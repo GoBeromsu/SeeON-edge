@@ -6,9 +6,11 @@ import { EventHistoryList } from '@/features/operations/EventHistoryList';
 import { ClipPlayerModal } from '@/features/operations/ClipPlayerModal';
 import { CameraEditModal } from '@/features/settings/CameraEditModal';
 import { DeleteCameraDialog } from '@/features/settings/DeleteCameraDialog';
+import { BedZoneRecognitionPanel } from '@/shared/ui/BedZoneRecognitionPanel';
+import { AccessibleDialog } from '@/shared/ui/AccessibleDialog';
 import { useStatusResource } from '@/shared/api/usePollingResource';
 import { getCameraStatusMeta } from '@/shared/ui/StatusBadge';
-import type { Camera, Clip, OverlayMode } from '@/shared/api/client';
+import type { Camera, Clip, OverlaySelection } from '@/shared/api/client';
 
 type RoomDetailProps = {
   camera: Camera;
@@ -29,10 +31,11 @@ export function RoomDetail({ camera, onBack, onRetryConnection }: RoomDetailProp
   const [selectedClip, setSelectedClip] = useState<Clip | null>(null);
   const [connectionModalOpen, setConnectionModalOpen] = useState(false);
   const [deletingCamera, setDeletingCamera] = useState<Camera | null>(null);
-  // Sourced from OverlayModeControl's own fetch/selection state (via its onModeChange callback)
+  const [bedZoneEditorCameraId, setBedZoneEditorCameraId] = useState<string | null>(null);
+  // Sourced from OverlaySelectionControl's own fetch/selection state
   // rather than re-fetched here, so the live badge below never disagrees with what the operator
   // picked in the detection settings card (issue #102).
-  const [overlayMode, setOverlayMode] = useState<OverlayMode | null>(null);
+  const [overlaySelection, setOverlaySelection] = useState<OverlaySelection | null>(null);
   const statusMeta = getCameraStatusMeta(camera.status);
 
   return (
@@ -62,7 +65,7 @@ export function RoomDetail({ camera, onBack, onRetryConnection }: RoomDetailProp
           <LiveStreamPanel
             camera={camera}
             diagnostics={diagnostics}
-            overlayMode={overlayMode}
+            overlaySelection={overlaySelection}
             onRetryConnection={onRetryConnection}
             onManageConnection={() => setConnectionModalOpen(true)}
           />
@@ -73,9 +76,31 @@ export function RoomDetail({ camera, onBack, onRetryConnection }: RoomDetailProp
             detection={diagnostics?.detection}
             onManageConnection={() => setConnectionModalOpen(true)}
           />
-          <DetectionSettingsCard camera={camera} onOverlayModeChange={setOverlayMode} />
+          <DetectionSettingsCard
+            camera={camera}
+            onOverlaySelectionChange={setOverlaySelection}
+            onEditBedZones={() => setBedZoneEditorCameraId(camera.id)}
+          />
         </div>
       </div>
+
+      <AccessibleDialog
+        open={bedZoneEditorCameraId === camera.id}
+        title="침대 영역 편집"
+        onClose={() => setBedZoneEditorCameraId(null)}
+        size="lg"
+        initialFocus="heading"
+      >
+        <BedZoneRecognitionPanel
+          cameraId={camera.id}
+          bedZone={camera.bed_zone ?? null}
+          onSaved={() => {
+            onRetryConnection();
+            setBedZoneEditorCameraId(null);
+          }}
+          onCancel={() => setBedZoneEditorCameraId(null)}
+        />
+      </AccessibleDialog>
 
       <div className="mt-8">
         <EventHistoryList cameraId={camera.id} cameraLabel={camera.label} onSelectClip={setSelectedClip} />

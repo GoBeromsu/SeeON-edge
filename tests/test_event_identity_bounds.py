@@ -173,12 +173,11 @@ def test_interrupted_compaction_leaves_complete_target(
     original = path.read_bytes()
 
     if seam == "write":
+
         def boom(*_args: object, **_kwargs: object) -> int:
             raise OSError("write failed")
 
-        monkeypatch.setattr(
-            "worker.pipeline.decision.event_identity._write_text", boom
-        )
+        monkeypatch.setattr("worker.pipeline.decision.event_identity._write_text", boom)
     elif seam == "fsync":
         real_fsync = os.fsync
 
@@ -188,6 +187,7 @@ def test_interrupted_compaction_leaves_complete_target(
         monkeypatch.setattr(os, "fsync", boom_fsync)
         del real_fsync
     elif seam == "replace":
+
         def boom_replace(*_args: object, **_kwargs: object) -> None:
             raise OSError("replace failed")
 

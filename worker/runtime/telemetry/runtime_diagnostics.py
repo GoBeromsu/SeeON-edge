@@ -10,7 +10,7 @@ from typing import final
 from contracts.decode_diagnostics import DECODE_FALLBACK_REASONS, DecodeSelection
 from contracts.encode_diagnostics import ENCODE_FALLBACK_REASONS, EncodeSelection
 from contracts.observation import BedRegionCacheState
-from worker.pipeline.inference_coordinator import CameraInferenceTelemetry
+from worker.pipeline.inference_telemetry import CameraInferenceTelemetry
 from worker.pipeline.perception.scene_state import BedRegionCacheCounterSnapshot
 from worker.runtime.telemetry.local_metrics import (
     StageTimingAccumulator,
@@ -89,6 +89,17 @@ class WorkerDiagnostics:
         # payload had to synthesise admitted == completed, which pinned the
         # backend's recent_success_rate at 1.0 and hid every failed frame.
         self._native_attempts_by_camera: dict[str, int] = {}
+        self._track_id_switches_by_camera: dict[str, int] = {}
+        self._track_id_switches_absorbed_by_camera: dict[str, int] = {}
+        self._replay_trace_write_failures_by_camera: dict[str, int] = {}
+        self._bed_polygon_source_by_camera: dict[str, str] = {}
+        self._resample_gap_rows_by_camera: dict[str, int] = {}
+        self._fall_inference_device_by_camera: dict[str, str] = {}
+        self._fall_unapplied_policy_threshold_by_camera: dict[str, float] = {}
+        self._flow_recording_by_camera: dict[str, tuple[int, int, int]] = {}
+        self._flow_nvenc_sessions_by_camera: dict[str, int] = {}
+        self._flow_lifecycle_by_camera: dict[str, tuple[int, int]] = {}
+        self._incident_managers: dict[str, object] = {}
         self._encoder = EncoderLifecycleSnapshot()
         self._clip_recorder = ClipRecorderStatus()
         self._clip_export = RelayClipExportPayload(enabled=False, version=0)
@@ -110,6 +121,49 @@ class WorkerDiagnostics:
     def set_worker_status(self, status: RelayWorkerPayload | None) -> None:
         with self._lock:
             self._worker = None if status is None else status.copy()
+
+    def record_resample_gap_rows(self, camera_id: str, count: int = 1) -> None:
+        if count < 0:
+            raise ValueError("resample gap count must be non-negative")
+        with self._lock:
+            self._resample_gap_rows_by_camera[camera_id] = (
+                self._resample_gap_rows_by_camera.get(camera_id, 0) + count
+            )
+
+    def record_fall_inference_device(self, camera_id: str, device: str) -> None:
+        if device != "cpu":
+            raise ValueError("fall inference device must be cpu")
+        with self._lock:
+            self._fall_inference_device_by_camera[camera_id] = device
+
+    def record_fall_unapplied_policy_threshold(self, camera_id: str, threshold: float) -> None:
+        """Report an operator threshold that was received but is not applied."""
+        if not 0.0 <= threshold <= 1.0:
+            raise ValueError("unapplied policy threshold must be a probability")
+        with self._lock:
+            self._fall_unapplied_policy_threshold_by_camera[camera_id] = threshold
+
+    def record_flow_recording_counters(
+        self, camera_id: str, *, extended: int, extension_raced: int, start_refused: int
+    ) -> None:
+        if min(extended, extension_raced, start_refused) < 0:
+            raise ValueError("Flow recording counters must be non-negative")
+        with self._lock:
+            self._flow_recording_by_camera[camera_id] = (extended, extension_raced, start_refused)
+
+    def record_flow_nvenc_sessions(self, camera_id: str, active: int) -> None:
+        if active < 0:
+            raise ValueError("Flow NVENC sessions must be non-negative")
+        with self._lock:
+            self._flow_nvenc_sessions_by_camera[camera_id] = active
+
+    def record_flow_lifecycle_counters(
+        self, camera_id: str, *, outages: int, recoveries: int
+    ) -> None:
+        if min(outages, recoveries) < 0:
+            raise ValueError("Flow lifecycle counters must be non-negative")
+        with self._lock:
+            self._flow_lifecycle_by_camera[camera_id] = (outages, recoveries)
 
     def register_decode(self, camera_id: str, requested: str) -> None:
         self.update_decode(
@@ -318,6 +372,35 @@ class WorkerDiagnostics:
                 self._native_attempts_by_camera.get(camera_id, 0) + 1
             )
 
+    def record_track_id_switch(self, camera_id: str) -> None:
+        with self._lock:
+            self._track_id_switches_by_camera[camera_id] = (
+                self._track_id_switches_by_camera.get(camera_id, 0) + 1
+            )
+
+    def record_track_id_switch_absorbed_total(self, camera_id: str, total: int) -> None:
+        if isinstance(total, bool) or total < 0:
+            raise ValueError("absorbed track id switch total must be non-negative")
+        with self._lock:
+            self._track_id_switches_absorbed_by_camera[camera_id] = total
+
+    def record_replay_trace_write_failure(self, camera_id: str) -> None:
+        with self._lock:
+            self._replay_trace_write_failures_by_camera[camera_id] = (
+                self._replay_trace_write_failures_by_camera.get(camera_id, 0) + 1
+            )
+
+    def record_bed_polygon_source(self, camera_id: str, source: str) -> None:
+        if source not in {"persisted", "native-per-frame", "none"}:
+            raise ValueError("invalid bed polygon source")
+        with self._lock:
+            self._bed_polygon_source_by_camera[camera_id] = source
+
+    def register_incident_manager(self, camera_id: str, manager: object) -> None:
+        """Expose the manager's cumulative cooldown counter in local snapshots."""
+        with self._lock:
+            self._incident_managers[camera_id] = manager
+
     def register_native_detection(self, camera_id: str) -> None:
         """Declare that a non-host producer owns this camera's detection.
 
@@ -376,6 +459,20 @@ class WorkerDiagnostics:
             bed_exit_scoring_by_camera = dict(self._bed_exit_scoring_by_camera)
             device_residency_by_camera = dict(self._device_residency_by_camera)
             decision_completed_by_camera = dict(self._decision_completed_by_camera)
+            track_id_switches_by_camera = dict(self._track_id_switches_by_camera)
+            track_id_switches_absorbed_by_camera = dict(self._track_id_switches_absorbed_by_camera)
+            replay_trace_write_failures_by_camera = dict(
+                self._replay_trace_write_failures_by_camera
+            )
+            bed_polygon_source_by_camera = dict(self._bed_polygon_source_by_camera)
+            resample_gap_rows_by_camera = dict(self._resample_gap_rows_by_camera)
+            fall_inference_device_by_camera = dict(self._fall_inference_device_by_camera)
+            fall_unapplied_by_camera = dict(self._fall_unapplied_policy_threshold_by_camera)
+            flow_recording_by_camera = dict(self._flow_recording_by_camera)
+            flow_nvenc_sessions_by_camera = dict(self._flow_nvenc_sessions_by_camera)
+            flow_lifecycle_by_camera = dict(self._flow_lifecycle_by_camera)
+            incident_managers = dict(self._incident_managers)
+            measured_fps_by_camera = dict(self._measured_fps_by_camera)
             camera_ids = (
                 set(self._decode_by_camera)
                 | set(decode_backend_by_camera)
@@ -387,6 +484,17 @@ class WorkerDiagnostics:
                 | set(bed_exit_scoring_by_camera)
                 | set(device_residency_by_camera)
                 | set(decision_completed_by_camera)
+                | set(track_id_switches_by_camera)
+                | set(track_id_switches_absorbed_by_camera)
+                | set(replay_trace_write_failures_by_camera)
+                | set(bed_polygon_source_by_camera)
+                | set(resample_gap_rows_by_camera)
+                | set(fall_inference_device_by_camera)
+                | set(fall_unapplied_by_camera)
+                | set(flow_recording_by_camera)
+                | set(flow_nvenc_sessions_by_camera)
+                | set(flow_lifecycle_by_camera)
+                | set(incident_managers)
                 | (set() if inference is None else set(inference.cameras))
             )
         cameras = tuple(
@@ -403,30 +511,44 @@ class WorkerDiagnostics:
                 bed_exit_scoring=bed_exit_scoring_by_camera.get(camera_id),
                 device_residency=device_residency_by_camera.get(camera_id),
                 decision_completed=decision_completed_by_camera.get(camera_id, 0),
-                inference=(
-                    None if inference is None else inference.cameras.get(camera_id)
-                ),
-                batch_sizes=(
-                    () if inference is None else tuple(inference.batch_sizes.items())
-                ),
+                inference=(None if inference is None else inference.cameras.get(camera_id)),
+                batch_sizes=(() if inference is None else tuple(inference.batch_sizes.items())),
                 geometry_batch_sizes=(
                     ()
                     if inference is None
                     else tuple(
-                        GeometryBatchHistogram(
-                            geometry, tuple(sorted(sizes.items()))
-                        )
-                        for geometry, sizes in sorted(
-                            inference.geometry_batch_sizes.items()
-                        )
+                        GeometryBatchHistogram(geometry, tuple(sorted(sizes.items())))
+                        for geometry, sizes in sorted(inference.geometry_batch_sizes.items())
                     )
                 ),
-                forward_p50_sec=(
-                    0.0 if inference is None else inference.forward_p50_sec
+                forward_p50_sec=(0.0 if inference is None else inference.forward_p50_sec),
+                forward_p95_sec=(0.0 if inference is None else inference.forward_p95_sec),
+                track_id_switch_total=track_id_switches_by_camera.get(camera_id, 0),
+                track_id_switch_absorbed_total=track_id_switches_absorbed_by_camera.get(
+                    camera_id, 0
                 ),
-                forward_p95_sec=(
-                    0.0 if inference is None else inference.forward_p95_sec
+                replay_trace_write_failures=replay_trace_write_failures_by_camera.get(camera_id, 0),
+                incident_cooldown_suppressed_total=getattr(
+                    incident_managers.get(camera_id), "cooldown_suppressed_total", 0
                 ),
+                bed_polygon_source=bed_polygon_source_by_camera.get(camera_id, "none"),
+                inference_fps=measured_fps_by_camera.get(camera_id, (0.0, None))[1],
+                camera_fps_unpinned=not _is_pinned_fps(
+                    measured_fps_by_camera.get(camera_id, (0.0, None))[1]
+                ),
+                resample_gap_rows_total=resample_gap_rows_by_camera.get(camera_id, 0),
+                fall_inference_device=fall_inference_device_by_camera.get(camera_id, "unknown"),
+                fall_unapplied_policy_threshold=fall_unapplied_by_camera.get(camera_id),
+                smart_record_extended_total=flow_recording_by_camera.get(camera_id, (0, 0, 0))[0],
+                smart_record_extension_raced_total=flow_recording_by_camera.get(
+                    camera_id, (0, 0, 0)
+                )[1],
+                smart_record_start_refused_total=flow_recording_by_camera.get(camera_id, (0, 0, 0))[
+                    2
+                ],
+                nvenc_sessions_active=flow_nvenc_sessions_by_camera.get(camera_id, 0),
+                flow_source_outages_total=flow_lifecycle_by_camera.get(camera_id, (0, 0))[0],
+                flow_source_recoveries_total=flow_lifecycle_by_camera.get(camera_id, (0, 0))[1],
             )
             for camera_id in sorted(camera_ids)
         )
@@ -550,6 +672,10 @@ class WorkerDiagnostics:
             for camera_id in selections
         }
         return selections, measured_fps, detections, clip_recorder, clip_export, gpu, worker
+
+
+def _is_pinned_fps(value: float | None) -> bool:
+    return value is not None and 14.0 <= value <= 16.0
 
 
 def _detection_for_camera(

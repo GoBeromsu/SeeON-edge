@@ -75,7 +75,9 @@ def get_incident(
     if summary is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="incident not found")
     append_governed(
-        request, actor_id=actor, action=AuditAction.INCIDENT_DETAIL,
+        request,
+        actor_id=actor,
+        action=AuditAction.INCIDENT_DETAIL,
         target_id=summary.incident_id,
     )
     return _summary_response(summary)
@@ -93,7 +95,9 @@ def review_incident(
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="incident not found")
     event = AuditEvent(
         occurred_at=datetime.now(UTC).isoformat(timespec="milliseconds").replace("+00:00", "Z"),
-        actor_id=actor, action=AuditAction.INCIDENT_REVIEW, target_id=summary.incident_id,
+        actor_id=actor,
+        action=AuditAction.INCIDENT_REVIEW,
+        target_id=summary.incident_id,
         detail=empty_detail(AuditAction.INCIDENT_REVIEW),
     )
     try:

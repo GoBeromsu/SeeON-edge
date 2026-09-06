@@ -5,19 +5,21 @@ import {
   normalizeCameraResponse,
   normalizeCameraTestResult,
   normalizeClipsResponse,
-  normalizeClipScene,
   normalizeClipStorageBrowse,
   normalizeClipStorageInfo,
   normalizeConnectionTestResult,
   normalizeConnectionView,
   normalizeDetectionSettings,
+  normalizeOverlaySelection,
   normalizeRuntimeSettings,
   normalizeStatusSnapshot,
   normalizeSystemSnapshot,
 } from '@/shared/api/normalizers';
 import { isRecord } from '@/shared/api/normalizerFields';
 import type {
+  BedRegion,
   BedZone,
+  BedZoneSaveInput,
   Camera,
   CameraInput,
   CameraPatchInput,
@@ -25,9 +27,7 @@ import type {
   CameraTestResult,
   CleanArtifactState,
   Clip,
-  ClipScene,
   ClipArtifacts,
-  ClipDeleteResult,
   ClipStorageBrowseResult,
   ClipStorageInfo,
   ConnectionInput,
@@ -41,8 +41,7 @@ import type {
   DetectionPolicyComparedPayload,
   DetectionPolicyDiff,
   DetectionPolicyRollbackInput,
-  Incident,
-  OverlayMode,
+  OverlaySelection,
   RuntimeSettings,
   RuntimeSettingsInput,
   StatusSnapshot,
@@ -50,8 +49,10 @@ import type {
 } from '@/shared/api/types';
 
 export type {
+  BedRegion,
   BedZone,
   BedZonePoint,
+  BedZoneSaveInput,
   Camera,
   CameraInput,
   CameraPatchInput,
@@ -60,9 +61,6 @@ export type {
   CameraHeartbeat,
   CameraTestResult,
   Clip,
-  ClipScene,
-  ClipDeleteResult,
-  ClipDeleteStatus,
   ClipStorageBrowseEntry,
   ClipStorageBrowseResult,
   ClipStorageInfo,
@@ -83,9 +81,8 @@ export type {
   DetectionPolicyRollbackInput,
   DetectionReason,
   DetectionState,
-  Incident,
   HeartbeatStatus,
-  OverlayMode,
+  OverlaySelection,
   RuntimeCameraDiagnostics,
   RuntimeDetectionDiagnostics,
   RuntimeClipExportApplied,
@@ -104,7 +101,6 @@ export {
   getApiBase,
   getCameraSnapshotUrl,
   getCameraStreamUrl,
-  getClipSceneUrl,
 } from '@/shared/api/session';
 
 export async function loginDashboard(username: string, password: string): Promise<void> {
@@ -291,13 +287,32 @@ export function bedZoneRecognitionFailureDetail(error: unknown): BedZoneRecognit
 }
 
 /**
- * Runs one-shot YOLO bed segmentation against the camera's latest frame. 422 (bed_not_found) and 503
- * (worker/frame unavailable) are both surfaced as thrown HttpErrors -- callers keep showing "인식 필요".
+ * Returns one-shot YOLO bed candidates from the camera's latest frame without saving them. 422
+ * (bed_not_found) and 503 (worker/frame unavailable) are surfaced as thrown HttpErrors.
  */
-export async function recognizeBedZone(cameraId: string): Promise<BedZone> {
+export async function recognizeBedZone(cameraId: string, confidence = 0.25): Promise<BedZone> {
   return normalizeBedZoneRecognitionResponse(
-    await requestJson(`/cameras/${encodeURIComponent(cameraId)}/bed-zone/recognize`, { method: 'POST' }),
+    await requestJson(`/cameras/${encodeURIComponent(cameraId)}/bed-zone/recognize`, {
+      method: 'POST',
+      body: JSON.stringify({ confidence }),
+    }),
   );
+}
+
+export async function saveBedZone(cameraId: string, input: BedZoneSaveInput): Promise<BedZone | null> {
+  const validated = normalizeBedZoneRecognitionResponse({
+    bed_zone: { ...input, recognized_at: 'request-validation' },
+  });
+  const value = await requestJson(`/cameras/${encodeURIComponent(cameraId)}/bed-zone`, {
+    method: 'PUT',
+    body: JSON.stringify({
+      regions: validated.regions,
+      image_width: validated.image_width,
+      image_height: validated.image_height,
+    }),
+  });
+  if (isRecord(value) && value.bed_zone === null) return null;
+  return normalizeBedZoneRecognitionResponse(value);
 }
 
 export async function fetchRuntimeSettings(signal?: AbortSignal): Promise<RuntimeSettings> {
@@ -344,15 +359,6 @@ export async function rollbackDetectionPolicy(input: DetectionPolicyRollbackInpu
   await requestJson('/detection-policies/rollback', { method: 'POST', body: JSON.stringify(input) });
 }
 
-export async function fetchIncidents(signal?: AbortSignal): Promise<Incident[]> {
-  const response = await requestJson('/incidents', { signal }) as { incidents?: Incident[] };
-  return Array.isArray(response.incidents) ? response.incidents : [];
-}
-
-export async function reviewIncident(incidentId: string, input: { expected_version: number; disposition: 'TRUE_POSITIVE' | 'FALSE_POSITIVE'; notes: string | null }): Promise<Incident> {
-  return await requestJson(`/incident-reviews/${encodeURIComponent(incidentId)}`, { method: 'PUT', body: JSON.stringify(input) }) as Incident;
-}
-
 const CLEAN_ARTIFACT_STATES = new Set<CleanArtifactState>(['AVAILABLE', 'UNAVAILABLE']);
 const SNAPSHOT_ARTIFACT_STATES = new Set<NonNullable<ClipArtifacts['snapshot']>>([
   'PENDING', 'AVAILABLE', 'UNAVAILABLE', 'CORRUPT', 'PURGED',
@@ -386,30 +392,6 @@ export async function fetchClipArtifacts(clipId: string, signal?: AbortSignal): 
   return normalizeClipArtifacts(await requestJson(`/clips/${encodeURIComponent(clipId)}/artifacts`, { signal }));
 }
 
-export async function fetchClipScene(clipId: string, signal?: AbortSignal): Promise<ClipScene | null> {
-  return normalizeClipScene(await requestJson(`/clips/${encodeURIComponent(clipId)}/scene`, { signal }));
-}
-
-const CLIP_DELETE_STATUSES = new Set<ClipDeleteResult['status']>([
-  'PURGED', 'HELD', 'MISSING', 'UNVERIFIABLE', 'DELETE_FAILED', 'VERIFICATION_FAILED',
-]);
-
-function normalizeClipDeleteResult(value: unknown): ClipDeleteResult {
-  if (!isRecord(value) || typeof value.clip_id !== 'string' || value.clip_id.length === 0
-    || typeof value.status !== 'string' || !CLIP_DELETE_STATUSES.has(value.status as ClipDeleteResult['status'])) {
-    throw new Error('Invalid clip deletion response');
-  }
-  return { clip_id: value.clip_id, status: value.status as ClipDeleteResult['status'] };
-}
-
-/** Explicit exact clip-id confirmation is required server-side; a mismatch is rejected as 422 before any worker call. */
-export async function deleteClip(clipId: string, confirmClipId: string): Promise<ClipDeleteResult> {
-  return normalizeClipDeleteResult(await requestJson(`/clips/${encodeURIComponent(clipId)}`, {
-    method: 'DELETE',
-    body: JSON.stringify({ confirm_clip_id: confirmClipId }),
-  }));
-}
-
 export async function fetchClipStorage(signal?: AbortSignal): Promise<ClipStorageInfo> {
   return normalizeClipStorageInfo(await requestJson('/clips/storage', { signal }));
 }
@@ -426,25 +408,15 @@ export async function saveClipStorageLocation(path: string): Promise<ClipStorage
   );
 }
 
-const OVERLAY_MODES: readonly OverlayMode[] = ['none', 'bedexit', 'fall'];
-
-function normalizeOverlayResponse(value: unknown): OverlayMode {
-  const mode = isRecord(value) ? value.mode : null;
-  if (typeof mode !== 'string' || !OVERLAY_MODES.includes(mode as OverlayMode)) {
-    throw new Error('Invalid overlay response');
-  }
-  return mode as OverlayMode;
+export async function fetchCameraOverlay(cameraId: string): Promise<OverlaySelection> {
+  return normalizeOverlaySelection(await requestJson(`/streams/${encodeURIComponent(cameraId)}/pose`));
 }
 
-export async function fetchCameraOverlay(cameraId: string): Promise<OverlayMode> {
-  return normalizeOverlayResponse(await requestJson(`/streams/${encodeURIComponent(cameraId)}/pose`));
-}
-
-export async function setCameraOverlay(cameraId: string, mode: OverlayMode): Promise<OverlayMode> {
-  return normalizeOverlayResponse(
+export async function setCameraOverlay(cameraId: string, selection: OverlaySelection): Promise<OverlaySelection> {
+  return normalizeOverlaySelection(
     await requestJson(`/streams/${encodeURIComponent(cameraId)}/pose`, {
       method: 'POST',
-      body: JSON.stringify({ mode }),
+      body: JSON.stringify(selection),
     }),
   );
 }

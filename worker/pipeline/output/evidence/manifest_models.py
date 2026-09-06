@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 from fractions import Fraction
+from math import isfinite
 from typing import ClassVar, Literal, Self, TypeAlias
 from uuid import UUID
 
@@ -14,7 +15,7 @@ from worker.pipeline.output.evidence.evidence_metadata import (
     validate_runtime_manifest_sha256,
 )
 from worker.pipeline.output.evidence.evidence_outbox_types import EvidenceReasonCode
-from worker.pipeline.output.evidence.manifest_media_models import SceneIndexFacts, SourceMediaFacts
+from worker.pipeline.output.evidence.manifest_media_models import SourceMediaFacts
 
 
 class TimeOriginFacts(BaseModel):
@@ -44,6 +45,49 @@ class TimeOriginFacts(BaseModel):
         return self
 
 
+class ExtensionContributor(BaseModel):
+    model_config: ClassVar[ConfigDict] = ConfigDict(frozen=True, extra="forbid")
+
+    event_ref: str
+    detected_at: str
+
+    @field_validator("event_ref")
+    @classmethod
+    def _event_ref(cls, value: str) -> str:
+        if not value:
+            raise PydanticCustomError("event_ref", "extension event reference is empty")
+        return value
+
+    @field_validator("detected_at")
+    @classmethod
+    def _detected_at(cls, value: str) -> str:
+        return normalized_timestamp(value)
+
+
+class ClipExtension(BaseModel):
+    model_config: ClassVar[ConfigDict] = ConfigDict(frozen=True, extra="forbid")
+
+    contributors: tuple[ExtensionContributor, ...]
+    duration_s: float
+    boundary: Literal["none", "extension_bounded", "extension_raced"]
+
+    @field_validator("contributors")
+    @classmethod
+    def _contributors(
+        cls, value: tuple[ExtensionContributor, ...]
+    ) -> tuple[ExtensionContributor, ...]:
+        if not value:
+            raise PydanticCustomError("extension_contributors", "extension contributors are empty")
+        return value
+
+    @field_validator("duration_s")
+    @classmethod
+    def _duration_s(cls, value: float) -> float:
+        if not isfinite(value) or value < 0:
+            raise PydanticCustomError("extension_duration", "extension duration is invalid")
+        return value
+
+
 class _ManifestProvenance(BaseModel):
     # Final on-disk manifests may carry forward-compatible keys from older
     # writers; repair and publication both read them with ignore semantics.
@@ -54,6 +98,7 @@ class _ManifestProvenance(BaseModel):
     domain: str | None = None
     decision_trace_id: str | None = None
     started_at: str | None = None
+    detected_at: str | None = None
     duration_s: float | None = None
     encoder: str | None = None
     path: str | None = None
@@ -62,9 +107,9 @@ class _ManifestProvenance(BaseModel):
     recovery_state: Literal["MEDIA_VERIFIED", "UNAVAILABLE"] | None = None
     source_media: SourceMediaFacts | None = None
     source_error_reason: str | None = None
-    scene_index: SceneIndexFacts | None = None
     truncation_reasons: tuple[str, ...] = ()
     time_origin: TimeOriginFacts | None = None
+    extension: ClipExtension | None = None
 
     @field_validator("decision_trace_id")
     @classmethod
@@ -73,7 +118,7 @@ class _ManifestProvenance(BaseModel):
             _sha256(value, "decision_trace_id")
         return value
 
-    @field_validator("started_at")
+    @field_validator("started_at", "detected_at")
     @classmethod
     def _started_at(cls, value: str | None) -> str | None:
         return None if value is None else normalized_timestamp(value)

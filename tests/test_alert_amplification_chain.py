@@ -104,9 +104,7 @@ def _projections(database: Path) -> list[IncidentProjection]:
                 str(item["edge_event_id"]),
                 str(item["detected_at"]),
                 str(item["lifecycle_state"]),
-                None
-                if item["event_delivery_state"] is None
-                else str(item["event_delivery_state"]),
+                None if item["event_delivery_state"] is None else str(item["event_delivery_state"]),
                 None,
             )
             for item in first.json()["incidents"]
@@ -253,9 +251,7 @@ def test_a_failing_identity_journal_still_admits_the_alert(tmp_path: Path) -> No
 
     admitted = manager.admit(_transition("onset-journal-failure"), now_sec=100.0)
 
-    assert admitted is not None, (
-        "the alert was suppressed by an identity-journal write failure"
-    )
+    assert admitted is not None, "the alert was suppressed by an identity-journal write failure"
     assert str(admitted.identity), "the admitted alert carries no identity"
     assert manager.identity_journal_failures == 1, (
         "the degradation is not counted, so a silently failing journal looks healthy"

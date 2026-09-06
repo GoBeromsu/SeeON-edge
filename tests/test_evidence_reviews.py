@@ -203,9 +203,12 @@ def test_operator_incident_api_reviews_without_available_primary_clip(tmp_path: 
 
     # When: the dashboard lists and reviews the incident, then retries stale version zero.
     with TestClient(app) as client:
-        assert client.post(
-            "/api/v1/auth/session", json={"username": "admin", "password": "admin"}
-        ).status_code == 204
+        assert (
+            client.post(
+                "/api/v1/auth/session", json={"username": "admin", "password": "admin"}
+            ).status_code
+            == 204
+        )
         listed = client.get("/api/v1/incidents", params={"limit": 10})
         reviewed = client.put(
             f"/api/v1/incident-reviews/{INCIDENT_ID}",

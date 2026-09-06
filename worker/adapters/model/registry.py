@@ -3,37 +3,15 @@
 from __future__ import annotations
 
 from collections.abc import Callable
-from typing import Final, Literal, Protocol, TypeAlias
+from typing import Final, Protocol, TypeAlias
 
 from contracts.runner import RunnerProtocol
-from worker.adapters.model.yolo_bed_seg import YoloBedSegRunner
-from worker.adapters.model.yolo_person import YoloPersonRunner
-from worker.adapters.model.yolo_pose import YoloPoseRunner
-from worker.types import FallModelInput
+from worker.interfaces.fall_model import FallV2ModelProtocol
 
 ModelOption: TypeAlias = str | int | float | bool | None
 
 
-class FallModelMetadata(Protocol):
-    @property
-    def window(self) -> int: ...
-
-    @property
-    def stride(self) -> int: ...
-
-    @property
-    def mode(self) -> Literal["features", "sequence"]: ...
-
-
-class FallModel(Protocol):
-    @property
-    def metadata(self) -> FallModelMetadata: ...
-
-    @property
-    def operating_threshold(self) -> float: ...
-
-    def predict(self, features: FallModelInput) -> float: ...
-
+class FallModel(FallV2ModelProtocol, Protocol):
     def warmup(self) -> None: ...
 
 
@@ -45,6 +23,7 @@ class WarmupModel(Protocol):
 # fall-family registry; warmup is an optional runner capability, not a model kind.
 ModelAdapter: TypeAlias = RunnerProtocol
 RunnerFactory: TypeAlias = Callable[..., ModelAdapter]
+
 
 class EmptyModelTaskError(ValueError):
     def __init__(self) -> None:
@@ -91,10 +70,50 @@ def default_registry() -> ModelRegistry:
     here would just be dead code shadowing the fail-closed boot check.
     """
     registry = ModelRegistry()
-    registry.register("pose", YoloPoseRunner)
-    registry.register("person", YoloPersonRunner)
-    registry.register("bed", YoloBedSegRunner)
+    registry.register("pose", _yolo_pose)
+    registry.register("person", _yolo_person)
+    registry.register("bed", _yolo_bed_seg)
     return registry
+
+
+# The ultralytics runners are the host/nvidia profiles' camera runners. They
+# are resolved when a task is created, not when this module imports: under the
+# flow profile DeepStream owns pose and ORT owns bed, and that process asserts
+# torch/ultralytics are never imported (P1b-AC7).
+def _yolo_pose(**kwargs: ModelOption) -> ModelAdapter:
+    from worker.adapters.model.yolo_pose import YoloPoseRunner
+
+    return YoloPoseRunner(**kwargs)
+
+
+def _yolo_person(**kwargs: ModelOption) -> ModelAdapter:
+    from worker.adapters.model.yolo_person import YoloPersonRunner
+
+    return YoloPersonRunner(**kwargs)
+
+
+def _yolo_bed_seg(**kwargs: ModelOption) -> ModelAdapter:
+    from worker.adapters.model.yolo_bed_seg import YoloBedSegRunner
+
+    return YoloBedSegRunner(**kwargs)
+
+
+def flow_registry() -> ModelRegistry:
+    """The P1b flow profile's registry: DeepStream owns pose, ORT owns bed.
+
+    "pose"/"person" are deliberately absent - the media plane performs
+    detection and no host runner may exist for them. "bed" is the ONNX Runtime
+    CPU segmenter so the process never imports torch or ultralytics.
+    """
+    registry = ModelRegistry()
+    registry.register("bed", _ort_bed_seg)
+    return registry
+
+
+def _ort_bed_seg(**kwargs: ModelOption) -> ModelAdapter:
+    from worker.adapters.model.ort_bed_seg import OrtBedSegRunner
+
+    return OrtBedSegRunner(**kwargs)
 
 
 DEFAULT_REGISTRY: Final = default_registry()
@@ -103,7 +122,6 @@ __all__ = [
     "DEFAULT_REGISTRY",
     "EmptyModelTaskError",
     "FallModel",
-    "FallModelMetadata",
     "ModelAdapter",
     "ModelOption",
     "ModelRegistry",
@@ -111,4 +129,5 @@ __all__ = [
     "UnknownModelTaskError",
     "WarmupModel",
     "default_registry",
+    "flow_registry",
 ]

@@ -1,0 +1,41 @@
+{
+  "criterion": "P1b-AC6 (production gate), 15-minute window by owner direction, PRODUCTION receipt",
+  "window_utc": [
+    "2026-09-04T16:47:53Z",
+    "2026-09-04T17:03:57Z"
+  ],
+  "window_minutes": 16.1,
+  "bundle": "production receipt: promotion_eligible=false, so the image default 0.5 governs (the earlier run mounted a promotion-eligible receipt carrying threshold 0.0 and its alert numbers are void)",
+  "cameras": 13,
+  "roster": "the 13 real facility cameras",
+  "alerts": {
+    "site_total": 0,
+    "site_per_hour": 0.0,
+    "budget_site_per_hour": 26,
+    "worst_camera_per_hour": 0.0,
+    "budget_per_camera_per_hour": 2,
+    "cameras_firing": 0
+  },
+  "stability": {
+    "dropped_sources": 0,
+    "outages": 0,
+    "segfaults": 0,
+    "critical_log_lines": 0,
+    "process_stable_minutes": 16,
+    "cameras_delivering": 13,
+    "total_frames": 367089
+  },
+  "perception": {
+    "track_observations": 211,
+    "cameras_with_people": 4,
+    "objects_matched_to_pose": "111 of 111 per camera",
+    "frames_without_pose_tensor": 0,
+    "probe_conversion_failures": 0
+  },
+  "verdict": "PASS. Zero alerts over 16 minutes on 13 real cameras at the production threshold, while people were genuinely present on 4 of them and every detected object was matched to a pose row. Both the alert-rate budget and the stability requirements are met.",
+  "not_established": [
+    "that an alert COULD have been emitted during this window - zero alerts is consistent with a correct quiet period and with a silent policy failure, and this run does not separate them; the same build did emit alerts on demand in the AC3 run, which is the nearest counter-evidence",
+    "raw provenance: the receipt records counters read from the backend database and the worker log rather than attaching the log and query artifacts themselves"
+  ],
+  "claim_strength": "The stability half is directly evidenced by per-camera counters over the whole window. The alert-rate half is evidenced by the backend incident table being empty for the window, which is the right source but is a negative result and inherits the caveat above."
+}

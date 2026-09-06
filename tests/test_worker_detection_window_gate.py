@@ -17,9 +17,8 @@ state while the window is closed). This file characterizes:
 
 from __future__ import annotations
 
-from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import Literal, final
+from typing import final
 
 import numpy as np
 from numpy.typing import NDArray
@@ -28,10 +27,10 @@ import worker.runtime.worker as worker_module
 from contracts.observation import BedRegionCacheState, BedRegionDebugSnapshot, FrameObservation
 from worker.domains.bed_exit import BedExitMonitor
 from worker.domains.detection_window import DetectionWindow
-from worker.domains.fall import FallEventLatch
+from worker.domains.fall import FallPolicyDeciderV2, FallV2DomainDecider, FallV2Probabilities
 from worker.runtime.config import CameraRuntimeConfig, WorkerConfig
 from worker.runtime.worker import WorkerRuntime
-from worker.types import BusinessEvent, DecisionInput
+from worker.types import BusinessEvent, DecisionInput, DecisionTraceSnapshot
 
 
 @final
@@ -44,6 +43,18 @@ class _RecordingDecider:
         del input_value
         self.calls += 1
         return self._events
+
+
+@final
+class _TraceRecordingDecider:
+    def __init__(self, snapshots: tuple[DecisionTraceSnapshot, ...]) -> None:
+        self.calls = 0
+        self.last_trace_snapshots = snapshots
+
+    def update(self, input_value: DecisionInput) -> tuple[BusinessEvent, ...]:
+        del input_value
+        self.calls += 1
+        return ()
 
 
 def _input() -> DecisionInput:
@@ -67,6 +78,9 @@ def test_window_gated_decider_skips_update_and_wrapped_state_outside_window() ->
 
     assert gated.update(_input()) == ()
     assert inner.calls == 0
+    assert len(gated.last_trace_snapshots) == 1
+    assert gated.last_trace_snapshots[0].current_state == "not-evaluated"
+    assert gated.last_trace_snapshots[0].reason == "outside-detection-window"
 
 
 def test_window_gated_decider_passes_through_inside_window() -> None:
@@ -90,23 +104,38 @@ def test_window_gated_decider_passes_through_inside_window() -> None:
 
     assert gated.update(_input()) == expected
     assert inner.calls == 1
+    assert gated.last_trace_snapshots == ()
 
 
-@dataclass(frozen=True, slots=True)
-class _FallMetadata:
-    window: int = 2
-    stride: int = 1
-    mode: Literal["sequence"] = "sequence"
+def test_window_gated_decider_forwards_trace_snapshots_inside_window() -> None:
+    snapshot = DecisionTraceSnapshot(
+        reason="below-threshold",
+        previous_state="clear",
+        current_state="clear",
+        triggered=False,
+        track_id=4,
+        bed_id=None,
+        values={"fall_transition_probability": 0.12},
+    )
+    inner = _TraceRecordingDecider((snapshot,))
+    gated = worker_module._WindowGatedDecider(  # noqa: SLF001
+        inner,
+        DetectionWindow(start="21:00", end="06:00", tz="UTC"),
+        clock=lambda: datetime(2026, 1, 1, 23, 0, tzinfo=UTC),
+    )
+
+    assert gated.update(_input()) == ()
+    assert inner.calls == 1
+    assert gated.last_trace_snapshots == (snapshot,)
 
 
 @final
 class _FakeFallModel:
     def __init__(self) -> None:
-        self.metadata = _FallMetadata()
         self.operating_threshold = 0.5
 
-    def predict(self, _features: NDArray[np.float32]) -> float:
-        return 0.99
+    def predict(self, _features: NDArray[np.float32]) -> FallV2Probabilities:
+        return FallV2Probabilities(0.0, 0.99, 0.1)
 
 
 @final
@@ -147,7 +176,8 @@ def test_fall_domain_is_ungated_24_7_when_no_window_configured() -> None:
 
     decider = runtime._build_decider("fall", _camera(runtime), _FakeFallModel())  # noqa: SLF001
 
-    assert isinstance(decider, FallEventLatch)
+    assert isinstance(decider, FallV2DomainDecider)
+    assert isinstance(decider.policy, FallPolicyDeciderV2)
 
 
 def test_fall_domain_is_gated_by_the_common_wrapper_once_a_window_is_configured() -> None:
@@ -159,7 +189,8 @@ def test_fall_domain_is_gated_by_the_common_wrapper_once_a_window_is_configured(
 
     assert isinstance(decider, worker_module._WindowGatedDecider)  # noqa: SLF001
     assert decider.window == DetectionWindow(start="21:00", end="06:00", tz="UTC")
-    assert isinstance(decider.decider, FallEventLatch)
+    assert isinstance(decider.decider, FallV2DomainDecider)
+    assert isinstance(decider.decider.policy, FallPolicyDeciderV2)
 
 
 def test_bed_exit_is_never_wrapped_by_the_common_gate_even_with_a_window_configured() -> None:

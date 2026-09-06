@@ -1,0 +1,29 @@
+{
+  "criterion": "P1b-AC2 (forced source rebuild) and the AC6 sub-criterion \"one camera stalled and reconnected while 12 continue\"",
+  "method": "12 real facility cameras plus one camera served by a controllable RTSP publisher; the publisher was killed mid-run and restored",
+  "stalled_camera": {
+    "camera_id": "87a95f1c-21f2-4dcf-be27-0a2a84476791",
+    "outages": 2,
+    "recoveries": 2,
+    "canonical_ids_seen_in_trace": 1,
+    "stream_epochs_observed": [
+      0,
+      2
+    ],
+    "frames_after_recovery": 9900,
+    "objects": 700,
+    "matched_tracks": 700
+  },
+  "other_cameras": {
+    "count": 12,
+    "outages": 0
+  },
+  "process": {
+    "crashed": false,
+    "stable_minutes": 7
+  },
+  "verdict": "PASS. The canonical camera id is unchanged across the forced rebuild - one id for the whole run - while the stream epoch rotated from 0 to 2 so post-outage frames cannot join the old stream. Each outage was counted exactly once and matched by a recovery, the other twelve cameras were untouched at zero outages, and the camera resumed detecting after reconnect.",
+  "not_established": [
+    "the twelve continuing cameras are evidenced by their outage counters staying at zero, which is weaker than showing each kept delivering frames throughout the outage window"
+  ]
+}

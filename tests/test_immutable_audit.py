@@ -125,9 +125,7 @@ def test_concurrent_appends_serialize_one_unbroken_chain() -> None:
 
     # When: SQLite serializes both BEGIN IMMEDIATE transactions.
     with ThreadPoolExecutor(max_workers=2) as executor:
-        ids = tuple(
-            executor.map(append, (AuditAction.CLIP_LIST, AuditAction.AUDIT_LIST))
-        )
+        ids = tuple(executor.map(append, (AuditAction.CLIP_LIST, AuditAction.AUDIT_LIST)))
 
     # Then: both commits survive and incremental verification reaches the second row.
     assert set(ids) == {1, 2}
@@ -163,9 +161,7 @@ def test_detail_parser_rejects_recursive_privacy_aliases(
 ) -> None:
     # Given/When/Then: privacy-bearing mixed-case keys or values never enter audit JSON
     with pytest.raises(AuditDetailError):
-        parse_detail_json(
-            AuditAction.CLIP_LIST, json.dumps({"version": 1, "nested": detail})
-        )
+        parse_detail_json(AuditAction.CLIP_LIST, json.dumps({"version": 1, "nested": detail}))
 
 
 def test_capacity_refusal_reads_only_count_before_history_bodies(
@@ -203,6 +199,5 @@ def test_detail_parser_canonicalizes_safe_registered_detail() -> None:
 
     # Then: the machine-consumed JSON is deterministic
     assert detail.json == (
-        '{"ended_at":"2026-08-24T00:01:00.000Z",'
-        '"failure_code":"SQLITE_FULL","version":1}'
+        '{"ended_at":"2026-08-24T00:01:00.000Z","failure_code":"SQLITE_FULL","version":1}'
     )

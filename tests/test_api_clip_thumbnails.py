@@ -67,10 +67,7 @@ def test_list_and_metadata_compute_thumbnail_availability_for_returned_items(
         listed = client.get("/api/v1/clips")
         metadata = client.get("/api/v1/clips/clip-with/metadata")
 
-    availability = {
-        clip["clip_id"]: clip["thumbnail_available"]
-        for clip in listed.json()["clips"]
-    }
+    availability = {clip["clip_id"]: clip["thumbnail_available"] for clip in listed.json()["clips"]}
     assert listed.status_code == 200
     assert availability == {"clip-with": True, "clip-without": False}
     assert metadata.status_code == 200
@@ -166,10 +163,7 @@ def test_thumbnail_payload_limit_is_enforced_for_availability_and_reads(
         accepted = client.get("/api/v1/clips/clip-accepted/thumbnail")
         rejected = client.get("/api/v1/clips/clip-rejected/thumbnail")
 
-    availability = {
-        clip["clip_id"]: clip["thumbnail_available"]
-        for clip in listed.json()["clips"]
-    }
+    availability = {clip["clip_id"]: clip["thumbnail_available"] for clip in listed.json()["clips"]}
     assert availability == {"clip-accepted": True, "clip-rejected": False}
     assert accepted.status_code == 200
     assert len(accepted.content) == THUMBNAIL_LIMIT_BYTES

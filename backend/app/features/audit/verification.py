@@ -26,6 +26,8 @@ from backend.app.features.audit.catalog import (
 GENESIS_HASH: Final = "0" * 64
 MAX_AUDIT_ROWS: Final = 1_000_000
 _VERIFY_PAGE_SIZE: Final = 1_000
+
+
 def _canonical_triggers() -> dict[str, str]:
     triggers: dict[str, str] = {}
     for statement in COMPACT_SCHEMA_CREATE_STATEMENTS:
@@ -96,21 +98,20 @@ def verify_connection(
         or checkpoint.trigger_fingerprint != trigger_fingerprint
     )
     data_changed = (
-        checkpoint is not None
-        and same_observer
-        and checkpoint.data_version != observed_version
+        checkpoint is not None and same_observer and checkpoint.data_version != observed_version
     )
     # A valid new audit tail accounts for a governed caller-owned commit because
     # the business write and audit INSERT share that SQLite transaction. A commit
     # without such a tail is unexplained and must complete a full verification.
-    has_tail = checkpoint is not None and connection.execute(
-        "SELECT 1 FROM audit_events WHERE audit_id>? LIMIT 1", (checkpoint.audit_id,)
-    ).fetchone() is not None
+    has_tail = (
+        checkpoint is not None
+        and connection.execute(
+            "SELECT 1 FROM audit_events WHERE audit_id>? LIMIT 1", (checkpoint.audit_id,)
+        ).fetchone()
+        is not None
+    )
     full = (
-        checkpoint is None
-        or not same_observer
-        or schema_changed
-        or (data_changed and not has_tail)
+        checkpoint is None or not same_observer or schema_changed or (data_changed and not has_tail)
     )
     if full:
         last_id, previous_hash, anchor_previous_hash = _verify_all(connection)
@@ -128,9 +129,16 @@ def verify_connection(
             last_id,
         )
     return VerificationCheckpoint(
-        last_id, previous_hash, anchor_previous_hash, schema_version,
-        trigger_fingerprint, identity, observer_id, observed_version,
-        rolling_id, rolling_hash,
+        last_id,
+        previous_hash,
+        anchor_previous_hash,
+        schema_version,
+        trigger_fingerprint,
+        identity,
+        observer_id,
+        observed_version,
+        rolling_id,
+        rolling_hash,
     )
 
 
@@ -228,12 +236,22 @@ def verify_row(row: tuple[SqlValue, ...], expected_previous: str) -> tuple[int, 
     if previous_hash != expected_previous:
         raise AuditVerificationError("audit previous hash does not match")
     payload = {
-        "action": action.value, "actor_id": str(row[5]), "actor_type": str(row[4]),
-        "auth_mechanism": str(row[6]), "clock_quality": str(row[3]),
-        "detail_json": detail.json, "hold_reference": row[18], "interaction_id": row[13],
-        "occurred_at": str(row[1]), "outcome": str(row[10]), "previous_hash": previous_hash,
-        "reason": row[11], "recorded_at": str(row[2]), "request_id": row[12],
-        "retention_class": str(row[17]), "target_id": str(row[9]),
+        "action": action.value,
+        "actor_id": str(row[5]),
+        "actor_type": str(row[4]),
+        "auth_mechanism": str(row[6]),
+        "clock_quality": str(row[3]),
+        "detail_json": detail.json,
+        "hold_reference": row[18],
+        "interaction_id": row[13],
+        "occurred_at": str(row[1]),
+        "outcome": str(row[10]),
+        "previous_hash": previous_hash,
+        "reason": row[11],
+        "recorded_at": str(row[2]),
+        "request_id": row[12],
+        "retention_class": str(row[17]),
+        "target_id": str(row[9]),
         "target_type": str(row[8]),
     }
     expected_hash = audit_record_hash(previous_hash, json.dumps(payload))
@@ -246,6 +264,12 @@ def verify_row(row: tuple[SqlValue, ...], expected_previous: str) -> tuple[int, 
 
 
 __all__ = [
-    "GENESIS_HASH", "MAX_AUDIT_ROWS", "AuditVerificationError", "DatabaseIdentity",
-    "SqlValue", "VerificationCheckpoint", "database_identity", "verify_connection",
+    "GENESIS_HASH",
+    "MAX_AUDIT_ROWS",
+    "AuditVerificationError",
+    "DatabaseIdentity",
+    "SqlValue",
+    "VerificationCheckpoint",
+    "database_identity",
+    "verify_connection",
 ]

@@ -52,6 +52,7 @@ class IncidentManager:
     _identities: EventIdentityStore = field(init=False, repr=False)
     #: Alerts admitted with a fresh identity because the journal failed.
     identity_journal_failures: int = field(default=0, init=False)
+    cooldown_suppressed_total: int = field(default=0, init=False)
     last_audit_snapshot: IncidentAuditSnapshot | None = field(
         default=None,
         init=False,
@@ -97,6 +98,7 @@ class IncidentManager:
         key = self.idempotency_key(event, event_time)
         last_seen = self._last_seen.get(key)
         if last_seen is not None and event_time - last_seen < self.cooldown_sec:
+            self.cooldown_suppressed_total += 1
             return None
 
         source_identity = event.identity
@@ -148,7 +150,6 @@ class IncidentManager:
     ) -> BusinessEvent | None:
         return self.admit(event, now_sec=now_sec)
 
-
     def release(self, event: BusinessEvent, *, now_sec: float | None = None) -> None:
         """Undo the consumption of a decision whose envelope was never admitted.
 
@@ -171,10 +172,15 @@ class IncidentManager:
         event_time: float | None = None,
     ) -> CooldownKey:
         del event_time
-        if event.domain == "fall":
-            return (event.camera_id, event.domain, event.event_type)
-        if event.domain == "bed_exit" and event.bed_id is not None:
-            return (event.camera_id, event.domain, event.event_type, event.bed_id)
+        # The episode authority (worker/domains/episode/) is the lifecycle
+        # owner: it already emits at most one event per episode and re-arms
+        # only on a confirmed recovery. This cooldown is overload protection
+        # for a producer that re-emits an identity it already emitted, so it
+        # keys on the episode identity. A camera-wide key would instead
+        # suppress a genuine second episode -- a different resident, or the
+        # same one after a confirmed recovery -- which is exactly the alert
+        # loss the episode machine exists to prevent. Every suppression here
+        # is therefore a defect signal, counted in cooldown_suppressed_total.
         return (event.camera_id, event.domain, event.event_type, event.identity)
 
     def reset(self) -> None:

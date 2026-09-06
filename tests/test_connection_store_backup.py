@@ -50,9 +50,9 @@ def test_online_backup_includes_committed_schema18_wal_state(tmp_path: Path) -> 
     backup = store.create_pre_v1_backup()
 
     with sqlite3.connect(backup.path) as connection:
-        assert connection.execute(
-            "SELECT facility_token FROM edge_site WHERE id=1"
-        ).fetchone() == ("wal-token",)
+        assert connection.execute("SELECT facility_token FROM edge_site WHERE id=1").fetchone() == (
+            "wal-token",
+        )
 
 
 def test_restore_reverts_enrollment_but_preserves_sibling_edge_site_authority(

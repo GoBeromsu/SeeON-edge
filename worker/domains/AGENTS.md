@@ -4,7 +4,7 @@ Own fall and bed-exit judgment. Numeric observations become typed `BusinessEvent
 
 ## Ownership rule
 
-**`worker.domains` must not import `worker.pipeline.ingest`, `worker.pipeline.output`, or `worker.runtime`.**
+**`worker.domains` must not import `worker.pipeline.output` or `worker.runtime`.**
 A domain never opens a stream, never sends a relay request, never writes a clip, and never learns how it was scheduled.
 It receives `DecisionInput` and returns `BusinessEvent` values. The pipeline decides delivery.
 
@@ -32,7 +32,7 @@ The fall model object is shared once per process. Hoisting a per-camera row leak
 
 ## Explicit policies
 
-Fall uses `FallPolicyV1.operating_threshold`. Bed-exit uses `BedExitPolicyV1.min_containment`, `hold_frames`, `grace_frames`.
+Fall uses `FallPolicyV2.transition_threshold` (fall.policy.v2). Bed-exit uses `BedExitPolicyV1.min_containment`, `hold_frames`, `grace_frames`.
 Policies are typed and versioned in `shared.detection_policies`. Unknown documents don't degrade into defaults.
 Night-window and cross-midnight behavior take an injected, timezone-aware clock. Don't read wall time.
 

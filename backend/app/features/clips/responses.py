@@ -12,14 +12,12 @@ def clip_response(
     manifest: ClipManifest,
     size_bytes: int | None,
     thumbnail_available: bool,
-    scene_available: bool = False,
 ) -> ClipManifestResponse:
     return ClipManifestResponse.model_validate(
         {
             **manifest.as_response(),
             "size_bytes": size_bytes,
             "thumbnail_available": thumbnail_available,
-            "scene_available": scene_available,
         }
     )
 

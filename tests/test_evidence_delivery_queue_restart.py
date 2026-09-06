@@ -67,9 +67,7 @@ def test_restart_preserves_event_and_classifies_missing_snapshot_once(
         "mime_type": "image/jpeg",
     }
     if crash_point == "snapshot_stage":
-        stager.record_snapshot_disposition(
-            "event-a", "snapshot-a", "MISSING", "capture failed"
-        )
+        stager.record_snapshot_disposition("event-a", "snapshot-a", "MISSING", "capture failed")
     elif crash_point == "snapshot_publish":
         stager.record_snapshot_disposition(
             "event-a", "snapshot-a", "MISSING", "publish interrupted"

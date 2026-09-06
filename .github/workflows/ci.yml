@@ -86,10 +86,10 @@ jobs:
       # compose.edge.yaml `${VAR:?...}` needs a value (default or placeholder)
       # in .env.edge.prod.example, or an operator following the docs gets stuck
       # at `docker compose config`.
-      - name: Edge env example renders (GPU + CPU-only overlay)
+      - name: Edge env example renders (Flow)
         run: |
           docker compose --env-file .env.edge.prod.example \
-            -f compose.edge.yaml -f compose.edge.cpu.yaml config -q
+            -f compose.edge.yaml config -q
 
   # The whole cost centre: pytest was 18m27s of a 19m37s job. Sharded across
   # SHARD_TOTAL runners by test file, which needs no new dependency in uv.lock.
@@ -131,6 +131,8 @@ jobs:
       # cache is cross-branch, so caching model weights here is a supply-chain
       # vector (aa5e2c0) bought for roughly zero seconds.
       - name: Fetch packaged default LSTM model
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
         run: bash scripts/fetch-models.sh
 
       # The marker filter is unchanged. `integration` is deselected because that
@@ -163,11 +165,7 @@ jobs:
           mapfile -t shard_files < <(
             git ls-files -- '*.py' |
               grep -E '(^|/)(test_[^/]*|[^/]*_test)\.py$' |
-              # A CTest fixture, not a pytest module: CMakeLists.txt runs it as
-              # `python perception_wire_cross_language_test.py <binary>`. It
-              # matches pytest's default glob but defines no test function, so
-              # pytest collects zero tests from it.
-              grep -vxF 'worker/native/deepstream/src/perception_wire_cross_language_test.py' |
+              while IFS= read -r path; do test -f "$path" && printf '%s\n' "$path"; done |
               LC_ALL=C sort |
               awk -v shard="$SHARD" -v total="$SHARD_TOTAL" \
                 'NR % total == shard % total'

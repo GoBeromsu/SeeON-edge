@@ -95,7 +95,8 @@ class CompactClipListing:
         connection = open_runtime_database(self.database_path, actor=RuntimeActor.API)
         try:
             reconciliation = (
-                None if query.cursor is not None
+                None
+                if query.cursor is not None
                 else _reconcile_incrementally(store, _catalogued(connection))
             )
             with write_transaction(connection):
@@ -105,7 +106,8 @@ class CompactClipListing:
         finally:
             connection.close()
         prepared_by_id = (
-            {} if reconciliation is None
+            {}
+            if reconciliation is None
             else {item.located.manifest.clip_id: item.located for item in reconciliation.prepared}
         )
         visible: list[LocatedClip] = []
@@ -169,8 +171,7 @@ def _reconcile_incrementally(
     scanned_ids = {item.clip_id for item in scanned}
     removed: set[str] = set(catalogued) - scanned_ids
     candidates = [
-        item for item in scanned
-        if not _unchanged(store.root, item, catalogued.get(item.clip_id))
+        item for item in scanned if not _unchanged(store.root, item, catalogued.get(item.clip_id))
     ]
     candidates.sort(key=lambda item: (item.mtime_ns, item.clip_id), reverse=True)
     prepared: list[_PreparedClip] = []
@@ -212,9 +213,7 @@ def _prepare_clip(
     manifest_path = located.manifest_path
     manifest_hash, manifest_size = _hash_regular(store.root, manifest_path)
     manifest_relpath = manifest_path.relative_to(store.root).as_posix()
-    known = (
-        None if row is None else (row.media_relpath, row.media_sha256, row.media_size_bytes)
-    )
+    known = None if row is None else (row.media_relpath, row.media_sha256, row.media_size_bytes)
     try:
         media_path = store.resolve_located_video_path(located)
         media_hash, media_size = _media_identity(store.root, media_path, known)
@@ -224,9 +223,7 @@ def _prepare_clip(
         media_size = None
     local_state = "AVAILABLE" if media_path is not None else "CORRUPT"
     local_reason = None if media_path is not None else "MEDIA_MISSING"
-    media_relpath = (
-        None if media_path is None else media_path.relative_to(store.root).as_posix()
-    )
+    media_relpath = None if media_path is None else media_path.relative_to(store.root).as_posix()
     thumbnail_path = manifest_path.parent / "thumbnail.jpg"
     try:
         thumbnail_hash, thumbnail_size = _hash_regular(store.root, thumbnail_path)
@@ -236,12 +233,26 @@ def _prepare_clip(
         thumbnail_size = None
         thumbnail_relpath = None
     values: tuple[str | int | None, ...] = (
-        manifest.clip_id, manifest.camera_id, effective_event_type(manifest),
-        manifest.started_at, max(1, round(manifest.duration_s * 1000)),
-        manifest.codec or None, "video/mp4", manifest_relpath, media_relpath,
-        thumbnail_relpath, manifest_hash, media_hash, thumbnail_hash,
-        manifest_size, media_size, thumbnail_size, local_state, local_reason,
-        manifest.started_at, manifest.started_at,
+        manifest.clip_id,
+        manifest.camera_id,
+        effective_event_type(manifest),
+        manifest.started_at,
+        max(1, round(manifest.duration_s * 1000)),
+        manifest.codec or None,
+        "video/mp4",
+        manifest_relpath,
+        media_relpath,
+        thumbnail_relpath,
+        manifest_hash,
+        media_hash,
+        thumbnail_hash,
+        manifest_size,
+        media_size,
+        thumbnail_size,
+        local_state,
+        local_reason,
+        manifest.started_at,
+        manifest.started_at,
     )
     return _PreparedClip(located, values, (manifest_hash, media_hash, media_size))
 
@@ -305,15 +316,20 @@ def _page_rows(connection, query: CompactClipQuery):
         + " ORDER BY started_at DESC, clip_id DESC LIMIT ?",
         (*page_params, query.limit + 1),
     ).fetchall()
-    total = int(connection.execute(
-        "SELECT count(*) FROM clips WHERE " + " AND ".join(count_predicates),
-        count_params,
-    ).fetchone()[0])
-    facets = dict(connection.execute(
-        "SELECT event_facet, count(*) FROM clips WHERE " + " AND ".join(scope_predicates)
-        + " GROUP BY event_facet ORDER BY event_facet",
-        tuple(scope_params),
-    ).fetchall())
+    total = int(
+        connection.execute(
+            "SELECT count(*) FROM clips WHERE " + " AND ".join(count_predicates),
+            count_params,
+        ).fetchone()[0]
+    )
+    facets = dict(
+        connection.execute(
+            "SELECT event_facet, count(*) FROM clips WHERE "
+            + " AND ".join(scope_predicates)
+            + " GROUP BY event_facet ORDER BY event_facet",
+            tuple(scope_params),
+        ).fetchall()
+    )
     return rows, total, facets
 
 

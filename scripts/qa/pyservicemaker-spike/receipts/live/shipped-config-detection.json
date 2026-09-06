@@ -1,0 +1,37 @@
+{
+  "sources": 1,
+  "error": null,
+  "elapsed_sec": 43.8,
+  "frames": 1209,
+  "objects": 2318,
+  "batch_callbacks": 1209,
+  "batch_callbacks_per_sec": 27.61,
+  "frame_items_per_sec": 27.61,
+  "per_source_fps_from_pts": {
+    "0": 30.02
+  },
+  "probe_latency_ms": {
+    "p50": 0.325863,
+    "p95": 0.493912,
+    "p99": 0.627943,
+    "max": 2.945256,
+    "mean": 0.3394
+  },
+  "batch_interval_budget_ms": 33.33,
+  "queue_drops_no_consumer": 2254,
+  "association": {
+    "iou_gate": 0.5,
+    "matched": 2318,
+    "unmatched": 0,
+    "row_reuse_blocked": 0,
+    "match_iou_p50": 1.0,
+    "match_iou_p05": 0.9999997615814209
+  },
+  "distinct_ids_by_source": {
+    "0": 10
+  },
+  "id_births": 10,
+  "id_switches_disappearance_gated": 5,
+  "torch_imported": false,
+  "note": "Shipped nvinfer/NvDCF config and the image-compiled parser, run through the same production Flow shape against an RTSP source with people. Proves the shipped detection path yields object metadata and NvDCF identities; the facility rooms were empty when the live traces showed tracks=[]."
+}

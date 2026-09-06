@@ -76,12 +76,12 @@ def test_policy_restart_requires_matching_worker_ack_before_pending_becomes_appl
             "/api/v1/detection-policies/apply",
             json={
                 "module_id": "fall",
-                "module_version": 1,
+                "module_version": 2,
                 "schema_id": "fall.policy",
-                "schema_version": 1,
+                "schema_version": 2,
                 "camera_id": None,
                 "expected_revision_id": 0,
-                "values": {"operating_threshold": 0.73},
+                "values": {"transition_threshold": 0.73},
             },
         )
         assert applied.status_code == 202

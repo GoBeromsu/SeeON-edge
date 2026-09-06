@@ -14,6 +14,7 @@ from worker.domains.module_compiler import (
 from worker.domains.module_definition import (
     ComponentBinding,
     DetectionModuleActivationError,
+    RuntimeResolvedIdentityField,
     SharedComponentIdentity,
 )
 from worker.interfaces.serving import (
@@ -189,6 +190,18 @@ def _verified_identity_field(
     expected: str | None = None,
 ) -> str:
     expected = getattr(binding, field) if expected is None else expected
+    if isinstance(expected, RuntimeResolvedIdentityField):
+        expected = None
+    if expected is None:
+        actual = getattr(component, field, None)
+        if actual is None:
+            actual = getattr(component, f"_{field}", None)
+        resolved = actual if actual is not None else provisioned
+        if not isinstance(resolved, str) or not resolved:
+            raise DetectionModuleActivationError(
+                f"component {binding.component_id!r} has no resolved {label} identity"
+            )
+        return resolved
     if not isinstance(expected, str) or not expected or "runtime-resolved" in expected:
         raise DetectionModuleActivationError(
             f"component {binding.component_id!r} has no compiled {label} identity"

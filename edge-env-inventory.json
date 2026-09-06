@@ -324,24 +324,25 @@
     },
     {
       "name": "ML_WORKER_PROFILE",
+      "category": "dead",
+      "authority": "none; Flow is the only production worker profile",
+      "behavior": "retired profile selector; compose pins ML_WORKER_PROFILE=flow"
+    },
+    {
+      "name": "ML_WORKER_FLOW_BATCH_SIZE",
       "category": "deployment artifact",
       "authority": "deployment env",
-      "behavior": "required canonical profile or deterministic legacy alias; NVIDIA profiles require compose.edge.nvidia.yaml and non-NVIDIA profiles reject it",
-      "todo7_status": "implemented",
-      "canonical_choices": [
-        "cpu-host",
-        "nvidia",
-        "intel-vaapi-host",
-        "apple-mps-host"
-      ],
-      "legacy_aliases": {
-        "cpu": "cpu-host",
-        "igpu": "intel-vaapi-host",
-        "mps": "apple-mps-host"
-      },
+      "behavior": "required Flow engine and runtime batch size",
       "compose": true,
-      "example": true,
-      "service_environment": true
+      "example": true
+    },
+    {
+      "name": "ML_WORKER_FLOW_TRACKER_PROFILE",
+      "category": "deployment artifact",
+      "authority": "deployment env",
+      "behavior": "optional Flow tracker configuration filename",
+      "compose": true,
+      "example": true
     },
     {
       "name": "ML_WORKER_SYSTEM_TEST_GATE",

@@ -124,7 +124,8 @@ def confirm_topology_preview(
             request,
             connection,
             AuditEvent(
-                occurred_at=utc_now(), actor_id=actor,
+                occurred_at=utc_now(),
+                actor_id=actor,
                 action=AuditAction.TOPOLOGY_CONFIRM,
                 target_id=payload.confirmation_id,
                 detail=empty_detail(AuditAction.TOPOLOGY_CONFIRM),

@@ -17,7 +17,7 @@ from urllib.parse import urlsplit
 from tests_support.local_backend_fixture import RouteRecord
 
 # Split so the cleartext-policy scan does not match this file.
-INSECURE_HTTP_ENV = "API_BACKEND_" "ALLOW_INSECURE_HTTP"  # noqa: ISC001
+INSECURE_HTTP_ENV = "API_BACKEND_ALLOW_INSECURE_HTTP"  # noqa: ISC001
 
 
 class DiagnosticOutcome(StrEnum):
@@ -292,9 +292,7 @@ def classify_rows(rows: Sequence[CorrelationRow]) -> Classification:
         # enforced-blocked without temporal-order evidence. Identity-derived
         # findings above remain reportable.
         if not all(row.order_evidence_valid for row in rows):
-            return _inconclusive(
-                "ordered-attempt convergence requires temporal-order evidence"
-            )
+            return _inconclusive("ordered-attempt convergence requires temporal-order evidence")
         return Classification(
             DiagnosticOutcome.TRANSPORT_RETRY,
             "판정 불가",
@@ -385,8 +383,7 @@ def validate_no_insecure_http_assignments(
     ]
     if leaked:
         raise ValueError(
-            "cleartext opt-in must be absent from package services: "
-            + ",".join(sorted(leaked))
+            "cleartext opt-in must be absent from package services: " + ",".join(sorted(leaked))
         )
 
 
@@ -441,8 +438,7 @@ def validate_insecure_http_source_declarations(repo_root: Path) -> None:
         )
     if unexpected_references:
         raise ValueError(
-            "unexpected cleartext policy references: "
-            + ",".join(sorted(unexpected_references))
+            "unexpected cleartext policy references: " + ",".join(sorted(unexpected_references))
         )
 
 
@@ -457,8 +453,7 @@ def _contains_effective_insecure_http_assignment(path: Path, content: str) -> bo
                 if node.func.attr == "setenv" and node.args:
                     first = node.args[0]
                     if (
-                        isinstance(first, ast.Constant)
-                        and first.value == INSECURE_HTTP_ENV
+                        isinstance(first, ast.Constant) and first.value == INSECURE_HTTP_ENV
                     ) or isinstance(first, ast.Name):
                         return True
             if isinstance(node, (ast.Assign, ast.AnnAssign)):
@@ -710,8 +705,7 @@ class RunOwnedTeardown:
 
     def finalize(self) -> None:
         if not self._resources or any(
-            not resource.stopped or not resource.destroyed
-            for resource in self._resources.values()
+            not resource.stopped or not resource.destroyed for resource in self._resources.values()
         ):
             raise ValueError("run-owned teardown is incomplete")
 

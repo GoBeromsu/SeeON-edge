@@ -7,16 +7,10 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Protocol
 
-import cv2
-
 from contracts.observation import FrameObservation
 from worker.domains.bed_exit import BedExitDebugSnapshot
-from worker.pipeline.output.overlay import (
-    OverlayEncodingError,
-    OverlayMode,
-    OverlayRenderer,
-)
 from worker.types import FramePacket
+from worker.types.preview import OverlaySelection
 
 
 @dataclass(frozen=True, slots=True)
@@ -42,12 +36,13 @@ class LatestFrameStore:
         self._known_camera_ids: set[str] = set()
         self._viewer_counts: dict[str, int] = {}
         self._snapshot_demand: set[str] = set()
-        self._mode: dict[str, OverlayMode] = {}
-        self._demand_listener: Callable[[str, int, OverlayMode, bool], None] | None = None
+        self._selection: dict[str, OverlaySelection] = {}
+        self._selection_generation: dict[str, int] = {}
+        self._demand_listener: Callable[[str, int, OverlaySelection, bool], None] | None = None
 
     def set_demand_listener(
         self,
-        listener: Callable[[str, int, OverlayMode, bool], None] | None,
+        listener: Callable[[str, int, OverlaySelection, bool], None] | None,
     ) -> None:
         with self._condition:
             self._demand_listener = listener
@@ -62,10 +57,13 @@ class LatestFrameStore:
         with self._condition:
             self._viewer_counts[camera_id] = self._viewer_counts.get(camera_id, 0) + 1
             viewers = self._viewer_counts[camera_id]
-            mode = self._mode.get(camera_id, "none")
+            selection = self._selection.get(camera_id, OverlaySelection())
             listener = self._demand_listener
+            if listener is not None:
+                _ = self._frames.pop(camera_id, None)
+            self._condition.notify_all()
         if listener is not None:
-            listener(camera_id, viewers, mode, False)
+            listener(camera_id, viewers, selection, False)
 
     def mark_viewer_disconnected(self, camera_id: str) -> None:
         """Undo one ``mark_viewer_connected`` (every stream return path calls this)."""
@@ -73,10 +71,13 @@ class LatestFrameStore:
             count = self._viewer_counts.get(camera_id, 0) - 1
             viewers = max(count, 0)
             self._viewer_counts[camera_id] = viewers
-            mode = self._mode.get(camera_id, "none")
+            selection = self._selection.get(camera_id, OverlaySelection())
             listener = self._demand_listener
+            if viewers > 0 and listener is not None:
+                _ = self._frames.pop(camera_id, None)
+            self._condition.notify_all()
         if listener is not None:
-            listener(camera_id, viewers, mode, False)
+            listener(camera_id, viewers, selection, False)
 
     def has_viewers(self, camera_id: str) -> bool:
         with self._condition:
@@ -93,10 +94,13 @@ class LatestFrameStore:
         with self._condition:
             self._snapshot_demand.add(camera_id)
             viewers = self._viewer_counts.get(camera_id, 0)
-            mode = self._mode.get(camera_id, "none")
+            selection = self._selection.get(camera_id, OverlaySelection())
             listener = self._demand_listener
+            if listener is not None:
+                _ = self._frames.pop(camera_id, None)
+            self._condition.notify_all()
         if listener is not None:
-            listener(camera_id, viewers, mode, True)
+            listener(camera_id, viewers, selection, True)
 
     def consume_snapshot_demand(self, camera_id: str) -> bool:
         """Atomically check and clear the one-frame snapshot demand flag."""
@@ -106,17 +110,26 @@ class LatestFrameStore:
                 return True
             return False
 
-    def set_mode(self, camera_id: str, mode: OverlayMode) -> None:
+    def set_selection(self, camera_id: str, selection: OverlaySelection) -> None:
         with self._condition:
-            self._mode[camera_id] = mode
+            if self._selection.get(camera_id, OverlaySelection()) == selection:
+                return
+            self._selection[camera_id] = selection
+            self._selection_generation[camera_id] = self._selection_generation.get(camera_id, 0) + 1
+            _ = self._frames.pop(camera_id, None)
             viewers = self._viewer_counts.get(camera_id, 0)
             listener = self._demand_listener
+            self._condition.notify_all()
         if listener is not None:
-            listener(camera_id, viewers, mode, False)
+            listener(camera_id, viewers, selection, True)
 
-    def get_mode(self, camera_id: str) -> OverlayMode:
+    def get_selection(self, camera_id: str) -> OverlaySelection:
         with self._condition:
-            return self._mode.get(camera_id, "none")
+            return self._selection.get(camera_id, OverlaySelection())
+
+    def selection_generation(self, camera_id: str) -> int:
+        with self._condition:
+            return self._selection_generation.get(camera_id, 0)
 
     def publish_jpeg(
         self,
@@ -127,7 +140,9 @@ class LatestFrameStore:
         seq: int | None = None,
         observation_age_sec: float | None = None,
         overlay_stale: bool = False,
-    ) -> None:
+        expected_selection: OverlaySelection | None = None,
+        expected_generation: int | None = None,
+    ) -> bool:
         latest = LatestFrame(
             jpeg=bytes(jpeg),
             seq=frame_index if seq is None else seq,
@@ -136,13 +151,31 @@ class LatestFrameStore:
             overlay_stale=overlay_stale,
         )
         with self._condition:
+            if (
+                expected_selection is not None
+                and self._selection.get(camera_id, OverlaySelection()) != expected_selection
+            ):
+                return False
+            if (
+                expected_generation is not None
+                and self._selection_generation.get(camera_id, 0) != expected_generation
+            ):
+                return False
             self._known_camera_ids.add(camera_id)
             self._frames[camera_id] = latest
             self._condition.notify_all()
+            return True
 
     def get_latest(self, camera_id: str) -> LatestFrame | None:
         with self._condition:
             return self._frames.get(camera_id)
+
+    def clear_camera(self, camera_id: str) -> None:
+        """Discard a preview that belongs to a retired stream identity."""
+        with self._condition:
+            _ = self._frames.pop(camera_id, None)
+            self._snapshot_demand.discard(camera_id)
+            self._condition.notify_all()
 
     def is_known(self, camera_id: str) -> bool:
         with self._condition:
@@ -172,47 +205,16 @@ class LiveViewRenderer(Protocol):
     ) -> bytes: ...
 
 
-class _PerCameraOverlayRenderer:
-    """Default ``LiveViewSubscriber`` renderer: per-camera runtime overlay mode.
-
-    ``OverlayRenderer.mode`` (overlay.py) is a frozen, per-instance
-    construction switch. Sharing one ``OverlayRenderer`` across every camera
-    (the previous ``worker.py`` wiring) collapses the switch into a single
-    process-global value. This reads each camera's mode from ``store`` -- the
-    same camera-keyed collaborator already threaded through the worker -- and
-    constructs a fresh, stateless ``OverlayRenderer`` per call, so switching
-    modes for one camera never affects another, and ``"none"`` still skips
-    every drawing loop entirely (overlay.py's early return), not just the
-    final composite.
-    """
-
-    def __init__(self, store: LatestFrameStore) -> None:
-        self._store = store
-
-    def encode_jpeg(
-        self,
-        packet: FramePacket,
-        observation: FrameObservation,
-        debug_snapshots: tuple[BedExitDebugSnapshot, ...] = (),
-    ) -> bytes:
-        mode = self._store.get_mode(packet.camera_id)
-        return OverlayRenderer(mode=mode).encode_jpeg(
-            packet, observation, debug_snapshots
-        )
-
-
 class LiveViewSubscriber:
-    """Render optional live output without changing inference state or flow."""
+    """Publish injected JPEG output without changing inference state or flow."""
 
     def __init__(
         self,
         store: LatestFrameStore,
-        renderer: LiveViewRenderer | None = None,
+        renderer: LiveViewRenderer,
     ) -> None:
         self._store = store
-        self._renderer = (
-            renderer if renderer is not None else _PerCameraOverlayRenderer(store)
-        )
+        self._renderer = renderer
 
     def publish(
         self,
@@ -242,7 +244,7 @@ class LiveViewSubscriber:
             return False
         try:
             jpeg = self._renderer.encode_jpeg(packet, observation, debug_snapshots)
-        except (cv2.error, OverlayEncodingError):
+        except Exception:  # noqa: BLE001 - preview output must not stop the live lane
             return False
         self._store.publish_jpeg(
             camera_id,

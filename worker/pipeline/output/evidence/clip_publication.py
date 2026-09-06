@@ -7,13 +7,12 @@ import json
 import logging
 import os
 import shutil
+import subprocess
 from collections.abc import Mapping
-from dataclasses import replace
 from pathlib import Path
 from typing import Final, final
 
-from worker.adapters.encode.adapter_errors import ThumbnailGenerationError
-from worker.adapters.encode.thumbnail import THUMBNAIL_FILENAME, FFmpegThumbnailGenerator
+from shared.events.delivery_queue import ClipEntry, DeliveryQueue
 from worker.interfaces import ThumbnailGenerator
 from worker.pipeline.output.evidence.clip_corrupt_publication import publish_existing_corrupt
 from worker.pipeline.output.evidence.clip_identity import ClipReservation
@@ -29,12 +28,12 @@ from worker.pipeline.output.evidence.clip_publication_types import (
 )
 from worker.pipeline.output.evidence.durability import fsync_directory, fsync_file
 from worker.pipeline.output.evidence.evidence_manifest import (
+    ClipManifest,
     finalize_ready_manifest,
     unavailable_manifest,
 )
 from worker.pipeline.output.evidence.evidence_outbox_types import EvidenceReasonCode
-from worker.pipeline.output.evidence.manifest_media_models import SceneIndexFacts
-from worker.pipeline.output.evidence.scene_index import SCENE_INDEX_FILENAME
+from worker.pipeline.output.evidence.manifest_models import ReadyClipManifest
 from worker.pipeline.output.evidence.terminal_outcome import (
     TerminalClipOutcome,
     TerminalClipState,
@@ -48,28 +47,6 @@ def _no_barrier(_stage: PublicationStage, _path: Path) -> None:
     return
 
 
-def _scene_index_facts(path: Path) -> SceneIndexFacts:
-    data = path.read_bytes()
-    return SceneIndexFacts(
-        path=SCENE_INDEX_FILENAME,
-        sha256=hashlib.sha256(data).hexdigest(),
-        size_bytes=len(data),
-        schema=1,
-        count=_scene_frame_count(data),
-    )
-
-
-def _scene_frame_count(data: bytes) -> int:
-    try:
-        value = json.loads(data)
-        count = value["frame_count"]
-    except (UnicodeDecodeError, json.JSONDecodeError, KeyError, TypeError) as exc:
-        raise OSError("scene index is invalid") from exc
-    if not isinstance(count, int) or isinstance(count, bool) or count < 0:
-        raise OSError("scene index frame count is invalid")
-    return count
-
-
 @final
 class ClipPublisher:
     def __init__(
@@ -79,11 +56,13 @@ class ClipPublisher:
         barrier: PublicationBarrier = _no_barrier,
         ffprobe_bin: str = "ffprobe",
         thumbnail_generator: ThumbnailGenerator | None = None,
+        delivery_queue_directory: Path | None = None,
     ) -> None:
         self._store_dir = store_dir
         self._barrier = barrier
         self._ffprobe_bin = ffprobe_bin
-        self._thumbnail_generator = thumbnail_generator or FFmpegThumbnailGenerator()
+        self._thumbnail_generator = thumbnail_generator
+        self._delivery_queue_directory = delivery_queue_directory
 
     def publish_ready(
         self,
@@ -93,28 +72,12 @@ class ClipPublisher:
     ) -> PublishedClip:
         self._validate_reservation(reservation)
         video_path = self._publish_media(reservation, artifact_path)
-        metadata = replace(
-            metadata,
-            scene_index=self._publish_scene_index(reservation, metadata),
-        )
-        try:
+        if self._thumbnail_generator is not None:
             thumbnail_path = self._thumbnail_generator.generate(
                 video_path,
-                reservation.final_dir / THUMBNAIL_FILENAME,
+                reservation.final_dir / "thumbnail.jpg",
                 metadata.duration_s,
             )
-        except ThumbnailGenerationError as exc:
-            LOGGER.warning(
-                "clip thumbnail generation failed camera_id=%r clip_id=%r error_type=%s",
-                metadata.camera_id,
-                str(reservation.clip_id),
-                type(exc).__name__,
-                extra={
-                    "camera_id": metadata.camera_id,
-                    "clip_id": str(reservation.clip_id),
-                },
-            )
-        else:
             self._barrier(PublicationStage.THUMBNAIL_RENAMED, thumbnail_path)
         manifest = finalize_ready_manifest(
             video_path=video_path,
@@ -143,8 +106,32 @@ class ClipPublisher:
                 hashlib.sha256(manifest_path.read_bytes()).hexdigest(),
             ),
         )
+        self._enqueue_clip(manifest, metadata)
         self._cleanup_staging(reservation)
         return PublishedClip(reservation.clip_id, manifest, manifest_path, video_path)
+
+    def publish_adopted_ready(
+        self,
+        reservation: ClipReservation,
+        source_path: Path,
+        metadata: ClipPublicationMetadata,
+    ) -> PublishedClip:
+        """Copy externally-recorded media into store staging before publication.
+
+        Smart Record owns its output path, which can be on another filesystem.
+        Copying and fsyncing under the reserved staging directory makes the
+        subsequent publication rename local and atomic without consuming the
+        plane-owned source until a complete manifest exists.
+        """
+        if not source_path.is_file():
+            raise ClipPublicationConflictError(reservation.clip_id, "recorded media is missing")
+        adopted = reservation.staging_dir / "adopted.mp4"
+        temporary = adopted.with_suffix(".mp4.tmp")
+        _adopt_media(source_path, temporary)
+        os.replace(temporary, adopted)
+        fsync_file(adopted)
+        fsync_directory(reservation.staging_dir)
+        return self.publish_ready(reservation, adopted, metadata)
 
     def publish_unavailable(
         self,
@@ -181,6 +168,7 @@ class ClipPublisher:
                 hashlib.sha256(manifest_path.read_bytes()).hexdigest(),
             ),
         )
+        self._enqueue_clip(manifest, metadata)
         self._cleanup_staging(reservation)
         return PublishedClip(reservation.clip_id, manifest, manifest_path, None)
 
@@ -232,58 +220,6 @@ class ClipPublisher:
         fsync_directory(reservation.final_dir)
         return destination
 
-    def _publish_scene_index(
-        self,
-        reservation: ClipReservation,
-        metadata: ClipPublicationMetadata,
-    ) -> SceneIndexFacts | None:
-        """Best-effort sidecar promotion; failure must never block READY media."""
-        expected = metadata.scene_index
-        if expected is None:
-            return None
-        staged = reservation.staging_dir / SCENE_INDEX_FILENAME
-        destination = reservation.final_dir / SCENE_INDEX_FILENAME
-        try:
-            if destination.exists():
-                facts = _scene_index_facts(destination)
-                if facts != expected:
-                    self._scene_warning(metadata, reservation, "HASH_CONFLICT")
-                    return None
-                fsync_file(destination)
-                fsync_directory(reservation.final_dir)
-                return facts
-            if not staged.is_file():
-                self._scene_warning(metadata, reservation, "STAGED_MISSING")
-                return None
-            facts = _scene_index_facts(staged)
-            if facts != expected:
-                self._scene_warning(metadata, reservation, "HASH_CONFLICT")
-                return None
-            fsync_file(staged)
-            os.replace(staged, destination)
-            fsync_file(destination)
-            fsync_directory(reservation.final_dir)
-        except Exception as exc:  # noqa: BLE001 - sidecar reconstruction is auxiliary
-            self._scene_warning(metadata, reservation, "PROMOTION_FAILED", exc)
-            return None
-        else:
-            return facts
-
-    def _scene_warning(
-        self,
-        metadata: ClipPublicationMetadata,
-        reservation: ClipReservation,
-        reason: str,
-        exc: Exception | None = None,
-    ) -> None:
-        LOGGER.warning(
-            "clip scene index not published: camera_id=%s clip_id=%s reason=%s error_type=%s",
-            metadata.camera_id,
-            reservation.clip_id,
-            reason,
-            type(exc).__name__ if exc is not None else "None",
-        )
-
     def _publish_manifest(
         self,
         reservation: ClipReservation,
@@ -324,6 +260,57 @@ class ClipPublisher:
             shutil.rmtree(reservation.staging_dir)
             fsync_directory(reservation.staging_dir.parent)
 
+    def _enqueue_clip(self, manifest: ClipManifest, metadata: ClipPublicationMetadata) -> None:
+        if self._delivery_queue_directory is None:
+            return
+        if metadata.facility_id is None:
+            raise ClipPublicationConflictError(
+                manifest.clip_id, "facility id is required for clip relay delivery"
+            )
+        if isinstance(manifest, ReadyClipManifest):
+            entry = ClipEntry(
+                clip_id=manifest.clip_id,
+                event_ids=manifest.event_refs,
+                camera_id=manifest.camera_id,
+                facility_id=metadata.facility_id,
+                local_state="VERIFIED",
+                state_version=manifest.state_version,
+                media_reference=f"clips/{manifest.clip_id}/clip.mp4",
+                sha256=manifest.sha256,
+                size_bytes=manifest.size_bytes,
+                mime_type=manifest.mime_type,
+                codec=manifest.codec,
+                duration_ms=manifest.duration_ms,
+                clip_start_at=manifest.clip_start_at,
+                clip_end_at=manifest.clip_end_at,
+                finalized_at=manifest.finalized_at,
+                unavailable_reason=None,
+            )
+        else:
+            entry = ClipEntry(
+                clip_id=manifest.clip_id,
+                event_ids=manifest.event_refs,
+                camera_id=manifest.camera_id,
+                facility_id=metadata.facility_id,
+                local_state="UNAVAILABLE",
+                state_version=manifest.state_version,
+                media_reference=None,
+                sha256=None,
+                size_bytes=None,
+                mime_type=None,
+                codec=None,
+                duration_ms=None,
+                clip_start_at=manifest.clip_start_at,
+                clip_end_at=manifest.clip_end_at,
+                finalized_at=manifest.finalized_at,
+                unavailable_reason=manifest.reason_code.value,
+            )
+        admitted = DeliveryQueue(self._delivery_queue_directory).try_admit(entry)
+        if not admitted.accepted:
+            raise ClipPublicationConflictError(
+                manifest.clip_id, f"clip relay queue admission failed: {admitted.fault}"
+            )
+
     def _validate_reservation(self, reservation: ClipReservation) -> None:
         clips_dir = self._store_dir / "clips"
         if reservation.final_dir != clips_dir / reservation.clip_id:
@@ -343,3 +330,53 @@ __all__ = [
     "PublicationStage",
     "PublishedClip",
 ]
+
+
+def _adopt_media(source_path: Path, destination: Path) -> None:
+    """Copy adopted media into staging as a faststart MP4.
+
+    DeepStream's Smart Record writes the moov atom last, but the evidence
+    contract requires faststart so a player can start without the whole file.
+    Remux (stream copy, no re-encode, so no NVENC session) when a remuxer is
+    available and fall back to a plain copy, which the media inspection then
+    rejects as CORRUPT rather than publishing something unplayable.
+    """
+    remuxer = shutil.which("ffmpeg")
+    if remuxer is not None:
+        result = subprocess.run(  # noqa: S603 - fixed argv, operator-owned binary
+            [
+                remuxer,
+                "-nostdin",
+                "-loglevel",
+                "error",
+                "-i",
+                str(source_path),
+                "-c",
+                "copy",
+                "-movflags",
+                "+faststart",
+                # The staging name ends in .tmp, so ffmpeg cannot infer the
+                # container from the extension and must be told.
+                "-f",
+                "mp4",
+                "-y",
+                str(destination),
+            ],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        if result.returncode == 0 and destination.exists() and destination.stat().st_size > 0:
+            with destination.open("rb") as handle:
+                os.fsync(handle.fileno())
+            return
+        LOGGER.warning(
+            "faststart remux failed for %s; adopting the original bytes: %s",
+            source_path,
+            (result.stderr or result.stdout).strip()[:200],
+        )
+        destination.unlink(missing_ok=True)
+    with source_path.open("rb") as source, destination.open("xb") as handle:
+        shutil.copyfileobj(source, handle)
+        handle.flush()
+        os.fsync(handle.fileno())

@@ -170,8 +170,7 @@ def test_artifact_identity_transition_and_revision_are_guarded(tmp_path: Path) -
         )
         with pytest.raises(sqlite3.IntegrityError):
             connection.execute(
-                "UPDATE artifacts SET state = 'PURGED', revision = 2 "
-                "WHERE incident_id = 'inc-1'"
+                "UPDATE artifacts SET state = 'PURGED', revision = 2 WHERE incident_id = 'inc-1'"
             )
         with pytest.raises(sqlite3.IntegrityError):
             connection.execute(

@@ -17,6 +17,7 @@ const PROBE_FAILURE_MESSAGE: Record<string, string> = {
   timeout: 'RTSP 연결 시간이 초과되었습니다. 주소와 네트워크를 확인하세요.',
   auth: 'RTSP 인증에 실패했습니다. 계정 정보를 확인하세요.',
   decode: '영상 스트림을 디코드하지 못했습니다. 카메라 설정을 확인하세요.',
+  unavailable: '현재 Flow 미디어 경로에서는 RTSP 연결 검사를 제공하지 않습니다.',
 };
 
 /**

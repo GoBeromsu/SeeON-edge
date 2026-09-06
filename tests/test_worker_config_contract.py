@@ -201,9 +201,7 @@ def test_from_dict_drops_invalid_timezone_and_falls_open(
         "config_version": 1,
         "restart_epoch": 0,
         "cameras": [_camera_payload()],
-        "detection_windows": {
-            "bed_exit": {"start": "21:00", "end": "06:00", "tz": "Not/A_Zone"}
-        },
+        "detection_windows": {"bed_exit": {"start": "21:00", "end": "06:00", "tz": "Not/A_Zone"}},
     }
 
     config = PulledWorkerConfig.from_dict(data)

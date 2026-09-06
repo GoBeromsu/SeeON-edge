@@ -25,8 +25,7 @@ def _write_fixture(root: Path) -> None:
             "camera_id": "camera-a",
             "event_ref": f"event-{index}",
             "started_at": (
-                f"2026-08-09T{index // 3600:02d}:"
-                f"{index // 60 % 60:02d}:{index % 60:02d}Z"
+                f"2026-08-09T{index // 3600:02d}:{index // 60 % 60:02d}:{index % 60:02d}Z"
             ),
             "duration_s": 0.0,
             "codec": "",

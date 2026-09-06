@@ -5,15 +5,14 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+import os
 import struct
 from pathlib import Path
 
 from worker.domains.fall.pose_bbox56 import PoseBbox56Track, pose_bbox56_tracks
 
 _EDGE_ROOT = Path(__file__).resolve().parents[1]
-_POSE_FIXTURE = _EDGE_ROOT / "tests" / "fixtures_fall_pose_bbox56_v1.json"
 _POLICY_FIXTURE = _EDGE_ROOT / "tests" / "fixtures_fall_policy_v2.json"
-_POSE_SHA256 = "72d7e911acf39c7183bcdf10fad3c066dd93b7a45b7d28bef1950e1bf85b3a9c"
 _POLICY_SHA256 = "9234acebd07f7494bc107d0471eff52ae08cb46b75ecfa47d9c709f4e16ea1b7"
 
 
@@ -35,19 +34,39 @@ def _load(path: Path) -> tuple[bytes, dict[str, object]]:
     return payload, json.loads(payload)
 
 
+def _bundle_pose_fixture() -> tuple[bytes, dict[str, object]]:
+    root = Path(
+        os.environ.get(
+            "FALL_MODEL_BUNDLE_DIR",
+            _EDGE_ROOT / "models/fall/pose-bbox56-gru",
+        )
+    )
+    manifest = json.loads((root / "bundle-manifest.json").read_bytes())
+    candidates = [
+        item
+        for item in manifest["files"]
+        if Path(item["relative_path"]).parent == Path("conformance")
+    ]
+    assert len(candidates) == 1
+    member = candidates[0]
+    payload = (root / member["relative_path"]).read_bytes()
+    assert len(payload) == member["size"]
+    assert hashlib.sha256(payload).hexdigest() == member["sha256"]
+    return payload, json.loads(payload)
+
+
 def _float32(value: float) -> float:
     return struct.unpack("!f", struct.pack("!f", value))[0]
 
 
 def test_pose_fixture_is_canonical() -> None:
-    payload, fixture = _load(_POSE_FIXTURE)
+    payload, fixture = _bundle_pose_fixture()
 
     assert payload == _canonical_bytes(fixture)
-    assert hashlib.sha256(payload).hexdigest() == _POSE_SHA256
 
 
 def test_pose_fixture_raw_cases_match_executable_transform() -> None:
-    _, fixture = _load(_POSE_FIXTURE)
+    _, fixture = _bundle_pose_fixture()
     tolerance = float(fixture["comparison"]["absolute_tolerance"])
     for case in fixture["raw_cases"]:
         frame = case["frame"]
@@ -89,7 +108,7 @@ def test_pose_fixture_raw_cases_match_executable_transform() -> None:
 
 
 def test_pose_vector_contract_and_negative_cases() -> None:
-    _, fixture = _load(_POSE_FIXTURE)
+    _, fixture = _bundle_pose_fixture()
 
     assert fixture["preprocessing_identity"] == "coco17-xyc-plus-pose-head-xyxy-valid-f32-v1"
     assert fixture["temporal"] == {"fps": 15, "stride_frames": 5, "window_frames": 30}
@@ -217,7 +236,35 @@ def test_policy_fixture_freezes_fall_v2_surface_and_state_transitions() -> None:
 
 
 def test_fixtures_exclude_grayscale_and_bed_vocabulary() -> None:
-    text = _POSE_FIXTURE.read_text() + _POLICY_FIXTURE.read_text()
+    pose_payload, _ = _bundle_pose_fixture()
+    text = pose_payload.decode() + _POLICY_FIXTURE.read_text()
 
     assert "grayscale" not in text.lower()
     assert "bed" not in text.lower()
+
+
+def test_resampled_gap_rows_are_zero_rows_at_the_exact_cadence() -> None:
+    """P1a-AC4/AC5: a dropped 15 fps bucket becomes one ``valid=0`` zero row.
+
+    The resampler is the single owner of fall input cadence, so a gap must
+    produce the same 56-wide zero row the classifier would see for a missing
+    observation -- never a repeated or interpolated pose.
+    """
+    from worker.domains.fall.pose_bbox56 import pose_bbox56_row
+    from worker.pipeline.perception.pts_resample import CADENCE_NS, PtsResampler
+
+    zero_row = pose_bbox56_row((), None, 640, 360)
+    assert zero_row == (0.0,) * 56
+
+    resampler: PtsResampler[str] = PtsResampler()
+    assert [row.valid for row in resampler.push(0, "a")] == [1]
+    assert [row.valid for row in resampler.push(CADENCE_NS, "b")] == [1]
+    # Two buckets skipped: exactly two invalid rows, then the observed row.
+    produced = resampler.push(4 * CADENCE_NS, "c")
+    assert [(row.pts_ns, row.valid, row.value) for row in produced] == [
+        (2 * CADENCE_NS, 0, None),
+        (3 * CADENCE_NS, 0, None),
+        (4 * CADENCE_NS, 1, "c"),
+    ]
+    # A second row inside an already-emitted bucket is dropped, not duplicated.
+    assert resampler.push(4 * CADENCE_NS + 1, "d") == ()

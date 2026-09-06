@@ -10,6 +10,7 @@ final path, so a later worker boot cannot load a half-written weight.
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 import shutil
 import stat
@@ -25,11 +26,25 @@ from worker.tools.fetch_models.http_source import (
     RetryPolicy,
     SourceError,
 )
-from worker.tools.fetch_models.manifest import SIDECAR_ROOT, Artifact, Bundle, Manifest
+from worker.tools.fetch_models.manifest import (
+    SIDECAR_ROOT,
+    Artifact,
+    Bundle,
+    Manifest,
+    ManifestError,
+    Source,
+    bundle_from_published_manifest,
+)
 
 HF_TOKEN_ENV: Final = "HF_TOKEN"
 PART_SUFFIX: Final = ".part"
 _HASH_CHUNK: Final = 1 << 20
+_FALL_BUNDLE_ROOT: Final = "fall/pose-bbox56-gru"
+_FALL_PT_PATH: Final = f"{_FALL_BUNDLE_ROOT}/model.pt"
+_FALL_ONNX_PATH: Final = f"{_FALL_BUNDLE_ROOT}/model.onnx"
+_PUBLISHED_BUNDLE_MANIFEST_PATH: Final = "manifest.json"
+_MAX_PUBLISHED_MANIFEST_SIZE: Final = 1 << 20
+_SELECTED_PUBLICATION_SOURCE_NAME: Final = "selected-model-publication"
 
 Outcome = Literal["present", "fetched", "sidecar-present", "sidecar-written"]
 
@@ -270,6 +285,85 @@ def fetch_bundle(
     return report
 
 
+def _read_published_bundle_manifest(
+    source: Source, byte_source: ByteSource, env: Mapping[str, str]
+) -> Bundle:
+    """Read the canonical descriptor which names a published bundle's members."""
+    body = bytearray()
+    url = source.url_for(_PUBLISHED_BUNDLE_MANIFEST_PATH)
+    headers = _headers_for(
+        Artifact(
+            path=_PUBLISHED_BUNDLE_MANIFEST_PATH,
+            source=source,
+            remote_path=_PUBLISHED_BUNDLE_MANIFEST_PATH,
+            size=1,
+            sha256="0" * 64,
+        ),
+        env,
+    )
+    try:
+        for chunk in byte_source.stream(url, headers):
+            body.extend(chunk)
+            if len(body) > _MAX_PUBLISHED_MANIFEST_SIZE:
+                raise VerificationError(
+                    f"published bundle manifest at {url} exceeds "
+                    f"{_MAX_PUBLISHED_MANIFEST_SIZE} bytes"
+                )
+        return bundle_from_published_manifest(bytes(body), source)
+    except SourceError as exc:
+        raise VerificationError(
+            f"published bundle source {source.source_locator}@{source.ref} is unreachable: {exc}"
+        ) from exc
+    except ManifestError as exc:
+        raise VerificationError(f"published bundle manifest at {url}: {exc}") from exc
+
+
+def _fetch_selected_bundle(
+    root: Path,
+    source: ByteSource,
+    *,
+    selection_path: Path,
+    env: Mapping[str, str],
+    retry: RetryPolicy,
+    log: Callable[[str], None],
+) -> FetchReport:
+    try:
+        selection_raw = json.loads(selection_path.read_text(encoding="utf-8"))
+        from worker.runtime.provenance.model_bundle import (
+            desired_model_bundle_from_selection_document,
+        )
+
+        desired = desired_model_bundle_from_selection_document(selection_raw)
+    except (OSError, ValueError, RuntimeError) as exc:
+        raise VerificationError(f"model selection at {selection_path} is invalid: {exc}") from exc
+
+    publication = desired.selection.model_publication if desired.selection is not None else None
+    if publication is None:  # pragma: no cover -- selection parsing always supplies it
+        raise VerificationError("model selection has no model publication")
+    selected_source = Source(
+        name=_SELECTED_PUBLICATION_SOURCE_NAME,
+        kind="huggingface",
+        source_locator=publication.source_locator,
+        ref=publication.revision,
+    )
+    bundle = _read_published_bundle_manifest(selected_source, source, env)
+    if bundle.sha256 != publication.bundle_sha256:
+        raise VerificationError(
+            f"published bundle manifest identity {bundle.sha256} does not match selected "
+            f"bundle {publication.bundle_sha256}"
+        )
+    destination = root / "bundles" / bundle.sha256
+    if destination.exists() or destination.is_symlink():
+        # An existing selected tree must fail with the exact boot-path reason,
+        # rather than the generic provisioning-tree error below.
+        _require_loadable_selected_fall_bundle(root, desired)
+    report = fetch_bundle(bundle, root, source, env=env, retry=retry, log=log)
+    for result in report.results:
+        log(f"{result.outcome:16} {result.sha256}  bundles/{bundle.sha256}/{result.path}")
+    _require_loadable_selected_fall_bundle(root, desired)
+    return report
+
+
 def fetch_all(
     manifest: Manifest,
     root: Path,
@@ -280,6 +374,7 @@ def fetch_all(
     force: bool = False,
     log: Callable[[str], None] = lambda _message: None,
     sidecar_root: Path = SIDECAR_ROOT,
+    selection_path: Path | None = None,
 ) -> FetchReport:
     """Fetch every artifact and sidecar; raise on the first failure."""
     report = FetchReport()
@@ -297,4 +392,77 @@ def fetch_all(
         for result in bundle_report.results:
             log(f"{result.outcome:16} {result.sha256}  bundles/{bundle.sha256}/{result.path}")
         report.results.extend(bundle_report.results)
+    # The Flow worker composes the ORT runner and refuses a fall bundle with no
+    # model.onnx. The published manifest may legitimately omit it - the ONNX is
+    # a publication-time export the edge image cannot produce, since Torch is
+    # excluded under P1b-AC7 - so judge the PROVISIONED bundle, not the manifest:
+    # an already-exported bundle on disk is fine, a fresh site without one is
+    # refused here with the reason, instead of at worker boot.
+    # And judge it the way the runner does: the file must exist AND the bundle
+    # manifest must list it. A redeploy re-fetches the published manifest over
+    # the exported one, leaving model.onnx on disk but unlisted - which the
+    # runner refuses - so a file-exists check alone reported success on a
+    # bundle the worker could not load.
+    artifact_paths = {artifact.path for artifact in manifest.artifacts}
+    if _FALL_PT_PATH in artifact_paths:
+        _require_loadable_fall_bundle(root)
+    if selection_path is not None and selection_path.is_file():
+        selected_report = _fetch_selected_bundle(
+            root,
+            source,
+            selection_path=selection_path,
+            env=env,
+            retry=retry,
+            log=log,
+        )
+        report.results.extend(selected_report.results)
     return report
+
+
+def _require_loadable_fall_bundle(root: Path) -> None:
+    """Load the bundle the way boot loads it, and refuse what boot would refuse.
+
+    The shared packaged-bundle loader owns the runner and publication-identity
+    checks, so whatever boot requires of the bundle provisioning requires too.
+    A full load and warm-up costs about 20 ms and pulls in no Torch.
+    """
+    from worker.adapters.model import ort_pose_bbox56
+    from worker.adapters.model.errors import ModelLoadError
+
+    bundle = root / _FALL_BUNDLE_ROOT
+    onnx = bundle / "model.onnx"
+    if not onnx.is_file():
+        raise VerificationError(
+            f"provisioned pose+bbox56 fall bundle is incomplete: missing model.onnx at {onnx}; "
+            "publish model.onnx with the bundle"
+        )
+    try:
+        _ = ort_pose_bbox56.load_packaged_fall_bundle(bundle)
+    except ModelLoadError as error:
+        raise VerificationError(
+            f"provisioned pose+bbox56 fall bundle at {bundle} is not loadable by the Flow "
+            f"runner: {error}; the published bundle manifest must list the exported model.onnx"
+        ) from error
+
+
+def _require_loadable_selected_fall_bundle(root: Path, desired: object) -> None:
+    """Exercise the selection boot path after the immutable tree is published."""
+    from worker.adapters.model.errors import ModelLoadError
+    from worker.adapters.model.ort_pose_bbox56 import OrtPoseBbox56Runner
+    from worker.runtime.provenance.model_bundle import (
+        DesiredModelBundle,
+        ModelBundleAdmissionError,
+        admit_model_bundle,
+    )
+
+    if not isinstance(desired, DesiredModelBundle):  # pragma: no cover -- local invariant
+        raise VerificationError("selected bundle desired state is invalid")
+    try:
+        proof = admit_model_bundle(root, desired)
+        if desired.selection is None:  # pragma: no cover -- local invariant
+            raise VerificationError("selected bundle has no selection")
+        OrtPoseBbox56Runner.from_admitted_bundle(
+            root / "bundles" / desired.bundle_sha256, proof, desired.selection
+        )
+    except (ModelBundleAdmissionError, ModelLoadError) as exc:
+        raise VerificationError(str(exc)) from exc

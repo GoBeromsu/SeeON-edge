@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from dataclasses import dataclass
 from pathlib import Path
 from typing import cast
 
@@ -19,7 +20,6 @@ from contracts.observation import (
 )
 from shared.events import envelope_limits as limits
 from shared.events.schemas import build_audit_envelope
-from worker.pipeline.analytics.composite import CompositeResult
 from worker.pipeline.output.evidence.event_payload import WorkerEventPayload
 from worker.pipeline.output.evidence.evidence_sender import _payload
 from worker.pipeline.output.evidence.evidence_stager import DurableEvidenceStager
@@ -31,6 +31,13 @@ from worker.types import BusinessEvent, DecisionInput, DecisionTraceSnapshot, Fr
 _RUNTIME_MANIFEST_SHA256 = "a" * 64
 _COMPONENT_SHA256 = "b" * 64
 _POLICY_SHA256 = "c" * 64
+
+
+@dataclass(frozen=True)
+class _TraceResult:
+    module_results: tuple[object, ...]
+    observation: FrameObservation
+    decision_input: DecisionInput
 
 
 class _ImmediateTraceWriter:
@@ -55,7 +62,7 @@ def _packet() -> FramePacket:
     )
 
 
-def _result() -> CompositeResult:
+def _result() -> _TraceResult:
     observation = FrameObservation(
         detections=((BoundingBox(0, 0, 2, 3, 0.9),), ()),
         regions=((BoundingBox(0, 0, 4, 4, 0.8),), ()),
@@ -70,7 +77,7 @@ def _result() -> CompositeResult:
         frame_index=1,
         bed_region=BedRegionDebugSnapshot(BedRegionCacheState.FRESH),
     )
-    return CompositeResult((), observation, decision_input)
+    return _TraceResult((), observation, decision_input)
 
 
 def _wire_payload_from_real_producers(

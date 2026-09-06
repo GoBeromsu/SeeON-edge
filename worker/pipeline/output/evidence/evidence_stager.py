@@ -137,9 +137,7 @@ class DurableEvidenceStager:
             raw_trace = dict(audit) if isinstance(audit, Mapping) else {}
             dropped_audit_keys = sorted(set(raw_trace) - limits.RELAY_AUDIT_FIELDS)
             trace = {
-                key: value
-                for key, value in raw_trace.items()
-                if key in limits.RELAY_AUDIT_FIELDS
+                key: value for key, value in raw_trace.items() if key in limits.RELAY_AUDIT_FIELDS
             }
             shed_audit_keys = tuple(f"audit.{key}" for key in dropped_audit_keys)
             validate_runtime_manifest_sha256(trace.get(RUNTIME_MANIFEST_SHA256_KEY))
@@ -161,6 +159,7 @@ class DurableEvidenceStager:
 #: against ``RelayAlertRequest`` in backend contract coverage.
 _PROTECTED_VALUE_KEYS: Final = limits.REQUIRED_ALERT_FIELDS
 _PROTECTED_TRACE_KEYS: Final = frozenset({CONFIG_VERSION_KEY, RUNTIME_MANIFEST_SHA256_KEY})
+
 
 def _shed_to_limit(
     payload: dict[str, object], limit: int, protected: frozenset[str]

@@ -129,12 +129,8 @@ def test_a_transient_failure_is_never_dead_lettered(queue_dir: Path) -> None:
 
     sender = EvidenceSender(
         queue_dir,
-        SenderConfig(
-            relay_url="http://relay.test", relay_token="t", probe_camera_id="camera-1"
-        ),
-        transport=_PoisonTransport(
-            entry.edge_event_id, disposition=DeliveryDisposition.RETRY
-        ),
+        SenderConfig(relay_url="http://relay.test", relay_token="t", probe_camera_id="camera-1"),
+        transport=_PoisonTransport(entry.edge_event_id, disposition=DeliveryDisposition.RETRY),
     )
     for _ in range(60):
         sender.run_once()
@@ -163,14 +159,10 @@ def test_a_transiently_failing_entry_does_not_block_the_ones_behind_it(
     for entry in entries:
         assert queue.try_admit(entry).accepted
 
-    transport = _PoisonTransport(
-        entries[0].edge_event_id, disposition=DeliveryDisposition.RETRY
-    )
+    transport = _PoisonTransport(entries[0].edge_event_id, disposition=DeliveryDisposition.RETRY)
     sender = EvidenceSender(
         queue_dir,
-        SenderConfig(
-            relay_url="http://relay.test", relay_token="t", probe_camera_id="camera-1"
-        ),
+        SenderConfig(relay_url="http://relay.test", relay_token="t", probe_camera_id="camera-1"),
         transport=transport,
     )
 
@@ -212,9 +204,7 @@ def test_a_full_retention_area_does_not_stall_the_live_queue(
     )
     sender = EvidenceSender(
         queue_dir,
-        SenderConfig(
-            relay_url="http://relay.test", relay_token="t", probe_camera_id="camera-1"
-        ),
+        SenderConfig(relay_url="http://relay.test", relay_token="t", probe_camera_id="camera-1"),
         transport=transport,
     )
     for _ in range(60):
@@ -265,9 +255,7 @@ def test_a_422_with_retention_full_does_not_stall_the_queue(
     transport = _RefusingTransport(entries[0].edge_event_id)
     sender = EvidenceSender(
         queue_dir,
-        SenderConfig(
-            relay_url="http://relay.test", relay_token="t", probe_camera_id="camera-1"
-        ),
+        SenderConfig(relay_url="http://relay.test", relay_token="t", probe_camera_id="camera-1"),
         transport=transport,
     )
     for _ in range(60):
@@ -310,9 +298,7 @@ def test_an_entry_that_raises_does_not_starve_the_queue(queue_dir: Path) -> None
     transport = _RaisingTransport(entries[0].edge_event_id)
     sender = EvidenceSender(
         queue_dir,
-        SenderConfig(
-            relay_url="http://relay.test", relay_token="t", probe_camera_id="camera-1"
-        ),
+        SenderConfig(relay_url="http://relay.test", relay_token="t", probe_camera_id="camera-1"),
         transport=transport,
     )
     for _ in range(40):
@@ -320,8 +306,7 @@ def test_an_entry_that_raises_does_not_starve_the_queue(queue_dir: Path) -> None
 
     others = {entry.edge_event_id for entry in entries[1:]}
     assert others.issubset(set(transport.delivered)), (
-        f"only {transport.delivered} delivered; one raising entry starved the "
-        f"queue behind it"
+        f"only {transport.delivered} delivered; one raising entry starved the queue behind it"
     )
 
 
@@ -360,16 +345,12 @@ def test_unwritable_retention_does_not_stall_the_queue(queue_dir: Path) -> None:
     transport = _RefusingTransport(entries[0].edge_event_id)
     sender = EvidenceSender(
         queue_dir,
-        SenderConfig(
-            relay_url="http://relay.test", relay_token="t", probe_camera_id="camera-1"
-        ),
+        SenderConfig(relay_url="http://relay.test", relay_token="t", probe_camera_id="camera-1"),
         transport=transport,
     )
 
     swallowed: list[BaseException] = []
-    with patch.object(
-        queue_module.os, "link", side_effect=OSError(errno.ENOSPC, "no space")
-    ):
+    with patch.object(queue_module.os, "link", side_effect=OSError(errno.ENOSPC, "no space")):
         for _ in range(40):
             # Exactly what EvidenceExportRuntime._run_sender does: it catches
             # and carries on. Collected rather than discarded so the test says
@@ -421,9 +402,7 @@ def test_a_failing_acknowledge_does_not_monopolise_the_queue(queue_dir: Path) ->
     transport = _AlwaysDelivers()
     sender = EvidenceSender(
         queue_dir,
-        SenderConfig(
-            relay_url="http://relay.test", relay_token="t", probe_camera_id="camera-1"
-        ),
+        SenderConfig(relay_url="http://relay.test", relay_token="t", probe_camera_id="camera-1"),
         transport=transport,
     )
 

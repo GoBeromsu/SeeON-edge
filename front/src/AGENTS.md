@@ -9,14 +9,14 @@ Import that way in app, features, shared, and tests. Never `../../`.
 - `app/`: shell and URL state. `App.tsx` wraps `AuthGate` + `Dashboard` (NavBar, page switch, account modal, toasts). `dashboardLocation.ts` owns query keys (`page`, `floor`, `camera`, `event`, `clip`) and canonicalize/restore. `app/pages/` holds the three route pages: Operations, Events, Settings. Pages compose features; they do not own view widgets.
 - `features/<slice>/`: components + view logic for one capability. A slice may add its own `AGENTS.md`.
   - `operations/`: camera wall, room detail, live tiles (via `shared/api/useMjpegStream`), overlay, snapshot queue, room event history.
-  - `events/`: clip grid, incident list, filters, pager, clip playback.
+  - `events/`: clip grid, filters, pager, clean clip playback; snapshot JPEG carries burned boxes.
   - `settings/`: camera registry table/modals, detection form, clip storage/export, policy evidence, processing status, bed-zone panel.
   - `connection/`: edge setup wizard + connection settings panel.
   - `cameras/`: topology editor, pairing list, confirm dialog. Consumed by the connection wizard.
   - `account-settings/`: single-admin username/password modal. Mounted from `App`, not a page.
 - `shared/`: cross-slice building blocks only.
   - `shared/api/`: HTTP (`http.ts`), session/base URL (`session.ts`), `client.ts` + per-resource normalizers, DTO types, polling hooks (`usePollingResource.ts`), MJPEG live-stream hook (`useMjpegStream.ts`, used by operations and settings), topology client.
-  - `shared/ui/`: presentational shell pieces: NavBar, AuthGate, AccessibleDialog, Toast, StatusBadge, ClipThumbnail, AutoplayVideo.
+  - `shared/ui/`: shared interface pieces: NavBar, AuthGate, AccessibleDialog, Toast, StatusBadge, ClipThumbnail, AutoplayVideo, and BedZoneRecognitionPanel.
   - `shared/format/`: tiny formatters (`bytes`, `uuid`).
 - `styles/`: token + shell CSS imported from `styles.css`. Don't dump feature layout here.
 - `test/setup.ts`: jsdom act flag + `HTMLMediaElement.play` stub. Vitest `setupFiles` points here.

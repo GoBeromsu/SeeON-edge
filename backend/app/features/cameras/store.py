@@ -204,9 +204,7 @@ class CameraRegistryStore(CameraLocationOperations):
     ) -> bool:
         with self._lock:
             with camera_transaction(self._connection) as connection:
-                cursor = connection.execute(
-                    "DELETE FROM cameras WHERE camera_id=?", (camera_id,)
-                )
+                cursor = connection.execute("DELETE FROM cameras WHERE camera_id=?", (camera_id,))
                 if cursor.rowcount == 0:
                     return False
                 record_registry_mutation(connection)

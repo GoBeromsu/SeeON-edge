@@ -11,7 +11,7 @@ from urllib.request import Request, urlopen
 import pytest
 
 from backend.app.edge_db.bootstrap import bootstrap_database
-from shared.detection_policies import BedExitPolicyV1, FallPolicyV1, make_effective_policy
+from shared.detection_policies import BedExitPolicyV1, FallPolicyV2, make_effective_policy
 from worker.pipeline.output.live_view import LatestFrameStore
 from worker.pipeline.output.mjpeg_server import MjpegServer, MjpegServerConfig
 
@@ -92,7 +92,7 @@ def test_replay_requires_relay_token_and_rejects_malformed_body() -> None:
         server.stop()
 
 
-def test_replay_returns_deterministic_result_without_a_fall_model_for_bed_exit() -> None:
+def test_legacy_replay_surfaces_tracker_liveness_non_reproducibility() -> None:
     server = MjpegServer(LatestFrameStore(), MjpegServerConfig(port=0, probe_token=_TOKEN))
     server.start()
     base = f"http://127.0.0.1:{server.port}"
@@ -101,7 +101,8 @@ def test_replay_returns_deterministic_result_without_a_fall_model_for_bed_exit()
             result = json.loads(response.read())
     finally:
         server.stop()
-    assert result["reproducible"] is True
+    assert result["reproducible"] is False
+    assert result["non_reproducible_reason"] == "legacy-trace-liveness"
     assert result["event_count"] == 0
     assert result["frames"][0]["analysis_trace_id"] == "a" * 64
 
@@ -111,8 +112,8 @@ def test_fall_replay_without_the_running_model_is_a_typed_refusal() -> None:
     payload["module_id"] = "fall"
     policy = make_effective_policy(
         module_id="fall",
-        module_version=1,
-        values=FallPolicyV1(operating_threshold=0.7),
+        module_version=2,
+        values=FallPolicyV2(transition_threshold=0.7),
         source="image-default",
         facility_revision_id=None,
         camera_revision_id=None,
@@ -125,7 +126,7 @@ def test_fall_replay_without_the_running_model_is_a_typed_refusal() -> None:
             urlopen(_request(f"http://127.0.0.1:{server.port}", payload), timeout=1)
         assert refused.value.code == 422
         assert json.loads(refused.value.read()) == {
-            "detail": "module 'fall.v1' requires a fall_model for replay",
+            "detail": "module 'fall.v2' requires a fall_model for replay",
             "status": "refused",
         }
     finally:
@@ -188,22 +189,32 @@ def test_packaged_replay_command_posts_without_persisting(
     try:
         status = _replay_command().main(  # type: ignore[attr-defined]
             [
-                "--database", str(database),
-                "--camera-id", "camera-replay-http",
-                "--worker-url", f"http://127.0.0.1:{server.port}",
-                "--relay-token", _TOKEN,
-                "--module-id", "bed_exit",
-                "--policy-json", json.dumps(_payload()["policy"]),
-                "--requested-by", "test-operator",
-                "--trace-json", str(trace_path),
+                "--database",
+                str(database),
+                "--camera-id",
+                "camera-replay-http",
+                "--worker-url",
+                f"http://127.0.0.1:{server.port}",
+                "--relay-token",
+                _TOKEN,
+                "--module-id",
+                "bed_exit",
+                "--policy-json",
+                json.dumps(_payload()["policy"]),
+                "--requested-by",
+                "test-operator",
+                "--trace-json",
+                str(trace_path),
             ]
         )
     finally:
         server.stop()
     printed = json.loads(capsys.readouterr().out)
-    assert status == 0
-    assert printed["reproducible"] is True
-    assert printed["event_count"] == 0
+    assert status == 2
+    assert printed == {
+        "detail": "worker refused incomplete replay input",
+        "status": "refused",
+    }
     _assert_no_replay_tables(database)
 
 
@@ -212,13 +223,20 @@ def test_packaged_replay_command_missing_input_does_not_open_sqlite(tmp_path: Pa
     bootstrap_database(database)
     status = _replay_command().main(  # type: ignore[attr-defined]
         [
-            "--database", str(database),
-            "--camera-id", "missing",
-            "--worker-url", "http://127.0.0.1:1",
-            "--relay-token", _TOKEN,
-            "--module-id", "bed_exit",
-            "--policy-json", json.dumps(_payload()["policy"]),
-            "--requested-by", "test-operator",
+            "--database",
+            str(database),
+            "--camera-id",
+            "missing",
+            "--worker-url",
+            "http://127.0.0.1:1",
+            "--relay-token",
+            _TOKEN,
+            "--module-id",
+            "bed_exit",
+            "--policy-json",
+            json.dumps(_payload()["policy"]),
+            "--requested-by",
+            "test-operator",
         ]
     )
     assert status == 2
@@ -241,14 +259,22 @@ def test_packaged_replay_command_refuses_truncated_input_without_persisting(
     try:
         status = _replay_command().main(  # type: ignore[attr-defined]
             [
-                "--database", str(database),
-                "--camera-id", "camera-replay-http",
-                "--worker-url", f"http://127.0.0.1:{server.port}",
-                "--relay-token", _TOKEN,
-                "--module-id", "bed_exit",
-                "--policy-json", json.dumps(_payload()["policy"]),
-                "--requested-by", "test-operator",
-                "--trace-json", str(trace_path),
+                "--database",
+                str(database),
+                "--camera-id",
+                "camera-replay-http",
+                "--worker-url",
+                f"http://127.0.0.1:{server.port}",
+                "--relay-token",
+                _TOKEN,
+                "--module-id",
+                "bed_exit",
+                "--policy-json",
+                json.dumps(_payload()["policy"]),
+                "--requested-by",
+                "test-operator",
+                "--trace-json",
+                str(trace_path),
             ]
         )
     finally:

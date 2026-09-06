@@ -103,9 +103,7 @@ def accept_camera_samples(
             _ = health.pop(key, None)
             continue
         active.add(key)
-        health[key] = accept_detection_sample(
-            health.get(key), counters, accepted_at=accepted_at
-        )
+        health[key] = accept_detection_sample(health.get(key), counters, accepted_at=accepted_at)
     for key in tuple(health):
         if key[0] == facility_id and key not in active:
             del health[key]

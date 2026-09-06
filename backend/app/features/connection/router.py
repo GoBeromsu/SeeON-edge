@@ -140,7 +140,9 @@ def put_connection(
             request,
             connection,
             AuditEvent(
-                occurred_at=utc_now(), actor_id=actor, action=AuditAction.CONNECTION_UPDATE,
+                occurred_at=utc_now(),
+                actor_id=actor,
+                action=AuditAction.CONNECTION_UPDATE,
                 target_id=verified.facility.facility_id,
                 detail=empty_detail(AuditAction.CONNECTION_UPDATE),
             ),
@@ -189,8 +191,10 @@ def sync_cameras(request: Request) -> dict[str, object]:
             request,
             connection,
             AuditEvent(
-                occurred_at=utc_now(), actor_id=actor,
-                action=AuditAction.CONNECTION_SYNC, target_id="camera-roster",
+                occurred_at=utc_now(),
+                actor_id=actor,
+                action=AuditAction.CONNECTION_SYNC,
+                target_id="camera-roster",
                 detail=empty_detail(AuditAction.CONNECTION_SYNC),
             ),
         ),

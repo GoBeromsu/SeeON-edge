@@ -28,11 +28,13 @@ EDGE_OPS_SERVICES: Final = {"edge-refused-evidence"}
 #: service fills the `worker-models` volume from the committed manifest and
 #: gates ml-worker through depends_on.
 EDGE_MODEL_FETCH_SERVICE: Final = "edge-model-fetch"
+EDGE_ENGINE_BUILD_SERVICE: Final = "edge-engine-build"
 MODELS_VOLUME: Final = "worker-models"
 
 EDGE_SERVICES: Final = {
     "edge-db-migrator",
     EDGE_MODEL_FETCH_SERVICE,
+    EDGE_ENGINE_BUILD_SERVICE,
     *EDGE_OPS_SERVICES,
     *EDGE_RUNTIME_SERVICES,
 }
@@ -107,12 +109,25 @@ def test_edge_worker_runtime_status_environment_contract() -> None:
     services = _compose_services(EDGE_COMPOSE_FILE)
     worker_environment = _mapping_field(services["ml-worker"], "environment")
 
-    # Explicit allowlist only: relay secret, profile, and RTSP destination policy.
+    # Explicit allowlist only: Flow topology, relay secret, and RTSP destination policy.
     # Live clip export is a dashboard runtime setting and must never appear here.
     assert set(worker_environment) == {
         "RELAY_TOKEN",
         "ML_WORKER_PROFILE",
         "ML_WORKER_IMAGE",
+        "ML_WORKER_FLOW_INFER_CONFIG",
+        "ML_WORKER_FLOW_TRACKER_CONFIG",
+        "ML_WORKER_FLOW_TRACKER_LIBRARY",
+        "ML_WORKER_FLOW_RECORD_DIR",
+        "ML_WORKER_FLOW_RECORD_CACHE_SECONDS",
+        "ML_WORKER_FLOW_FRAME_WIDTH",
+        "ML_WORKER_FLOW_FRAME_HEIGHT",
+        "ML_WORKER_FLOW_BATCH_SIZE",
+        "ML_WORKER_FLOW_ENGINE_PATH",
+        "ML_WORKER_FLOW_ENGINE_IDENTITY_PATH",
+        "ML_WORKER_FLOW_ONNX_PATH",
+        "ML_WORKER_FLOW_PARSER_LIBRARY",
+        "NVIDIA_DRIVER_CAPABILITIES",
         "ML_RTSP_ALLOW_PRIVATE_DESTINATIONS",
         "ML_RTSP_ALLOW_LOCAL_DESTINATIONS",
     }
@@ -122,6 +137,7 @@ def test_edge_worker_runtime_status_environment_contract() -> None:
     assert worker_environment["ML_RTSP_ALLOW_LOCAL_DESTINATIONS"] == (
         "${ML_RTSP_ALLOW_LOCAL_DESTINATIONS:-0}"
     )
+    assert worker_environment["ML_WORKER_PROFILE"] == "flow"
     assert not any("EVENT_CLIP_EXPORT" in key for key in worker_environment)
     assert "API_FACILITY_ID" not in worker_environment
 
@@ -155,6 +171,7 @@ def test_edge_db_migrator_owns_schema_lifecycle_before_runtime_start() -> None:
     assert worker_depends_on == {
         "ml-api": {"condition": "service_healthy"},
         EDGE_MODEL_FETCH_SERVICE: {"condition": "service_completed_successfully"},
+        EDGE_ENGINE_BUILD_SERVICE: {"condition": "service_completed_successfully"},
     }
 
 
@@ -176,7 +193,10 @@ def test_edge_model_fetch_owns_the_models_volume_before_worker_start() -> None:
         "--dest",
         "/models",
     ]
-    assert _list_field(fetch, "volumes") == [f"{MODELS_VOLUME}:/models:rw"]
+    assert _list_field(fetch, "volumes") == [
+        f"{MODELS_VOLUME}:/models:rw",
+        "/deployment/model-selection.json:/app/model-selection.json:ro",
+    ]
     assert set(_mapping_field(fetch, "environment")) == {"HF_TOKEN"}, (
         "only the optional HF token crosses into the fetcher; no relay secret, no profile"
     )
@@ -185,11 +205,17 @@ def test_edge_model_fetch_owns_the_models_volume_before_worker_start() -> None:
 
     worker_volumes = _list_field(services["ml-worker"], "volumes")
     assert f"{MODELS_VOLUME}:/models:ro" in worker_volumes
+    assert "/deployment/model-selection.json:/app/model-selection.json:ro" in worker_volumes
     assert not any(str(volume).startswith("./models") for volume in worker_volumes)
-    # Every service other than the fetcher (writer) and the worker (reader) stays
-    # off the models volume. Derived from compose so retiring a service cannot
-    # silently drop it from this check.
-    for service_name in sorted(set(services) - {"edge-model-fetch", "ml-worker"}):
+    engine_build = services[EDGE_ENGINE_BUILD_SERVICE]
+    assert _list_field(engine_build, "volumes") == [
+        f"{MODELS_VOLUME}:/app/models:ro",
+        "worker-engine-cache:/var/cache/seeon/tensorrt:rw",
+    ]
+    # The engine build reads provisioned models but never writes them. Every
+    # other service stays off the models volume.
+    excluded_services = {"edge-model-fetch", "ml-worker", EDGE_ENGINE_BUILD_SERVICE}
+    for service_name in sorted(set(services) - excluded_services):
         volumes = _list_field(services[service_name], "volumes")
         assert not any("/models" in str(volume) for volume in volumes), (
             f"{service_name} must not mount the models volume"
@@ -299,27 +325,21 @@ def test_edge_image_workflow_never_pushes_from_pull_requests() -> None:
 
 
 def test_edge_worker_boot_smoke_runs_on_the_single_build() -> None:
-    # The boot smoke moved from edge-worker-image.yml into the publish job, and
-    # then off the docker-format exporter entirely. `load: true` was what put
-    # the image in the runner's daemon so a `docker run` could boot it, and on
-    # PR run 33156001540 that exporter cost 473.7s to export plus 244.0s to
-    # import -- 84% of the whole required check -- to enable a 4.4s check. The
-    # fresh-build path now boots inside Dockerfile.edge's `bootsmoke` stage, so
-    # no exporter runs and `load:` is gone.
+    """The shipped image is Dockerfile.edge's final stage and boots via carrier."""
     source = (REPO_ROOT / EDGE_IMAGES_WORKFLOW).read_text(encoding="utf-8")
     workflow = _workflow(EDGE_IMAGES_WORKFLOW)
     steps = workflow["jobs"]["publish"]["steps"]
     worker_step = next(s for s in steps if s.get("name") == "Build and push ml-worker image")
-    stage_smoke = next(s for s in steps if (s.get("with") or {}).get("target") == "bootsmoke")
+    carrier_smoke = next(
+        s
+        for s in steps
+        if "docker load --input /tmp/ml-worker-runtime.tar" in str(s.get("run", ""))
+    )
     pull_smoke = next(s for s in steps if "docker pull" in str(s.get("run", "")))
 
     assert not (REPO_ROOT / ".github/workflows/edge-worker-image.yml").exists()
-    # BaseLoader keeps scalars as text, so an absent key is a real absence.
     assert "load" not in worker_step["with"]
-    # The published image must name its stage: `bootsmoke` is the LAST stage in
-    # Dockerfile.edge and Docker defaults to the last stage, so an unpinned
-    # build would tag and push the smoke layer as ml-worker.
-    assert worker_step["with"]["target"] == "runtime"
+    assert worker_step["with"]["outputs"] == "type=docker,dest=/tmp/ml-worker-runtime.tar"
     # A release still pushes an OCI index, because a release's digest is the one
     # a later release may reuse and re-tagging only preserves a digest when the
     # manifest is an index. See docs/runbooks/edge-image-publish.md.
@@ -329,14 +349,11 @@ def test_edge_worker_boot_smoke_runs_on_the_single_build() -> None:
         "${{ env.PUSH_IMAGES == 'true' && 'type=gha,scope=edge-ml-worker,mode=max' || '' }}"
     )
 
-    # Two build steps against one Dockerfile, one build graph: same file, same
-    # cache scope, and the smoke exports nothing.
-    assert source.count("file: Dockerfile.edge") == 2
-    assert stage_smoke["with"]["file"] == "Dockerfile.edge"
-    assert stage_smoke["with"]["push"] == "false"
-    assert stage_smoke["with"]["cache-from"] == "type=gha,scope=edge-ml-worker"
-    assert "cache-to" not in stage_smoke["with"]
-    assert "load" not in stage_smoke["with"]
+    assert source.count("file: Dockerfile.edge") == 1
+    assert carrier_smoke["if"] == "env.BUILD_ML_WORKER == 'true' && env.RELEASE_BUILD != 'true'"
+    assert "docker run --rm --network none" in str(carrier_smoke["run"])
+    assert "python -m worker --check-config" in str(carrier_smoke["run"])
+    assert 'test "$status" -eq 0' in str(carrier_smoke["run"])
 
     # The reuse/release path still pulls the published bytes and boots them, so
     # a seal never pins a worker digest that was not booted in this run.
@@ -344,27 +361,29 @@ def test_edge_worker_boot_smoke_runs_on_the_single_build() -> None:
     assert "docker run --rm" in str(pull_smoke["run"])
     assert "python -m worker --check-config" in str(pull_smoke["run"])
 
-    # The check itself lives in the Dockerfile now, and `--network=none` is what
-    # turns "--check-config has no side effects" into something the build
-    # enforces instead of something a comment claims.
     dockerfile = (REPO_ROOT / "Dockerfile.edge").read_text(encoding="utf-8")
-    assert "FROM runtime AS bootsmoke" in dockerfile
-    assert (
-        "RUN --network=none RELAY_TOKEN=ci-boot-smoke-test python -m worker --check-config"
-    ) in dockerfile
-    # `bootsmoke` really is last, which is exactly why every build that keeps
-    # its output has to pass `--target runtime`.
     stages = re.findall(r"^FROM\s+\S+\s+AS\s+(\S+)", dockerfile, re.MULTILINE)
-    assert stages[-1] == "bootsmoke", stages
-    assert "FROM bootsmoke" not in dockerfile
-    # Nothing that builds this file may rely on the default target.
+    assert stages[-1] == "runtime", stages
+    assert "bootsmoke" not in dockerfile
+    for retired in (
+        (Path("worker") / "native").as_posix(),
+        (Path("worker") / "runtime" / "deepstream").as_posix(),
+        (Path("worker") / "adapters" / "decode").as_posix(),
+        (Path("worker") / "adapters" / "encode").as_posix(),
+        (Path("worker") / "pipeline" / "ingest").as_posix(),
+        (Path("worker") / "pipeline" / "bus").as_posix(),
+        (Path("worker") / "tools" / "deepstream_canary").as_posix(),
+        "deepstream-native-build",
+        "preflight",
+    ):
+        assert retired not in dockerfile, retired
     dev_compose = (REPO_ROOT / "compose.edge.dev.yaml").read_text(encoding="utf-8")
-    assert "target: runtime" in dev_compose
+    assert "target:" not in dev_compose
     for doc in ("AGENTS.md", "docs/runbooks/edge-image-publish.md"):
         text = (REPO_ROOT / doc).read_text(encoding="utf-8")
         for line in text.splitlines():
             if "docker build" in line and "Dockerfile.edge" in line:
-                assert "--target runtime" in line, (doc, line)
+                assert "--target" not in line, (doc, line)
 
 
 def test_a_publishing_run_never_records_an_empty_digest() -> None:
@@ -576,32 +595,21 @@ def test_internal_origins_and_ports_are_baked_runtime_topology() -> None:
     assert pulled.dev_mjpeg.port == 8090
 
 
-def test_cpu_intel_and_nvidia_overlays_keep_hardware_opt_in() -> None:
+def test_flow_compose_reserves_the_required_nvidia_hardware() -> None:
     services = _compose_services(EDGE_COMPOSE_FILE)
     worker = services["ml-worker"]
-    assert "deploy" not in worker
-    assert "devices" not in worker
-    assert "NVIDIA_DRIVER_CAPABILITIES" not in _mapping_field(worker, "environment")
-
-    cpu_worker = _compose_services("compose.edge.cpu.yaml")["ml-worker"]
-    assert cpu_worker["deploy"] == "null"
-
-    intel_worker = _compose_services("compose.edge.igpu.yaml")["ml-worker"]
-    assert intel_worker["devices"] == ["/dev/dri:/dev/dri"]
-    assert _mapping_field(intel_worker, "environment") == {"LIBVA_DRIVER_NAME": "iHD"}
-
-    nvidia_worker = _compose_services("compose.edge.nvidia.yaml")["ml-worker"]
-    nvidia_deploy = _mapping_field(nvidia_worker, "deploy")
-    assert nvidia_deploy == {
+    assert _mapping_field(worker, "deploy") == {
         "resources": {
             "reservations": {
                 "devices": [{"driver": "nvidia", "count": "all", "capabilities": ["gpu"]}]
             }
         }
     }
-    assert _mapping_field(nvidia_worker, "environment") == {
-        "NVIDIA_DRIVER_CAPABILITIES": "compute,utility,video"
-    }
+    assert "devices" not in worker
+    assert (
+        _mapping_field(worker, "environment")["NVIDIA_DRIVER_CAPABILITIES"]
+        == "compute,utility,video"
+    )
 
 
 def test_edge_compose_exposes_no_static_roster_or_mutable_policy_authority() -> None:

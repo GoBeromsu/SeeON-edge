@@ -43,9 +43,11 @@ def _hook(path: Path, action: AuditAction, *, deny: bool = False):
     def append(connection: sqlite3.Connection) -> None:
         if deny:
             connection.set_authorizer(
-                lambda code, table, *_: sqlite3.SQLITE_DENY
-                if code == sqlite3.SQLITE_INSERT and table == "audit_events"
-                else sqlite3.SQLITE_OK
+                lambda code, table, *_: (
+                    sqlite3.SQLITE_DENY
+                    if code == sqlite3.SQLITE_INSERT and table == "audit_events"
+                    else sqlite3.SQLITE_OK
+                )
             )
         store.append(event, connection=connection)
 
@@ -70,8 +72,13 @@ def _sync_fixture(path: Path) -> tuple[TopologyRetryCoordinator, EdgeTopologySyn
     registry.create_floor(edge_ref="floor-1", name="First", order_index=1)
     registry.create_room(edge_ref="room-1", floor_edge_ref="floor-1", name="101")
     registry.create(
-        camera_id="local-1", label="A", rtsp_url="rtsp://private", space_id=None,
-        status="online", edge_ref="camera-1", room_edge_ref="room-1",
+        camera_id="local-1",
+        label="A",
+        rtsp_url="rtsp://private",
+        space_id=None,
+        status="online",
+        edge_ref="camera-1",
+        room_edge_ref="room-1",
     )
     unchanged = MutationCounts(0, 0, 1)
 
@@ -81,8 +88,11 @@ def _sync_fixture(path: Path) -> tuple[TopologyRetryCoordinator, EdgeTopologySyn
         def put(self, pending: PendingTopologySnapshot) -> TopologyPutResult:
             return TopologyAccepted(
                 TopologySuccessEnvelope(
-                    pending.snapshot_id, pending.client_revision, 1,
-                    TopologyMutationResult(unchanged, unchanged, unchanged), None,
+                    pending.snapshot_id,
+                    pending.client_revision,
+                    1,
+                    TopologyMutationResult(unchanged, unchanged, unchanged),
+                    None,
                 )
             )
 
@@ -105,9 +115,12 @@ def test_connection_sync_route_commits_canonical_action_and_detail(tmp_path: Pat
     app = create_app(lifespan=no_lifespan)
     app.state.topology_retry_coordinator = coordinator
     client = TestClient(app)
-    assert client.post(
-        "/api/v1/auth/session", json={"username": "admin", "password": "admin"}
-    ).status_code == 204
+    assert (
+        client.post(
+            "/api/v1/auth/session", json={"username": "admin", "password": "admin"}
+        ).status_code
+        == 204
+    )
 
     response = client.post("/api/v1/connection/sync-cameras")
 
@@ -126,7 +139,8 @@ def test_connection_sync_audit_is_one_atomic_operation(tmp_path: Path) -> None:
     healthy_path = tmp_path / "sync-healthy" / "edge.sqlite3"
     healthy, healthy_state = _sync_fixture(healthy_path)
     result = healthy.trigger(
-        force=True, now_epoch=1.0,
+        force=True,
+        now_epoch=1.0,
         after_write=_hook(healthy_path, AuditAction.CONNECTION_SYNC),
     )
     assert result.status == "synced"
@@ -138,7 +152,8 @@ def test_connection_sync_audit_is_one_atomic_operation(tmp_path: Path) -> None:
     before = fault_state.load()
     with pytest.raises(sqlite3.DatabaseError):
         fault.trigger(
-            force=True, now_epoch=1.0,
+            force=True,
+            now_epoch=1.0,
             after_write=_hook(fault_path, AuditAction.CONNECTION_SYNC, deny=True),
         )
     assert fault_state.load() == before
@@ -155,7 +170,10 @@ def _confirmation_fixture(path: Path):
     counts = MutationCounts(0, 0, 1)
     result = TopologyMutationResult(counts, counts, counts)
     preview_response = TopologySuccessEnvelope(
-        "snapshot-1", 1, 7, result,
+        "snapshot-1",
+        1,
+        7,
+        result,
         OmissionPreview("confirmation-1", "a" * 64, "2099-01-01T00:00:00Z", (), (), ()),
     )
     terminal = TopologySuccessEnvelope("snapshot-1", 1, 8, result, None)
@@ -170,7 +188,8 @@ def test_topology_confirmation_audit_rolls_back_terminal_state(tmp_path: Path) -
     healthy_path = tmp_path / "confirm-healthy" / "edge.sqlite3"
     store, preview, terminal = _confirmation_fixture(healthy_path)
     store.complete(
-        preview, terminal,
+        preview,
+        terminal,
         after_write=_hook(healthy_path, AuditAction.TOPOLOGY_CONFIRM),
     )
     loaded = store.load()
@@ -181,7 +200,8 @@ def test_topology_confirmation_audit_rolls_back_terminal_state(tmp_path: Path) -
     fault_store, fault_preview, fault_terminal = _confirmation_fixture(fault_path)
     with pytest.raises(sqlite3.DatabaseError):
         fault_store.complete(
-            fault_preview, fault_terminal,
+            fault_preview,
+            fault_terminal,
             after_write=_hook(fault_path, AuditAction.TOPOLOGY_CONFIRM, deny=True),
         )
     loaded = fault_store.load()
@@ -191,8 +211,15 @@ def test_topology_confirmation_audit_rolls_back_terminal_state(tmp_path: Path) -
 
 def _event(edge_event_id: str) -> RelayEvent:
     return RelayEvent(
-        edge_event_id, "fall", 0.9, "2026-08-24T00:00:00Z",
-        "camera-1", "facility-1", None, None, None,
+        edge_event_id,
+        "fall",
+        0.9,
+        "2026-08-24T00:00:00Z",
+        "camera-1",
+        "facility-1",
+        None,
+        None,
+        None,
     )
 
 
@@ -202,14 +229,20 @@ def test_snapshot_actions_share_projection_transactions(tmp_path: Path) -> None:
     projection = RelayEvidenceProjection(path)
     projection.project_event(_event("event-attach"))
     projection.attach_snapshot(
-        edge_event_id="event-attach", snapshot_id="snapshot-1", sha256="a" * 64,
-        media_reference="clips/snapshot.jpg", size_bytes=10, mime_type="image/jpeg",
+        edge_event_id="event-attach",
+        snapshot_id="snapshot-1",
+        sha256="a" * 64,
+        media_reference="clips/snapshot.jpg",
+        size_bytes=10,
+        mime_type="image/jpeg",
         after_write=_hook(path, AuditAction.RELAY_SNAPSHOT_ATTACHMENT),
     )
     projection.project_event(_event("event-disposition"))
     projection.record_snapshot_disposition(
-        edge_event_id="event-disposition", snapshot_id="snapshot-2",
-        disposition="unavailable", reason="capture_failed",
+        edge_event_id="event-disposition",
+        snapshot_id="snapshot-2",
+        disposition="unavailable",
+        reason="capture_failed",
         after_write=_hook(path, AuditAction.RELAY_SNAPSHOT_DISPOSITION),
     )
     assert _count(path, AuditAction.RELAY_SNAPSHOT_ATTACHMENT) == 1
@@ -218,8 +251,12 @@ def test_snapshot_actions_share_projection_transactions(tmp_path: Path) -> None:
     projection.project_event(_event("event-fault"))
     with pytest.raises(sqlite3.DatabaseError):
         projection.attach_snapshot(
-            edge_event_id="event-fault", snapshot_id="snapshot-3", sha256="b" * 64,
-            media_reference="clips/fault.jpg", size_bytes=10, mime_type="image/jpeg",
+            edge_event_id="event-fault",
+            snapshot_id="snapshot-3",
+            sha256="b" * 64,
+            media_reference="clips/fault.jpg",
+            size_bytes=10,
+            mime_type="image/jpeg",
             after_write=_hook(path, AuditAction.RELAY_SNAPSHOT_ATTACHMENT, deny=True),
         )
     with sqlite3.connect(path) as connection:
@@ -236,10 +273,16 @@ def _media(tmp_path: Path, data: bytes) -> Path:
     (path.parent / "manifest.json").write_text(
         json.dumps(
             {
-                "clip_id": "clip-1", "camera_id": "camera-1", "event_ref": "event-1",
-                "event_type": "fall", "started_at": "2026-08-24T00:00:00Z",
-                "duration_s": 1.0, "codec": "h264", "path": "clips/clip-1",
-                "video_available": True, "finalized": True,
+                "clip_id": "clip-1",
+                "camera_id": "camera-1",
+                "event_ref": "event-1",
+                "event_type": "fall",
+                "started_at": "2026-08-24T00:00:00Z",
+                "duration_s": 1.0,
+                "codec": "h264",
+                "path": "clips/clip-1",
+                "video_available": True,
+                "finalized": True,
             }
         ),
         encoding="utf-8",
@@ -247,16 +290,37 @@ def _media(tmp_path: Path, data: bytes) -> Path:
     return path
 
 
+def _seed_incident(database: Path) -> None:
+    """A verified receipt now completes its incident, so the incident must exist."""
+    from backend.app.features.evidence.relay_projection import RelayEvent, RelayEvidenceProjection
+
+    RelayEvidenceProjection(database).project_event(
+        RelayEvent(
+            edge_event_id="event-1",
+            event_type="fall",
+            probability=0.8,
+            detected_at="2026-08-24T00:00:00Z",
+            camera_id="camera-1",
+            facility_id="facility-1",
+            resident_id=None,
+            evidence=None,
+            audit=None,
+        )
+    )
+
+
 def test_evidence_receipt_audit_rolls_back_compact_facts(tmp_path: Path) -> None:
     path = tmp_path / "receipt.sqlite3"
     bootstrap_database(path)
+    _seed_incident(path)
     data = b"verified video"
     media_path = _media(tmp_path, data)
     receipt = ArtifactReceipt("clip-1", hashlib.sha256(data).hexdigest(), len(data))
     store = CompactArtifactReceiptStore(path, tmp_path / "clip-store")
     with media_path.open("rb") as handle:
         store.commit_verified(
-            receipt, verified_artifact(handle),
+            receipt,
+            verified_artifact(handle),
             after_write=_hook(path, AuditAction.EVIDENCE_RECEIPT),
         )
     assert store.get("clip-1") == receipt
@@ -264,10 +328,12 @@ def test_evidence_receipt_audit_rolls_back_compact_facts(tmp_path: Path) -> None
 
     fault_path = tmp_path / "receipt-fault.sqlite3"
     bootstrap_database(fault_path)
+    _seed_incident(fault_path)
     fault_store = CompactArtifactReceiptStore(fault_path, tmp_path / "clip-store")
     with media_path.open("rb") as handle, pytest.raises(sqlite3.DatabaseError):
         fault_store.commit_verified(
-            receipt, verified_artifact(handle),
+            receipt,
+            verified_artifact(handle),
             after_write=_hook(fault_path, AuditAction.EVIDENCE_RECEIPT, deny=True),
         )
     assert fault_store.get("clip-1") is None

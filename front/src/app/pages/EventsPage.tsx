@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import { getPageLabel } from '@/shared/ui/NavBar';
 import { useCamerasResource } from '@/shared/api/usePollingResource';
 import { CameraFilterSelect } from '@/features/events/CameraFilterSelect';
@@ -6,7 +6,6 @@ import { ClipGrid } from '@/features/events/ClipGrid';
 import { ClipPlaybackModal } from '@/features/events/ClipPlaybackModal';
 import { EventTypeFilterChips } from '@/features/events/EventTypeFilterChips';
 import { EventsPager } from '@/features/events/EventsPager';
-import { IncidentList } from '@/features/events/IncidentList';
 import { toEventFacet } from '@/shared/api/clipEventFacet';
 import { resolveCameraLabel } from '@/features/events/resolveCameraLabel';
 import { useClipMetadata } from '@/features/events/useClipMetadata';
@@ -18,9 +17,6 @@ const EMPTY_CLIPS: readonly Clip[] = [];
 
 export function EventsPage(): JSX.Element {
   const [selectedCameraId, setSelectedCameraId] = useState('');
-  const [deletedClip, setDeletedClip] = useState<Clip | null>(null);
-  // Retained while a delete is in flight or accepted so list convergence cannot 404-validate the clip away.
-  const [retainedClip, setRetainedClip] = useState<Clip | null>(null);
   const camerasResource = useCamerasResource(true);
   const location = useEventsLocation();
   const clipsResource = useEventsPage({
@@ -36,15 +32,12 @@ export function EventsPage(): JSX.Element {
     () => [...typeCounts.values()].reduce((total, count) => total + count, 0),
     [typeCounts],
   );
-  const suppressClipId = retainedClip?.id === location.clipId || deletedClip?.id === location.clipId
-    ? location.clipId ?? null
-    : null;
   const metadata = useClipMetadata({
     clipId: location.clipId,
     pageClips: clips,
     completeClips: clipsResource.data?.complete_clips ?? null,
     pageReady: clipsResource.data !== null,
-    suppressClipId,
+    suppressClipId: null,
   });
   const cameras = camerasResource.data?.cameras ?? [];
   const metadataMatchesFilters = metadata.clip !== null
@@ -53,8 +46,6 @@ export function EventsPage(): JSX.Element {
   const activeClip = location.clipId
     ? clips.find((clip) => clip.id === location.clipId)
       ?? (metadataMatchesFilters ? metadata.clip : null)
-      ?? (deletedClip?.id === location.clipId ? deletedClip : null)
-      ?? (retainedClip?.id === location.clipId ? retainedClip : null)
     : null;
 
   useEffect(() => {
@@ -62,20 +53,11 @@ export function EventsPage(): JSX.Element {
   }, [clips, clipsResource.status, location.validate, typeCounts]);
 
   useEffect(() => {
-    if (suppressClipId !== null && suppressClipId === location.clipId) return;
     if (metadata.status === 'invalid'
       || (metadata.status === 'success' && metadata.clip !== null && !metadataMatchesFilters)) {
       location.discardClip();
     }
-  }, [suppressClipId, location.clipId, location.discardClip, metadata.clip, metadata.status, metadataMatchesFilters]);
-
-  const refreshClipsRef = useRef(clipsResource.refresh);
-  refreshClipsRef.current = clipsResource.refresh;
-  // Refresh the list only after accepted deletion state is committed so metadata stays suppressed.
-  useEffect(() => {
-    if (deletedClip === null) return;
-    refreshClipsRef.current();
-  }, [deletedClip]);
+  }, [location.discardClip, metadata.clip, metadata.status, metadataMatchesFilters]);
 
   const resolveLabel = useCallback((clip: Clip) => resolveCameraLabel(cameras, clip), [cameras]);
   const lastSuccessDate = clipsResource.lastSuccessAt === null ? null : new Date(clipsResource.lastSuccessAt);
@@ -145,29 +127,13 @@ export function EventsPage(): JSX.Element {
         ) : null}
       </div>
 
-      <IncidentList />
-
       <ClipPlaybackModal
         clip={activeClip}
         cameraLabel={activeClip ? resolveLabel(activeClip) : ''}
         open={location.clipId !== undefined}
-        onClose={() => {
-          setDeletedClip(null);
-          setRetainedClip(null);
-          location.closeClip();
-        }}
+        onClose={location.closeClip}
         lookupStatus={metadata.status}
         onRetry={metadata.retry}
-        onDeleteStarted={(clip) => {
-          setRetainedClip(clip);
-        }}
-        onDeleted={(clip) => {
-          setRetainedClip(clip);
-          setDeletedClip(clip);
-        }}
-        onDeleteRejected={(clip) => {
-          setRetainedClip((current) => (current?.id === clip.id ? null : current));
-        }}
       />
     </section>
   );

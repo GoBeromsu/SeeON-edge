@@ -51,7 +51,6 @@ JSON_CARRIERS: tuple[str, ...] = ("front/package.json",)
 #       different format lineage.
 #   worker/runtime/provenance/environment.py
 #       Reports torch / CUDA / NVIDIA driver versions — other people's versions.
-#   worker/native/deepstream/export.py
 #       MANIFEST_SCHEMA_VERSION is the export manifest's own schema, and
 #       exporter_version is ultralytics'.
 

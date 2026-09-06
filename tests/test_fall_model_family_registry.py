@@ -1,72 +1,22 @@
-"""Issue #65: fall-model family registry -- config/metadata-driven dispatch.
-
-Owner acceptance criteria under test (from the issue's comments):
-  (a) the fall-model family in use is selected by config (``FallModelConfig
-      .type``), not by which class is imported and called in
-      ``worker/runtime/worker.py``.
-  (b) onboarding a new family means implementing ``FallModelProtocol`` and
-      registering a factory -- no edits to ``_create_fall_model``'s call
-      sites and no widening of the ``type`` pin beyond the one-time
-      Literal["lstm"] -> str change that landed this dispatch mechanism.
-  (c) an unrecognized ``type`` value refuses to boot with a loud, diagnostic
-      error naming every registered family -- never a silent fallback to
-      "lstm" or any other default.
-  (d) coverage includes a second, fake/test-only model family that loads and
-      runs purely through config, with no hardcoded reference to it in any
-      production module -- proving the registry actually decouples model
-      family from ``worker.py`` rather than moving the hardcoding one layer
-      down.
-
-The #43 none-config boot refusal (``config.models.fall is None``) is
-untouched by this issue and stays covered in
-``tests/test_worker_fall_model_selection.py``.
-"""
+"""Packaged fall-model family registry behavior."""
 
 from __future__ import annotations
 
-import json
-from dataclasses import dataclass
 from pathlib import Path
-from typing import Literal, final
+from typing import final
 
 import pytest
-import torch
-import yaml
 
-import worker.runtime.worker as worker_module
-from contracts.observation import (
-    BedRegionCacheState,
-    BedRegionDebugSnapshot,
-    FrameObservation,
-)
+from shared.detection_policies import FallPolicyV2, PolicySource, make_effective_policy
+from tests_support.pose_bbox56_bundle_artifact import write_pose_bbox56_bundle
 from worker.adapters.model.fall_family_registry import (
     FallModelFamilyRegistry,
     UnknownFallModelTypeError,
     default_fall_model_family_registry,
 )
-from worker.adapters.model.torch_lstm_fall import build_lstm_module
-from worker.domains.fall import FallWindowClassifier
+from worker.domains import DETECTION_MODULE_REGISTRY, CameraModuleContext
+from worker.interfaces.fall_model import FallV2Probabilities
 from worker.runtime.config import WorkerConfig
-from worker.runtime.lease import GpuLease
-from worker.runtime.profile.registry import VerifyResult
-from worker.runtime.worker import WorkerRuntime
-from worker.types import DecisionInput
-
-
-@final
-class _ForbiddenServingClient:
-    """Fall model dispatch must never reach the serving client (mirrors the
-    #43 test double in ``test_worker_fall_model_selection.py``)."""
-
-    def create(self, task: str, **_options: object) -> object:
-        raise AssertionError(f"fall model dispatch must not call serving.create({task!r})")
-
-
-@dataclass(frozen=True, slots=True)
-class _FakeMetadata:
-    window: int = 3
-    stride: int = 1
-    mode: Literal["sequence"] = "sequence"
 
 
 @final
@@ -79,22 +29,21 @@ class _FakeFamilyFallModel:
     ``config.models.fall.type``, without any hardcoded branch for it.
     """
 
+    device = "cpu"
+
     def __init__(self) -> None:
-        self.metadata = _FakeMetadata()
-        self.operating_threshold = 0.9
         self.predict_calls = 0
 
-    def predict(self, _features: object) -> float:
+    def predict(self, _features: object) -> FallV2Probabilities:
         self.predict_calls += 1
-        return 0.42
+        return FallV2Probabilities(background=0.58, fall_transition=0.42, fallen=0.0)
+
+    def warmup(self) -> None:
+        self.predict(None)
 
 
 def _write_fall_artifact(path: Path) -> Path:
-    path.mkdir(parents=True)
-    (path / "model.pt").write_bytes(b"placeholder")
-    (path / "arch.json").write_text('{"hidden":4,"layers":1,"dropout":0.0}', encoding="utf-8")
-    (path / "metadata.yaml").write_text("type: lstm\n", encoding="utf-8")
-    return path
+    return write_pose_bbox56_bundle(path)
 
 
 def _config(
@@ -121,23 +70,13 @@ def _config(
                     "weights": "model.pt",
                     "architecture": "arch.json",
                     "metadata": "metadata.yaml",
-                    "window": 3,
-                    "stride": 1,
-                    "input_shape": [3, 51],
+                    "window": 30,
+                    "stride": 5,
+                    "input_shape": [30, 56],
                     "operating_threshold": operating_threshold,
                 }
             },
         }
-    )
-
-
-def _runtime(config: WorkerConfig, state_dir: Path) -> WorkerRuntime:
-    return WorkerRuntime(
-        config,
-        env={"ML_WORKER_PROFILE": "cpu"},
-        serving_client=_ForbiddenServingClient(),
-        acquire_lease=lambda: GpuLease.acquire(state_dir),
-        decode_probe=lambda _decode: VerifyResult(True, "cpu", "decode", "available"),
     )
 
 
@@ -154,7 +93,7 @@ def test_registry_register_and_create_round_trip(tmp_path: Path) -> None:
 
 def test_registry_get_factory_raises_for_unregistered_type_naming_known_families() -> None:
     registry = FallModelFamilyRegistry()
-    registry.register("lstm", lambda _config, _device: object())
+    registry.register("pose-bbox56-proxy-v0", lambda _config, _device: object())
     registry.register("fake-family", lambda _config, _device: object())
 
     with pytest.raises(UnknownFallModelTypeError) as excinfo:
@@ -162,152 +101,100 @@ def test_registry_get_factory_raises_for_unregistered_type_naming_known_families
 
     message = str(excinfo.value)
     assert "gru" in message
-    assert "lstm" in message
+    assert "pose-bbox56-proxy-v0" in message
     assert "fake-family" in message
 
 
-def test_default_registry_only_registers_lstm() -> None:
+def test_default_registry_only_registers_the_packaged_pose_bbox56_family() -> None:
     registry = default_fall_model_family_registry()
-    assert registry.types() == ("lstm",)
+    assert registry.types() == ("pose-bbox56-proxy-v0",)
 
 
-def test_create_fall_model_loads_a_fake_family_registered_purely_via_config(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+def _fall_module(
+    model: object,
+    transition_threshold: float = 0.5,
+    *,
+    source: PolicySource = "image-default",
+):
+    policy = make_effective_policy(
+        module_id="fall",
+        module_version=2,
+        values=FallPolicyV2(transition_threshold=transition_threshold),
+        source=source,
+        facility_revision_id=1 if source == "facility-default" else None,
+        camera_revision_id=1 if source == "camera-override" else None,
+    )
+    definition = DETECTION_MODULE_REGISTRY.get("fall", 2)
+    context = CameraModuleContext(
+        camera_id="camera-a",
+        facility_id="facility-a",
+        shared_components={"fall-classifier": model},
+        camera_components={"episode-identity": ("boot", "1", 0)},
+        detection_window=None,
+        clock=lambda: pytest.fail("fall clock should not be called"),
+        diagnostics=None,
+        policy=policy,
+    )
+    return definition, definition.create_camera_module(context), context
+
+
+def test_research_bundle_keeps_the_policy_default_threshold_and_audits_the_receipt(
+    tmp_path: Path,
 ) -> None:
-    """Requirement (d): a fake second family, registered on a throwaway
-    registry, loads through ``WorkerRuntime._create_fall_model`` purely
-    because ``config.models.fall.type`` names it -- there is no "fake-family"
-    branch anywhere in ``worker.py``."""
-    artifact_dir = _write_fall_artifact(tmp_path / "models" / "fall" / "fake")
-    config = _config("fake-family", artifact_dir)
-    fake_model = _FakeFamilyFallModel()
-
-    registry = FallModelFamilyRegistry()
-    registry.register("fake-family", lambda _config, _device: fake_model)
-    monkeypatch.setattr(worker_module, "DEFAULT_FALL_MODEL_FAMILY_REGISTRY", registry)
-
-    runtime = _runtime(config, tmp_path)
-    model = runtime._create_fall_model("cpu")  # noqa: SLF001
-
-    assert model is fake_model
-
-
-def _write_real_lstm_artifact(path: Path, *, manifest_operating_threshold: float) -> Path:
-    """A genuinely loadable LSTM artifact (unlike ``_write_fall_artifact``'s
-    placeholder ``model.pt``), whose manifest packages
-    ``manifest_operating_threshold`` -- deliberately different from whatever
-    ``FallModelConfig.operating_threshold`` the test configures, so the
-    regression test below can tell "the manifest's own value" apart from
-    "the configured override" when it inspects what actually got wired up.
-    """
-    path.mkdir(parents=True)
-    module = build_lstm_module(hidden=4, layers=1, dropout=0.0)
-    torch.save(module.state_dict(), path / "model.pt")
-    (path / "arch.json").write_text(
-        json.dumps({"hidden": 4, "layers": 1, "dropout": 0.0}), encoding="utf-8"
+    """Threshold precedence (P1a-AC7): the packaged bundle's receipt is
+    research-only (``promotion_eligible`` false), so the owner-fixed 0.5
+    policy default governs the decider and the audit envelope names the
+    source; the receipt value is still recorded for audit."""
+    artifact_dir = write_pose_bbox56_bundle(
+        tmp_path / "research", receipt_threshold=0.05, promotion_eligible=False
     )
-    (path / "metadata.yaml").write_text(
-        yaml.safe_dump(
-            {
-                "type": "lstm",
-                "framework": "pytorch",
-                "mode": "sequence",
-                "artifact_dir": str(path),
-                "schema_version": 2,
-                "preprocessing_identity": "coco17-xyc-frame-normalized-zero-fill-v1",
-                "weights": "model.pt",
-                "architecture": "arch.json",
-                "metadata": "metadata.yaml",
-                "window": 3,
-                "stride": 1,
-                "input_shape": [3, 51],
-                "operating_threshold": manifest_operating_threshold,
-            }
-        ),
-        encoding="utf-8",
-    )
-    return path
-
-
-def _classify_input(*, frame_index: int, track_id: int) -> DecisionInput:
-    pose = tuple((25 + index, 100 + index, 0.9) for index in range(17))
-    return DecisionInput(
-        observation=FrameObservation(poses=(pose,), track_ids=(track_id,)),
-        frame_width=100,
-        frame_height=200,
-        live_track_ids=(track_id,),
-        time_sec=float(frame_index),
-        frame_index=frame_index,
-        bed_region=BedRegionDebugSnapshot(BedRegionCacheState.EMPTY),
-    )
-
-
-def test_lstm_operating_threshold_override_reaches_the_classifiers_actual_comparison(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
-    """Issue #217 regression.
-
-    #204 correctly resolved ``FallModelConfig.operating_threshold`` from env
-    and logged it, but the value never reached the object that actually
-    decides: ``_create_lstm_fall_model`` dropped it on the floor and
-    ``LstmFallRunner.from_artifact_dir`` unconditionally took the packaged
-    manifest's own ``operating_threshold`` instead. A test that only checks
-    ``FallModelConfig.operating_threshold`` (what #204 shipped) would have
-    passed against that broken code -- this drives the real
-    registry -> real ``LstmFallRunner.from_artifact_dir`` -> real
-    ``FallWindowClassifier`` path (nothing about threshold delivery is
-    mocked) and asserts on the classifier's actual fall/no-fall decision,
-    the same read of ``self.model.operating_threshold`` that
-    ``worker/domains/fall/classifier.py`` performs in production.
-    """
-    manifest_threshold = 0.9
-    configured_threshold = 0.1
-    artifact_dir = _write_real_lstm_artifact(
-        tmp_path / "lstm", manifest_operating_threshold=manifest_threshold
-    )
-    config = _config("lstm", artifact_dir, operating_threshold=configured_threshold)
-    fall_config = config.models.fall
+    fall_config = _config("pose-bbox56-proxy-v0", artifact_dir).models.fall
     assert fall_config is not None
+    model = default_fall_model_family_registry().create("pose-bbox56-proxy-v0", fall_config, "cpu")
+    assert model.device == "cpu"
 
-    registry = default_fall_model_family_registry()
-    model = registry.create("lstm", fall_config, "cpu")
+    definition, module, context = _fall_module(model)
+    assert definition.audit_adapter is not None
+    audit = definition.audit_adapter(context)
 
-    # The packaged manifest's own value must not leak through the override.
-    assert model.operating_threshold == pytest.approx(configured_threshold)
-    assert model.operating_threshold != pytest.approx(manifest_threshold)
-
-    classifier = FallWindowClassifier(model)
-    # predict()'s own numerical correctness is covered elsewhere
-    # (tests/test_runners_torch_lstm_fall.py); this isolates threshold
-    # wiring by fixing the probability squarely between the two candidate
-    # thresholds, so the fall/no-fall decision can only be explained by
-    # which threshold the classifier actually compared against.
-    monkeypatch.setattr(model, "predict", lambda _features: 0.5)
-
-    for frame_index in range(2):
-        result = classifier.classify(_classify_input(frame_index=frame_index, track_id=1))
-    result = classifier.classify(_classify_input(frame_index=2, track_id=1))
-
-    assert result.labels[0].confidence == 0.5
-    # 0.5 >= 0.1 (configured) is True; 0.5 >= 0.9 (manifest) would be False --
-    # against the pre-fix code this assertion fails.
-    assert result.labels[0].is_fall
+    assert module.decider.policy.policy.transition_threshold == 0.5
+    assert audit.operating_threshold == 0.5
+    assert audit.threshold_source == "default"
+    assert audit.receipt_threshold == pytest.approx(0.05)
 
 
-def test_create_fall_model_refuses_to_boot_for_an_unknown_type(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+def test_promotion_eligible_receipt_overrides_the_policy_default_threshold(
+    tmp_path: Path,
 ) -> None:
-    """Requirement (c): an unrecognized ``type`` refuses to boot with a loud
-    error naming the registered families -- never a silent fallback to
-    "lstm" or any other default."""
-    artifact_dir = _write_fall_artifact(tmp_path / "models" / "fall" / "unknown")
-    config = _config("gru", artifact_dir)
+    artifact_dir = write_pose_bbox56_bundle(
+        tmp_path / "promoted", receipt_threshold=0.3, promotion_eligible=True
+    )
+    fall_config = _config("pose-bbox56-proxy-v0", artifact_dir).models.fall
+    assert fall_config is not None
+    model = default_fall_model_family_registry().create("pose-bbox56-proxy-v0", fall_config, "cpu")
 
-    registry = FallModelFamilyRegistry()
-    registry.register("lstm", lambda _config, _device: object())
-    monkeypatch.setattr(worker_module, "DEFAULT_FALL_MODEL_FAMILY_REGISTRY", registry)
+    definition, module, context = _fall_module(model)
+    assert definition.audit_adapter is not None
+    audit = definition.audit_adapter(context)
 
-    runtime = _runtime(config, tmp_path)
+    assert module.decider.policy.policy.transition_threshold == pytest.approx(0.3)
+    assert audit.operating_threshold == pytest.approx(0.3)
+    assert audit.threshold_source == "receipt"
 
-    with pytest.raises(RuntimeError, match="unknown fall model type 'gru'"):
-        runtime._create_fall_model("cpu")  # noqa: SLF001
+
+def test_operator_policy_override_is_audited_but_not_applied(tmp_path: Path) -> None:
+    artifact_dir = write_pose_bbox56_bundle(
+        tmp_path / "operator-policy", receipt_threshold=0.05, promotion_eligible=False
+    )
+    fall_config = _config("pose-bbox56-proxy-v0", artifact_dir).models.fall
+    assert fall_config is not None
+    model = default_fall_model_family_registry().create("pose-bbox56-proxy-v0", fall_config, "cpu")
+
+    definition, module, context = _fall_module(model, 0.7, source="camera-override")
+    assert definition.audit_adapter is not None
+    audit = definition.audit_adapter(context)
+
+    assert module.decider.policy.policy.transition_threshold == pytest.approx(0.5)
+    assert audit.operating_threshold == 0.5
+    assert audit.threshold_source == "default"
+    assert audit.unapplied_policy_threshold == pytest.approx(0.7)

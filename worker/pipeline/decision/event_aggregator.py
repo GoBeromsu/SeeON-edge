@@ -5,9 +5,9 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Final
 
-from worker.interfaces.decision import Decider
+from worker.interfaces.decision import Decider, TraceSnapshotProvider
 from worker.pipeline.decision.incident_manager import IncidentManager
-from worker.types import BusinessEvent, DecisionInput
+from worker.types import BusinessEvent, DecisionInput, DecisionTraceSnapshot
 
 #: Producers retained for late releases. Bounded so memory cannot grow.
 _MAX_TRACKED_PRODUCERS: Final = 64
@@ -18,13 +18,20 @@ class EventAggregator:
     deciders: tuple[Decider, ...]
     incidents: IncidentManager
     monotonic: Callable[[], float] = time.monotonic
-    _producers: dict[str, Decider] = field(default_factory=dict, init=False)
+    _producers: dict[str, tuple[Decider, BusinessEvent]] = field(default_factory=dict, init=False)
+
+    @property
+    def last_trace_snapshots(self) -> tuple[DecisionTraceSnapshot, ...]:
+        return tuple(
+            snapshot
+            for decider in self.deciders
+            if isinstance(decider, TraceSnapshotProvider)
+            for snapshot in decider.last_trace_snapshots
+        )
 
     def update(self, input_value: DecisionInput) -> tuple[BusinessEvent, ...]:
         produced: list[tuple[BusinessEvent, Decider]] = [
-            (event, decider)
-            for decider in self.deciders
-            for event in decider.update(input_value)
+            (event, decider) for decider in self.deciders for event in decider.update(input_value)
         ]
         produced.sort(key=lambda pair: _event_order(pair[0]))
         now_sec = self.monotonic()
@@ -45,7 +52,11 @@ class EventAggregator:
             admitted = self.incidents.admit(event, now_sec=now_sec)
             if admitted is None:
                 continue
-            self._producers[str(admitted.identity)] = decider
+            # Admission replaces the source episode identity with the durable
+            # edge identity. Keep both: IncidentManager.release needs the
+            # latter to clear its cooldown, while the producer's lifecycle
+            # authority recognizes only the former.
+            self._producers[str(admitted.identity)] = (decider, event)
             emitted.append(admitted)
         return tuple(emitted)
 
@@ -61,7 +72,7 @@ class EventAggregator:
         """
         self.incidents.release(event)
         producer = self._producers.pop(str(event.identity), None)
-        for decider in () if producer is None else (producer,):
+        for decider, source_event in () if producer is None else (producer,):
             # Reach through wrappers. Production wraps deciders (see
             # _WindowGatedDecider), and a plain getattr on the wrapper returns
             # None, so the release would silently never arrive.
@@ -75,7 +86,7 @@ class EventAggregator:
                 target = getattr(target, "decider", None)
             if target is None:
                 continue
-            target.release_onset(event)
+            target.release_onset(source_event)
 
 
 def _event_order(event: BusinessEvent) -> tuple[str, ...]:

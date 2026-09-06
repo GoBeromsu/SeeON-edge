@@ -47,6 +47,7 @@ def test_health_ready_200_when_catalog_path_is_unwritable(monkeypatch: pytest.Mo
     assert not hasattr(app.state, "catalog_store")
     assert get_catalog_store(app) is None
 
+
 def test_health_ready_200_after_gateway_lifespan_boot() -> None:
     app = create_app()
     with TestClient(app) as client:

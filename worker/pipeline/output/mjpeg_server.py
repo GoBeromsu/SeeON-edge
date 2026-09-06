@@ -9,12 +9,11 @@ from dataclasses import dataclass
 from http.server import HTTPServer
 from typing import Final
 
-from worker.domains.fall import FallModelProtocol
+from worker.interfaces.fall_model import FallV2ModelProtocol
 from worker.pipeline.output._mjpeg_http import (
-    BED_ZONE_FRAME_TIMEOUT_SECONDS,
     BedZoneNotFoundError,
     BedZoneRecognizer,
-    ClipDeletionControl,
+    BedZoneSnapshot,
     MjpegProbe,
     MjpegProbeError,
     MjpegProbePayload,
@@ -44,16 +43,15 @@ class MjpegServer:
         config: MjpegServerConfig,
         probe: MjpegProbe | None = None,
         bed_zone_recognizer: BedZoneRecognizer | None = None,
-        clip_deletion_control: ClipDeletionControl | None = None,
-        replay_fall_model: FallModelProtocol | None = None,
-        *,
-        bed_zone_frame_timeout_s: float = BED_ZONE_FRAME_TIMEOUT_SECONDS,
+        bed_zone_snapshot: BedZoneSnapshot | None = None,
+        replay_fall_model: FallV2ModelProtocol | None = None,
     ) -> None:
         self.store = store
         self.host = config.host
         self.probe_token = config.probe_token
         self.probe = probe if probe is not None else _unavailable_probe
         self.bed_zone_recognizer = bed_zone_recognizer
+        self.bed_zone_snapshot = bed_zone_snapshot
         self._server: HTTPServer = build_http_server(
             store,
             host=self.host,
@@ -61,9 +59,8 @@ class MjpegServer:
             probe_token=self.probe_token,
             probe=self.probe,
             bed_zone_recognizer=self.bed_zone_recognizer,
-            clip_deletion_control=clip_deletion_control,
+            bed_zone_snapshot=self.bed_zone_snapshot,
             replay_fall_model=replay_fall_model,
-            bed_zone_frame_timeout_s=bed_zone_frame_timeout_s,
         )
         self.port = int(self._server.server_port)
         self._thread: threading.Thread | None = None
@@ -103,8 +100,8 @@ MjpegServerFactory = Callable[
         MjpegServerConfig,
         MjpegProbe | None,
         BedZoneRecognizer | None,
-        ClipDeletionControl | None,
-        FallModelProtocol | None,
+        BedZoneSnapshot | None,
+        FallV2ModelProtocol | None,
     ],
     MjpegServer,
 ]
@@ -147,8 +144,8 @@ def start_optional_mjpeg_server(
     *,
     probe: MjpegProbe | None = None,
     bed_zone_recognizer: BedZoneRecognizer | None = None,
-    clip_deletion_control: ClipDeletionControl | None = None,
-    replay_fall_model: FallModelProtocol | None = None,
+    bed_zone_snapshot: BedZoneSnapshot | None = None,
+    replay_fall_model: FallV2ModelProtocol | None = None,
     factory: MjpegServerFactory = MjpegServer,
 ) -> MjpegServer | None:
     resolved = dev_mjpeg_config() if config is None else config
@@ -160,7 +157,7 @@ def start_optional_mjpeg_server(
             resolved,
             probe,
             bed_zone_recognizer,
-            clip_deletion_control,
+            bed_zone_snapshot,
             replay_fall_model,
         )
     except OSError:
@@ -174,13 +171,13 @@ def start_optional_mjpeg_server(
 
 
 def _unavailable_probe(_rtsp_url: str) -> MjpegProbePayload:
-    raise MjpegProbeError("decode")
+    raise MjpegProbeError("unavailable")
 
 
 __all__ = [
     "BedZoneNotFoundError",
     "BedZoneRecognizer",
-    "ClipDeletionControl",
+    "BedZoneSnapshot",
     "MjpegProbe",
     "MjpegProbeError",
     "MjpegProbePayload",

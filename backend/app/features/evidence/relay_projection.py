@@ -71,8 +71,12 @@ class RelayEvidenceProjection:
                     (event.edge_event_id,),
                 ).fetchone()
                 expected = (
-                    _incident_id(event.edge_event_id), event.facility_id, event.camera_id,
-                    event.event_type, event.probability, event.detected_at,
+                    _incident_id(event.edge_event_id),
+                    event.facility_id,
+                    event.camera_id,
+                    event.event_type,
+                    event.probability,
+                    event.detected_at,
                 )
                 if existing is None:
                     connection.execute(
@@ -86,9 +90,15 @@ class RelayEvidenceProjection:
                                   'NOT_RECORDED', 0, 1, ?, ?)
                         """,
                         (
-                            expected[0], event.edge_event_id, event.facility_id,
-                            event.camera_id, event.event_type, event.probability,
-                            event.detected_at, event.detected_at, event.detected_at,
+                            expected[0],
+                            event.edge_event_id,
+                            event.facility_id,
+                            event.camera_id,
+                            event.event_type,
+                            event.probability,
+                            event.detected_at,
+                            event.detected_at,
+                            event.detected_at,
                         ),
                     )
                 elif tuple(existing) != expected:
@@ -158,8 +168,13 @@ class RelayEvidenceProjection:
                             revision, created_at, updated_at
                         ) VALUES (?, 'SNAPSHOT', 'UNAVAILABLE', ?, ?, 1, ?, ?)
                         """,
-                        (incident_id, terminal_reason, _snapshot_timestamp(snapshot_id),
-                         _snapshot_timestamp(snapshot_id), _snapshot_timestamp(snapshot_id)),
+                        (
+                            incident_id,
+                            terminal_reason,
+                            _snapshot_timestamp(snapshot_id),
+                            _snapshot_timestamp(snapshot_id),
+                            _snapshot_timestamp(snapshot_id),
+                        ),
                     )
                 elif tuple(existing) != expected:
                     raise RelayEvidenceProjectionConflict(
@@ -184,8 +199,13 @@ def _put_snapshot(
         (incident_id,),
     ).fetchone()
     expected = (
-        snapshot.snapshot_id, "AVAILABLE", snapshot.path, snapshot.sha256,
-        snapshot.size_bytes, snapshot.mime_type, snapshot.captured_at,
+        snapshot.snapshot_id,
+        "AVAILABLE",
+        snapshot.path,
+        snapshot.sha256,
+        snapshot.size_bytes,
+        snapshot.mime_type,
+        snapshot.captured_at,
     )
     if existing is None:
         connection.execute(
@@ -196,9 +216,17 @@ def _put_snapshot(
                 revision, created_at, updated_at
             ) VALUES (?, 'SNAPSHOT', ?, 'AVAILABLE', ?, ?, ?, ?, ?, 1, ?, ?)
             """,
-            (incident_id, snapshot.snapshot_id, snapshot.path, snapshot.sha256,
-             snapshot.size_bytes, snapshot.mime_type, snapshot.captured_at,
-             snapshot.captured_at, snapshot.captured_at),
+            (
+                incident_id,
+                snapshot.snapshot_id,
+                snapshot.path,
+                snapshot.sha256,
+                snapshot.size_bytes,
+                snapshot.mime_type,
+                snapshot.captured_at,
+                snapshot.captured_at,
+                snapshot.captured_at,
+            ),
         )
     elif tuple(existing) != expected:
         raise RelayEvidenceProjectionConflict(
@@ -210,8 +238,11 @@ def _validate_snapshot(snapshot: RelaySnapshot) -> None:
     if snapshot.size_bytes <= 0:
         raise RelayEvidenceProjectionError("snapshot size_bytes must be positive")
     if (
-        not snapshot.path or snapshot.path.startswith("/") or "\\" in snapshot.path
-        or snapshot.path in {".", ".."} or "/../" in f"/{snapshot.path}/"
+        not snapshot.path
+        or snapshot.path.startswith("/")
+        or "\\" in snapshot.path
+        or snapshot.path in {".", ".."}
+        or "/../" in f"/{snapshot.path}/"
     ):
         raise RelayEvidenceProjectionError("snapshot path is not contained")
 
@@ -244,6 +275,10 @@ def _bounded_reason(disposition: str, reason: str) -> str:
 
 
 __all__ = [
-    "RelayEvent", "RelayEvidenceProjection", "RelayEvidenceProjectionConflict",
-    "RelayEvidenceProjectionError", "RelayEvidenceProjectionMissingEvent", "RelaySnapshot",
+    "RelayEvent",
+    "RelayEvidenceProjection",
+    "RelayEvidenceProjectionConflict",
+    "RelayEvidenceProjectionError",
+    "RelayEvidenceProjectionMissingEvent",
+    "RelaySnapshot",
 ]

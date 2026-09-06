@@ -1,32 +1,17 @@
-"""Fall domain: temporal state, window classifier and rising-edge decisions."""
+"""Fall V2 domain policy and pose+bbox56 classifier."""
 
 from __future__ import annotations
 
 from shared.detection_policies import FallPolicyV2
-from worker.domains.fall.classifier import (
-    FallModelMetadataProtocol,
-    FallModelProtocol,
-    FallWindowClassifier,
-)
-from worker.domains.fall.classifier_v2 import (
-    FallV2ModelProtocol,
-    FallV2Probabilities,
-    FallWindowClassifierV2,
-)
-from worker.domains.fall.detector import FallEventLatch, FallLatchStatus
-from worker.domains.fall.policy_v2 import FallPolicyDeciderV2
-from worker.domains.fall.schema import FallEvent
+from worker.domains.fall.classifier_v2 import FallWindowClassifierV2
+from worker.domains.fall.policy_v2 import FallPolicyDeciderV2, FallV2DomainDecider
+from worker.interfaces.fall_model import FallV2ModelProtocol, FallV2Probabilities
 
 __all__ = [
-    "FallEvent",
-    "FallEventLatch",
-    "FallLatchStatus",
-    "FallModelMetadataProtocol",
-    "FallModelProtocol",
     "FallPolicyDeciderV2",
     "FallPolicyV2",
+    "FallV2DomainDecider",
     "FallV2ModelProtocol",
     "FallV2Probabilities",
-    "FallWindowClassifier",
     "FallWindowClassifierV2",
 ]

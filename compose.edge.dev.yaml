@@ -59,9 +59,7 @@ services:
     build:
       context: .
       dockerfile: Dockerfile.edge
-      # Dockerfile.edge ends with the CI-only `bootsmoke` stage, which is what
-      # an unpinned build would produce (Docker defaults to the last stage).
-      target: runtime
+
     pull_policy: never
   # Same locally built worker tag; never try to pull it from GHCR.
   edge-model-fetch:

@@ -37,6 +37,8 @@ export function normalizeClip(value: unknown): Clip | null {
     camera_label: pickString(value, ['camera_label', 'cameraLabel', 'camera'], '카메라 미상'),
     event_type: toEventFacet(pickString(value, ['event_type', 'eventType', 'type', 'event_ref', 'eventRef'])),
     created_at: pickNullableString(value, ['created_at', 'createdAt', 'timestamp', 'started_at', 'startedAt']),
+    detected_at: pickNullableString(value, ['detected_at', 'detectedAt']),
+    truncation_reasons: Array.isArray(value.truncation_reasons) ? value.truncation_reasons : [],
     video_path: getClipVideoUrl(id),
     video_available: normalizedVideoAvailable,
     thumbnail_available: thumbnailAvailable === true,
@@ -47,8 +49,6 @@ export function normalizeClip(value: unknown): Clip | null {
         : '영상 제공 상태를 확인할 수 없습니다.',
     duration_s: pickNonNegativeNumber(value, ['duration_s', 'durationS']),
     size_bytes: pickNonNegativeNumber(value, ['size_bytes', 'sizeBytes']),
-    scene_available: pickBoolean(value, ['scene_available', 'sceneAvailable']) === true,
-    scene_frame_count: pickNonNegativeNumber(value, ['scene_frame_count', 'sceneFrameCount']),
   };
 }
 
@@ -162,8 +162,8 @@ function isClipManifestResponse(value: unknown): value is Record<string, unknown
     && value.duration_s >= 0
     && typeof value.video_available === 'boolean'
     && (!('thumbnail_available' in value) || typeof value.thumbnail_available === 'boolean')
-    && (!('scene_available' in value) || typeof value.scene_available === 'boolean')
-    && (!('scene_frame_count' in value) || value.scene_frame_count === null || (typeof value.scene_frame_count === 'number' && Number.isFinite(value.scene_frame_count) && value.scene_frame_count >= 0))
+    && hasNullableString(value, 'detected_at')
+    && (!('truncation_reasons' in value) || (Array.isArray(value.truncation_reasons) && value.truncation_reasons.every((reason) => typeof reason === 'string')))
     && typeof value.finalized === 'boolean'
     && (!('event_type' in value) || value.event_type === null || isNonEmptyString(value.event_type))
     && (!('codec' in value) || typeof value.codec === 'string')

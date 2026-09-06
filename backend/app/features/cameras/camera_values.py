@@ -16,7 +16,7 @@ class CameraRegistryData(TypedDict):
     cameras: list[dict[str, object]]
 
 
-ProbeErrorClass = Literal["timeout", "decode", "auth", "unsupported"]
+ProbeErrorClass = Literal["timeout", "decode", "auth", "unsupported", "unavailable"]
 FLOOR_MIN = -1
 FLOOR_MAX = 10
 DEFAULT_FLOOR = 1

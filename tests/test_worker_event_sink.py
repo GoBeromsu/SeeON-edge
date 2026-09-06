@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import logging
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
@@ -12,7 +13,10 @@ from contracts.event import EventEvidence
 from contracts.frame import Frame
 from worker.interfaces.output import EventSink
 from worker.pipeline.output.event_sink import EvidenceEventSink
+from worker.pipeline.output.evidence.clip_identity import ClipIdAllocator
+from worker.pipeline.output.evidence.clip_publication import ClipPublicationMetadata, ClipPublisher
 from worker.pipeline.output.evidence.event_payload import WorkerEventPayload
+from worker.pipeline.output.evidence.evidence_outbox_types import EdgeEventId, EvidenceReasonCode
 from worker.pipeline.output.evidence.snapshot_store import (
     SnapshotLimits,
     SnapshotStore,
@@ -49,7 +53,7 @@ class _RecordingStager:
 @dataclass(slots=True)
 class _RecordingRecorder:
     clip_id: str | None
-    calls: list[tuple[str, BusinessEvent, bool]] = field(default_factory=list)
+    calls: list[tuple[str, BusinessEvent, bool, datetime]] = field(default_factory=list)
 
     def on_event(
         self,
@@ -57,8 +61,9 @@ class _RecordingRecorder:
         event: BusinessEvent,
         *,
         allow_new_clip: bool = True,
+        detected_at: datetime,
     ) -> str | None:
-        self.calls.append((trigger_packet.camera_id, event, allow_new_clip))
+        self.calls.append((trigger_packet.camera_id, event, allow_new_clip, detected_at))
         return self.clip_id
 
 
@@ -135,9 +140,44 @@ def test_event_sink_stages_then_binds_the_admitted_business_event() -> None:
             },
         }
     ]
-    assert recorder.calls == [("camera-1", _event(), True)]
+    assert recorder.calls == [
+        ("camera-1", _event(), True, datetime(2026, 7, 31, 12, 0, tzinfo=UTC))
+    ]
     assert stager.completions == [("event-123", "clip-123")]
     assert isinstance(sink, EventSink)
+
+
+def test_relay_detected_at_matches_the_published_manifest_byte_for_byte(tmp_path: Path) -> None:
+    stager = _RecordingStager()
+    recorder = _RecordingRecorder(clip_id="clip-123")
+    detected_at = datetime(2026, 7, 31, 12, 0, 0, 123456, tzinfo=UTC)
+    EvidenceEventSink(stager=stager, recorder=recorder, now=lambda: detected_at).emit_for_frame(
+        _event(), _trigger_packet()
+    )
+
+    captured_at = recorder.calls[0][3]
+    reservation = ClipIdAllocator(tmp_path, id_factory=lambda _camera: "clip-123").reserve(
+        "camera-1"
+    )
+    published = ClipPublisher(tmp_path).publish_unavailable(
+        reservation,
+        ClipPublicationMetadata(
+            camera_id="camera-1",
+            event_refs=(EdgeEventId("00000000-0000-4000-8000-000000000123"),),
+            event_type="fall_detected",
+            clip_start_at=detected_at - timedelta(seconds=30),
+            clip_end_at=detected_at + timedelta(seconds=30),
+            finalized_at=detected_at + timedelta(seconds=31),
+            started_at=detected_at - timedelta(seconds=30),
+            detected_at=captured_at,
+            duration_s=60.0,
+            encoder="source-packet-remux",
+        ),
+        EvidenceReasonCode.NO_FRAMES,
+    )
+
+    manifest = json.loads(published.manifest_path.read_text(encoding="utf-8"))
+    assert manifest["detected_at"] == stager.staged[0]["detected_at"]
 
 
 def test_event_sink_renders_backpressure_identity(
@@ -254,6 +294,28 @@ def test_event_sink_completes_without_clip_when_recording_is_unavailable() -> No
 
     # Then: durable delivery remains ready rather than being dropped.
     assert stager.completions == [("event-123", None)]
+
+
+def test_event_sink_surfaces_an_explicit_snapshot_capture_failure_to_operators() -> None:
+    stager = _RecordingStager()
+    sink = EvidenceEventSink(stager=stager, recorder=_RecordingRecorder(clip_id=None))
+
+    sink.emit_for_frame(
+        replace(
+            _event(),
+            snapshot_unavailable_reason="deepstream_on_demand_capture_unsupported",
+        ),
+        _trigger_packet(),
+    )
+
+    assert stager.dispositions == [
+        (
+            "event-123",
+            "event-123",
+            "UNAVAILABLE",
+            "deepstream_on_demand_capture_unsupported",
+        )
+    ]
 
 
 def test_worker_relay_surface_delegates_http_to_the_shared_bounded_transport() -> None:

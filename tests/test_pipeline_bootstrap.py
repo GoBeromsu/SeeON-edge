@@ -111,15 +111,13 @@ def test_gpu_lease_stage_fails_fast_when_lease_unavailable(tmp_path: Path) -> No
 
 def test_profile_device_stage_fails_fast_and_publishes_no_profile_on_failure() -> None:
     context = boot.BootstrapContext()
-    deps = BootDependencies(
-        {"nvidia": lambda: VerifyResult(False, "nvidia", "device", "no CUDA")}
-    )
+    deps = BootDependencies({"flow": lambda: VerifyResult(True, "flow", "device", "available")})
     stage = boot.profile_device_stage(context, {"ML_WORKER_PROFILE": "nvidia"}, deps)
 
     with pytest.raises(boot.BootstrapStageError) as exc:
         boot.run_stages((stage,))
     assert exc.value.exit_code == boot.REFUSE_TO_START_EXIT_CODE
-    assert "no CUDA" in str(exc.value)
+    assert "ADR-0002: unsupported ML_WORKER_PROFILE 'nvidia'; set flow" in str(exc.value)
     assert context.profile is None  # never published on a failed verify
 
 

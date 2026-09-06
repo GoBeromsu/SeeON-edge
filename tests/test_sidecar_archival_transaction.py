@@ -53,9 +53,7 @@ def _snapshot(paths: list[Path]) -> dict[Path, tuple[str, int]]:
     return {path: digest_and_size(path) for path in paths}
 
 
-def _assert_sources_untouched(
-    paths: list[Path], before: dict[Path, tuple[str, int]]
-) -> None:
+def _assert_sources_untouched(paths: list[Path], before: dict[Path, tuple[str, int]]) -> None:
     for path in paths:
         assert path.is_file(), f"source destroyed despite failure: {path}"
         assert digest_and_size(path) == before[path], f"source mutated: {path}"
@@ -208,17 +206,13 @@ def test_execute_dry_run_archives_without_mutating_sources(
 ) -> None:
     before = _snapshot(sources)
 
-    manifest_path = execute(
-        tmp_path, archive_root, sources[:1], sources[1:], destroy=False
-    )
+    manifest_path = execute(tmp_path, archive_root, sources[:1], sources[1:], destroy=False)
 
     assert manifest_path.is_file()
     _assert_sources_untouched(sources, before)
 
 
-def test_missing_source_refuses_the_whole_batch(
-    sources: list[Path], archive_root: Path
-) -> None:
+def test_missing_source_refuses_the_whole_batch(sources: list[Path], archive_root: Path) -> None:
     before = _snapshot(sources[:-1])
     sources[-1].unlink()
 

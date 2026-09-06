@@ -27,9 +27,7 @@ class AuditSession:
     session_id: str
 
 
-def start_session(
-    store: AuditStore, connection: sqlite3.Connection | None = None
-) -> AuditSession:
+def start_session(store: AuditStore, connection: sqlite3.Connection | None = None) -> AuditSession:
     """Fence one prior unclosed session, then durably open this process session."""
     session = AuditSession(uuid4().hex)
     if connection is not None:
@@ -47,8 +45,7 @@ def _start_session(
     store: AuditStore, connection: sqlite3.Connection, session: AuditSession
 ) -> None:
     previous = connection.execute(
-        "SELECT target_id FROM audit_events "
-        "WHERE action=? ORDER BY audit_id DESC LIMIT 1",
+        "SELECT target_id FROM audit_events WHERE action=? ORDER BY audit_id DESC LIMIT 1",
         (AuditAction.AUDIT_SESSION_START.value,),
     ).fetchone()
     if previous is not None:
@@ -111,8 +108,10 @@ def _fence_if_needed(
 
     store.append(
         AuditEvent(
-            occurred_at=utc_now(), actor_id="audit-readiness",
-            action=AuditAction.RECOVERY_FENCE, target_id=session_id,
+            occurred_at=utc_now(),
+            actor_id="audit-readiness",
+            action=AuditAction.RECOVERY_FENCE,
+            target_id=session_id,
             detail=recovery_detail(failure_code, utc_now()),
             actor_type=AuditActorType.SYSTEM,
             auth_mechanism=AuditAuthMechanism.INTERNAL,
@@ -125,9 +124,13 @@ def _session_event(action: AuditAction, session: AuditSession) -> AuditEvent:
     from backend.app.features.audit.store import AuditEvent, utc_now
 
     return AuditEvent(
-        occurred_at=utc_now(), actor_id="audit-readiness", action=action,
-        target_id=session.session_id, detail=session_detail(action),
-        actor_type=AuditActorType.SYSTEM, auth_mechanism=AuditAuthMechanism.INTERNAL,
+        occurred_at=utc_now(),
+        actor_id="audit-readiness",
+        action=action,
+        target_id=session.session_id,
+        detail=session_detail(action),
+        actor_type=AuditActorType.SYSTEM,
+        auth_mechanism=AuditAuthMechanism.INTERNAL,
     )
 
 

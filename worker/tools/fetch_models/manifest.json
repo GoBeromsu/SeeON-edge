@@ -1,11 +1,6 @@
 {
   "schema_version": 1,
   "sources": {
-    "eldercare-fall-models": {
-      "kind": "huggingface",
-      "source_locator": "Berom0227/eldercare-fall-models",
-      "revision": "d67887844bfd2e4b1ca3f3275f770b0b05e23aba"
-    },
     "published-pose-bbox56-fall-model": {
       "kind": "huggingface",
       "source_locator": "Berom0227/seeon-model-v0.1.0-pose-bbox56-proxy-research",
@@ -19,18 +14,60 @@
   },
   "artifacts": [
     {
-      "path": "fall/lstm/model.pt",
-      "source": "eldercare-fall-models",
-      "remote_path": "lstm/model.pt",
-      "size": 903525,
-      "sha256": "889075695884742475b9713e3b86ba67085bb96979b64c51756ea3fd715ab57a"
+      "path": "fall/pose-bbox56-gru/arch.json",
+      "source": "published-pose-bbox56-fall-model",
+      "remote_path": "arch.json",
+      "size": 230,
+      "sha256": "ba6b7b3e83514aa9b6cea15012bb1fa96b66ef668a2ddb447635af5f97602726"
     },
     {
-      "path": "fall/lstm/metadata.upstream.json",
-      "source": "eldercare-fall-models",
-      "remote_path": "lstm/metadata.json",
-      "size": 426,
-      "sha256": "c0870223db642f9e773256ff90a52d9c3021aaf4e6981281d6e69772003b0f66"
+      "path": "fall/pose-bbox56-gru/calibration.json",
+      "source": "published-pose-bbox56-fall-model",
+      "remote_path": "calibration.json",
+      "size": 766,
+      "sha256": "0653c44577390488a84ff20388907e34a2c7a6cfe91c4c6f80b6da2ac3de1510"
+    },
+    {
+      "path": "fall/pose-bbox56-gru/conformance/pose-bbox56-v1.json",
+      "source": "published-pose-bbox56-fall-model",
+      "remote_path": "conformance/pose-bbox56-v1.json",
+      "size": 10699,
+      "sha256": "72d7e911acf39c7183bcdf10fad3c066dd93b7a45b7d28bef1950e1bf85b3a9c"
+    },
+    {
+      "path": "fall/pose-bbox56-gru/metadata.yaml",
+      "source": "published-pose-bbox56-fall-model",
+      "remote_path": "metadata.yaml",
+      "size": 1326,
+      "sha256": "f309ca0b08bc58a790519e3df5cda0a072cd6419558e28c09c3a7c5906a5e69e"
+    },
+    {
+      "path": "fall/pose-bbox56-gru/model-card.md",
+      "source": "published-pose-bbox56-fall-model",
+      "remote_path": "model-card.md",
+      "size": 658,
+      "sha256": "77c09bc3eacba53cadcaef1b8e91b5085efee38a04847908d436e431738166bd"
+    },
+    {
+      "path": "fall/pose-bbox56-gru/model.pt",
+      "source": "published-pose-bbox56-fall-model",
+      "remote_path": "model.pt",
+      "size": 96533,
+      "sha256": "7bb75a2932e1a1250dc900013b2c80b220de5e23f3ea568e05f1db21d0a757e3"
+    },
+    {
+      "path": "fall/pose-bbox56-gru/bundle-manifest.json",
+      "source": "published-pose-bbox56-fall-model",
+      "remote_path": "bundle-manifest.json",
+      "size": 1074,
+      "sha256": "55108ac7e1bb427d0387c29b55caa5e2019e7616e4bcd05c615c4805e85f91d6"
+    },
+    {
+      "path": "fall/pose-bbox56-gru/evaluation-receipt.json",
+      "source": "published-pose-bbox56-fall-model",
+      "remote_path": "evaluation-receipt.json",
+      "size": 18499,
+      "sha256": "3880181783b97708903c8c440d852cae32cc44d619128eabbf4972f255317fce"
     },
     {
       "path": "pose/yolo26n-pose.pt",
@@ -53,16 +90,5 @@
       "size": 54750385,
       "sha256": "16b636f04e8fb6a325b3370f22dc5e5535ff473e384f4d041fd28d788f6ee9f5"
     }
-  ],
-  "published_bundles": [
-    {
-      "source_locator": "Berom0227/seeon-model-v0.1.0-pose-bbox56-proxy-research",
-      "revision": "988bacc666a3e5935b70e9f546aea38a6d7e5399",
-      "bundle_sha256": "998e060138911f3167c4fba79b96b406ff555893771c33a53bd07eaa4d77cffe"
-    }
-  ],
-  "sidecars": [
-    "fall/lstm/arch.json",
-    "fall/lstm/metadata.yaml"
   ]
 }

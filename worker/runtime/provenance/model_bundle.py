@@ -20,6 +20,7 @@ from typing import Final
 from contracts.model_selection import (
     ContractError,
     ModelSelection,
+    canonical_digest,
     canonical_json_bytes,
     parse_model_selection,
     validate_evaluation_receipt_identity,
@@ -41,9 +42,7 @@ _IDENTITY_FIELDS: Final = (
 )
 _RECEIPT_IDENTITY_FIELDS: Final = ("evaluation", "field")
 _BUNDLE_IDENTITY_FIELDS: Final = tuple(
-    field
-    for field in _IDENTITY_FIELDS
-    if field not in _RECEIPT_IDENTITY_FIELDS
+    field for field in _IDENTITY_FIELDS if field not in _RECEIPT_IDENTITY_FIELDS
 )
 
 
@@ -150,6 +149,14 @@ def admit_model_bundle(models_root: Path, desired: DesiredModelBundle) -> ModelB
     _validate_bundle_identity(document, desired.bundle_sha256)
     observed_members = _verify_members(root, members)
     observed_receipts = _verify_members(root, receipts)
+    member_digests = {
+        member_path: member["sha256"]
+        for member_path, member in zip(observed_members, members, strict=True)
+        if isinstance(member, dict)
+    }
+    _verify_selection_member_digests(member_digests, desired.selection)
+    _verify_selection_bundle_format(root, member_digests, desired.selection)
+    _verify_selection_policy_digest(root, desired.selection)
     receipt_identities = _verify_required_members(root, members, receipts, desired)
     _verify_exact_tree(root, {"manifest.json", *observed_members, *observed_receipts})
     frozen_static = _freeze({**dict(identities), **receipt_identities})
@@ -157,6 +164,7 @@ def admit_model_bundle(models_root: Path, desired: DesiredModelBundle) -> ModelB
         {
             "bundle_sha256": desired.bundle_sha256,
             "members": tuple(observed_members),
+            "member_digests": member_digests,
             "receipts": tuple(observed_receipts),
             "identities": frozen_static,
         }
@@ -168,6 +176,83 @@ def admit_model_bundle(models_root: Path, desired: DesiredModelBundle) -> ModelB
         }
     )
     return ModelBundleProof(observed=observed, applied=applied)
+
+
+def _verify_selection_member_digests(
+    member_digests: Mapping[str, object], selection: ModelSelection | None
+) -> None:
+    if selection is None:
+        return
+    _verify_selection_member_digest(
+        member_digests, "calibration.json", selection.calibration_digest
+    )
+    # The conformance document is bound by its content, not by a file name the
+    # publisher may not use: the shipped bundle keeps it at
+    # conformance/pose-bbox56-v1.json, so a check gated on "conformance.json"
+    # never ran. The digest the selection declares must be the content digest
+    # of exactly one member of the bundle, whatever that member is called.
+    matching = [
+        path for path, digest in member_digests.items() if digest == selection.conformance_digest
+    ]
+    if len(matching) != 1:
+        raise ModelBundleAdmissionError(
+            f"conformance_digest {selection.conformance_digest} matches "
+            f"{len(matching)} bundle member(s) {matching!r}; it must name exactly one"
+        )
+
+
+def _verify_selection_member_digest(
+    member_digests: Mapping[str, object], member_path: str, selected_digest: str
+) -> None:
+    observed_digest = member_digests.get(member_path)
+    if observed_digest != selected_digest:
+        raise ModelBundleAdmissionError(
+            f"{member_path} digest mismatch: selection declares {selected_digest}, "
+            f"member content has {observed_digest!r}"
+        )
+
+
+def _verify_selection_bundle_format(
+    root: Path,
+    member_digests: Mapping[str, object],
+    selection: ModelSelection | None,
+) -> None:
+    """Bind the declared format to the packaged bundle manifest vocabulary."""
+    if selection is None:
+        return
+    if "bundle-manifest.json" not in member_digests:
+        raise ModelBundleAdmissionError(
+            "selected bundle has no bundle-manifest.json member for bundle_format"
+        )
+    raw = _read_regular(root / "bundle-manifest.json", "member bundle-manifest.json")
+    try:
+        manifest = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise ModelBundleAdmissionError("bundle-manifest.json is invalid JSON") from exc
+    observed = manifest.get("schema_version") if isinstance(manifest, dict) else None
+    if observed != selection.bundle_format:
+        raise ModelBundleAdmissionError(
+            f"bundle format mismatch: selection declares {selection.bundle_format!r}, "
+            f"bundle-manifest.json schema_version is {observed!r}"
+        )
+
+
+def _verify_selection_policy_digest(root: Path, selection: ModelSelection | None) -> None:
+    """Bind policy_digest to the canonical calibration temporal_rule object."""
+    if selection is None:
+        return
+    raw = _read_regular(root / "calibration.json", "member calibration.json")
+    try:
+        calibration = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise ModelBundleAdmissionError("calibration.json is invalid JSON") from exc
+    temporal_rule = calibration.get("temporal_rule") if isinstance(calibration, dict) else None
+    actual_digest = canonical_digest(temporal_rule)
+    if actual_digest != selection.policy_digest:
+        raise ModelBundleAdmissionError(
+            f"policy_digest mismatch: selection declares {selection.policy_digest}, "
+            f"calibration temporal_rule content has {actual_digest}"
+        )
 
 
 def _validate_bundle_identity(document: Mapping[str, object], expected: str) -> None:

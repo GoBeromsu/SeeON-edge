@@ -2,12 +2,13 @@ from __future__ import annotations
 
 import hmac
 import json
+import logging
 import time
 from collections.abc import Callable
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from socketserver import ThreadingMixIn
-from typing import Final, Protocol, TypeAlias
+from typing import Final, TypeAlias
 from urllib.parse import urlsplit
 
 import cv2
@@ -17,7 +18,7 @@ from contracts.runner import Image
 from shared.detection_policies import parse_effective_policy
 from shared.events.replay_wire import MAX_REPLAY_BODY_BYTES as _REPLAY_BODY_LIMIT
 from shared.events.replay_wire import ReplayWireError, decode_replay_trace
-from worker.domains.fall import FallModelProtocol
+from worker.interfaces.fall_model import FallV2ModelProtocol
 from worker.pipeline.output.live_view import LatestFrame, LatestFrameStore
 from worker.pipeline.output.live_view_api import (
     BED_ZONE_NOT_FOUND_BODY,
@@ -27,16 +28,14 @@ from worker.pipeline.output.live_view_api import (
     RELAY_TOKEN_HEADER,
     REPLAY_PATH,
     BedZoneRecognizeResponse,
-    OverlayMode,
     ProbeErrorClass,
     ProbeResponse,
     bed_zone_camera_id,
-    clip_deletion_clip_id,
-    clip_deletion_preflight_clip_id,
     normalize_probe_error_class,
-    parse_pose_body,
+    overlay_selection_body,
+    parse_bed_zone_recognize_request,
+    parse_overlay_selection,
     parse_probe_request,
-    pose_body,
     pose_camera_id,
     snapshot_camera_id,
     stream_camera_id,
@@ -52,11 +51,13 @@ from worker.pipeline.trace.models import (
     TraceTruncation,
 )
 from worker.replay.engine import ReplayConfigurationError, ReplayRun, replay_recovered
+from worker.types.preview import OverlaySelection
 
 POLL_INTERVAL_SECONDS: Final = 0.05
 HEARTBEAT_INTERVAL_SECONDS: Final = 1.0
 MAX_PROBE_BODY_BYTES: Final = 8192
 MAX_POSE_BODY_BYTES: Final = 256
+MAX_BED_ZONE_BODY_BYTES: Final = 256
 # Derived from the trace retention bound in shared/events/replay_wire.py so a
 # full retained timeline can actually be transferred. A bare constant here
 # refused exactly the long windows replay exists for.
@@ -67,11 +68,7 @@ MAX_REPLAY_BODY_BYTES: Final = _REPLAY_BODY_LIMIT
 # cached the way it always was pre-gating; this must stay comfortably under
 # a client's read timeout while giving the pump a real chance to publish.
 STREAM_FIRST_FRAME_TIMEOUT_SECONDS: Final = 0.5
-# On-demand bed-zone recognition is a deliberate, infrequent user action (not
-# periodic polling), so it is worth waiting a bit longer than a stream's first
-# frame for a genuinely fresh capture before falling back to whatever is
-# already cached.
-BED_ZONE_FRAME_TIMEOUT_SECONDS: Final = 2.0
+LOGGER: Final = logging.getLogger(__name__)
 
 
 class BedZoneNotFoundError(RuntimeError):
@@ -79,17 +76,12 @@ class BedZoneNotFoundError(RuntimeError):
 
 
 # Given the best available (raw-ish) frame, run bed segmentation once and
-# return the highest-confidence bed's polygon, or raise ``BedZoneNotFoundError``
+# return its qualifying segmented beds, or raise ``BedZoneNotFoundError``
 # when the model finds no bed. Injected from ``worker.runtime`` -- the
 # composition root -- so this output-layer module never imports
 # ``worker.adapters`` directly, mirroring the existing ``MjpegProbe`` seam.
-BedZoneRecognizer = Callable[[Image], BedZoneRecognizeResponse]
-
-
-class ClipDeletionControl(Protocol):
-    def preflight(self, clip_id: str) -> dict[str, object]: ...
-
-    def delete(self, clip_id: str) -> dict[str, object]: ...
+BedZoneRecognizer = Callable[[Image, float], BedZoneRecognizeResponse]
+BedZoneSnapshot = Callable[[str], bytes]
 
 
 # Raw probe result as the runtime's probe callable returns it (it may carry
@@ -124,9 +116,8 @@ def build_http_server(
     probe_token: str | None,
     probe: MjpegProbe,
     bed_zone_recognizer: BedZoneRecognizer | None = None,
-    clip_deletion_control: ClipDeletionControl | None = None,
-    replay_fall_model: FallModelProtocol | None = None,
-    bed_zone_frame_timeout_s: float = BED_ZONE_FRAME_TIMEOUT_SECONDS,
+    bed_zone_snapshot: BedZoneSnapshot | None = None,
+    replay_fall_model: FallV2ModelProtocol | None = None,
 ) -> HTTPServer:
     class Handler(BaseHTTPRequestHandler):
         def do_GET(self) -> None:  # noqa: N802 - stdlib hook name
@@ -142,10 +133,6 @@ def build_http_server(
             pose_id = pose_camera_id(path)
             if pose_id is not None:
                 self._handle_get_pose(pose_id)
-                return
-            clip_preflight_id = clip_deletion_preflight_clip_id(path)
-            if clip_preflight_id is not None:
-                self._handle_clip_delete_preflight(clip_preflight_id)
                 return
             self.send_error(HTTPStatus.NOT_FOUND)
 
@@ -225,42 +212,6 @@ def build_http_server(
                 return
             self._write_status_json(HTTPStatus.OK, _replay_run_payload(result, trace.truncation))
 
-        def do_DELETE(self) -> None:  # noqa: N802 - stdlib hook name
-            path = urlsplit(self.path).path
-            clip_id = clip_deletion_clip_id(path)
-            if clip_id is not None:
-                self._handle_clip_delete(clip_id)
-                return
-            self.send_error(HTTPStatus.NOT_FOUND)
-
-        def _handle_clip_delete_preflight(self, clip_id: str) -> None:
-            if not _authorized_probe(self.headers.get(RELAY_TOKEN_HEADER), probe_token):
-                self.send_error(HTTPStatus.FORBIDDEN)
-                return
-            if clip_deletion_control is None:
-                self.send_error(HTTPStatus.SERVICE_UNAVAILABLE)
-                return
-            try:
-                payload = clip_deletion_control.preflight(clip_id)
-            except (OSError, RuntimeError, TypeError, ValueError):
-                self.send_error(HTTPStatus.CONFLICT)
-                return
-            self._write_status_json(HTTPStatus.OK, payload)
-
-        def _handle_clip_delete(self, clip_id: str) -> None:
-            if not _authorized_probe(self.headers.get(RELAY_TOKEN_HEADER), probe_token):
-                self.send_error(HTTPStatus.FORBIDDEN)
-                return
-            if clip_deletion_control is None:
-                self.send_error(HTTPStatus.SERVICE_UNAVAILABLE)
-                return
-            try:
-                payload = clip_deletion_control.delete(clip_id)
-            except (OSError, RuntimeError, TypeError, ValueError):
-                self.send_error(HTTPStatus.CONFLICT)
-                return
-            self._write_status_json(HTTPStatus.ACCEPTED, payload)
-
         def _resolve_frame(self, camera_id: str) -> LatestFrame | None:
             if camera_id == "" or not store.is_known(camera_id):
                 self.send_error(HTTPStatus.NOT_FOUND)
@@ -307,7 +258,12 @@ def build_http_server(
 
                 previous: LatestFrame | None = None
                 last_send_at = 0.0
+                last_refresh_at = time.monotonic()
                 while True:
+                    now = time.monotonic()
+                    if now - last_refresh_at >= POLL_INTERVAL_SECONDS:
+                        store.request_snapshot_refresh(camera_id)
+                        last_refresh_at = now
                     frame = store.wait_for_latest(
                         camera_id,
                         previous=previous,
@@ -315,7 +271,14 @@ def build_http_server(
                     )
                     now = time.monotonic()
                     heartbeat_due = now - last_send_at >= HEARTBEAT_INTERVAL_SECONDS
-                    if frame is None or (frame is previous and not heartbeat_due):
+                    if frame is None:
+                        # A selection change can deliberately invalidate the cached
+                        # frame. Wait against ``None`` next time rather than
+                        # repeatedly satisfying ``current is not previous``
+                        # with the empty slot and spinning.
+                        previous = None
+                        continue
+                    if frame is previous and not heartbeat_due:
                         continue
                     try:
                         self._write_part(frame)
@@ -357,7 +320,7 @@ def build_http_server(
             if camera_id == "" or not store.is_known(camera_id):
                 self.send_error(HTTPStatus.NOT_FOUND)
                 return
-            self._write_mode_json(store.get_mode(camera_id))
+            self._write_selection_json(store.get_selection(camera_id))
 
         def _handle_set_pose(self, camera_id: str) -> None:
             if not _authorized_pose(self.headers.get(RELAY_TOKEN_HEADER), probe_token):
@@ -366,12 +329,12 @@ def build_http_server(
             if camera_id == "" or not store.is_known(camera_id):
                 self.send_error(HTTPStatus.NOT_FOUND)
                 return
-            mode = self._read_mode_body()
-            if mode is None:
+            selection = self._read_selection_body()
+            if selection is None:
                 self.send_error(HTTPStatus.BAD_REQUEST)
                 return
-            store.set_mode(camera_id, mode)
-            self._write_mode_json(mode)
+            store.set_selection(camera_id, selection)
+            self._write_selection_json(selection)
 
         def _handle_bed_zone_recognize(self, camera_id: str) -> None:
             if not _authorized_probe(self.headers.get(RELAY_TOKEN_HEADER), probe_token):
@@ -380,42 +343,104 @@ def build_http_server(
             if camera_id == "" or not store.is_known(camera_id):
                 self.send_error(HTTPStatus.NOT_FOUND)
                 return
-            if bed_zone_recognizer is None:
-                self.send_error(HTTPStatus.SERVICE_UNAVAILABLE)
+            confidence = self._read_bed_zone_confidence()
+            if confidence is None:
+                self.send_error(HTTPStatus.BAD_REQUEST)
                 return
-            # Force as fresh a capture as the live-view store can provide:
-            # note whatever is already cached, ask for a refresh (viewer
-            # gating -- #48 -- means encoding is otherwise paused with no
-            # stream viewer connected), then wait for a frame that is not the
-            # one we already had. Fall back to the stale cached frame if the
-            # wait times out rather than failing the whole request.
-            previous = store.get_latest(camera_id)
-            store.request_snapshot_refresh(camera_id)
-            frame = store.wait_for_latest(
-                camera_id, previous=previous, timeout=bed_zone_frame_timeout_s
-            )
-            if frame is None:
-                frame = previous
-            if frame is None:
-                self.send_error(HTTPStatus.SERVICE_UNAVAILABLE)
-                return
-            decoded = cv2.imdecode(np.frombuffer(frame.jpeg, dtype=np.uint8), cv2.IMREAD_COLOR)
-            if not isinstance(decoded, np.ndarray) or decoded.dtype != np.dtype(np.uint8):
-                self.send_error(HTTPStatus.SERVICE_UNAVAILABLE)
-                return
-            image = np.asarray(decoded, dtype=np.uint8)
-            if image.ndim != 3 or image.shape[0] <= 0 or image.shape[1] <= 0 or image.shape[2] != 3:
+            if bed_zone_recognizer is None or bed_zone_snapshot is None:
+                LOGGER.error(
+                    "bed-zone recognition failed: stage=mising_wiring "
+                    "camera_id=%s exception_class=RuntimeError",
+                    camera_id,
+                )
                 self.send_error(HTTPStatus.SERVICE_UNAVAILABLE)
                 return
             try:
-                payload = bed_zone_recognizer(image)
+                jpeg = bed_zone_snapshot(camera_id)
+                if not isinstance(jpeg, bytes) or not jpeg:
+                    LOGGER.warning(
+                        "bed-zone recognition failed: stage=snapshot_decode "
+                        "camera_id=%s exception_class=%s",
+                        camera_id,
+                        "TypeError" if not isinstance(jpeg, bytes) else "ValueError",
+                    )
+                    self.send_error(HTTPStatus.SERVICE_UNAVAILABLE)
+                    return
+                decoded = cv2.imdecode(np.frombuffer(jpeg, dtype=np.uint8), cv2.IMREAD_COLOR)
+            except (OSError, RuntimeError, TypeError, ValueError, cv2.error) as error:
+                LOGGER.warning(
+                    "bed-zone recognition failed: stage=snapshot_decode "
+                    "camera_id=%s exception_class=%s",
+                    camera_id,
+                    type(error).__name__,
+                )
+                self.send_error(HTTPStatus.SERVICE_UNAVAILABLE)
+                return
+            if not isinstance(decoded, np.ndarray) or decoded.dtype != np.dtype(np.uint8):
+                LOGGER.warning(
+                    "bed-zone recognition failed: stage=snapshot_decode "
+                    "camera_id=%s exception_class=ValueError",
+                    camera_id,
+                )
+                self.send_error(HTTPStatus.SERVICE_UNAVAILABLE)
+                return
+            if (
+                decoded.ndim != 3
+                or decoded.shape[0] <= 0
+                or decoded.shape[1] <= 0
+                or decoded.shape[2] != 3
+            ):
+                LOGGER.warning(
+                    "bed-zone recognition failed: stage=snapshot_decode "
+                    "camera_id=%s exception_class=ValueError",
+                    camera_id,
+                )
+                self.send_error(HTTPStatus.SERVICE_UNAVAILABLE)
+                return
+            try:
+                image = cv2.cvtColor(decoded, cv2.COLOR_BGR2RGB)
+            except cv2.error as error:
+                LOGGER.warning(
+                    "bed-zone recognition failed: stage=snapshot_decode "
+                    "camera_id=%s exception_class=%s",
+                    camera_id,
+                    type(error).__name__,
+                )
+                self.send_error(HTTPStatus.SERVICE_UNAVAILABLE)
+                return
+            try:
+                payload = bed_zone_recognizer(image, confidence)
             except BedZoneNotFoundError:
                 self._write_status_json(HTTPStatus.NOT_FOUND, BED_ZONE_NOT_FOUND_BODY)
                 return
-            except (OSError, RuntimeError, TypeError, ValueError, cv2.error):
+            except (OSError, RuntimeError, TypeError, ValueError, cv2.error) as error:
+                LOGGER.warning(
+                    "bed-zone recognition failed: stage=model "
+                    "camera_id=%s exception_class=%s",
+                    camera_id,
+                    type(error).__name__,
+                )
                 self.send_error(HTTPStatus.SERVICE_UNAVAILABLE)
                 return
             self._write_status_json(HTTPStatus.OK, payload.as_dict())
+
+        def _read_bed_zone_confidence(self) -> float | None:
+            raw_length = self.headers.get("Content-Length")
+            if raw_length is None:
+                return parse_bed_zone_recognize_request({})
+            try:
+                length = int(raw_length)
+            except ValueError:
+                return None
+            if length < 0 or length > MAX_BED_ZONE_BODY_BYTES:
+                return None
+            if length == 0:
+                return parse_bed_zone_recognize_request({})
+            try:
+                payload: object = json.loads(self.rfile.read(length).decode("utf-8"))
+            except (UnicodeDecodeError, json.JSONDecodeError):
+                return None
+            return parse_bed_zone_recognize_request(payload)
 
         def _read_json_object(self, limit: int) -> dict[str, object] | None:
             """Bounded JSON object body, or None when absent, oversized, or malformed."""
@@ -442,11 +467,11 @@ def build_http_server(
             self.end_headers()
             self.wfile.write(body)
 
-        def _read_mode_body(self) -> OverlayMode | None:
+        def _read_selection_body(self) -> OverlaySelection | None:
             payload = self._read_json_object(MAX_POSE_BODY_BYTES)
             if payload is None:
                 return None
-            return parse_pose_body(payload)
+            return parse_overlay_selection(payload)
 
         def _read_replay_body(self) -> dict[str, object] | None:
             payload = self._read_json_object(MAX_REPLAY_BODY_BYTES)
@@ -454,8 +479,8 @@ def build_http_server(
                 return None
             return payload
 
-        def _write_mode_json(self, mode: OverlayMode) -> None:
-            self._write_status_json(HTTPStatus.OK, pose_body(mode))
+        def _write_selection_json(self, selection: OverlaySelection) -> None:
+            self._write_status_json(HTTPStatus.OK, overlay_selection_body(selection))
 
         def _read_probe_url(self) -> str | None:
             payload = self._read_json_object(MAX_PROBE_BODY_BYTES)
@@ -754,10 +779,9 @@ def _replay_run_payload(run: ReplayRun, truncation: dict[str, object]) -> dict[s
 
 
 __all__ = [
-    "BED_ZONE_FRAME_TIMEOUT_SECONDS",
     "BedZoneNotFoundError",
     "BedZoneRecognizer",
-    "ClipDeletionControl",
+    "BedZoneSnapshot",
     "MjpegProbe",
     "MjpegProbeError",
     "MjpegProbePayload",

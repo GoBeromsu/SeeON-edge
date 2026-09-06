@@ -78,9 +78,7 @@ class TopologyConfirmationService:
         *,
         connection: sqlite3.Connection | None = None,
     ) -> None:
-        self._store.save(
-            response, principal, registry_version, connection=connection
-        )
+        self._store.save(response, principal, registry_version, connection=connection)
 
     def confirm(
         self,
@@ -117,13 +115,9 @@ class TopologyConfirmationService:
                     ):
                         return TopologyRetryable("unreachable")
                     try:
-                        self._store.complete(
-                            preview, response, after_write=after_write
-                        )
+                        self._store.complete(preview, response, after_write=after_write)
                     except TopologyConfirmationStateConflictError:
-                        return TopologyConfirmationRejected(
-                            409, EdgeErrorCode.CONFIRMATION_STALE
-                        )
+                        return TopologyConfirmationRejected(409, EdgeErrorCode.CONFIRMATION_STALE)
                     return outcome
                 case TopologyRetryable() | TopologyPaused():
                     return outcome

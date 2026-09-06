@@ -10,7 +10,9 @@ helper directly.
 
 from __future__ import annotations
 
+import ast
 from datetime import datetime
+from pathlib import Path
 from typing import Final
 from zoneinfo import ZoneInfo
 
@@ -21,6 +23,7 @@ from contracts.observation import (
     FrameObservation,
 )
 from worker.domains import bed_exit
+from worker.pipeline.perception.scene_state import SceneState
 from worker.types import DecisionInput
 
 PERSON_ID: Final = 1
@@ -62,6 +65,9 @@ def _monitor(*, min_containment: float = 0.5, grace_frames: int = 1) -> bed_exit
             night_window=bed_exit.NightWindow(start="21:00", end="05:00", tz="Asia/Seoul"),
         ),
         clock=lambda: fixed,
+        boot_id="test-boot",
+        stream_epoch="test-epoch",
+        source_generation=0,
     )
 
 
@@ -118,3 +124,27 @@ def test_person_beside_polygon_bed_reads_as_not_occupied_immediately() -> None:
     # bed polygon, even though it sits inside the bed's AABB.
     assert monitor.last_debug_snapshot is not None
     assert monitor.last_debug_snapshot.statuses[0].occupancy != "occupied"
+
+
+def test_bed_exit_input_can_only_receive_persisted_polygons() -> None:
+    """A segmentation row can never become the bed ID used by an alert."""
+    scene = SceneState("camera-polygon")
+    observation, _ = scene.resolve_bed_regions(
+        FrameObservation(regions=((DIAMOND_BED,), ())),
+        frame_index=0,
+        bed_scheduled=True,
+        bed_interval=1,
+    )
+    assert observation.bed_boxes == ()
+    assert scene.bed_polygon_source == "none"
+
+    tree = ast.parse(Path("worker/pipeline/perception/scene_state.py").read_text())
+    segmentation_reads = [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Attribute)
+        and node.attr == "bed_boxes"
+        and isinstance(node.value, ast.Name)
+        and node.value.id == "observation"
+    ]
+    assert segmentation_reads == []

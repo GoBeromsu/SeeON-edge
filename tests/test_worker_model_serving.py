@@ -6,12 +6,8 @@ import pytest
 
 import worker.adapters.model.in_process as in_process_module
 from contracts.runner import Image, RunnerProtocol, RunnerResult, pose_result
-from worker.adapters.model import (
-    InProcessServingClient,
-    ModelRegistry,
-    default_registry,
-)
-from worker.adapters.model.registry import UnknownModelTaskError
+from worker.adapters.model.in_process import InProcessServingClient
+from worker.adapters.model.registry import ModelRegistry, UnknownModelTaskError, default_registry
 from worker.interfaces.serving import BatchServingClient, ServingClient
 
 ServingOption = str | int | float | bool | None

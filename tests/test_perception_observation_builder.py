@@ -52,19 +52,21 @@ def test_window_buffer_rejects_invalid_dimensions() -> None:
         WindowBuffer(window=1, stride=0)
 
 
-def test_scene_state_updates_latest_tracks_and_cached_bed_regions() -> None:
-    first_bed = BoundingBox(1, 2, 30, 40, 0.9)
-    first = FrameObservation(regions=((first_bed,), ("occupied",)))
+def test_scene_state_updates_tracks_without_mutating_persisted_bed_polygon() -> None:
+    persisted_bed = BoundingBox(1, 2, 30, 40, 0.9)
+    live_bed = BoundingBox(50, 60, 70, 80, 0.8)
+    first = FrameObservation(regions=((live_bed,), ("occupied",)))
     second = FrameObservation()
-    state = SceneState(camera_id="cam-1")
+    state = SceneState(camera_id="cam-1", persisted_bed_regions=(persisted_bed,))
 
     assert state.update(first, track_ids=(10, 11)) is first
     assert state.latest_observation == first
     assert state.track_ids == (10, 11)
-    assert state.bed_regions == (first_bed,)
+    assert state.persisted_bed_regions == (persisted_bed,)
+    assert state.bed_polygon_source == "persisted"
 
     state.update(second, track_ids=(12,))
 
     assert state.latest_observation == second
     assert state.track_ids == (12,)
-    assert state.bed_regions == (first_bed,)
+    assert state.persisted_bed_regions == (persisted_bed,)

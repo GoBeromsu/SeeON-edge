@@ -53,6 +53,7 @@ class EventClipRecorder(Protocol):
         event: BusinessEvent,
         *,
         allow_new_clip: bool = True,
+        detected_at: datetime,
     ) -> str | None: ...
 
 
@@ -86,7 +87,10 @@ class EvidenceEventSink:
             evidence["person_id"] = event.person_id
         if event.bed_id is not None:
             evidence["bed_id"] = event.bed_id
-        detected_at = self.now().isoformat().replace("+00:00", "Z")
+        detected_at_value = self.now()
+        if detected_at_value.tzinfo is None or detected_at_value.utcoffset() is None:
+            raise ValueError("relay detected_at must be timezone-aware")
+        detected_at = detected_at_value.isoformat().replace("+00:00", "Z")
         payload: WorkerEventPayload = {
             "edge_event_id": edge_event_id,
             "event_type": event.event_type,
@@ -171,18 +175,23 @@ class EvidenceEventSink:
                 )
         elif event.snapshot_jpeg is None:
             self._record_snapshot_disposition(
-                edge_event_id, snapshot_id, "UNAVAILABLE", "snapshot_not_provided"
+                edge_event_id,
+                snapshot_id,
+                "UNAVAILABLE",
+                event.snapshot_unavailable_reason or "snapshot_not_provided",
             )
-        clip_id = self.recorder.on_event(trigger_packet, event)
+        clip_id = self.recorder.on_event(
+            trigger_packet,
+            event,
+            detected_at=detected_at_value,
+        )
         self.stager.complete(edge_event_id, clip_id)
 
     def _record_snapshot_disposition(
         self, edge_event_id: str, snapshot_id: str, disposition: str, reason: str
     ) -> None:
         try:
-            self.stager.record_snapshot_disposition(
-                edge_event_id, snapshot_id, disposition, reason
-            )
+            self.stager.record_snapshot_disposition(edge_event_id, snapshot_id, disposition, reason)
         except Exception:  # noqa: BLE001 - event remains authoritative
             LOGGER.exception(
                 "snapshot disposition admission failed: edge_event_id=%s", edge_event_id

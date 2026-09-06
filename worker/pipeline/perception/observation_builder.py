@@ -46,11 +46,7 @@ def build_frame_observation(
         poses=tuple(tuple(pose) for pose in poses) if poses is not None else base.keypoints,
         regions=(
             tuple(bed_boxes) if bed_boxes is not None else base.bed_boxes,
-            (
-                tuple(bed_exit_statuses)
-                if bed_exit_statuses is not None
-                else base.bed_exit_statuses
-            ),
+            (tuple(bed_exit_statuses) if bed_exit_statuses is not None else base.bed_exit_statuses),
         ),
         track_ids=tuple(track_ids) if track_ids is not None else base.track_ids,
     )

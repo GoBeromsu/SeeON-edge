@@ -70,6 +70,7 @@ _EXPECTED_FIELDS = {
         "bed_id",
         "audit",
         "snapshot_jpeg",
+        "snapshot_unavailable_reason",
     ),
 }
 

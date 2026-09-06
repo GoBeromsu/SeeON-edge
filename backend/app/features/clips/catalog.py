@@ -25,6 +25,7 @@ from uuid import UUID
 
 from backend.app.edge_db import EDGE_DATABASE_PATH
 from backend.app.edge_db.connection import RuntimeActor, open_runtime_database
+from backend.app.features.clips.manifest import ClipExtension, ExtensionContributor
 from backend.app.features.clips.store import ClipManifest, is_valid_clip_id
 
 if TYPE_CHECKING:
@@ -87,7 +88,8 @@ _MANIFEST_FIELDS = {
     "source_error_reason",
     "truncation_reasons",
     "time_origin",
-    "scene_index",
+    "detected_at",
+    "extension",
 }
 
 _TABLE_KEYS = {
@@ -290,6 +292,7 @@ def _strict_manifest_from_payload(payload: dict[str, Any], path: Path) -> ClipMa
     if state not in _MANIFEST_STATES:
         raise ValueError(f"invalid manifest state: {path}")
     _validate_source_remux_metadata(payload, path, state)
+    extension = _validate_extension(payload.get("extension"), path)
     clip_id, camera_id, event_ref = _manifest_identity(payload, path)
     event_refs = payload.get("event_refs")
     if not isinstance(event_refs, list) or not event_refs:
@@ -307,6 +310,11 @@ def _strict_manifest_from_payload(payload: dict[str, Any], path: Path) -> ClipMa
         _utc_timestamp(payload.get("finalized_at"), path),
     )
     _utc_timestamp(payload.get("started_at"), path)
+    # Reader tolerance staged ahead of the worker writer (P0-AC7): an optional
+    # RFC3339-Z event time; older manifests without it stay valid.
+    detected_at = payload.get("detected_at")
+    if detected_at is not None:
+        _utc_timestamp(detected_at, path)
     if timestamps != tuple(sorted(timestamps)):
         raise ValueError(f"manifest timestamps are unordered: {path}")
     duration_s = payload.get("duration_s")
@@ -346,6 +354,9 @@ def _strict_manifest_from_payload(payload: dict[str, Any], path: Path) -> ClipMa
         if isinstance(payload.get("video_error"), str)
         else None,
         finalized=True,
+        detected_at=detected_at if isinstance(detected_at, str) else None,
+        truncation_reasons=tuple(payload.get("truncation_reasons") or ()),
+        extension=extension,
     )
 
 
@@ -375,11 +386,6 @@ def _validate_source_remux_metadata(
     time_origin = payload.get("time_origin")
     if time_origin is not None and not isinstance(time_origin, dict):
         raise ValueError(f"invalid manifest time origin: {path}")
-    scene_index = payload.get("scene_index")
-    if scene_index is not None:
-        if not isinstance(scene_index, dict):
-            raise ValueError(f"invalid manifest scene index: {path}")
-        _validate_scene_index_claim(scene_index, path)
     truncations = payload.get("truncation_reasons")
     if truncations is not None and (
         not isinstance(truncations, list)
@@ -389,20 +395,44 @@ def _validate_source_remux_metadata(
         raise ValueError(f"invalid manifest truncation reasons: {path}")
 
 
-def _validate_scene_index_claim(scene_index: dict[str, Any], path: Path) -> None:
-    """Minimal invariant shared with the worker writer: fixed path, schema 1,
-    lowercase sha256, bounded non-negative size and frame count."""
-    if scene_index.get("path") != "scene-index.json":
-        raise ValueError(f"invalid manifest scene index path: {path}")
-    if scene_index.get("schema") != 1:
-        raise ValueError(f"invalid manifest scene index schema: {path}")
-    sha256 = scene_index.get("sha256")
-    if not isinstance(sha256, str) or _SHA256_RE.fullmatch(sha256) is None:
-        raise ValueError(f"invalid manifest scene index digest: {path}")
-    for field in ("size_bytes", "count"):
-        value = scene_index.get(field)
-        if not isinstance(value, int) or isinstance(value, bool) or value < 0:
-            raise ValueError(f"invalid manifest scene index {field}: {path}")
+def _validate_extension(value: Any, path: Path) -> ClipExtension | None:
+    if value is None:
+        return None
+    if not isinstance(value, dict) or set(value) != {
+        "contributors",
+        "duration_s",
+        "boundary",
+    }:
+        raise ValueError(f"invalid manifest extension: {path}")
+    boundary = value["boundary"]
+    duration_s = value["duration_s"]
+    contributors = value["contributors"]
+    if (
+        not isinstance(boundary, str)
+        or boundary not in {"none", "extension_bounded", "extension_raced"}
+        or isinstance(duration_s, bool)
+        or not isinstance(duration_s, int | float)
+        or not math.isfinite(duration_s)
+        or duration_s < 0
+        or not isinstance(contributors, list)
+        or not contributors
+    ):
+        raise ValueError(f"invalid manifest extension: {path}")
+    parsed: list[ExtensionContributor] = []
+    for contributor in contributors:
+        if not isinstance(contributor, dict) or set(contributor) != {"event_ref", "detected_at"}:
+            raise ValueError(f"invalid manifest extension contributor: {path}")
+        event_ref = contributor["event_ref"]
+        detected_at = contributor["detected_at"]
+        if not isinstance(event_ref, str) or not event_ref.strip():
+            raise ValueError(f"invalid manifest extension contributor: {path}")
+        _utc_timestamp(detected_at, path)
+        parsed.append(ExtensionContributor(event_ref=event_ref, detected_at=detected_at))
+    return ClipExtension(
+        contributors=tuple(parsed),
+        duration_s=float(duration_s),
+        boundary=boundary,
+    )
 
 
 def _validate_source_media_translation(
@@ -507,7 +537,7 @@ def _is_canonical_uuid4(value: object) -> bool:
 
 
 def _utc_timestamp(value: object, path: Path) -> datetime:
-    if not isinstance(value, str):
+    if not isinstance(value, str) or not value.endswith("Z"):
         raise TypeError(f"invalid manifest timestamp: {path}")
     try:
         parsed = datetime.fromisoformat(value)

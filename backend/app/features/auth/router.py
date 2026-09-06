@@ -141,7 +141,9 @@ def login(payload: DashboardLoginRequest, request: Request, response: Response) 
     _LOGIN_THROTTLE.clear(key)
     try:
         append_governed(
-            request, actor_id=payload.username, action=AuditAction.AUTH_LOGIN,
+            request,
+            actor_id=payload.username,
+            action=AuditAction.AUTH_LOGIN,
             target_id=payload.username,
         )
     except AuditUnavailableError:
@@ -153,17 +155,13 @@ def login(payload: DashboardLoginRequest, request: Request, response: Response) 
 @router.get("/session", status_code=status.HTTP_204_NO_CONTENT, response_model=None)
 def session(request: Request) -> None:
     actor = authorize_dashboard(request)
-    append_governed(
-        request, actor_id=actor, action=AuditAction.AUTH_SESSION_READ, target_id=actor
-    )
+    append_governed(request, actor_id=actor, action=AuditAction.AUTH_SESSION_READ, target_id=actor)
 
 
 @router.delete("/session", status_code=status.HTTP_204_NO_CONTENT, response_model=None)
 def logout(request: Request, response: Response) -> None:
     actor = authorize_dashboard(request)
-    append_governed(
-        request, actor_id=actor, action=AuditAction.AUTH_LOGOUT, target_id=actor
-    )
+    append_governed(request, actor_id=actor, action=AuditAction.AUTH_LOGOUT, target_id=actor)
     dashboard_sessions(request).revoke(request.cookies.get(DASHBOARD_SESSION_COOKIE))
     response.delete_cookie(DASHBOARD_SESSION_COOKIE, path="/", samesite="strict")
 
@@ -174,7 +172,9 @@ def update_credentials(
 ) -> None:
     actor = authorize_dashboard(request)
     event = AuditEvent(
-        occurred_at=utc_now(), actor_id=actor, action=AuditAction.CREDENTIAL_ROTATE,
+        occurred_at=utc_now(),
+        actor_id=actor,
+        action=AuditAction.CREDENTIAL_ROTATE,
         target_id=payload.username or actor,
         detail=empty_detail(AuditAction.CREDENTIAL_ROTATE),
     )

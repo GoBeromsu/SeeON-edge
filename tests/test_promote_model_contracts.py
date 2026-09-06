@@ -51,7 +51,7 @@ FIELD_RECEIPT_DIGEST = canonical_digest(
 
 def desired_raw() -> dict[str, object]:
     return {
-        "schema_version": 1,
+        "schema_version": 2,
         "model_publication": {
             "source_locator": "seeon/fall-model",
             "revision": "0" * 40,
@@ -72,6 +72,10 @@ def desired_raw() -> dict[str, object]:
         "output_class_semantics_digest": OUTPUT_SEMANTICS_DIGEST,
         "policy_digest": POLICY_DIGEST,
         "runtime_format": "opaque-bundle-format",
+        "bundle_format": "bundle-manifest/proxy-v0",
+        "preprocessing_identity": "coco17-xyc-plus-pose-head-xyxy-valid-f32-v1",
+        "transition_threshold": 0.5,
+        "threshold_source": "default",
     }
 
 

@@ -91,9 +91,7 @@ def test_media_probe_uses_same_open_inode_when_path_is_swapped(
         assert kwargs.get("pass_fds") == (descriptor,)
         stdout = json.dumps(
             {
-                "streams": [
-                    {"codec_type": "video", "codec_name": "h264", "pix_fmt": "yuv420p"}
-                ],
+                "streams": [{"codec_type": "video", "codec_name": "h264", "pix_fmt": "yuv420p"}],
                 "format": {"duration": "1.000"},
             }
         )
@@ -178,9 +176,7 @@ def test_conflicting_event_admission_preserves_the_original_durable_fact(tmp_pat
     refused = queue.try_admit(conflict)
 
     assert not refused.accepted
-    assert tuple(queue.entries()) == (
-        next(DeliveryQueue(tmp_path).entries()),
-    )
+    assert tuple(queue.entries()) == (next(DeliveryQueue(tmp_path).entries()),)
 
 
 @contextlib.contextmanager

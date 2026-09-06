@@ -40,13 +40,13 @@ ALLOWED_PATHS: Final = {
     "/api/v1/cameras/topology/rooms/{edge_ref}",
     "/api/v1/cameras/worker-config",
     "/api/v1/cameras/{camera_id}",
+    "/api/v1/cameras/{camera_id}/bed-zone",
     "/api/v1/cameras/{camera_id}/test",
     "/api/v1/cameras/{camera_id}/bed-zone/recognize",
     "/api/v1/clips",
     "/api/v1/clips/storage",
     "/api/v1/clips/storage/browse",
     "/api/v1/clips/storage/location",
-    "/api/v1/clips/{clip_id}",
     "/api/v1/clips/{clip_id}/artifacts",
     "/api/v1/clips/{clip_id}/metadata",
     "/api/v1/connection",
@@ -54,7 +54,6 @@ ALLOWED_PATHS: Final = {
     "/api/v1/connection/test",
     "/api/v1/connection/topology-preview",
     "/api/v1/connection/topology-preview/confirm",
-    "/api/v1/clips/{clip_id}/scene",
     "/api/v1/clips/{clip_id}/thumbnail",
     "/api/v1/clips/{clip_id}/video",
     "/api/v1/detection-policies",
@@ -129,6 +128,11 @@ def test_serving_app_exposes_only_documented_boundary_routes() -> None:
     ]
 
     assert exposed_paths == ALLOWED_PATHS
+    bed_zone_save_routes = [
+        route for route in api_routes if route.path == "/api/v1/cameras/{camera_id}/bed-zone"
+    ]
+    assert len(bed_zone_save_routes) == 1
+    assert bed_zone_save_routes[0].methods == {"PUT"}
     assert not production_routes, (
         "Serving must not expose production edge/runtime surfaces: " + ", ".join(production_routes)
     )

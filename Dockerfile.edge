@@ -1,57 +1,18 @@
 # syntax=docker/dockerfile:1.7
 
-# DeepStream 9.1 publishes no devel tag. The digest-pinned triton-multiarch
-# image is intentionally used for both stages: it was verified to contain the
-# 9.1 sources/headers, GStreamer development metadata, C++ compiler and CMake.
-FROM nvcr.io/nvidia/deepstream@sha256:f6fa0247da9290979cbb05749e7da9435d089c93db7c4dcfe85ba2488b5f4994 AS deepstream-native-build
-
-WORKDIR /src
-COPY worker/native/deepstream/CMakeLists.txt ./CMakeLists.txt
-COPY worker/native/deepstream/runtime-ctest.cmake.in ./runtime-ctest.cmake.in
-COPY worker/native/deepstream/src ./src
-RUN test -d /opt/nvidia/deepstream/deepstream/sources \
-    && find /opt/nvidia/deepstream/deepstream/sources -type f -name 'nvds*.h' -print -quit | grep -q . \
-    && cmake -S . -B build -DCMAKE_BUILD_TYPE=Release \
-    && cmake --build build --parallel \
-    && ctest --test-dir build --output-on-failure \
-    && cmake --install build --prefix /opt/seeon-native \
-    && cmake -S . -B build-sanitized \
-        -DCMAKE_BUILD_TYPE=RelWithDebInfo \
-        -DSEEON_ENABLE_SANITIZERS=ON \
-    && cmake --build build-sanitized --parallel \
-    && ctest --test-dir build-sanitized --output-on-failure \
-    && sha256sum \
-        /opt/seeon-native/bin/seeon-deepstream-preflight \
-        /opt/seeon-native/bin/seeon-deepstream-child
+# ml-worker is the DeepStream Flow production image. Engines are prepared before
+# boot; the worker verifies them and never builds them at runtime (ADR-0002).
+FROM nvcr.io/nvidia/deepstream@sha256:f6fa0247da9290979cbb05749e7da9435d089c93db7c4dcfe85ba2488b5f4994 AS parser-build
+COPY worker/adapters/deepstream/native_parser/yolo26_pose_parser.cpp /src/yolo26_pose_parser.cpp
+RUN g++ -std=c++17 -shared -fPIC -O2 \
+      -o /src/libnvdsinfer_custom_yolo26_pose.so /src/yolo26_pose_parser.cpp \
+      -I/opt/nvidia/deepstream/deepstream/sources/includes -I/usr/local/cuda/include \
+    && sha256sum /src/libnvdsinfer_custom_yolo26_pose.so
 
 FROM ghcr.io/astral-sh/uv:python3.12-bookworm-slim@sha256:e5b65587bce7de595f299855d7385fe7fca39b8a74baa261ba1b7147afa78e58 AS uv-bin
 
 FROM nvcr.io/nvidia/deepstream@sha256:f6fa0247da9290979cbb05749e7da9435d089c93db7c4dcfe85ba2488b5f4994 AS runtime
-
-COPY --from=uv-bin /usr/local/bin/uv /usr/local/bin/uv
-COPY --from=deepstream-native-build /opt/seeon-native/bin/seeon-deepstream-preflight /usr/local/bin/seeon-deepstream-preflight
-COPY --from=deepstream-native-build /opt/seeon-native/bin/seeon-deepstream-child /usr/local/bin/seeon-deepstream-child
-COPY --from=deepstream-native-build /opt/seeon-native/native-build /opt/seeon/native-build
-RUN ctest --test-dir /opt/seeon/native-build --output-on-failure
-
-ENV UV_LINK_MODE=copy \
-    UV_PYTHON_DOWNLOADS=never \
-    PYTHONDONTWRITEBYTECODE=1 \
-    PYTHONUNBUFFERED=1 \
-    PATH="/app/.venv/bin:${PATH}" \
-    GST_PLUGIN_PATH=/opt/nvidia/deepstream/deepstream/lib/gst-plugins \
-    LD_LIBRARY_PATH="/opt/nvidia/deepstream/deepstream/lib:${LD_LIBRARY_PATH}" \
-    SEEON_DEEPSTREAM_MANIFEST=/opt/seeon/deepstream-manifest.json \
-    SEEON_DEEPSTREAM_FIRST_FAULT=/var/lib/seeon-state/deepstream-first-fault.json
-
 WORKDIR /app
-
-# Keep the shared image's existing clip/font and Intel decode capabilities.
-# DeepStream 9.1 is Ubuntu 24.04, so unlike the old Debian base no apt source
-# rewriting is needed for the non-free Intel media driver.
-# The NGC image retains dpkg records for several codec libraries whose files
-# are intentionally pruned. --reinstall restores those exact Noble packages;
-# without it Ubuntu ffmpeg links against absent libvpx/lame/x26x objects.
 RUN apt-get update \
     && apt-get install -y --reinstall --no-install-recommends \
         ffmpeg \
@@ -64,66 +25,40 @@ RUN apt-get update \
         libx264-164 \
         libx265-199 \
         vainfo \
-    && apt-get purge -y --auto-remove \
-        build-essential \
-        cpp \
-        cpp-13 \
-        cuda-crt-13-2 \
-        cuda-nvcc-13-2 \
-        cuda-tileiras-13-2 \
-        g++ \
-        g++-13 \
-        gcc \
-        gcc-13 \
-        libtool \
-    && rm -rf \
-        /opt/nvidia/deepstream/deepstream/sources \
-        /var/lib/apt/lists/* \
-    && test ! -e /usr/bin/g++ \
-    && test ! -d /opt/nvidia/deepstream/deepstream/sources \
-    && ffmpeg -version \
-    && test -f /usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc \
-    && test -f /opt/nvidia/deepstream/deepstream/lib/gst-plugins/libnvdsgst_multistream.so
+    && rm -rf /var/lib/apt/lists/*
+COPY --from=uv-bin /usr/local/bin/uv /usr/local/bin/uv
+COPY --from=parser-build /src/libnvdsinfer_custom_yolo26_pose.so /opt/nvidia/deepstream/deepstream/lib/
 
+ENV UV_PROJECT_ENVIRONMENT=/app/.venv \
+    PATH=/app/.venv/bin:$PATH \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    GST_PLUGIN_PATH=/opt/nvidia/deepstream/deepstream/lib/gst-plugins \
+    LD_LIBRARY_PATH=/opt/nvidia/deepstream/deepstream/lib:${LD_LIBRARY_PATH}
 COPY pyproject.toml uv.lock ./
 RUN --mount=type=cache,target=/root/.cache/uv \
-    uv sync --frozen --no-default-groups --group worker --no-install-project
+    uv venv --system-site-packages /app/.venv \
+    && uv sync --frozen --no-default-groups --group flow --no-install-project \
+    && python -m pip install --no-cache-dir pyyaml \
+    && python -c 'import importlib.util as u; assert u.find_spec("pyservicemaker"), "pyservicemaker not visible from the venv"' \
+    && python -c 'import onnxruntime; assert "CPUExecutionProvider" in onnxruntime.get_available_providers()' \
+    && ! python -c 'import torch' \
+    && ! python -c 'import ultralytics'
 
 COPY contracts ./contracts
 COPY shared ./shared
 COPY worker ./worker
-# C8 canary orchestration is a host-side operator tool. .dockerignore removes
-# it from the COPY context; this assertion makes accidental product shipment a
-# build failure rather than a documentation promise.
-RUN test ! -e /app/worker/tools/deepstream_canary
-# No operational SQLite CLI ships in this image. ADR 0005 gives the
-# inference-runtime slot no database, so clip-consistency repair is
-# backend-owned (scripts/ops/repair-clip-consistency.py against
-# backend/app/features/clips/consistency_ops.py).
-# State dir is image-owned (matches worker/runtime/state_dir.py's resolver for
-# the root container user); deliberately no VOLUME here to avoid anonymous-
-# volume sprawl and derived-image RUN neutralization -- compose.edge.yaml
-# attaches a named volume at this same path instead.
-RUN mkdir -p /root/.local/state/ml-worker
+COPY worker/adapters/deepstream/configs /opt/seeon/deepstream-flow
 RUN mkdir -p \
-        /app/models/fall/lstm-runtime \
+        /root/.local/state/ml-worker \
         /app/models/pose \
         /app/models/bed \
         /var/lib/seeon-state \
         /var/cache/seeon/tensorrt \
-    && python worker/native/deepstream/build_manifest.py \
-        worker/native/deepstream/manifest.template.json \
-        /opt/seeon/deepstream-manifest.json \
-    && python -m worker.native.deepstream.preflight \
-        --prepare-engine-cache /opt/seeon/deepstream-manifest.json \
-    && chmod 0444 /opt/seeon/deepstream-manifest.json \
-    && sha256sum \
-        /opt/seeon/deepstream-manifest.json \
-        /usr/local/bin/seeon-deepstream-preflight \
-        /usr/local/bin/seeon-deepstream-child
+        /var/lib/seeon-records
 
 ARG EDGE_DATABASE_SCHEMA_VERSION=18
-ARG SOURCE_REVISION
+ARG SOURCE_REVISION=db09fc12c1dcf1f04fb735706ae80c4e498e2ab0
 RUN if [ "$SOURCE_REVISION" = "0000000000000000000000000000000000000000" ] \
       || [ "${#SOURCE_REVISION}" -ne 40 ] \
       || printf '%s' "$SOURCE_REVISION" | grep -Eq '[^0123456789abcdef]'; then \
@@ -137,63 +72,9 @@ RUN if [ "$SOURCE_REVISION" = "0000000000000000000000000000000000000000" ] \
 LABEL org.opencontainers.image.revision="${SOURCE_REVISION}" \
       org.opencontainers.image.source="SeniorAILab/eldercare-fall-ml-v2" \
       seeon.edge.database.schema-version="${EDGE_DATABASE_SCHEMA_VERSION}" \
-      com.seniorailab.seeon.deepstream.image="nvcr.io/nvidia/deepstream@sha256:f6fa0247da9290979cbb05749e7da9435d089c93db7c4dcfe85ba2488b5f4994"
-ENV ML_WORKER_BUILD_REVISION="${SOURCE_REVISION}"
-
+      com.seniorailab.seeon.deepstream.image="nvcr.io/nvidia/deepstream@sha256:f6fa0247da9290979cbb05749e7da9435d089c93db7c4dcfe85ba2488b5f4994" \
+      com.seniorailab.seeon.worker.profile="flow"
+ENV ML_WORKER_BUILD_REVISION="${SOURCE_REVISION}" \
+    ML_WORKER_PROFILE=flow \
+    PYTHONPATH=/app
 CMD ["python", "-m", "worker"]
-
-# --- CI-only boot smoke stage -------------------------------------------------
-#
-# NOT SHIPPED -- but read the next paragraph before adding anything below it.
-#
-# THIS IS THE LAST STAGE, AND DOCKER'S DEFAULT TARGET IS THE LAST STAGE. So a
-# bare `docker build -f Dockerfile.edge .` builds THIS, not `runtime`, and would
-# ship a production image carrying the smoke layer (verified locally: 82 layers
-# against runtime's 81, and a different image ID). Every build that produces an
-# image anyone keeps therefore names its stage explicitly with
-# `--target runtime` / `target: runtime`: the ml-worker step in
-# .github/workflows/edge-images.yml, compose.edge.dev.yaml, and the build
-# commands in AGENTS.md, worker/native/deepstream/AGENTS.md and the runbooks.
-# tests/test_public_repository_privacy.py fails any PUSHING build of this file
-# that does not pin `target: runtime`, so the registry cannot receive this stage
-# by accident. Building `bootsmoke` adds exactly one layer on top of `runtime`
-# and never mutates it, so the runtime image is unaffected by this stage's
-# existence -- only by which stage a build selects.
-#
-# Why it exists. A successful build only proves the image assembles; it does not
-# prove the interpreter can import the worker's module graph. That is the #195
-# httpx incident: the image built fine and the container died at boot with
-# ModuleNotFoundError. `--check-config` is the entrypoint's own no-side-effect
-# boot path (worker/runtime/AGENTS.md) -- it forces every top-level import in
-# worker/__main__.py's module graph to resolve before returning.
-#
-# Why it is a BUILD STAGE and not a `docker run`. Running the smoke in the
-# workflow requires the built image inside the runner's daemon, i.e. `load:
-# true`, i.e. the docker-format exporter: on PR run 33156001540 that exporter
-# cost 473.7s (125.9s exporting layers + 347.9s sending tarball) plus 244.0s
-# importing to docker -- 717.7s, 89% of the 806s image step and 84% of the whole
-# 14m14s required check, to enable a 4.4s check. This stage covers the FRESH
-# BUILD path -- every pull request and every push to main. A reused or
-# release-built digest is instead pulled from the registry and booted by the
-# workflow's second smoke step, so that a release seal only ever pins bytes that
-# were actually published and booted. As a stage the same command
-# runs inside BuildKit against layers it already has, and no exporter runs at
-# all.
-#
-# Why `--network=none`. It turns "this check is side-effect free" from a comment
-# into an assertion the build enforces. With no `--config`, worker/__main__.py
-# takes the else-branch at line 321: it reads RELAY_TOKEN (line 323), refuses if
-# it is unset (lines 331-337), validates only the SHAPE of the baked relay
-# endpoint + token via `RelayConfig.model_validate` (lines 338-346), then in the
-# `--check-config` branch (line 348) does one READ-ONLY
-# `WorkerConfigLkgStore(...).load()` (line 362) and returns
-# CLEAN_SHUTDOWN_EXIT_CODE (line 380). No relay pull, no LKG write, no model
-# resolution -- `resolve_local_overrides` sits after the return, at line 382.
-# If a future edit makes the check reach the network, this stage fails the build
-# instead of silently passing. (The same contract is pinned from the Python side
-# in tests/test_worker_startup_config_resolution.py.)
-#
-# The token only has to be well-formed, not reachable: RELAY_URL is retired and
-# the endpoint is fixed in-code, so a literal placeholder is the whole input.
-FROM runtime AS bootsmoke
-RUN --network=none RELAY_TOKEN=ci-boot-smoke-test python -m worker --check-config

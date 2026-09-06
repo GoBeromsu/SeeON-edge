@@ -1,0 +1,102 @@
+{
+  "sources": 13,
+  "error": null,
+  "elapsed_sec": 154.1,
+  "frames": 43355,
+  "objects": 56,
+  "batch_callbacks": 3770,
+  "batch_callbacks_per_sec": 24.46,
+  "frame_items_per_sec": 281.27,
+  "per_source_fps_from_pts": {
+    "1": 29.81,
+    "8": 29.93,
+    "2": 29.8,
+    "0": 29.8,
+    "9": 29.8,
+    "6": 29.99,
+    "5": 30.0,
+    "11": 30.02,
+    "12": 29.99,
+    "10": 30.01,
+    "3": 30.01,
+    "4": 30.01,
+    "7": 30.03
+  },
+  "probe_latency_ms": {
+    "p50": 3.849656,
+    "p95": 7.19498,
+    "p99": 9.725503,
+    "max": 21.156916,
+    "mean": 4.1463
+  },
+  "batch_interval_budget_ms": 33.33,
+  "queue_drops_no_consumer": 0,
+  "association": {
+    "iou_gate": 0.5,
+    "matched": 56,
+    "unmatched": 0,
+    "row_reuse_blocked": 0,
+    "match_iou_p50": 1.0,
+    "match_iou_p05": 0.9999999037300374
+  },
+  "distinct_ids_by_source": {
+    "1": 0,
+    "8": 0,
+    "2": 0,
+    "0": 0,
+    "9": 0,
+    "6": 0,
+    "5": 1,
+    "11": 0,
+    "12": 0,
+    "10": 0,
+    "3": 0,
+    "4": 0,
+    "7": 0
+  },
+  "id_births": 1,
+  "id_switches_disappearance_gated": 0,
+  "torch_imported": false,
+  "ort_providers": [
+    "CPUExecutionProvider"
+  ],
+  "ort_inferences": 29171,
+  "ort_per_sec": 188.9,
+  "cuda_compute_apps": [
+    "pid, used_gpu_memory [MiB]",
+    "82, 822 MiB"
+  ],
+  "cuda_process_count": 1,
+  "torch_imported_at_snapshot": false,
+  "lifecycle": {
+    "1": {},
+    "8": {},
+    "2": {},
+    "0": {},
+    "9": {},
+    "6": {},
+    "5": {
+      "0": {
+        "first_frame": 1375,
+        "last_frame": 1617,
+        "frames_present": 56,
+        "gaps": 30
+      }
+    },
+    "11": {},
+    "12": {},
+    "10": {},
+    "3": {},
+    "4": {},
+    "7": {}
+  },
+  "births": [
+    {
+      "t": 1385426.72,
+      "source": 5,
+      "id": 0,
+      "frame": 1375,
+      "switch_from": []
+    }
+  ]
+}

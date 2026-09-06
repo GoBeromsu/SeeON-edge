@@ -50,7 +50,7 @@ class DeviceInputEncoder(Protocol):
 
     Distinct from ``ClipEncoder``/``EncoderSession`` (the production
     host-buffer segment-muxer seam, fed one ``FramePacket`` at a time by
-    ``worker.adapters.encode.ffmpeg_segment_encoder.FFmpegSegmentEncoder``):
+    the concrete Flow recorder):
     this port only accepts an already device-resident, ownership-tracked
     ``FrameLease`` -- never a host array -- and never silently reads it back.
     A caller that has only a host frame must materialize it through a named,

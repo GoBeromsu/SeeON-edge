@@ -36,9 +36,7 @@ class _ProbabilityMatrix(Protocol):
 class _ProbabilityModel(Protocol):
     n_features_in_: int
 
-    def predict_proba(
-        self, values: NDArray[np.float32]
-    ) -> _ProbabilityMatrix: ...
+    def predict_proba(self, values: NDArray[np.float32]) -> _ProbabilityMatrix: ...
 
 
 @runtime_checkable
@@ -104,9 +102,7 @@ class FallDetector:
         metadata["artifact_digest"] = self.artifact_digest
         return metadata
 
-    def predict(
-        self, features: Sequence[float] | NDArray[np.float32]
-    ) -> float:
+    def predict(self, features: Sequence[float] | NDArray[np.float32]) -> float:
         values = np.asarray(features, dtype=np.float32)
         if values.size == 0:
             raise ModelInputError("feature vector must be non-empty")

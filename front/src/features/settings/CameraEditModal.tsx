@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { testCamera, updateCamera, type BedZone, type Camera, type CameraTestResult } from '@/shared/api/client';
 import { AccessibleDialog } from '@/shared/ui/AccessibleDialog';
-import { BedZoneRecognitionPanel } from '@/features/settings/BedZoneRecognitionPanel';
+import { BedZoneRecognitionPanel } from '@/shared/ui/BedZoneRecognitionPanel';
 import { FloorSelect } from '@/features/settings/FloorSelect';
 import { assessRtspSubstreamGuidance } from '@/features/settings/rtspSubstreamGuidance';
 import { getCameraStatusMeta, statusBadgeClassName } from '@/shared/ui/StatusBadge';
@@ -26,6 +26,7 @@ const TEST_FAILURE_DETAIL: Record<string, string> = {
   timeout: 'RTSP 연결 시간이 초과되었습니다. 주소와 네트워크를 확인하세요.',
   auth: 'RTSP 인증에 실패했습니다. 계정 정보를 확인하세요.',
   decode: '영상 스트림을 디코드하지 못했습니다. 카메라 설정을 확인하세요.',
+  unavailable: '현재 Flow 미디어 경로에서는 RTSP 연결 검사를 제공하지 않습니다.',
 };
 
 function testFailureMessage(result: CameraTestResult): string {
@@ -198,23 +199,13 @@ export function CameraEditModal({ camera, onClose, onUpdated, onRequestDelete }:
           <BedZoneRecognitionPanel
             cameraId={camera.id}
             bedZone={bedZone}
-            onRecognized={(zone) => {
+            onSaved={(zone) => {
               setBedZone(zone);
               onUpdated();
+              setMode('view');
             }}
+            onCancel={() => setMode('view')}
           />
-          <div className="dialog-actions mt-4">
-            <button type="button" className="dialog-secondary-action" onClick={() => setMode('view')}>
-              취소
-            </button>
-            <button
-              type="button"
-              className="brand-action inline-flex h-9 items-center justify-center rounded-control px-4 text-sm font-semibold"
-              onClick={() => setMode('view')}
-            >
-              완료
-            </button>
-          </div>
         </div>
       ) : (
         <form onSubmit={(event) => { event.preventDefault(); void handleSave(); }} noValidate>

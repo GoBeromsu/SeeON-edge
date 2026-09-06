@@ -1,0 +1,29 @@
+{
+  "uri": "file:///opt/nvidia/deepstream/deepstream/samples/streams/sample_1080p_h264.mp4",
+  "error": null,
+  "elapsed_sec": 1.899,
+  "frames": 1443,
+  "objects": 2397,
+  "distinct_track_ids": 10,
+  "sample_track_ids": [
+    0,
+    1,
+    2,
+    3,
+    4,
+    5,
+    6,
+    7,
+    8,
+    9
+  ],
+  "probe_callbacks": 1443,
+  "probe_latency_ms": {
+    "p50": 0.042251,
+    "p95": 0.056983,
+    "p99": 0.099907,
+    "max": 112.32512,
+    "mean": 0.1197
+  },
+  "observed_fps": 759.9
+}

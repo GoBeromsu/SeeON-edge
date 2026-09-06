@@ -29,10 +29,11 @@ import logging
 import os
 from collections.abc import Mapping
 from pathlib import Path
-from typing import Final
+from typing import Final, Literal
 
 from pydantic import ValidationError
 
+from contracts.model_selection import POSE_BBOX56_PREPROCESSING_IDENTITY
 from worker.runtime.config.errors import WorkerConfigError
 from worker.runtime.config.worker_models import (
     ClipRecordingConfig,
@@ -61,6 +62,7 @@ ML_WORKER_FALL_MODEL_PREPROCESSING_IDENTITY_ENV: Final = (
     "ML_WORKER_FALL_MODEL_PREPROCESSING_IDENTITY"
 )
 ML_WORKER_CLIP_RECORDING_ENABLED_ENV: Final = "ML_WORKER_CLIP_RECORDING_ENABLED"
+WORKER_REPLAY_TRACE_DIR_ENV: Final = "WORKER_REPLAY_TRACE_DIR"
 FALL_SELECTION_PATH: Final = Path("/app/model-selection.json")
 FALL_MODELS_ROOT: Final = Path("/models")
 
@@ -101,24 +103,24 @@ def reject_retired_worker_environment(environ: Mapping[str, str]) -> None:
 
 _TRUTHY: Final = frozenset({"1", "true", "yes", "on"})
 _FALSY: Final = frozenset({"0", "false", "no", "off"})
-_DEFAULT_TYPE: Final = "lstm"
+_DEFAULT_TYPE: Final = "pose-bbox56-proxy-v0"
 _DEFAULT_WEIGHTS: Final = "model.pt"
 _DEFAULT_ARCHITECTURE: Final = "arch.json"
-# Issue #133: packaged default fall model, used when
-# ML_WORKER_FALL_MODEL_ARTIFACT_DIR is unset. Sidecars (arch.json,
-# metadata.yaml) are tracked in git at this path; model.pt is fetched
-# separately via scripts/fetch-models.sh since weights stay gitignored.
-# Values mirror worker/ml-worker.example.yaml's models.fall block and the
-# upstream Berom0227/eldercare-fall-models lstm/metadata.json this artifact
-# was derived from (operating_threshold in particular is not a placeholder).
-_DEFAULT_ARTIFACT_DIR: Final = "models/fall/lstm"
+# Packaged default fall model, used when ML_WORKER_FALL_MODEL_ARTIFACT_DIR is
+# unset: the published pose+bbox56 proxy bundle pinned in
+# worker/tools/fetch_models/manifest.json and provisioned by
+# scripts/fetch-models.sh (nothing under models/ is tracked). Values mirror
+# worker/ml-worker.example.yaml's models.fall block; the 0.5 transition
+# threshold is the owner-fixed default that a promotion-eligible receipt may
+# override (worker/domains/registry.py).
+_DEFAULT_ARTIFACT_DIR: Final = "models/fall/pose-bbox56-gru"
 _DEFAULT_WINDOW: Final = 30
 _DEFAULT_STRIDE: Final = 5
-_DEFAULT_OPERATING_THRESHOLD: Final = 0.0007872396381571889
-_DEFAULT_SCHEMA_VERSION: Final = 1
-_DEFAULT_PREPROCESSING_IDENTITY: Final = "legacy-coco17-xyc-frame-normalized-zero-fill-v1"
+_DEFAULT_OPERATING_THRESHOLD: Final = 0.5
+_DEFAULT_SCHEMA_VERSION: Final = 2
+_DEFAULT_PREPROCESSING_IDENTITY: Final = POSE_BBOX56_PREPROCESSING_IDENTITY
 _FETCH_MODELS_HINT: Final = (
-    "run scripts/fetch-models.sh to download the packaged default LSTM model "
+    "run scripts/fetch-models.sh to download the packaged pose+bbox56 model "
     "weights (or set ML_WORKER_FALL_MODEL_ARTIFACT_DIR to point at an "
     "already-provisioned artifact directory)"
 )
@@ -244,45 +246,13 @@ def clip_recording_config_from_environment(
 def fall_model_config_from_environment(
     environ: Mapping[str, str] | None = None,
 ) -> FallModelConfig:
-    """Build ``models.fall`` from env, defaulting to the packaged LSTM model.
+    """Build the legacy local fall config from the packaged pose+bbox56 bundle.
 
-    Issue #133: the worker must boot with zero env vars.
-    ``ML_WORKER_FALL_MODEL_ARTIFACT_DIR`` is the on/off switch for *explicit*
-    artifact configuration: unset (the out-of-the-box default) no longer
-    means "no fall model" -- it now resolves to the packaged default LSTM
-    model at ``models/fall/lstm`` (arch.json/metadata.yaml are tracked in
-    git; model.pt is fetched separately via ``scripts/fetch-models.sh``
-    since weights stay gitignored). An explicit ``ARTIFACT_DIR`` env value
-    always overrides the default outright, never blends with it.
-
-    Issue #198: ``ARTIFACT_DIR`` being unset does *not* also gate
-    ``window``/``stride``/``operating_threshold`` -- those three are read
-    from their own env vars regardless of which artifact is in play, each
-    falling back independently to the packaged manifest's value only when
-    its own env var is absent. Reading them only inside the "artifact dir is
-    explicitly set" branch (the pre-#198 behavior) meant an operator-set
-    ``ML_WORKER_FALL_MODEL_OPERATING_THRESHOLD`` was silently discarded on
-    the packaged-default path -- the only path the shipped edge topology
-    actually takes.
-
-    Once ``ML_WORKER_FALL_MODEL_ARTIFACT_DIR`` is explicitly set, the
-    artifact contract tightens: window/stride/operating_threshold become
-    *required* (not just respected-if-present) so a partially configured
-    fall model still fails loudly at boot rather than silently defaulting
-    (ADR-0002) -- issue #79 (track 2): every malformed field is collected
-    and reported together, not just the first.
-    ``framework``/``mode`` are not independent env vars: today's
-    ``FallModelConfig`` only has one valid literal for each
-    (pytorch/sequence), so there is nothing for an env var to select yet.
-    ``type`` (the model family/architecture -- #65) does have an env var,
-    ``ML_WORKER_FALL_MODEL_TYPE``, defaulting to "lstm" so existing
-    deployments are unaffected; the registry
-    (``worker.adapters.model.fall_family_registry``) fails closed at boot on
-    an unrecognized value, not here, so a typo'd family name is still
-    validated against every registered family rather than silently accepted
-    as an opaque string. ``input_shape`` is derived from ``window`` rather
-    than given its own var, since ``FallModelConfig`` already requires
-    ``input_shape == (window, 51)``.
+    The zero-environment default is ``models/fall/pose-bbox56-gru`` with a
+    30x56 input, schema version 2, and operating threshold 0.5. Production
+    model selection is the versioned worker-config authority; the local
+    ``ML_WORKER_FALL_MODEL_*`` selection keys are retired and rejected before
+    configuration is resolved.
     """
     env = os.environ if environ is None else environ
     artifact_dir_raw = env.get(ML_WORKER_FALL_MODEL_ARTIFACT_DIR_ENV, "").strip()
@@ -379,17 +349,23 @@ def fall_model_config_from_environment(
         operating_threshold,
         operating_threshold_source,
     )
+    # The packaged bundle carries both members; which one runs is the
+    # profile's decision. The flow image ships no Torch (P1b-AC7), so its
+    # packaged default is the ONNX Runtime member.
+    framework: Literal["pytorch", "onnxruntime"] = (
+        "onnxruntime" if env.get("ML_WORKER_PROFILE", "").strip() == "flow" else "pytorch"
+    )
     try:
         return FallModelConfig(
             type=model_type,
-            framework="pytorch",
+            framework=framework,
             mode="sequence",
             artifact_dir=Path(artifact_dir),
             weights=weights,
             architecture=architecture,
             window=window,
             stride=stride,
-            input_shape=(window, 51),
+            input_shape=(window, 56),
             operating_threshold=operating_threshold,
             schema_version=schema_version,
             preprocessing_identity=preprocessing_identity,
@@ -397,7 +373,7 @@ def fall_model_config_from_environment(
     except ValidationError as error:
         if is_default:
             raise WorkerConfigError(
-                "packaged default LSTM fall model is not fully provisioned at "
+                "packaged default pose+bbox56 fall model is not fully provisioned at "
                 f"{artifact_dir!r} ({error}); {_FETCH_MODELS_HINT}"
             ) from error
         raise WorkerConfigError(f"invalid fall model environment configuration: {error}") from error
@@ -406,10 +382,12 @@ def fall_model_config_from_environment(
 def selected_fall_bundle_config_from_environment(
     environ: Mapping[str, str] | None = None,
     *,
-    selection_path: Path = FALL_SELECTION_PATH,
-    models_root: Path = FALL_MODELS_ROOT,
+    selection_path: Path | None = None,
+    models_root: Path | None = None,
 ) -> SelectedFallBundleConfig | None:
     """Load the selected fall bundle; absence leaves the packaged model active."""
+    selection_path = FALL_SELECTION_PATH if selection_path is None else selection_path
+    models_root = FALL_MODELS_ROOT if models_root is None else models_root
     if not selection_path.exists():
         return None
     try:
@@ -436,9 +414,11 @@ def selected_fall_bundle_config_from_environment(
 def worker_models_config_from_environment(
     environ: Mapping[str, str] | None = None,
 ) -> WorkerModelsConfig:
+    selected = selected_fall_bundle_config_from_environment(environ)
+    if selected is not None:
+        return WorkerModelsConfig(selected=selected)
     return WorkerModelsConfig(
         fall=fall_model_config_from_environment(environ),
-        selected=selected_fall_bundle_config_from_environment(environ),
     )
 
 
@@ -474,19 +454,7 @@ def resolve_local_overrides(
     """
     env = os.environ if environ is None else environ
     environment_models = worker_models_config_from_environment(env)
-    models = WorkerModelsConfig(
-        fall=(
-            yaml_config.models.fall
-            if yaml_config is not None and yaml_config.models.fall is not None
-            else environment_models.fall
-        ),
-        box_source=(
-            yaml_config.models.box_source
-            if yaml_config is not None and yaml_config.models.fall is not None
-            else environment_models.box_source
-        ),
-        selected=environment_models.selected,
-    )
+    yaml_models = yaml_config.models if yaml_config is not None else None
     clip = (
         yaml_config.clip
         if yaml_config is not None and yaml_config.clip.enabled
@@ -495,7 +463,34 @@ def resolve_local_overrides(
     dev_mjpeg = (
         yaml_config.dev_mjpeg if yaml_config is not None and yaml_config.dev_mjpeg.enabled else None
     )
+    if environment_models.selected is not None:
+        if yaml_models is not None:
+            raise WorkerConfigError(
+                "selected fall bundle cannot coexist with a packaged fall model"
+            )
+        return environment_models, clip, dev_mjpeg
+    models = WorkerModelsConfig(
+        fall=(
+            yaml_models.fall
+            if yaml_models is not None and yaml_models.fall is not None
+            else environment_models.fall
+        ),
+        box_source=(
+            yaml_models.box_source
+            if yaml_models is not None and yaml_models.fall is not None
+            else environment_models.box_source
+        ),
+    )
     return models, clip, dev_mjpeg
+
+
+def replay_trace_directory_from_environment(
+    environ: Mapping[str, str] | None = None,
+) -> Path | None:
+    """Return the opt-in local replay trace directory, if configured."""
+    env = os.environ if environ is None else environ
+    raw = env.get(WORKER_REPLAY_TRACE_DIR_ENV, "").strip()
+    return None if not raw else Path(raw)
 
 
 __all__ = [
@@ -511,9 +506,11 @@ __all__ = [
     "ML_WORKER_FALL_MODEL_TYPE_ENV",
     "ML_WORKER_FALL_MODEL_WEIGHTS_ENV",
     "ML_WORKER_FALL_MODEL_WINDOW_ENV",
+    "WORKER_REPLAY_TRACE_DIR_ENV",
     "clip_recording_config_from_environment",
     "fall_model_config_from_environment",
     "reject_retired_worker_environment",
+    "replay_trace_directory_from_environment",
     "resolve_local_overrides",
     "selected_fall_bundle_config_from_environment",
     "worker_models_config_from_environment",

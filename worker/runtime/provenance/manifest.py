@@ -3,12 +3,15 @@ from __future__ import annotations
 from collections.abc import Mapping, Sequence
 from math import isfinite
 from types import MappingProxyType
+from typing import Literal, Protocol
 
 from shared.detection_policies import EffectivePolicy, parse_effective_policy, policy_values_dict
 from worker.domains.module_compiler import CompiledDetectionModuleRegistry
 from worker.domains.module_definition import (
     ComponentBinding,
     DetectionModuleDefinition,
+    RuntimeResolvedArtifactDigest,
+    RuntimeResolvedIdentityField,
     SharedComponentIdentity,
 )
 from worker.runtime.profile.boot import BootContext
@@ -19,6 +22,7 @@ from worker.runtime.provenance.content import (
 )
 from worker.runtime.provenance.models import (
     AppliedBedZone,
+    AppliedBedZoneRegion,
     AppliedCameraState,
     AppliedDetectionWindow,
     AppliedRuntimeManifest,
@@ -35,6 +39,12 @@ SCHEDULE_INTERVAL_BASIS = "ingested-frame-index"
 _EFFECTIVE_DECODE_BACKENDS = frozenset({"cpu", "opencv", "nvdec", "vaapi"})
 
 
+class _BedZoneRegionInput(Protocol):
+    id: str
+    polygon: Sequence[tuple[int, int]]
+    origin: Literal["manual", "model"]
+
+
 def build_applied_camera_state(
     *,
     camera_id: str,
@@ -44,17 +54,17 @@ def build_applied_camera_state(
     schedule: Mapping[str, int],
     detection_windows: Mapping[str, AppliedDetectionWindow | None],
     policies: Mapping[str, EffectivePolicy],
-    bed_zone_polygon: Sequence[tuple[int, int]] | None,
+    bed_zone_regions: Sequence[_BedZoneRegionInput] | None,
     bed_zone_image_width: int | None,
     bed_zone_image_height: int | None,
 ) -> AppliedCameraState:
     """Freeze the effective camera-local state consumed by the runtime plan."""
-    if bed_zone_polygon is None:
+    if not bed_zone_regions:
         bed_zone = AppliedBedZone(
-            authority="live-segmentation",
+            authority="none",
             coordinate_schema_version=BED_ZONE_COORDINATE_SCHEMA_VERSION,
             coordinate_space=None,
-            polygon=None,
+            regions=(),
             source_width=None,
             source_height=None,
         )
@@ -64,10 +74,17 @@ def build_applied_camera_state(
                 "persisted bed-zone provenance requires source dimensions"
             )
         bed_zone = AppliedBedZone(
-            authority="persisted-polygon",
+            authority="persisted-regions",
             coordinate_schema_version=BED_ZONE_COORDINATE_SCHEMA_VERSION,
             coordinate_space=BED_ZONE_COORDINATE_SPACE,
-            polygon=tuple(bed_zone_polygon),
+            regions=tuple(
+                AppliedBedZoneRegion(
+                    id=region.id,
+                    polygon=tuple(region.polygon),
+                    origin=region.origin,
+                )
+                for region in bed_zone_regions
+            ),
             source_width=bed_zone_image_width,
             source_height=bed_zone_image_height,
         )
@@ -151,10 +168,13 @@ def _verified_component_identities(
             raise AppliedRuntimeManifestError(
                 f"unresolved applied identity for component {identity.component_id!r}"
             )
+        # Under the media-plane-owned profiles the temporal policy and the
+        # bed segmenter run on the CPU beside a CUDA media plane by design;
+        # every other component must match the boot device.
         cpu_policy = (
-            boot.profile.name == "nvidia"
+            boot.profile.name in {"nvidia", "flow"}
             and identity.device == "cpu"
-            and identity.runtime == "cpu-policy"
+            and identity.runtime in {"cpu-policy", "onnxruntime-cpu"}
         )
         if identity.device != boot.device and not cpu_policy:
             raise AppliedRuntimeManifestError(
@@ -185,11 +205,17 @@ def _verified_component_identities(
         )
     for component_id, identity in by_id.items():
         binding = bindings[component_id]
-        if binding.artifact_digest != identity.artifact_digest:
+        if (
+            not isinstance(binding.artifact_digest, RuntimeResolvedArtifactDigest)
+            and binding.artifact_digest != identity.artifact_digest
+        ):
             raise AppliedRuntimeManifestError(
                 f"contradictory artifact identity for component {component_id!r}"
             )
-        if binding.preprocessing_identity != identity.preprocessing_identity:
+        if (
+            not isinstance(binding.preprocessing_identity, RuntimeResolvedIdentityField)
+            and binding.preprocessing_identity != identity.preprocessing_identity
+        ):
             raise AppliedRuntimeManifestError(
                 f"contradictory preprocessing identity for component {component_id!r}"
             )
@@ -288,50 +314,79 @@ def _bed_zone_content(bed_zone: AppliedBedZone, camera_id: str) -> dict[str, Jso
         raise AppliedRuntimeManifestError(
             f"camera {camera_id!r} has an invalid bed-zone coordinate schema version"
         )
-    if bed_zone.authority == "live-segmentation":
-        if any(
-            value is not None
-            for value in (
-                bed_zone.coordinate_space,
-                bed_zone.polygon,
-                bed_zone.source_width,
-                bed_zone.source_height,
+    if bed_zone.authority == "none":
+        if (
+            any(
+                value is not None
+                for value in (
+                    bed_zone.coordinate_space,
+                    bed_zone.source_width,
+                    bed_zone.source_height,
+                )
             )
+            or bed_zone.regions
         ):
             raise AppliedRuntimeManifestError(
                 f"camera {camera_id!r} has contradictory absent bed-zone semantics"
             )
         dimensions: JsonValue = None
-        polygon_content: JsonValue = None
+        regions_content: list[JsonValue] = []
     else:
-        polygon = bed_zone.polygon
-        open_polygon = () if polygon is None else _without_closing_vertex(polygon)
         if (
             bed_zone.coordinate_space != BED_ZONE_COORDINATE_SPACE
-            or len(open_polygon) < 3
+            or not bed_zone.regions
             or bed_zone.source_width is None
             or bed_zone.source_height is None
             or bed_zone.source_width <= 0
             or bed_zone.source_height <= 0
-            or any(
-                isinstance(coordinate, bool) or not isinstance(coordinate, int)
-                for point in open_polygon
-                for coordinate in point
-            )
         ):
             raise AppliedRuntimeManifestError(
                 f"camera {camera_id!r} has invalid persisted bed-zone semantics"
+            )
+        region_ids = tuple(region.id for region in bed_zone.regions)
+        if len(set(region_ids)) != len(region_ids) or any(
+            not region_id.strip() for region_id in region_ids
+        ):
+            raise AppliedRuntimeManifestError(
+                f"camera {camera_id!r} has invalid persisted bed-zone region ids"
+            )
+        regions_content = []
+        for region in sorted(bed_zone.regions, key=lambda item: item.id):
+            open_polygon = _without_closing_vertex(region.polygon)
+            if (
+                region.origin not in ("manual", "model")
+                or len(open_polygon) < 3
+                or any(
+                    isinstance(coordinate, bool)
+                    or not isinstance(coordinate, int)
+                    or coordinate < 0
+                    for point in open_polygon
+                    for coordinate in point
+                )
+                or any(
+                    x >= bed_zone.source_width or y >= bed_zone.source_height
+                    for x, y in open_polygon
+                )
+            ):
+                raise AppliedRuntimeManifestError(
+                    f"camera {camera_id!r} has invalid persisted bed-zone region semantics"
+                )
+            regions_content.append(
+                {
+                    "id": region.id,
+                    "origin": region.origin,
+                    "polygon": [[x, y] for x, y in _canonical_polygon(open_polygon)],
+                }
             )
         dimensions = {
             "width": bed_zone.source_width,
             "height": bed_zone.source_height,
         }
-        polygon_content = [[x, y] for x, y in _canonical_polygon(open_polygon)]
     return {
         "authority": bed_zone.authority,
         "coordinate_schema_version": bed_zone.coordinate_schema_version,
         "coordinate_space": bed_zone.coordinate_space,
-        "polygon": polygon_content,
+        "regions": regions_content,
         "source_dimensions": dimensions,
     }
 

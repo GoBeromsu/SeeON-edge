@@ -15,7 +15,7 @@ from worker.types import TemporalProfile
 
 ObservationChannel: TypeAlias = str
 ComponentKind: TypeAlias = Literal["extractor", "model", "state", "rule"]
-IntervalSource: TypeAlias = Literal["camera-frame-stride", "fixed", "temporal-profile"]
+IntervalSource: TypeAlias = Literal["camera-frame-stride", "fixed", "on-demand", "temporal-profile"]
 WindowMode: TypeAlias = Literal["external", "internal"]
 
 
@@ -25,6 +25,21 @@ class DetectionModuleCompilationError(ValueError):
 
 class DetectionModuleActivationError(RuntimeError):
     pass
+
+
+@dataclass(frozen=True, slots=True)
+class RuntimeResolvedIdentityField:
+    """Marker for a shared model identity field supplied by its verified bundle."""
+
+
+# Field-specific aliases retain readable binding annotations while making all
+# runtime-resolved identity fields one explicit, non-string marker type.
+RuntimeResolvedArtifactDigest = RuntimeResolvedIdentityField
+RuntimeResolvedPreprocessingIdentity = RuntimeResolvedIdentityField
+
+
+RUNTIME_RESOLVED_ARTIFACT_DIGEST = RuntimeResolvedIdentityField()
+RUNTIME_RESOLVED_PREPROCESSING_IDENTITY = RuntimeResolvedIdentityField()
 
 
 @dataclass(frozen=True, slots=True)
@@ -70,8 +85,8 @@ class ComponentBinding:
     model_family: str | None = None
     provisioner: str | None = None
     serving_task: str | None = None
-    artifact_digest: str | None = None
-    preprocessing_identity: str | None = None
+    artifact_digest: str | RuntimeResolvedIdentityField | None = None
+    preprocessing_identity: str | RuntimeResolvedIdentityField | None = None
     output_adapter: str | None = None
     activation_flag: str | None = None
     warmup_required: bool = False
@@ -86,7 +101,9 @@ class ComponentBinding:
             raise DetectionModuleCompilationError(
                 f"camera-local binding {self.component_id!r} has no shared identity"
             )
-        if self.artifact_digest is None or self.preprocessing_identity is None:
+        if not isinstance(self.artifact_digest, str) or not isinstance(
+            self.preprocessing_identity, str
+        ):
             raise DetectionModuleCompilationError(
                 f"component binding {self.component_id!r} is missing provenance"
             )
@@ -106,11 +123,14 @@ class ScheduleRule:
     interval: int | None = None
     skip_when_flag: str | None = None
 
-    def resolve(self, camera_frame_stride: int, temporal_profile: TemporalProfile) -> int:
+    def resolve(self, camera_frame_stride: int, temporal_profile: TemporalProfile) -> int | None:
         # temporal_profile is required: compile-time validation and live
         # activation must name the same owner. A missing argument used to
         # fall through to CURRENT_TEMPORAL_PROFILE, so a 15fps activation
         # still validated CURRENT's 30-frame bed interval.
+        if self.interval_source == "on-demand":
+            # Provisioned for an explicit operator request, never per frame.
+            return None
         if self.interval_source == "camera-frame-stride":
             return camera_frame_stride
         if self.interval_source == "temporal-profile":

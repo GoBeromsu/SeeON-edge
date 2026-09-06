@@ -19,6 +19,13 @@ from pathlib import Path
 
 import pytest
 
+from contracts.model_selection import (
+    DatasetPublication,
+    ModelPublication,
+    ModelSelection,
+    canonical_digest,
+)
+from tests_support.pose_bbox56_bundle_artifact import write_pose_bbox56_bundle
 from worker.tools.fetch_models import cli
 from worker.tools.fetch_models.fetcher import (
     PART_SUFFIX,
@@ -37,10 +44,11 @@ from worker.tools.fetch_models.http_source import (
 from worker.tools.fetch_models.manifest import (
     MANIFEST_PATH,
     SIDECAR_ROOT,
+    Artifact,
     Bundle,
     Manifest,
     ManifestError,
-    PublishedBundle,
+    Source,
     canonical_json,
     load_manifest,
     parse_manifest,
@@ -208,6 +216,116 @@ def _bundle_source(bundle: Bundle) -> FakeSource:
     )
 
 
+def _selected_bundle_delivery(
+    tmp_path: Path, *, include_calibration: bool = True
+) -> tuple[Manifest, FakeSource, Path, Bundle]:
+    source_root = write_pose_bbox56_bundle(tmp_path / "source")
+    members = {
+        path: (source_root / path).read_bytes()
+        for path in (
+            "model.onnx",
+            "calibration.json",
+            "conformance/pose-bbox56-v1.json",
+            "bundle-manifest.json",
+        )
+        if include_calibration or path != "calibration.json"
+    }
+    identities = {
+        "dataset": "1" * 64,
+        "calibration": _sha(members["calibration.json"])
+        if "calibration.json" in members
+        else "2" * 64,
+        "conformance": _sha(members["conformance/pose-bbox56-v1.json"]),
+        "class": "4" * 64,
+        "input": "pose-bbox56.v1",
+        "policy": (
+            canonical_digest(json.loads(members["calibration.json"])["temporal_rule"])
+            if "calibration.json" in members
+            else "5" * 64
+        ),
+        "members": "6" * 64,
+    }
+    member_records = [
+        {"path": path, "sha256": _sha(body), "size": len(body)} for path, body in members.items()
+    ]
+    payload = {"identities": identities}
+    bundle_sha256 = _sha(canonical_json({"members": member_records, "payload": payload}).encode())
+    evaluation = {
+        "bundle_sha256": bundle_sha256,
+        "bundle_members_digest": identities["members"],
+        "dataset_payload_digest": identities["dataset"],
+        "calibration_digest": identities["calibration"],
+        "conformance_digest": identities["conformance"],
+        "input_observation_schema": identities["input"],
+        "output_class_count": 2,
+        "output_class_semantics_digest": identities["class"],
+        "policy_digest": identities["policy"],
+    }
+    field = {
+        **evaluation,
+        "evaluation_receipt_digest": canonical_digest(evaluation),
+        "status": "green",
+    }
+    receipts = {
+        "evaluation-receipt.json": canonical_json(evaluation).encode() + b"\n",
+        "field-evaluation-receipt.json": canonical_json(field).encode() + b"\n",
+    }
+    raw = _manifest_dict()
+    manifest = parse_manifest(raw)
+    source = Source(
+        name="replacement-publication",
+        kind="huggingface",
+        source_locator="replacement/models",
+        ref="c" * 40,
+    )
+    bundle = Bundle(
+        bundle_sha256,
+        tuple(
+            Artifact(path, source, path, len(body), _sha(body)) for path, body in members.items()
+        ),
+        payload,
+        tuple(
+            Artifact(path, source, path, len(body), _sha(body)) for path, body in receipts.items()
+        ),
+        "onnxruntime",
+    )
+    selection = ModelSelection(
+        model_publication=ModelPublication(source.source_locator, source.ref, bundle_sha256),
+        bundle_members_digest=identities["members"],
+        dataset_publication=DatasetPublication("facility/dataset", "b" * 40, identities["dataset"]),
+        evaluation_receipt_digest=canonical_digest(evaluation),
+        field_evaluation_receipt_digest=canonical_digest(field),
+        calibration_digest=identities["calibration"],
+        conformance_digest=identities["conformance"],
+        input_observation_schema=identities["input"],
+        output_class_count=2,
+        output_class_semantics_digest=identities["class"],
+        policy_digest=identities["policy"],
+        runtime_format="onnxruntime",
+        bundle_format="bundle-manifest/proxy-v0",
+        preprocessing_identity="coco17-xyc-plus-pose-head-xyxy-valid-f32-v1",
+        transition_threshold=0.5,
+        threshold_source="default",
+    )
+    selection_path = tmp_path / "model-selection.json"
+    selection_path.write_text(json.dumps(selection.as_dict()), encoding="utf-8")
+    bodies = _fake_for(manifest).bodies
+    bodies[source.url_for("manifest.json")] = bundle.manifest_bytes
+    bodies.update(
+        {
+            artifact.url: body
+            for artifact, body in zip(bundle.members, members.values(), strict=True)
+        }
+    )
+    bodies.update(
+        {
+            artifact.url: body
+            for artifact, body in zip(bundle.receipts, receipts.values(), strict=True)
+        }
+    )
+    return manifest, FakeSource(bodies), selection_path, bundle
+
+
 # --- manifest -------------------------------------------------------------
 
 
@@ -215,44 +333,36 @@ def test_committed_manifest_parses_and_pins_every_family_the_worker_loads() -> N
     manifest = load_manifest(MANIFEST_PATH)
     paths = {artifact.path for artifact in manifest.artifacts}
     assert {
-        "fall/lstm/model.pt",
-        "fall/lstm/metadata.upstream.json",
+        "fall/pose-bbox56-gru/bundle-manifest.json",
+        "fall/pose-bbox56-gru/model.pt",
+        "fall/pose-bbox56-gru/arch.json",
+        "fall/pose-bbox56-gru/calibration.json",
+        "fall/pose-bbox56-gru/evaluation-receipt.json",
+        "fall/pose-bbox56-gru/metadata.yaml",
+        "fall/pose-bbox56-gru/conformance/pose-bbox56-v1.json",
         "pose/yolo26n-pose.pt",
         "person/yolo26n.pt",
         "bed/yolo26m-seg.pt",
     } <= paths
-    assert set(manifest.sidecars) == {"fall/lstm/arch.json", "fall/lstm/metadata.yaml"}
-    hf = manifest.sources["eldercare-fall-models"]
-    assert (hf.source_locator, hf.ref) == (
-        "Berom0227/eldercare-fall-models",
-        "d67887844bfd2e4b1ca3f3275f770b0b05e23aba",
-    )
+    # The V2 bundle is self-verifying from its own bundle-manifest.json, so no
+    # tracked sidecar copies exist any more.
+    assert manifest.sidecars == ()
+    assert not any(path.startswith("fall/lstm/") for path in paths)
     published_source = manifest.sources["published-pose-bbox56-fall-model"]
     assert (published_source.source_locator, published_source.ref) == (
         "Berom0227/seeon-model-v0.1.0-pose-bbox56-proxy-research",
         "988bacc666a3e5935b70e9f546aea38a6d7e5399",
     )
-    assert manifest.published_bundles == (
-        PublishedBundle(
-            "Berom0227/seeon-model-v0.1.0-pose-bbox56-proxy-research",
-            "988bacc666a3e5935b70e9f546aea38a6d7e5399",
-            "998e060138911f3167c4fba79b96b406ff555893771c33a53bd07eaa4d77cffe",
-        ),
-    )
 
 
 def test_committed_manifest_digests_agree_with_runtime_pins() -> None:
-    """The registry and the tracked LSTM sidecar already pin these digests;
-    the manifest must never drift from what the runtime will accept."""
+    """Perception artifacts remain pinned by the compiled Flow registry."""
     from worker.domains.registry import _COMPONENT_ARTIFACT_DIGESTS
 
     by_path = {artifact.path: artifact.sha256 for artifact in load_manifest().artifacts}
     assert by_path["pose/yolo26n-pose.pt"] == _COMPONENT_ARTIFACT_DIGESTS["pose"]
     assert by_path["person/yolo26n.pt"] == _COMPONENT_ARTIFACT_DIGESTS["person"]
     assert by_path["bed/yolo26m-seg.pt"] == _COMPONENT_ARTIFACT_DIGESTS["bed"]
-    assert by_path["fall/lstm/model.pt"] == _COMPONENT_ARTIFACT_DIGESTS["fall-classifier"]
-    sidecar = (TRACKED_SIDECAR_DIR / "metadata.yaml").read_text(encoding="utf-8")
-    assert f'artifact_digest: "{by_path["fall/lstm/model.pt"]}"' in sidecar
 
 
 def test_bundled_sidecars_are_byte_identical_to_tracked_models_dir() -> None:
@@ -275,6 +385,7 @@ def test_bundled_sidecars_are_byte_identical_to_tracked_models_dir() -> None:
         (lambda d: d["artifacts"][0].update(path="../escape"), "plain relative path"),
         (lambda d: d["artifacts"][0].update(path="/abs"), "plain relative path"),
         (lambda d: d["artifacts"][1].update(path="fall/lstm/model.pt"), "duplicate"),
+        (lambda d: d.update(published_bundles=[]), "published_bundles is obsolete"),
     ],
 )
 def test_manifest_rejects_malformed_entries(mutation: object, message: str) -> None:
@@ -315,6 +426,128 @@ def test_fetch_all_downloads_verifies_and_is_idempotent(tmp_path: Path) -> None:
     assert len(source.calls) == 2, "second run must not touch the network"
 
 
+def test_fetch_all_delivers_and_rehearses_selected_bundle_not_listed_in_manifest(
+    tmp_path: Path,
+) -> None:
+    manifest, source, selection_path, bundle = _selected_bundle_delivery(tmp_path)
+    publication = json.loads(selection_path.read_text(encoding="utf-8"))["model_publication"]
+    assert not any(
+        (candidate.source_locator, candidate.ref)
+        == (publication["source_locator"], publication["revision"])
+        for candidate in manifest.sources.values()
+    )
+
+    report = fetch_all(
+        manifest,
+        tmp_path / "models",
+        source,
+        env={},
+        retry=_no_sleep_policy(),
+        selection_path=selection_path,
+    )
+
+    destination = tmp_path / "models" / "bundles" / bundle.sha256
+    assert {result.path for result in report.results} >= {
+        "model.onnx",
+        "calibration.json",
+        "evaluation-receipt.json",
+        "field-evaluation-receipt.json",
+    }
+    assert (destination / "manifest.json").read_bytes() == bundle.manifest_bytes
+    assert all(
+        sha256_of(destination / artifact.path) == artifact.sha256
+        for artifact in (*bundle.members, *bundle.receipts)
+    )
+
+
+def test_fetch_all_refuses_selection_when_its_source_is_unreachable(tmp_path: Path) -> None:
+    manifest = parse_manifest(_manifest_dict())
+    selection_path = tmp_path / "model-selection.json"
+    _, _, selected_path, _ = _selected_bundle_delivery(tmp_path / "selection")
+    selection_path.write_bytes(selected_path.read_bytes())
+
+    with pytest.raises(
+        VerificationError,
+        match="published bundle source replacement/models@c{40} is unreachable",
+    ):
+        fetch_all(
+            manifest,
+            tmp_path / "models",
+            _fake_for(manifest),
+            env={},
+            retry=_no_sleep_policy(),
+            selection_path=selection_path,
+        )
+
+
+def test_fetch_all_refuses_selected_bundle_claim_with_different_members_identity(
+    tmp_path: Path,
+) -> None:
+    manifest, source, selection_path, bundle = _selected_bundle_delivery(tmp_path)
+    raw_selection = json.loads(selection_path.read_text(encoding="utf-8"))
+    raw_selection["model_publication"]["bundle_sha256"] = "0" * 64
+    selection_path.write_text(json.dumps(raw_selection), encoding="utf-8")
+
+    with pytest.raises(
+        VerificationError,
+        match=(
+            f"published bundle manifest identity {bundle.sha256} does not match selected bundle "
+            f"{'0' * 64}"
+        ),
+    ):
+        fetch_all(
+            manifest,
+            tmp_path / "models",
+            source,
+            env={},
+            retry=_no_sleep_policy(),
+            selection_path=selection_path,
+        )
+
+
+def test_fetch_all_refuses_selected_bundle_boot_would_refuse(tmp_path: Path) -> None:
+    manifest, source, selection_path, bundle = _selected_bundle_delivery(
+        tmp_path, include_calibration=False
+    )
+
+    with pytest.raises(VerificationError, match="calibration.json digest mismatch"):
+        fetch_all(
+            manifest,
+            tmp_path / "models",
+            source,
+            env={},
+            retry=_no_sleep_policy(),
+            selection_path=selection_path,
+        )
+    assert (tmp_path / "models" / "bundles" / bundle.sha256).is_dir()
+
+
+def test_fetch_all_rejects_tampered_selected_bundle_with_boot_reason(tmp_path: Path) -> None:
+    manifest, source, selection_path, bundle = _selected_bundle_delivery(tmp_path)
+    models_root = tmp_path / "models"
+    fetch_all(
+        manifest,
+        models_root,
+        source,
+        env={},
+        retry=_no_sleep_policy(),
+        selection_path=selection_path,
+    )
+    (models_root / "bundles" / bundle.sha256 / "calibration.json").write_text(
+        "tampered", encoding="utf-8"
+    )
+
+    with pytest.raises(VerificationError, match="member mismatch: calibration.json"):
+        fetch_all(
+            manifest,
+            models_root,
+            source,
+            env={},
+            retry=_no_sleep_policy(),
+            selection_path=selection_path,
+        )
+
+
 def test_hash_mismatch_fails_and_leaves_nothing_at_the_final_path(tmp_path: Path) -> None:
     manifest = parse_manifest(_manifest_dict())
     source = _fake_for(manifest)
@@ -324,6 +557,72 @@ def test_hash_mismatch_fails_and_leaves_nothing_at_the_final_path(tmp_path: Path
         fetch_all(manifest, tmp_path, source, env={}, retry=_no_sleep_policy())
     assert not (tmp_path / "fall/lstm/model.pt").exists()
     assert not list(tmp_path.rglob(f"*{PART_SUFFIX}"))
+
+
+def test_pose_bbox56_bundle_is_judged_the_way_the_runner_judges_it(tmp_path: Path) -> None:
+    """Fetch loads the bundle with the runner's own constructor, so it refuses
+    exactly what boot refuses and nothing else.
+
+    A redeploy re-fetches the published manifest over the exported one, leaving
+    the ONNX on disk but unlisted; a file-exists check alone once reported
+    success on a bundle the worker then refused at boot.
+    """
+    bundle = tmp_path / "fall" / "pose-bbox56-gru"
+    bundle.mkdir(parents=True)
+    write_pose_bbox56_bundle(bundle)
+    # The published model.pt is the very one the bundle carries, so fetch's own
+    # download does not disturb the bundle's identity.
+    weights = (bundle / "model.pt").read_bytes()
+    raw = _manifest_dict(
+        artifacts=[
+            {
+                "path": "fall/pose-bbox56-gru/model.pt",
+                "source": "hf",
+                "remote_path": "bundle/model.pt",
+                "size": len(weights),
+                "sha256": _sha(weights),
+            }
+        ]
+    )
+    manifest = parse_manifest(raw)
+    source = FakeSource({manifest.artifacts[0].url: weights})
+    onnx = bundle / "model.onnx"
+    good_onnx = onnx.read_bytes()
+    good_manifest = (bundle / "bundle-manifest.json").read_text(encoding="utf-8")
+
+    # Exported bundle: on disk, listed, digests verify -> provisioning proceeds.
+    report = fetch_all(manifest, tmp_path, source, env={}, retry=_no_sleep_policy())
+    assert report.results, "provisioning must run when the bundle is loadable"
+
+    # Fresh site: no ONNX at all -> refused naming the missing file.
+    onnx.unlink()
+    with pytest.raises(VerificationError, match="missing model.onnx"):
+        fetch_all(manifest, tmp_path, source, env={}, retry=_no_sleep_policy())
+
+    # Redeploy: ONNX back on disk but the re-fetched manifest no longer lists it
+    # -> refused, because the runner's constructor refuses it.
+    onnx.write_bytes(good_onnx)
+    stripped = json.loads(good_manifest)
+    stripped["files"] = [f for f in stripped["files"] if f["relative_path"] != "model.onnx"]
+    (bundle / "bundle-manifest.json").write_text(json.dumps(stripped), encoding="utf-8")
+    with pytest.raises(VerificationError, match="not loadable by the Flow runner"):
+        fetch_all(manifest, tmp_path, source, env={}, retry=_no_sleep_policy())
+
+    # Tampered member: listed but the digest no longer matches disk -> refused.
+    (bundle / "bundle-manifest.json").write_text(good_manifest, encoding="utf-8")
+    onnx.write_bytes(b"tampered")
+    with pytest.raises(VerificationError, match="not loadable by the Flow runner"):
+        fetch_all(manifest, tmp_path, source, env={}, retry=_no_sleep_policy())
+
+    # Manifest lists model.onnx but not model.pt: the runner loads, but boot's
+    # composition also names the bundle by its published weights' digest and
+    # refuses - so fetch must refuse too.
+    onnx.write_bytes(good_onnx)
+    no_pt = json.loads(good_manifest)
+    no_pt["files"] = [f for f in no_pt["files"] if f["relative_path"] != "model.pt"]
+    (bundle / "bundle-manifest.json").write_text(json.dumps(no_pt), encoding="utf-8")
+    with pytest.raises(VerificationError, match="not loadable by the Flow runner"):
+        fetch_all(manifest, tmp_path, source, env={}, retry=_no_sleep_policy())
 
 
 def test_size_mismatch_fails_before_hash(tmp_path: Path) -> None:

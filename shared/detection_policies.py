@@ -23,15 +23,10 @@ class PolicyDocumentError(ValueError):
 
 
 @dataclass(frozen=True, slots=True)
-class FallPolicyV1:
-    operating_threshold: float
-
-
-@dataclass(frozen=True, slots=True)
 class FallPolicyV2:
     """Frozen inactive fall-candidate temporal policy, not a policy document."""
 
-    transition_threshold: float = 0.7
+    transition_threshold: float = 0.5
     transition_votes: int = 3
     transition_window: int = 5
     fallen_threshold: float = 0.8
@@ -74,9 +69,9 @@ class BedExitPolicyV1:
     grace_frames: int
 
 
-NumericPolicy: TypeAlias = FallPolicyV1 | BedExitPolicyV1
+NumericPolicy: TypeAlias = FallPolicyV2 | BedExitPolicyV1
 
-FALL_POLICY_V1_DEFAULT: Final = FallPolicyV1(operating_threshold=0.5)
+FALL_POLICY_V2_DEFAULT: Final = FallPolicyV2()
 BED_EXIT_POLICY_V1_DEFAULT: Final = BedExitPolicyV1(
     min_containment=0.35,
     hold_frames=2,
@@ -105,11 +100,11 @@ class PolicyDefinition:
 _POLICY_DEFINITIONS: Final = (
     PolicyDefinition(
         "fall",
-        1,
+        2,
         "fall.policy",
-        1,
-        MappingProxyType({"operating_threshold": "probability [0,1]"}),
-        FALL_POLICY_V1_DEFAULT,
+        2,
+        MappingProxyType({"transition_threshold": "probability [0,1]"}),
+        FALL_POLICY_V2_DEFAULT,
     ),
     PolicyDefinition(
         "bed_exit",
@@ -169,12 +164,12 @@ def parse_policy_values(
             f"supported {definition.qualified_schema_id}"
         )
     mapping = _mapping(values, "policy values")
-    if module_id == "fall":
-        _require_fields(mapping, {"operating_threshold"}, "fall policy")
-        threshold = _finite_number(mapping["operating_threshold"], "operating_threshold")
+    if module_id == "fall" and module_version == 2:
+        _require_fields(mapping, {"transition_threshold"}, "fall policy")
+        threshold = _finite_number(mapping["transition_threshold"], "transition_threshold")
         if not 0.0 <= threshold <= 1.0:
-            raise PolicyDocumentError("operating_threshold must be in [0, 1]")
-        return FallPolicyV1(threshold)
+            raise PolicyDocumentError("transition_threshold must be in [0, 1]")
+        return FallPolicyV2(transition_threshold=threshold)
     if module_id == "bed_exit":
         _require_fields(
             mapping,
@@ -199,8 +194,8 @@ def parse_policy_values(
 
 
 def policy_values_dict(policy: NumericPolicy) -> dict[str, int | float]:
-    if isinstance(policy, FallPolicyV1):
-        return {"operating_threshold": policy.operating_threshold}
+    if isinstance(policy, FallPolicyV2):
+        return {"transition_threshold": policy.transition_threshold}
     return {
         "min_containment": policy.min_containment,
         "hold_frames": policy.hold_frames,
@@ -506,12 +501,11 @@ def _canonical_json(value: object) -> str:
 
 __all__ = [
     "BED_EXIT_POLICY_V1_DEFAULT",
-    "FALL_POLICY_V1_DEFAULT",
+    "FALL_POLICY_V2_DEFAULT",
     "LATEST_POLICY_VERSIONS",
     "POLICY_DEFINITIONS",
     "BedExitPolicyV1",
     "EffectivePolicy",
-    "FallPolicyV1",
     "NumericPolicy",
     "PolicyBundle",
     "PolicyDefinition",

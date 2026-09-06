@@ -116,10 +116,7 @@ _NEUTRAL_INPUTS = (
     "LICENSE",
     "README.md",
     "artifacts/",
-    "compose.edge.cpu.yaml",
     "compose.edge.dev.yaml",
-    "compose.edge.igpu.yaml",
-    "compose.edge.nvidia.yaml",
     "compose.edge.yaml",
     "docs/",
     "edge-env-inventory.json",
@@ -247,8 +244,13 @@ def published_digest(repo: str, tag: str, run: Runner | None = None) -> str:
     run = run or _run
     return run(
         [
-            "docker", "buildx", "imagetools", "inspect",
-            f"{repo}:{tag}", "--format", "{{.Manifest.Digest}}",
+            "docker",
+            "buildx",
+            "imagetools",
+            "inspect",
+            f"{repo}:{tag}",
+            "--format",
+            "{{.Manifest.Digest}}",
         ]
     ).strip()
 
@@ -294,9 +296,7 @@ def _iter_label_maps(node: object) -> Iterable[dict[str, str]]:
             yield from _iter_label_maps(value)
 
 
-def retag_preserving_digest(
-    repo: str, digest: str, tag: str, run: Runner | None = None
-) -> str:
+def retag_preserving_digest(repo: str, digest: str, tag: str, run: Runner | None = None) -> str:
     """Add ``tag`` to the manifest already published at ``repo@digest``.
 
     This is the whole reuse mechanism: it copies a manifest to a new tag without
@@ -410,8 +410,7 @@ def plan(
 
     if not commit_exists(base):
         return build(
-            f"{repo}@{digest} names build commit {base}, which is not in this "
-            "repository's history"
+            f"{repo}@{digest} names build commit {base}, which is not in this repository's history"
         )
 
     decision = decide(image, base, head)

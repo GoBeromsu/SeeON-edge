@@ -1,9 +1,17 @@
 from __future__ import annotations
 
-from typing import ClassVar, Final
+from typing import ClassVar, Final, Literal
 from urllib.parse import urlsplit, urlunsplit
 
-from pydantic import BaseModel, ConfigDict, Field, SecretStr, field_validator, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    SecretStr,
+    StrictInt,
+    field_validator,
+    model_validator,
+)
 
 from worker.runtime.config.errors import ConfigValidationError
 from worker.types import CURRENT_TEMPORAL_PROFILE
@@ -25,6 +33,21 @@ class CameraStreamsConfig(BaseModel):
         return _normalize_rtsp_url(value, "streams")
 
 
+class BedZoneRegionConfig(BaseModel):
+    model_config: ClassVar[ConfigDict] = ConfigDict(frozen=True, extra="forbid")
+
+    id: str = Field(min_length=1, max_length=64, strict=True)
+    polygon: tuple[tuple[StrictInt, StrictInt], ...] = Field(min_length=3, max_length=16)
+    origin: Literal["manual", "model"]
+
+    @field_validator("id")
+    @classmethod
+    def _require_nonblank_id(cls, value: str) -> str:
+        if not value.strip():
+            raise ConfigValidationError("bed zone region id must not be blank")
+        return value
+
+
 class CameraRuntimeConfig(BaseModel):
     model_config: ClassVar[ConfigDict] = ConfigDict(frozen=True, extra="forbid")
 
@@ -40,24 +63,11 @@ class CameraRuntimeConfig(BaseModel):
     frame_stride: int = Field(default=1, gt=0)
     label: str | None = None
     decode_backend: str | None = None
-    # Operator-recognized bed polygon (see the bed-zone recognize endpoint),
-    # persisted backend-side and pulled down as part of the worker config.
-    # When set, it is the authoritative bed region for bed-exit -- live
-    # segmentation is only used as a fallback when this is absent.
-    bed_zone_polygon: tuple[tuple[int, int], ...] | None = None
+    # Persisted operator-approved regions are authoritative for bed-exit.
+    # Recognition only proposes regions for explicit persistence.
+    bed_zone_regions: tuple[BedZoneRegionConfig, ...] = Field(default=(), max_length=8)
     bed_zone_image_width: int | None = Field(default=None, gt=0)
     bed_zone_image_height: int | None = Field(default=None, gt=0)
-
-    @field_validator("bed_zone_polygon")
-    @classmethod
-    def _validate_bed_zone_polygon(
-        cls, value: tuple[tuple[int, int], ...] | None
-    ) -> tuple[tuple[int, int], ...] | None:
-        if value is None:
-            return None
-        if len(value) < 3:
-            raise ConfigValidationError("bed_zone_polygon must have at least 3 points")
-        return value
 
     @field_validator("camera_id")
     @classmethod
@@ -99,15 +109,30 @@ class CameraRuntimeConfig(BaseModel):
             return None
         normalized = value.strip().lower()
         if normalized not in SUPPORTED_DECODE_BACKENDS:
-            raise ConfigValidationError(
-                "decode_backend must be one of auto, nvdec, opencv, cpu"
-            )
+            raise ConfigValidationError("decode_backend must be one of auto, nvdec, opencv, cpu")
         return normalized
 
     @model_validator(mode="after")
     def _require_inference_stream(self) -> CameraRuntimeConfig:
         if self.rtsp_url is None and self.streams is None:
             raise ConfigValidationError("camera must define rtsp_url or streams.sub")
+        if self.bed_zone_regions:
+            if self.bed_zone_image_width is None or self.bed_zone_image_height is None:
+                raise ConfigValidationError("bed zone regions require image width and height")
+            region_ids = tuple(region.id for region in self.bed_zone_regions)
+            if len(set(region_ids)) != len(region_ids):
+                raise ConfigValidationError("bed zone region ids must be distinct")
+            for region in self.bed_zone_regions:
+                if any(
+                    x < 0
+                    or x >= self.bed_zone_image_width
+                    or y < 0
+                    or y >= self.bed_zone_image_height
+                    for x, y in region.polygon
+                ):
+                    raise ConfigValidationError(
+                        "bed zone polygon points must be within source image bounds"
+                    )
         return self
 
     @property
@@ -150,6 +175,7 @@ def _normalize_rtsp_url(value: str, field_name: str) -> str:
 
 __all__ = [
     "SUPPORTED_DECODE_BACKENDS",
+    "BedZoneRegionConfig",
     "CameraRuntimeConfig",
     "CameraStreamsConfig",
     "RelayConfig",

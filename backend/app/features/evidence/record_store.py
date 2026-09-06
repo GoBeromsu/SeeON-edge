@@ -46,8 +46,7 @@ class EvidenceReviewConflictError(RuntimeError):
 
     def __str__(self) -> str:
         return (
-            f"incident review {self.incident_id}: "
-            f"expected version {self.expected_version} changed"
+            f"incident review {self.incident_id}: expected version {self.expected_version} changed"
         )
 
 
@@ -100,8 +99,7 @@ class CentralEvidenceReviewStore:
                 if changed != 1:
                     raise EvidenceReviewConflictError(incident_id, expected_version)
                 clip_row = connection.execute(
-                    "SELECT clip_id FROM artifacts "
-                    "WHERE incident_id = ? AND kind = 'PRIMARY_CLIP'",
+                    "SELECT clip_id FROM artifacts WHERE incident_id = ? AND kind = 'PRIMARY_CLIP'",
                     (incident_id,),
                 ).fetchone()
                 if after_write is not None:
@@ -131,8 +129,7 @@ class CentralEvidenceQuery:
         connection = open_runtime_database(self.database_path, actor=RuntimeActor.API)
         try:
             row = connection.execute(
-                _SUMMARY_SELECT
-                + " WHERE incident.incident_id = ? OR incident.edge_event_id = ?",
+                _SUMMARY_SELECT + " WHERE incident.incident_id = ? OR incident.edge_event_id = ?",
                 (identity, identity),
             ).fetchone()
         finally:
@@ -201,9 +198,7 @@ def _summary_from_row(row: sqlite3.Row | tuple[object, ...]) -> CentralEvidenceS
     review = None
     if review_version > 0:
         disposition = (
-            ReviewDisposition.TRUE_POSITIVE
-            if row[19] == "TP"
-            else ReviewDisposition.FALSE_POSITIVE
+            ReviewDisposition.TRUE_POSITIVE if row[19] == "TP" else ReviewDisposition.FALSE_POSITIVE
         )
         review = EvidenceReview(
             review_id=f"{row[0]}:review:{review_version}",
@@ -216,15 +211,26 @@ def _summary_from_row(row: sqlite3.Row | tuple[object, ...]) -> CentralEvidenceS
             notes=_text(row[20]),
         )
     return CentralEvidenceSummary(
-        incident_id=str(row[0]), edge_event_id=str(row[1]), schema_version=18,
-        camera_id=str(row[2]), event_type=str(row[3]), detected_at=str(row[4]),
-        lifecycle_state=str(row[5]), revision=_integer(row[6]), failure_reason=_text(row[7]),
-        runtime_manifest_sha256=_text(row[8]), decision_trace_id=None,
-        module_qualified_id=_text(row[9]), policy_qualified_id=_text(row[10]),
-        primary_clip_id=_text(row[11]), primary_artifact_state=_text(row[12]),
+        incident_id=str(row[0]),
+        edge_event_id=str(row[1]),
+        schema_version=18,
+        camera_id=str(row[2]),
+        event_type=str(row[3]),
+        detected_at=str(row[4]),
+        lifecycle_state=str(row[5]),
+        revision=_integer(row[6]),
+        failure_reason=_text(row[7]),
+        runtime_manifest_sha256=_text(row[8]),
+        decision_trace_id=None,
+        module_qualified_id=_text(row[9]),
+        policy_qualified_id=_text(row[10]),
+        primary_clip_id=_text(row[11]),
+        primary_artifact_state=_text(row[12]),
         snapshot_artifact_state=_text(row[13]),
-        event_delivery_state="ACKED", clip_publish_state=_text(row[14]),
-        retention_state=_text(row[15]), review=review,
+        event_delivery_state="ACKED",
+        clip_publish_state=_text(row[14]),
+        retention_state=_text(row[15]),
+        review=review,
     )
 
 
@@ -273,6 +279,10 @@ def _text(value: object) -> str | None:
 
 
 __all__ = [
-    "CentralEvidenceQuery", "CentralEvidenceReviewStore", "CentralEvidenceSummary",
-    "EvidenceReview", "EvidenceReviewConflictError", "ReviewDisposition",
+    "CentralEvidenceQuery",
+    "CentralEvidenceReviewStore",
+    "CentralEvidenceSummary",
+    "EvidenceReview",
+    "EvidenceReviewConflictError",
+    "ReviewDisposition",
 ]

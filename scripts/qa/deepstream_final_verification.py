@@ -96,9 +96,7 @@ def compliance(
             receipts = _task_receipts(root, task, phase)
             if not receipts:
                 findings.append(f"task_{task}_{phase}_missing")
-            artifacts.extend(
-                f"{path.relative_to(root)}:{_digest(path)}" for path in receipts
-            )
+            artifacts.extend(f"{path.relative_to(root)}:{_digest(path)}" for path in receipts)
         entries = task_entries.get(task, ())
         if entries and not any(re.search(r"\b[0-9a-f]{40}\b", line) for line in entries):
             findings.append(f"task_{task}_sha_missing")

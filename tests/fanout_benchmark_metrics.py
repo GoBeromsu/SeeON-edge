@@ -478,9 +478,7 @@ class RunMetrics:
                 "forwards": forwards,
                 "frames": frames_in_batches,
                 "mean_batch_size": (None if forwards == 0 else frames_in_batches / forwards),
-                "max_batch_size": (
-                    None if not histogram else max(int(size) for size in histogram)
-                ),
+                "max_batch_size": (None if not histogram else max(int(size) for size in histogram)),
                 "coordinator_forward_p50_ms": (
                     None
                     if last_sample is None
@@ -494,15 +492,13 @@ class RunMetrics:
             },
             "live_lane": {
                 "published": sum(
-                    camera["bus"].get("live", {}).get("published", 0)
-                    for camera in cameras.values()
+                    camera["bus"].get("live", {}).get("published", 0) for camera in cameras.values()
                 ),
                 "taken": sum(
                     camera["bus"].get("live", {}).get("taken", 0) for camera in cameras.values()
                 ),
                 "dropped": sum(
-                    camera["bus"].get("live", {}).get("dropped", 0)
-                    for camera in cameras.values()
+                    camera["bus"].get("live", {}).get("dropped", 0) for camera in cameras.values()
                 ),
             },
             "evidence_lane": {
@@ -511,8 +507,7 @@ class RunMetrics:
                     for camera in cameras.values()
                 ),
                 "taken": sum(
-                    camera["bus"].get("evidence", {}).get("taken", 0)
-                    for camera in cameras.values()
+                    camera["bus"].get("evidence", {}).get("taken", 0) for camera in cameras.values()
                 ),
                 "dropped": sum(
                     camera["bus"].get("evidence", {}).get("dropped", 0)
@@ -520,8 +515,7 @@ class RunMetrics:
                 ),
             },
             "inference_dropped": sum(
-                camera["bus"].get("inference", {}).get("dropped", 0)
-                for camera in cameras.values()
+                camera["bus"].get("inference", {}).get("dropped", 0) for camera in cameras.values()
             ),
             "overwritten": sum(int(camera.get("overwritten", 0)) for camera in cameras.values()),
             "overwritten_by_camera": {

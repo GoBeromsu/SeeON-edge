@@ -7,6 +7,22 @@ from typing import ClassVar, Literal, Self, TypeAlias
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 ClipEventType: TypeAlias = Literal["fall", "bed-exit", "other"]
+ClipExtensionBoundary: TypeAlias = Literal["none", "extension_bounded", "extension_raced"]
+
+
+class ClipExtensionContributorResponse(BaseModel):
+    model_config: ClassVar[ConfigDict] = ConfigDict(extra="forbid")
+
+    event_ref: str = Field(min_length=1)
+    detected_at: str = Field(min_length=1)
+
+
+class ClipExtensionResponse(BaseModel):
+    model_config: ClassVar[ConfigDict] = ConfigDict(extra="forbid")
+
+    contributors: list[ClipExtensionContributorResponse]
+    duration_s: float = Field(ge=0)
+    boundary: ClipExtensionBoundary
 
 
 class ClipManifestResponse(BaseModel):
@@ -25,8 +41,9 @@ class ClipManifestResponse(BaseModel):
     finalized: bool
     size_bytes: int | None = Field(default=None, ge=0)
     thumbnail_available: bool = False
-    scene_available: bool = False
-    scene_frame_count: int | None = Field(default=None, ge=0)
+    detected_at: str | None = Field(default=None, min_length=1)
+    truncation_reasons: list[str] = Field(default_factory=list)
+    extension: ClipExtensionResponse | None = None
 
 
 class ClipsPaginationResponse(BaseModel):
@@ -87,28 +104,3 @@ class AuditResponse(BaseModel):
     model_config: ClassVar[ConfigDict] = ConfigDict(extra="forbid")
 
     entries: list[dict[str, object]]
-
-
-class DeleteClipRequest(BaseModel):
-    model_config: ClassVar[ConfigDict] = ConfigDict(extra="forbid")
-
-    # Explicit exact clip-id confirmation -- not a generic query/GET side
-    # effect. The router rejects a mismatch against the path's clip_id.
-    confirm_clip_id: str = Field(min_length=1)
-
-
-ClipDeleteStatus = Literal[
-    "PURGED",
-    "HELD",
-    "MISSING",
-    "UNVERIFIABLE",
-    "DELETE_FAILED",
-    "VERIFICATION_FAILED",
-]
-
-
-class DeleteClipResponse(BaseModel):
-    model_config: ClassVar[ConfigDict] = ConfigDict(extra="forbid")
-
-    clip_id: str = Field(min_length=1)
-    status: ClipDeleteStatus

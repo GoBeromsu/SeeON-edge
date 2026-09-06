@@ -88,6 +88,3 @@ def test_backend_central_evidence_query_is_privacy_bounded(tmp_path: Path) -> No
     assert not hasattr(summary, "payload_json")
     assert not hasattr(summary, "operator_only")
     assert not hasattr(summary, "facility_id")
-
-
-

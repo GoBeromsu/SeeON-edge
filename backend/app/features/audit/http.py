@@ -64,9 +64,7 @@ class AuditReadiness:
         with self._lock:
             if self.session is None:
                 self.session = (
-                    start_session(store)
-                    if connection is None
-                    else start_session(store, connection)
+                    start_session(store) if connection is None else start_session(store, connection)
                 )
             return self.session
 
@@ -97,7 +95,9 @@ def _verify_incremental(request: Request, store: AuditStore) -> None:
     except AuditVerificationError as error:
         audit_readiness(request).degraded("incremental_verification")
         request.app.state.readiness = {
-            "ready": False, "status": "degraded", "reason": "audit unavailable"
+            "ready": False,
+            "status": "degraded",
+            "reason": "audit unavailable",
         }
         raise AuditUnavailableError from error
 
@@ -108,8 +108,11 @@ def append_governed(
     """Commit one governed success before FastAPI starts its response."""
     readiness = audit_readiness(request)
     event = AuditEvent(
-        occurred_at=utc_now(), actor_id=actor_id, action=action,
-        target_id=target_id, detail=empty_detail(action),
+        occurred_at=utc_now(),
+        actor_id=actor_id,
+        action=action,
+        target_id=target_id,
+        detail=empty_detail(action),
     )
     failure_code = readiness.current_failure()
     try:
@@ -139,9 +142,7 @@ def append_transactional(
         if failure_code is None:
             store.append(event, connection=connection)
         else:
-            append_with_recovery(
-                store, event, session, failure_code, connection
-            )
+            append_with_recovery(store, event, session, failure_code, connection)
         readiness.recovered()
         request.app.state.readiness = {"ready": True, "status": "ready"}
     except (OSError, sqlite3.Error, EdgeDatabaseError) as error:
@@ -153,14 +154,14 @@ def refuse_unavailable(
 ) -> NoReturn:
     audit_readiness(request).degraded(error.__class__.__name__)
     request.app.state.readiness = {
-        "ready": False, "status": "degraded", "reason": "audit unavailable"
+        "ready": False,
+        "status": "degraded",
+        "reason": "audit unavailable",
     }
     raise AuditUnavailableError from error
 
 
-def audit_unavailable_handler(
-    request: Request, error: AuditUnavailableError
-) -> Response:
+def audit_unavailable_handler(request: Request, error: AuditUnavailableError) -> Response:
     del request, error
     return Response(status_code=status.HTTP_503_SERVICE_UNAVAILABLE)
 
@@ -170,12 +171,20 @@ def note_fail_open_degradation(request: Request, failure_code: str) -> None:
     readiness = audit_readiness(request)
     readiness.degraded(failure_code)
     request.app.state.readiness = {
-        "ready": False, "status": "degraded", "reason": "audit unavailable"
+        "ready": False,
+        "status": "degraded",
+        "reason": "audit unavailable",
     }
 
 
 __all__ = [
-    "AuditReadiness", "AuditUnavailableError", "append_governed",
-    "append_transactional", "audit_readiness", "audit_store",
-    "audit_unavailable_handler", "note_fail_open_degradation", "refuse_unavailable",
+    "AuditReadiness",
+    "AuditUnavailableError",
+    "append_governed",
+    "append_transactional",
+    "audit_readiness",
+    "audit_store",
+    "audit_unavailable_handler",
+    "note_fail_open_degradation",
+    "refuse_unavailable",
 ]

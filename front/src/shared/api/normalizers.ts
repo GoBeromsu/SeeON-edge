@@ -6,7 +6,6 @@ export {
   normalizeCameraTestResult,
 } from '@/shared/api/cameraNormalizer';
 export { normalizeClip, normalizeClipPageResponse, normalizeClipsResponse } from '@/shared/api/clipNormalizer';
-export { normalizeClipScene } from '@/shared/api/clipSceneNormalizer';
 export { normalizeClipStorageBrowse, normalizeClipStorageInfo } from '@/shared/api/clipStorageNormalizer';
 export {
   normalizeConnectionTestResult,
@@ -14,6 +13,7 @@ export {
 } from '@/shared/api/connectionNormalizer';
 export { normalizeDetectionSettings } from '@/shared/api/detectionSettingsNormalizer';
 export { normalizeRuntimeSettings } from '@/shared/api/runtimeSettingsNormalizer';
+export { normalizeOverlaySelection } from '@/shared/api/overlayNormalizer';
 export { isRecord } from '@/shared/api/normalizerFields';
 export { normalizeStatusSnapshot } from '@/shared/api/statusNormalizer';
 export { normalizeSystemSnapshot } from '@/shared/api/systemNormalizer';

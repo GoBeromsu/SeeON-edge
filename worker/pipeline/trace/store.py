@@ -92,9 +92,7 @@ class TraceStore:
                 return RecoveredCameraTrace((), (), TraceTruncation(0, 0, None, None))
             frames = tuple(sorted(camera.frames.values(), key=_frame_order))
             analyses = tuple(frame.analysis for frame in frames)
-            decisions = tuple(
-                decision for frame in frames for decision in frame.decisions
-            )
+            decisions = tuple(decision for frame in frames for decision in frame.decisions)
             return RecoveredCameraTrace(
                 analyses,
                 decisions,
@@ -124,14 +122,18 @@ class TraceStore:
         for camera in cache.cameras.values():
             ordered = sorted(camera.frames.values(), key=_frame_order, reverse=True)
             newest_time = next(
-                (frame.analysis.source_time.value
-                 for frame in ordered if frame.analysis.source_time.value is not None),
+                (
+                    frame.analysis.source_time.value
+                    for frame in ordered
+                    if frame.analysis.source_time.value is not None
+                ),
                 None,
             )
             keep = ordered[:max_frames_per_camera]
             if newest_time is not None:
                 keep = [
-                    frame for frame in keep
+                    frame
+                    for frame in keep
                     if frame.analysis.source_time.value is None
                     or frame.analysis.source_time.value >= newest_time - max_age_seconds
                 ]

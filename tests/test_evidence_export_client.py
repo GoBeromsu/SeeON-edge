@@ -23,7 +23,7 @@ from shared.events.evidence_export_contract import (
     DeliveryFailure,
     EventReceipt,
 )
-from shared.events.evidence_http_transport import MAX_RESPONSE_BYTES
+from shared.events.evidence_http_transport import MAX_RESPONSE_BYTES, classify_http_failure
 from worker.pipeline.output.evidence.evidence_outbox_types import (
     ClaimedClip,
     ClipId,
@@ -150,6 +150,26 @@ def test_relay_client_parses_typed_event_receipt_and_retry_after(server_url: str
         ("POST", "/api/v1/relay/alerts", "relay-secret"),
         ("POST", "/api/v1/relay/alerts", "relay-secret"),
     ]
+
+
+def test_mapping_failure_reason_is_retryable_but_unknown_conflict_is_terminal() -> None:
+    mapping = classify_http_failure(
+        409,
+        {},
+        _json({"detail": {"code": "CAMERA_MAPPING_MISSING"}}),
+    )
+    unknown = classify_http_failure(409, {}, _json({"detail": {"code": "FUTURE_REASON"}}))
+
+    assert mapping == DeliveryFailure(
+        DeliveryDisposition.RETRY,
+        "CAMERA_MAPPING_MISSING",
+        status_code=409,
+    )
+    assert unknown == DeliveryFailure(
+        DeliveryDisposition.PERMANENT,
+        "HTTP_409",
+        status_code=409,
+    )
 
 
 def test_relay_client_has_no_system_test_payload_route(server_url: str) -> None:

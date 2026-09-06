@@ -10,7 +10,12 @@ from worker.domains.module_compiler import (
     CompiledDetectionModuleRegistry,
     compile_detection_module_registry,
 )
-from worker.domains.module_definition import DetectionModuleDefinition
+from worker.domains.module_definition import (
+    DetectionModuleDefinition,
+    RuntimeResolvedArtifactDigest,
+    RuntimeResolvedPreprocessingIdentity,
+    SharedComponentIdentity,
+)
 from worker.domains.registry import (
     AVAILABLE_OBSERVATION_CHANNELS,
     DETECTION_MODULE_DEFINITIONS,
@@ -61,7 +66,11 @@ def _registry_with(
                 component_bindings=tuple(
                     replace(binding, preprocessing_identity="rgb24-to-coco17.v2")
                     if component_change and binding.component_id == "pose"
-                    else replace(binding, artifact_digest="d" * 64)
+                    else replace(
+                        binding,
+                        artifact_digest="d" * 64,
+                        preprocessing_identity="coco17-xyc-plus-pose-head-xyxy-valid-f32-v1",
+                    )
                     if model_change and binding.component_id == "fall-classifier"
                     else binding
                     for binding in changed.component_bindings
@@ -83,7 +92,7 @@ def _boot(profile_name: str) -> BootContext:
 
 
 def _environment(profile_name: str) -> RuntimeEnvironmentFacts:
-    nvidia = profile_name == "nvidia"
+    nvidia = profile_name == "flow"
     return RuntimeEnvironmentFacts(
         worker_build_revision=_BUILD_REVISION,
         os_name="Linux",
@@ -100,29 +109,37 @@ def _environment(profile_name: str) -> RuntimeEnvironmentFacts:
 def _manifest(
     *,
     registry: CompiledDetectionModuleRegistry = DETECTION_MODULE_REGISTRY,
-    profile_name: str = "cpu-host",
+    profile_name: str = "flow",
     fall_threshold: float | None = None,
     reordered: bool = False,
 ) -> AppliedRuntimeManifest:
-    selection = {"fall": 1, "bed_exit": 1}
+    selection = {"fall": 2, "bed_exit": 1}
     boot = _boot(profile_name)
     bindings = registry.shared_bindings(selection, flags={"person-box-source": True})
     identities = tuple(
-        binding.identity(
+        SharedComponentIdentity(
+            component_id=binding.component_id,
+            artifact_digest="c" * 64,
+            runtime=boot.runtime_profile.effective_inference_backend,
+            device=boot.device,
+            preprocessing_identity="coco17-xyc-plus-pose-head-xyxy-valid-f32-v1",
+        )
+        if isinstance(binding.artifact_digest, RuntimeResolvedArtifactDigest)
+        else binding.identity(
             runtime=boot.runtime_profile.effective_inference_backend,
             device=boot.device,
         )
         for binding in bindings
     )
     bundle = default_policy_bundle((_CAMERA_ID,))
-    fall_policy = bundle.resolve(_CAMERA_ID, "fall", 1)
+    fall_policy = bundle.resolve(_CAMERA_ID, "fall", 2)
     if fall_threshold is not None:
         fall_policy = make_effective_policy(
             module_id="fall",
-            module_version=1,
+            module_version=2,
             values=replace(
                 fall_policy.values,
-                operating_threshold=fall_threshold,
+                transition_threshold=fall_threshold,
             ),
             source=fall_policy.source,
             facility_revision_id=fall_policy.facility_revision_id,
@@ -134,7 +151,7 @@ def _manifest(
     }
     windows = {"fall": None, "bed_exit": None}
     schedule = {"pose": 2, "person": 2, "bed": 30}
-    module_ids = ("fall.v1", "bed_exit.v1")
+    module_ids = ("fall.v2", "bed_exit.v1")
     if reordered:
         selection = dict(reversed(tuple(selection.items())))
         identities = tuple(reversed(identities))
@@ -150,7 +167,7 @@ def _manifest(
         schedule=schedule,
         detection_windows=windows,
         policies=policies,
-        bed_zone_polygon=None,
+        bed_zone_regions=(),
         bed_zone_image_width=None,
         bed_zone_image_height=None,
     )
@@ -181,16 +198,15 @@ def _strings(value: object) -> Iterator[str]:
 
 
 def test_catalog_qualifies_production_modules_components_and_model_bindings() -> None:
-    assert DETECTION_MODULE_REGISTRY.qualified_ids == ("fall.v1", "bed_exit.v1")
-    assert dict(DETECTION_MODULE_REGISTRY.latest_versions) == {"fall": 1, "bed_exit": 1}
+    assert DETECTION_MODULE_REGISTRY.qualified_ids == ("fall.v2", "bed_exit.v1")
+    assert dict(DETECTION_MODULE_REGISTRY.latest_versions) == {"fall": 2, "bed_exit": 1}
 
     expected_components = {
-        "fall.v1": (
+        "fall.v2": (
             ("pose", "extractor"),
             ("person-tracker", "state"),
-            ("fall-window", "state"),
             ("fall-classifier", "model"),
-            ("fall-latch", "state"),
+            ("fall-v2", "state"),
         ),
         "bed_exit.v1": (
             ("pose", "extractor"),
@@ -200,11 +216,10 @@ def test_catalog_qualifies_production_modules_components_and_model_bindings() ->
             ("containment", "rule"),
             ("bed-assignment", "state"),
             ("bed-exit-state", "state"),
-            ("bed-exit-latch", "state"),
         ),
     }
     expected_models = {
-        "fall.v1": {
+        "fall.v2": {
             "pose": ("yolo-pose", "serving-client", "pose"),
             "fall-classifier": (
                 "configured-fall-family",
@@ -220,7 +235,6 @@ def test_catalog_qualifies_production_modules_components_and_model_bindings() ->
     }
 
     for definition in DETECTION_MODULE_REGISTRY.definitions:
-        assert definition.version == 1
         assert definition.qualified_id == f"{definition.module_id}.v{definition.version}"
         assert (
             tuple(
@@ -240,21 +254,25 @@ def test_catalog_qualifies_production_modules_components_and_model_bindings() ->
         }
         assert model_bindings == expected_models[definition.qualified_id]
         for binding in definition.shared_bindings:
-            assert binding.artifact_digest is not None
-            assert _SHA256.fullmatch(binding.artifact_digest)
-            assert binding.preprocessing_identity
+            assert isinstance(binding.artifact_digest, (str, RuntimeResolvedArtifactDigest))
+            if isinstance(binding.artifact_digest, str):
+                assert _SHA256.fullmatch(binding.artifact_digest)
+            assert isinstance(
+                binding.preprocessing_identity,
+                (str, RuntimeResolvedPreprocessingIdentity),
+            )
             assert binding.warmup_required is True
 
-    fall_pose = DETECTION_MODULE_REGISTRY.get("fall", 1).shared_bindings[0]
+    fall_pose = DETECTION_MODULE_REGISTRY.get("fall", 2).shared_bindings[0]
     bed_exit_pose = DETECTION_MODULE_REGISTRY.get("bed_exit", 1).shared_bindings[0]
     assert fall_pose == bed_exit_pose
 
 
-def test_pose_binding_identity_is_byte_identical_across_fall_v1_and_bed_exit_v1() -> None:
+def test_pose_binding_identity_is_byte_identical_across_fall_v2_and_bed_exit_v1() -> None:
     """Cross-camera batched pose (nvidia-multistream-serving) rests on this.
 
     A single inference owner may batch every camera's pose frames into ONE
-    forward only because fall.v1 and bed_exit.v1 declare the SAME pose
+    forward only because fall.v2 and bed_exit.v1 declare the SAME pose
     component: same artifact, same preprocessing, same serving task. If the
     two modules ever diverge on any identity field, ``SharedComponentPool``
     correctly produces two runners and one batched pose lane becomes wrong,
@@ -264,7 +282,7 @@ def test_pose_binding_identity_is_byte_identical_across_fall_v1_and_bed_exit_v1(
     """
     fall_pose = next(
         binding
-        for binding in DETECTION_MODULE_REGISTRY.get("fall", 1).shared_bindings
+        for binding in DETECTION_MODULE_REGISTRY.get("fall", 2).shared_bindings
         if binding.component_id == "pose"
     )
     bed_exit_pose = next(
@@ -308,7 +326,7 @@ def test_catalog_order_and_projected_identity_are_deterministic() -> None:
 
     first_content: list[JsonValue] = [module_content(item) for item in first.definitions]
     second_content: list[JsonValue] = [module_content(item) for item in second.definitions]
-    assert first.qualified_ids == second.qualified_ids == ("fall.v1", "bed_exit.v1")
+    assert first.qualified_ids == second.qualified_ids == ("fall.v2", "bed_exit.v1")
     assert canonical_json(first_content) == canonical_json(second_content)
     assert first.get("fall") is first.definitions[0]
     assert first.get("bed_exit") is first.definitions[1]
@@ -327,8 +345,8 @@ def test_catalog_preserves_qualified_identity_for_enabled_and_disabled_modules()
         for state in (True, False)
     }
 
-    assert qualification == {True: ("fall.v1",), False: ("bed_exit.v1",)}
-    assert registry.get("fall", 1).enabled is True
+    assert qualification == {True: ("fall.v2",), False: ("bed_exit.v1",)}
+    assert registry.get("fall", 2).enabled is True
     assert registry.get("bed_exit", 1).enabled is False
 
 
@@ -343,7 +361,6 @@ def test_manifest_identity_changes_iff_effective_catalog_or_runtime_state_change
         "component": _manifest(registry=_registry_with(component_change=True)),
         "model": _manifest(registry=_registry_with(model_change=True)),
         "policy": _manifest(fall_threshold=0.72),
-        "profile": _manifest(profile_name="nvidia"),
     }
 
     assert equivalent.sha256 == baseline.sha256
@@ -364,7 +381,6 @@ def test_manifest_identity_changes_iff_effective_catalog_or_runtime_state_change
         json.loads(changed["policy"].canonical_json)["cameras"][0]["policies"]
         != baseline_content["cameras"][0]["policies"]
     )
-    assert json.loads(changed["profile"].canonical_json)["profile"] != baseline_content["profile"]
 
 
 def test_module_definitions_are_profile_independent_and_emit_no_secrets_or_local_paths() -> None:
@@ -382,15 +398,12 @@ def test_module_definitions_are_profile_independent_and_emit_no_secrets_or_local
         }
     )
 
-    cpu_content = json.loads(_manifest().canonical_json)
-    nvidia_content = json.loads(_manifest(profile_name="nvidia").canonical_json)
-    assert cpu_content["modules"] == nvidia_content["modules"]
-    assert cpu_content["profile"] != nvidia_content["profile"]
+    flow_content = json.loads(_manifest().canonical_json)
 
     serialized_catalog = canonical_json(
         [module_content(definition) for definition in DETECTION_MODULE_REGISTRY.definitions]
     )
-    serialized_manifest = canonical_json(cpu_content)
+    serialized_manifest = canonical_json(flow_content)
     forbidden_fragments = (
         "://",
         "/Users/",
@@ -409,5 +422,5 @@ def test_module_definitions_are_profile_independent_and_emit_no_secrets_or_local
     )
     assert all(
         not value.startswith(("/", "\\\\")) and re.match(r"[A-Za-z]:[\\/]", value) is None
-        for value in _strings((cpu_content["modules"], cpu_content["components"]))
+        for value in _strings((flow_content["modules"], flow_content["components"]))
     )

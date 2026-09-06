@@ -18,6 +18,8 @@ const validClipManifest = {
   event_ref: 'event-1',
   event_type: null,
   started_at: '2026-07-21T00:00:00Z',
+  detected_at: '2026-07-21T00:00:30Z',
+  truncation_reasons: ['post_roll_cap'],
   duration_s: 4.2,
   codec: '',
   path: null,
@@ -306,6 +308,8 @@ describe('clip list contract normalization', () => {
     ['missing event reference', { ...validClipManifest, event_ref: undefined }],
     ['malformed nullable event type', { ...validClipManifest, event_type: 1 }],
     ['missing start time', { ...validClipManifest, started_at: undefined }],
+    ['malformed nullable detection time', { ...validClipManifest, detected_at: 1 }],
+    ['malformed truncation reasons', { ...validClipManifest, truncation_reasons: ['post_roll_cap', 1] }],
     ['negative duration', { ...validClipManifest, duration_s: -1 }],
     ['malformed codec', { ...validClipManifest, codec: null }],
     ['malformed nullable path', { ...validClipManifest, path: 1 }],
@@ -320,6 +324,19 @@ describe('clip list contract normalization', () => {
 
   it('accepts an entry that omits size_bytes entirely (older backend, null-tolerant)', () => {
     expect(() => normalizeClipsResponse({ clips: [validClipManifest] })).not.toThrow();
+  });
+
+  it('keeps detection time and truncation reasons, defaulting missing optional fields for old manifests', () => {
+    const current = normalizeClipsResponse({ clips: [validClipManifest] })[0];
+    const oldManifest = Object.fromEntries(
+      Object.entries(validClipManifest).filter(([key]) => key !== 'detected_at' && key !== 'truncation_reasons'),
+    );
+    const older = normalizeClipsResponse({ clips: [oldManifest] })[0];
+
+    expect(current.detected_at).toBe('2026-07-21T00:00:30Z');
+    expect(current.truncation_reasons).toEqual(['post_roll_cap']);
+    expect(older.detected_at).toBeNull();
+    expect(older.truncation_reasons).toEqual([]);
   });
 
   it('accepts an entry with an explicit null size_bytes and a numeric size_bytes alike', () => {
@@ -800,5 +817,48 @@ describe('decode backend normalization via normalizeCamera', () => {
   it('preserves an unknown string decode_backend value allowed by the backend contract', () => {
     const camera = normalizeCamera({ id: 'cam-1', rtsp_url: 'rtsp://camera.internal.example/stream', decode_backend: 'quicksync' });
     expect(camera?.decode_backend).toBe('quicksync');
+  });
+});
+
+describe('bed-zone normalization via normalizeCamera', () => {
+  it('preserves canonical multi-region geometry', () => {
+    const bedZone = {
+      regions: [
+        { id: 'bed-1', polygon: [[0, 0], [10, 0], [10, 10]], origin: 'model' },
+        { id: 'bed-2', polygon: [[20, 0], [30, 0], [30, 10]], origin: 'manual' },
+      ],
+      image_width: 1920,
+      image_height: 1080,
+      recognized_at: '2026-08-02T00:00:00Z',
+    };
+
+    expect(normalizeCamera({ id: 'cam-1', bed_zone: bedZone })?.bed_zone).toEqual(bedZone);
+  });
+
+  it.each([
+    ['an old singleton polygon', {
+      polygon: [[0, 0], [10, 0], [10, 10]],
+      image_width: 1920,
+      image_height: 1080,
+      recognized_at: '2026-08-02T00:00:00Z',
+    }],
+    ['a fractional coordinate', {
+      regions: [{ id: 'bed-1', polygon: [[0, 0], [10.5, 0], [10, 10]], origin: 'model' }],
+      image_width: 1920,
+      image_height: 1080,
+      recognized_at: '2026-08-02T00:00:00Z',
+    }],
+    ['too many regions', {
+      regions: Array.from({ length: 9 }, (_, index) => ({
+        id: `bed-${index}`,
+        polygon: [[0, 0], [10, 0], [10, 10]],
+        origin: 'model',
+      })),
+      image_width: 1920,
+      image_height: 1080,
+      recognized_at: '2026-08-02T00:00:00Z',
+    }],
+  ])('defensively maps %s to null', (_case, bedZone) => {
+    expect(normalizeCamera({ id: 'cam-1', bed_zone: bedZone })?.bed_zone).toBeNull();
   });
 });

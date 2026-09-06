@@ -26,11 +26,8 @@ from shared.events.evidence_http_transport import (
 )
 from shared.events.relay_failure_log import classify_relay_failure
 from shared.release_identity import ReleaseIdentityMismatchError
-from worker.adapters.encode.thumbnail import FFmpegThumbnailGenerator
 from worker.adapters.model.in_process import InProcessServingClient
-from worker.pipeline.output.evidence.clip_config import configured_ffmpeg_bin, configured_store_dir
-from worker.pipeline.output.evidence.clip_store_lock import ClipStoreLockedError
-from worker.pipeline.output.evidence.thumbnail_backfill import backfill_thumbnails
+from worker.adapters.model.registry import flow_registry
 from worker.runtime.bootstrap import REFUSE_TO_START_EXIT_CODE
 from worker.runtime.config import (
     RELAY_HEARTBEAT_PATH,
@@ -117,23 +114,6 @@ def _build_parser() -> argparse.ArgumentParser:
         help=(
             "Bounded-run cap: exit cleanly once every camera has processed "
             "this many frames (default: run indefinitely)"
-        ),
-    )
-    parser.add_argument(
-        "--backfill-thumbnails",
-        action="store_true",
-        help=(
-            "Generate missing clip-local thumbnails and exit; returns nonzero "
-            "while playable clips remain missing thumbnails"
-        ),
-    )
-    parser.add_argument(
-        "--clip-store-dir",
-        type=Path,
-        default=None,
-        help=(
-            "Portable clip-store root for --backfill-thumbnails only "
-            "(default: baked /var/lib/clip-store)"
         ),
     )
     parser.add_argument(
@@ -228,27 +208,11 @@ def main(argv: list[str] | None = None) -> int:
         format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
     )
 
-    if args.clip_store_dir is not None and not args.backfill_thumbnails:
-        LOGGER.error("--clip-store-dir requires --backfill-thumbnails")
-        return CONFIG_ERROR_EXIT_CODE
-
     try:
         reject_retired_worker_environment(os.environ)
     except WorkerConfigError as exc:
         LOGGER.error("worker configuration refused: %s", exc)  # noqa: TRY400
         return CONFIG_ERROR_EXIT_CODE
-
-    if args.backfill_thumbnails:
-        try:
-            report = backfill_thumbnails(
-                configured_store_dir(args.clip_store_dir),
-                FFmpegThumbnailGenerator(ffmpeg_bin=configured_ffmpeg_bin()),
-            )
-        except ClipStoreLockedError as exc:
-            LOGGER.warning("thumbnail backfill refused: %s", exc)
-            return GENERIC_RUNTIME_ERROR_EXIT_CODE
-        print(report.summary())
-        return CLEAN_SHUTDOWN_EXIT_CODE if report.missing == 0 else GENERIC_RUNTIME_ERROR_EXIT_CODE
 
     # Ordering note: legacy edge/runtime/edge_worker.py:141-149 runs
     # run_global_bootstrap([profile_verify_stage(...)]) BEFORE loading config
@@ -472,9 +436,14 @@ def main(argv: list[str] | None = None) -> int:
     # fail-fast on unknown) is composition-root territory owned by
     # `WorkerRuntime` itself (`worker/runtime/worker.py`), not the CLI entry.
     # `WorkerRuntime.__init__` supplies the real profile-driven default.
+    # The flow profile's bed recognizer is the ONNX Runtime segmenter; every
+    # other profile keeps the ultralytics runners. Selecting the registry here
+    # keeps that decision in the composition root, not in a registry default.
+    profile_name = os.environ.get("ML_WORKER_PROFILE", "").strip()
+    serving_registry = flow_registry() if profile_name == "flow" else None
     runtime = WorkerRuntime(
         config,
-        serving_client=InProcessServingClient(),
+        serving_client=InProcessServingClient(serving_registry),
         restart_check=restart_check,
         clip_export_policy=clip_export_policy,
         max_frames_per_camera=args.max_frames_per_camera,

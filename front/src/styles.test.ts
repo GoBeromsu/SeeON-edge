@@ -32,7 +32,7 @@ const appReachableComponentPaths = [
   'src/app/pages/SettingsPage.tsx',
   'src/features/account-settings/AccountSettingsModal.tsx',
   'src/features/connection/ConnectionSettingsPanel.tsx',
-  'src/features/settings/BedZoneRecognitionPanel.tsx',
+  'src/shared/ui/BedZoneRecognitionPanel.tsx',
   'src/features/settings/CameraEditModal.tsx',
   'src/features/settings/CameraRegisterModal.tsx',
   'src/features/settings/CameraSection.tsx',

@@ -70,9 +70,7 @@ class TopologyRetryCoordinator:
         self._registry = registry
         self._state_store = state_store
         self._client_provider = client_provider
-        self._confirmation = TopologyConfirmationService(
-            registry, state_store, client_provider
-        )
+        self._confirmation = TopologyConfirmationService(registry, state_store, client_provider)
         self._lock = threading.Lock()
 
     def trigger(
@@ -94,7 +92,10 @@ class TopologyRetryCoordinator:
                 return self._trigger(client, force=force, refresh=refresh, now=now)
             with self._state_store.operation(after_write) as connection:
                 return self._trigger(
-                    client, force=force, refresh=refresh, now=now,
+                    client,
+                    force=force,
+                    refresh=refresh,
+                    now=now,
                     connection=connection,
                 )
         finally:
@@ -124,10 +125,7 @@ class TopologyRetryCoordinator:
         if pending is None:
             topology = self._registry.topology_snapshot()
             dirty = topology.dirty
-            if (
-                dirty is None
-                or dirty.registry_version <= state.last_snapshotted_registry_version
-            ):
+            if dirty is None or dirty.registry_version <= state.last_snapshotted_registry_version:
                 return self.current_result(attempted=False)
             if topology.readiness_error is not None:
                 return self._result(state, False, "pending", None, _INCOMPLETE)
@@ -135,14 +133,10 @@ class TopologyRetryCoordinator:
                 TopologySnapshotBuilder(topology, client.principal, _uuid7())
             )
         outcome = client.put(pending)
-        return self._record_outcome(
-            outcome, pending.snapshot_id, now, connection=connection
-        )
+        return self._record_outcome(outcome, pending.snapshot_id, now, connection=connection)
 
     def current_result(self, *, attempted: bool = False) -> TopologyRetryResult:
-        return current_retry_result(
-            self._registry, self._state_store, attempted=attempted
-        )
+        return current_retry_result(self._registry, self._state_store, attempted=attempted)
 
     def preview(self) -> TopologyConfirmationPreview | None:
         return self._confirmation.preview()
@@ -187,7 +181,9 @@ class TopologyRetryCoordinator:
                         "accepted topology has no pending snapshot"
                     )
                 self._confirmation.save_preview(
-                    response, pending.principal, pending.registry_version,
+                    response,
+                    pending.principal,
+                    pending.registry_version,
                     connection=connection,
                 )
                 state = self._state_store.accept(snapshot_id, response, now_epoch=now)
@@ -212,9 +208,7 @@ class TopologyRetryCoordinator:
         error_class: TopologySyncErrorClass | None,
         detail: str | None,
     ) -> TopologyRetryResult:
-        return retry_result(
-            self._registry, state, attempted, status, error_class, detail
-        )
+        return retry_result(self._registry, state, attempted, status, error_class, detail)
 
 
 def topology_retry_coordinator(app: FastAPI) -> TopologyRetryCoordinator:

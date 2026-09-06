@@ -5,12 +5,15 @@ from dataclasses import replace
 
 import pytest
 
-from shared.detection_policies import FallPolicyV1, default_policy_bundle, make_effective_policy
+from shared.detection_policies import FallPolicyV2, default_policy_bundle, make_effective_policy
 from worker.domains.module_compiler import (
     CompiledDetectionModuleRegistry,
     compile_detection_module_registry,
 )
-from worker.domains.module_definition import SharedComponentIdentity
+from worker.domains.module_definition import (
+    RuntimeResolvedArtifactDigest,
+    SharedComponentIdentity,
+)
 from worker.domains.registry import (
     AVAILABLE_OBSERVATION_CHANNELS,
     DETECTION_MODULE_DEFINITIONS,
@@ -46,11 +49,11 @@ def _facts(*, nvidia: bool = False, os_name: str = "Linux") -> RuntimeEnvironmen
 
 
 def _policy(threshold: float):
-    default = default_policy_bundle((_CAMERA_ID,)).resolve(_CAMERA_ID, "fall", 1)
+    default = default_policy_bundle((_CAMERA_ID,)).resolve(_CAMERA_ID, "fall", 2)
     return make_effective_policy(
         module_id="fall",
-        module_version=1,
-        values=FallPolicyV1(operating_threshold=threshold),
+        module_version=2,
+        values=FallPolicyV2(transition_threshold=threshold),
         source=default.source,
         facility_revision_id=default.facility_revision_id,
         camera_revision_id=default.camera_revision_id,
@@ -70,7 +73,11 @@ def _compiled_with(*, module_change: bool = False, model_change: bool = False):
             changed = replace(
                 changed,
                 component_bindings=tuple(
-                    replace(binding, artifact_digest="d" * 64)
+                    replace(
+                        binding,
+                        artifact_digest="d" * 64,
+                        preprocessing_identity="coco17-xyc-plus-pose-head-xyxy-valid-f32-v1",
+                    )
                     if binding.component_id == "fall-classifier"
                     else binding
                     for binding in changed.component_bindings
@@ -91,16 +98,26 @@ def _identities(
     runtime: str,
     device: str,
 ) -> tuple[SharedComponentIdentity, ...]:
-    return tuple(
-        binding.identity(runtime=runtime, device=device)
-        for binding in registry.shared_bindings({"fall": 1}, flags={})
-    )
+    # The fall classifier's digest is resolved from the loaded bundle at
+    # composition time, never from the registry; stand in for that here the
+    # way the runtime does, with a digest for a bundle that was loaded.
+    resolved = "7bb75a2932e1a1250dc900013b2c80b220de5e23f3ea568e05f1db21d0a757e3"
+    identities = []
+    for binding in registry.shared_bindings({"fall": 2}, flags={}):
+        if isinstance(binding.artifact_digest, RuntimeResolvedArtifactDigest):
+            binding = replace(
+                binding,
+                artifact_digest=resolved,
+                preprocessing_identity="coco17-xyc-plus-pose-head-xyxy-valid-f32-v1",
+            )
+        identities.append(binding.identity(runtime=runtime, device=device))
+    return tuple(identities)
 
 
 def _manifest(
     *,
     registry: CompiledDetectionModuleRegistry = DETECTION_MODULE_REGISTRY,
-    profile_name: str = "cpu-host",
+    profile_name: str = "flow",
     threshold: float = 0.5,
     facts: RuntimeEnvironmentFacts | None = None,
     reverse_identities: bool = False,
@@ -125,24 +142,24 @@ def _manifest(
         camera_id=_CAMERA_ID,
         effective_decode_backend=boot.decode,
         ingest_target_fps=5.0,
-        module_qualified_ids=("fall.v1",),
+        module_qualified_ids=("fall.v2",),
         schedule={"pose": 2},
         detection_windows={"fall": None},
         policies={"fall": policy},
-        bed_zone_polygon=None,
+        bed_zone_regions=(),
         bed_zone_image_width=None,
         bed_zone_image_height=None,
     )
     return build_applied_runtime_manifest(
         boot=boot,
         module_registry=registry,
-        module_versions={"fall": 1},
+        module_versions={"fall": 2},
         component_identities=identities,
         cameras=(camera,),
         config_version=9,
         restart_generation=3,
         detector_version="worker-domain-detectors-v1",
-        environment=facts or _facts(nvidia=profile_name == "nvidia"),
+        environment=facts or _facts(nvidia=profile_name == "flow"),
         edge_database_schema_version=5,
     )
 
@@ -152,7 +169,6 @@ def test_runtime_manifest_identity_tracks_effective_module_profile_model_and_pol
     equivalent = _manifest(reverse_identities=True)
     module_changed = _manifest(registry=_compiled_with(module_change=True))
     model_changed = _manifest(registry=_compiled_with(model_change=True))
-    profile_changed = _manifest(profile_name="nvidia")
     policy_changed = _manifest(threshold=0.72)
 
     assert equivalent.sha256 == baseline.sha256
@@ -163,17 +179,15 @@ def test_runtime_manifest_identity_tracks_effective_module_profile_model_and_pol
                 baseline.sha256,
                 module_changed.sha256,
                 model_changed.sha256,
-                profile_changed.sha256,
                 policy_changed.sha256,
             }
         )
-        == 5
+        == 4
     )
 
     baseline_content = json.loads(baseline.canonical_json)
     assert json.loads(module_changed.canonical_json)["modules"] != baseline_content["modules"]
     assert json.loads(model_changed.canonical_json)["components"] != baseline_content["components"]
-    assert json.loads(profile_changed.canonical_json)["profile"] != baseline_content["profile"]
     assert (
         json.loads(policy_changed.canonical_json)["cameras"][0]["policies"]
         != baseline_content["cameras"][0]["policies"]

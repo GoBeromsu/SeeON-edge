@@ -1,21 +1,21 @@
-"""Issue #133 (env-less default fall model) + #79 track 2 (aggregate boot-gate
+"""Env-less packaged fall model default + #79 track 2 (aggregate boot-gate
 error reporting) for ``worker.runtime.config.local_env``.
 
-``model.pt`` is gitignored (see .gitignore) so a fresh clone/CI checkout
-never has it on disk; ``arch.json``/``metadata.yaml`` are tracked in git and
-always present. Tests that need the packaged default to actually *resolve*
-(not just fail closed) skip when the weights are absent -- run
-``scripts/fetch-models.sh`` to provision them locally.
+Nothing under ``models/`` is tracked: the packaged default is the published
+pose+bbox56 bundle pinned in ``worker/tools/fetch_models/manifest.json`` and
+provisioned by ``scripts/fetch-models.sh``. Tests that need the default to
+actually *resolve* build a synthetic bundle in ``tmp_path`` through the
+``packaged_fall_bundle`` fixture, so they are deterministic in CI.
 """
 
 from __future__ import annotations
 
-import json
 from pathlib import Path
 
+import numpy as np
 import pytest
-import yaml
 
+from tests_support.pose_bbox56_bundle_artifact import write_pose_bbox56_bundle
 from worker.runtime.config.errors import WorkerConfigError
 from worker.runtime.config.local_env import (
     ML_WORKER_FALL_MODEL_ARTIFACT_DIR_ENV,
@@ -26,63 +26,38 @@ from worker.runtime.config.local_env import (
     ML_WORKER_FALL_MODEL_WINDOW_ENV,
     fall_model_config_from_environment,
     reject_retired_worker_environment,
+    worker_models_config_from_environment,
 )
+from worker.runtime.config.worker_models import WorkerModelsConfig
 
-_REPO_ROOT = Path(__file__).resolve().parents[1]
-_PACKAGED_DEFAULT_ARTIFACT_DIR = _REPO_ROOT / "models" / "fall" / "lstm"
-_WEIGHTS_PROVISIONED = (_PACKAGED_DEFAULT_ARTIFACT_DIR / "model.pt").exists()
-_SKIP_NO_WEIGHTS_REASON = (
-    "packaged default LSTM weights not provisioned locally "
-    "(run scripts/fetch-models.sh)"
-)
+_PACKAGED_DEFAULT_ARTIFACT_DIR = Path("models/fall/pose-bbox56-gru")
+_PREPROCESSING_IDENTITY = "coco17-xyc-plus-pose-head-xyxy-valid-f32-v1"
 
 
-def test_packaged_default_sidecars_are_tracked_and_parseable() -> None:
-    """arch.json/metadata.yaml are committed to git (unlike model.pt), so
-    this always runs, even in a fresh CI checkout with no weights fetched."""
-    arch = json.loads((_PACKAGED_DEFAULT_ARTIFACT_DIR / "arch.json").read_text())
-    assert arch.keys() == {"hidden", "layers", "dropout"}
-    assert isinstance(arch["hidden"], int) and arch["hidden"] > 0
-    assert isinstance(arch["layers"], int) and arch["layers"] > 0
-
-    metadata = yaml.safe_load((_PACKAGED_DEFAULT_ARTIFACT_DIR / "metadata.yaml").read_text())
-    assert metadata["type"] == "lstm"
-    assert metadata["window"] == 30
-    assert metadata["stride"] == 5
-    assert metadata["input_shape"] == [30, 51]
-    assert metadata["schema_version"] == 1
-    assert (
-        metadata["preprocessing_identity"]
-        == "legacy-coco17-xyc-frame-normalized-zero-fill-v1"
-    )
-
-
-@pytest.mark.skipif(not _WEIGHTS_PROVISIONED, reason=_SKIP_NO_WEIGHTS_REASON)
-def test_default_env_resolves_packaged_lstm_config() -> None:
+def test_default_env_resolves_packaged_pose_bbox56_config(packaged_fall_bundle: Path) -> None:
     config = fall_model_config_from_environment({})
 
-    assert config.type == "lstm"
-    assert config.artifact_dir == _PACKAGED_DEFAULT_ARTIFACT_DIR.resolve()
+    assert config.type == "pose-bbox56-proxy-v0"
+    assert config.artifact_dir == packaged_fall_bundle.resolve()
     assert config.window == 30
     assert config.stride == 5
-    assert config.input_shape == (30, 51)
-    assert config.schema_version == 1
-    assert (
-        config.preprocessing_identity == "legacy-coco17-xyc-frame-normalized-zero-fill-v1"
-    )
+    assert config.input_shape == (30, 56)
+    assert config.schema_version == 2
+    assert config.operating_threshold == 0.5
+    assert config.preprocessing_identity == _PREPROCESSING_IDENTITY
 
 
-@pytest.mark.skipif(not _WEIGHTS_PROVISIONED, reason=_SKIP_NO_WEIGHTS_REASON)
-def test_lstm_runner_loads_and_predicts_from_packaged_default() -> None:
-    import numpy as np
+def test_bundle_runner_loads_and_predicts_from_packaged_default(
+    packaged_fall_bundle: Path,
+) -> None:
+    from worker.adapters.model.pose_bbox56_bundle import PoseBbox56BundleRunner
 
-    from worker.adapters.model.torch_lstm_fall import LstmFallRunner
+    runner = PoseBbox56BundleRunner.from_artifact_dir(packaged_fall_bundle)
+    probabilities = runner.predict(np.zeros((30, 56), dtype=np.float32))
 
-    runner = LstmFallRunner.from_artifact_dir(_PACKAGED_DEFAULT_ARTIFACT_DIR)
-    probability = runner.predict(np.zeros((30, 51), dtype=np.float32))
-
-    assert isinstance(probability, float)
-    assert 0.0 <= probability <= 1.0
+    assert runner.device == "cpu"
+    assert 0.0 <= probabilities.fall_transition <= 1.0
+    assert probabilities.fallen == 0.0
 
 
 def test_default_env_missing_weights_raises_actionable_error(
@@ -90,28 +65,27 @@ def test_default_env_missing_weights_raises_actionable_error(
 ) -> None:
     """Deterministic regardless of whether *this* repo checkout has fetched
     weights: chdir into an empty directory so the packaged default's
-    relative path (``models/fall/lstm``) resolves to nothing there, and
+    relative path (``models/fall/pose-bbox56-gru``) resolves to nothing there, and
     assert the fail-closed error names the fetch script rather than silently
     booting without a fall model."""
     monkeypatch.chdir(tmp_path)
 
-    with pytest.raises(WorkerConfigError, match="scripts/fetch-models.sh"):
-        fall_model_config_from_environment({})
+    with pytest.raises(WorkerConfigError, match="missing model.pt"):
+        worker_models_config_from_environment({})
+
+
+def test_models_config_refuses_when_no_fall_model_is_available() -> None:
+    with pytest.raises(ValueError, match="no fall model configured"):
+        WorkerModelsConfig()
 
 
 def _write_fake_packaged_default(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """Chdir into an empty directory and populate a fake packaged-default
-    artifact there so ``fall_model_config_from_environment({})`` resolves
+    """Chdir into an empty directory and populate a packaged-default bundle
+    there so ``fall_model_config_from_environment({})`` resolves
     deterministically -- independent of whether *this* checkout has fetched
-    the real (gitignored) model.pt via ``scripts/fetch-models.sh``."""
+    the real (gitignored) bundle via ``scripts/fetch-models.sh``."""
     monkeypatch.chdir(tmp_path)
-    artifact_dir = tmp_path / "models" / "fall" / "lstm"
-    artifact_dir.mkdir(parents=True)
-    (artifact_dir / "model.pt").write_bytes(b"placeholder")
-    (artifact_dir / "arch.json").write_text(
-        '{"hidden":4,"layers":1,"dropout":0.0}', encoding="utf-8"
-    )
-    (artifact_dir / "metadata.yaml").write_text("type: lstm\n", encoding="utf-8")
+    write_pose_bbox56_bundle(tmp_path / _PACKAGED_DEFAULT_ARTIFACT_DIR)
 
 
 def test_default_env_with_no_overrides_resolves_packaged_manifest_defaults(
@@ -125,7 +99,7 @@ def test_default_env_with_no_overrides_resolves_packaged_manifest_defaults(
 
     assert config.window == 30
     assert config.stride == 5
-    assert config.operating_threshold == pytest.approx(0.0007872396381571889)
+    assert config.operating_threshold == 0.5
 
 
 def test_model_policy_environment_keys_are_retired_explicitly() -> None:
@@ -153,8 +127,7 @@ def test_default_env_with_no_threshold_override_logs_manifest_default_source(
         fall_model_config_from_environment({})
 
     assert any(
-        "source: packaged manifest default" in record.getMessage()
-        for record in caplog.records
+        "source: packaged manifest default" in record.getMessage() for record in caplog.records
     )
 
 

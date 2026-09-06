@@ -21,6 +21,7 @@ from worker.domains.bed_exit.state_machine import (
     BedExitStateDecision,
     BedExitStateMachine,
 )
+from worker.domains.episode import EpisodeAuthority, EpisodeProposal
 from worker.domains.staleness import DEFAULT_STALE_AFTER_SEC
 from worker.types import (
     BusinessEvent,
@@ -57,6 +58,7 @@ class _Assignment:
         "candidate_bed_id",
         "candidate_frames",
         "grace_frames",
+        "recovery_frames",
     )
 
     def __init__(self) -> None:
@@ -64,6 +66,7 @@ class _Assignment:
         self.candidate_bed_id: int | None = None
         self.candidate_frames: int = 0
         self.grace_frames: int = 0
+        self.recovery_frames: int = 0
 
     def update_candidate(self, bed_id: int | None) -> None:
         if bed_id is None:
@@ -81,6 +84,7 @@ class _Assignment:
         self.candidate_bed_id = None
         self.candidate_frames = 0
         self.grace_frames = 0
+        self.recovery_frames = 0
 
 
 class BedExitMonitor:
@@ -95,6 +99,9 @@ class BedExitMonitor:
         staleness_clock: Callable[[], float] = monotonic,
         stale_after_sec: float = DEFAULT_STALE_AFTER_SEC,
         temporal_profile: TemporalProfile | None = None,
+        boot_id: str,
+        stream_epoch: str,
+        source_generation: int,
     ) -> None:
         self._config: BedExitConfig = config
         self._clock: Callable[[], datetime] = clock
@@ -105,6 +112,20 @@ class BedExitMonitor:
             stale_after_sec=stale_after_sec,
         )
         self._state_machine = BedExitStateMachine(temporal_profile=temporal_profile)
+        if (
+            not boot_id
+            or not stream_epoch
+            or isinstance(source_generation, bool)
+            or source_generation < 0
+        ):
+            raise ValueError("bed-exit event identities must name a boot and source epoch")
+        self._episodes = EpisodeAuthority(
+            boot_id=boot_id,
+            stream_epoch=stream_epoch,
+            source_generation=source_generation,
+        )
+        self._recovery_events: list[BedExitEvent] = []
+        self._lost_track_ids: list[int] = []
         self.last_debug_snapshot: BedExitDebugSnapshot | None = None
         self.last_trace_snapshots: tuple[DecisionTraceSnapshot, ...] = ()
         self.last_shadow_trace_snapshots: tuple[DecisionTraceSnapshot, ...] = ()
@@ -123,11 +144,20 @@ class BedExitMonitor:
         self._assignments_made: int = 0
 
     @property
+    def track_id_switch_absorbed_total(self) -> int:
+        """Re-associations the episode authority absorbed instead of re-alerting."""
+        return self._episodes.track_id_switch_absorbed_total
+
+    @property
     def config(self) -> BedExitConfig:
         return self._config
 
     def update_night_window(self, night_window: NightWindow | None) -> None:
         self._night_window = night_window
+
+    def release_onset(self, event: BusinessEvent) -> None:
+        """Reopen only the exact bed-exit onset that failed durable staging."""
+        self._episodes.release(event)
 
     @property
     def state_machine(self) -> BedExitStateMachine:
@@ -135,18 +165,22 @@ class BedExitMonitor:
 
     def coast(self, *, frame_index: int | None = None) -> tuple[BusinessEvent, ...]:
         """Hold assignment/latch/shadow-machine state when no person inference was made."""
-        _ = self._latch.coast()
+        self._latch.coast()
         _ = self._state_machine.coast()
         freshness = self._latch.status_snapshot
         previous = self.last_debug_snapshot
-        statuses = () if previous is None else tuple(
-            BedStatus(
-                bed_id=status.bed_id,
-                box=status.box,
-                occupancy="covered",
-                person_id=status.person_id,
+        statuses = (
+            ()
+            if previous is None
+            else tuple(
+                BedStatus(
+                    bed_id=status.bed_id,
+                    box=status.box,
+                    occupancy="covered",
+                    person_id=status.person_id,
+                )
+                for status in previous.statuses
             )
-            for status in previous.statuses
         )
         self.last_debug_snapshot = BedExitDebugSnapshot(
             frame_index=frame_index,
@@ -159,47 +193,6 @@ class BedExitMonitor:
             observation_age_sec=freshness.observation_age_sec,
         )
         return ()
-
-
-
-    def release_onset(self, event: object | None = None) -> None:
-        """Re-open a bed-exit onset whose envelope was never made durable.
-
-        Two pieces of owner state consumed that onset. The latch recorded the
-        (person, bed) pair, and -- the one that actually matters -- the exit
-        cleared this person's bed assignment, so a later frame no longer counts
-        them as having been in that bed and can never re-derive the exit.
-
-        I previously concluded bed exit was unrecoverable and deleted this. That
-        was wrong: I had inspected the latch, which does clear itself, and not
-        the assignment, which does not. Restoring the assignment lets the next
-        frame report the same exit.
-        """
-        # Fail closed on ownership, like the fall latch: act only on an event
-        # this monitor produced.
-        if getattr(event, "domain", None) != "bed_exit":
-            return
-        if getattr(event, "camera_id", None) != self._config.camera_id:
-            return
-        person_id = getattr(event, "person_id", None)
-        bed_id = getattr(event, "bed_id", None)
-        if person_id is None or bed_id is None:
-            return
-        assignment = self._assignments.get(person_id)
-        if assignment is None:
-            # A track that vanished mid-exit fires from the stale path, which
-            # DELETES the assignment rather than clearing its bed. Returning
-            # here left that onset unrecoverable: the resident is gone from the
-            # frame, so no later frame can re-derive the exit, and the alert was
-            # lost outright. Recreate the assignment so the next stale sweep
-            # reports it again.
-            assignment = _Assignment()
-            assignment.grace_frames = 1
-            self._assignments[person_id] = assignment
-        elif assignment.bed_id is not None:
-            return
-        assignment.bed_id = bed_id
-        self._latch.release_onset(person_id, bed_id)
 
     def update(self, input_value: DecisionInput) -> tuple[BusinessEvent, ...]:
         observation = input_value.observation
@@ -259,14 +252,10 @@ class BedExitMonitor:
                     exc_info=True,
                 )
         event_time = 0.0 if input_value.time_sec is None else input_value.time_sec
-        # Gate before the latch consumes an onset. A daytime exit fed into
-        # BedExitLatch advances event_count and can hold (person_id, bed_id)
-        # in `_active_exits`, swallowing the same pair once the window opens.
-        # Feed ``()`` outside the window so freshness still updates and no
-        # onset is recorded. Snapshot still uses the real frame so the overlay
-        # renders `bed:exit` (docs/runbooks/post-redeploy-event-readout.md ④).
+        # The night window gates proposals, not freshness. The snapshot still
+        # uses the real frame so the overlay renders `bed:exit`.
         in_window = self._night_window is None or self._night_window.contains(self._clock())
-        onset_events = self._latch.update(frame.events if in_window else (), event_time)
+        self._latch.update()
         freshness = self._latch.status_snapshot
         self.last_debug_snapshot = BedExitDebugSnapshot(
             frame_index=input_value.frame_index,
@@ -280,9 +269,55 @@ class BedExitMonitor:
         )
         if not in_window:
             return ()
-        return tuple(self._business_event(event, event_time) for event in onset_events)
+        self._episodes.expire(frame_index=input_value.frame_index, time_sec=event_time)
+        emitted: list[BusinessEvent] = []
+        for event in frame.events:
+            emitted.extend(
+                self._episodes.propose(
+                    EpisodeProposal(
+                        camera_id=self._config.camera_id,
+                        facility_id=self._config.facility_id,
+                        event_type="bed-exit",
+                        track_id=event.person_id,
+                        bed_id=event.bed_id,
+                        frame_index=input_value.frame_index,
+                        time_sec=event_time,
+                        qualifying=True,
+                        probability=1.0,
+                        domain="bed_exit",
+                        confirmation_votes=1,
+                        confirmation_window=1,
+                    )
+                )
+            )
+            if event.person_id in self._lost_track_ids:
+                self._episodes.track_lost(
+                    camera_id=self._config.camera_id,
+                    frame_index=input_value.frame_index,
+                    time_sec=event_time,
+                    track_id=event.person_id,
+                )
+        for event in self._recovery_events:
+            _ = self._episodes.propose(
+                EpisodeProposal(
+                    camera_id=self._config.camera_id,
+                    facility_id=self._config.facility_id,
+                    event_type="bed-exit",
+                    track_id=event.person_id,
+                    bed_id=event.bed_id,
+                    frame_index=input_value.frame_index,
+                    time_sec=event_time,
+                    qualifying=False,
+                    confirmed_recovery=True,
+                    probability=1.0,
+                    domain="bed_exit",
+                )
+            )
+        return tuple(emitted)
 
     def _update_frame(self, input_value: DecisionInput) -> BedExitFrame:
+        self._recovery_events = []
+        self._lost_track_ids = []
         observation = input_value.observation
         has_track_ids = bool(observation.track_ids)
         if has_track_ids:
@@ -351,6 +386,7 @@ class BedExitMonitor:
                 assert assignment.bed_id is not None
                 events.append(BedExitEvent(person_id=stale_id, bed_id=assignment.bed_id))
                 exit_beds.add(assignment.bed_id)
+                self._lost_track_ids.append(stale_id)
             del self._assignments[stale_id]
         for person_id, person_box in zip(person_ids, observation.boxes, strict=True):
             if person_id is None or person_id not in live_ids:
@@ -371,6 +407,23 @@ class BedExitMonitor:
                     assignment.bed_id = assignment.candidate_bed_id
                     assignment.grace_frames = 0
                     self._assignments_made += 1
+                    assert assignment.bed_id is not None
+                    self._episodes.reassociate_bed_exit(
+                        EpisodeProposal(
+                            camera_id=self._config.camera_id,
+                            facility_id=self._config.facility_id,
+                            event_type="bed-exit",
+                            track_id=person_id,
+                            bed_id=assignment.bed_id,
+                            frame_index=input_value.frame_index,
+                            time_sec=(
+                                0.0 if input_value.time_sec is None else input_value.time_sec
+                            ),
+                            qualifying=False,
+                            probability=1.0,
+                            domain="bed_exit",
+                        )
+                    )
                 if assignment.bed_id is not None:
                     occupied[assignment.bed_id] = person_id
                 traces.append(
@@ -406,6 +459,11 @@ class BedExitMonitor:
             if own_ratio >= self._config.min_containment:
                 previous_grace = assignment.grace_frames
                 assignment.grace_frames = 0
+                assignment.recovery_frames += 1
+                if assignment.recovery_frames > self._config.grace_frames:
+                    self._recovery_events.append(
+                        BedExitEvent(person_id=person_id, bed_id=own_bed_id)
+                    )
                 occupied[own_bed_id] = person_id
                 traces.append(
                     DecisionTraceSnapshot(
@@ -431,6 +489,7 @@ class BedExitMonitor:
             ):
                 previous_grace = assignment.grace_frames
                 assignment.grace_frames = 0
+                assignment.recovery_frames = 0
                 traces.append(
                     DecisionTraceSnapshot(
                         reason="contained-in-other-bed",
@@ -456,6 +515,7 @@ class BedExitMonitor:
                 continue
 
             grace_before = assignment.grace_frames
+            assignment.recovery_frames = 0
             was_off_bed_start = grace_before == 0
             assignment.grace_frames += 1
             if was_off_bed_start:
@@ -487,18 +547,13 @@ class BedExitMonitor:
             if triggered:
                 events.append(BedExitEvent(person_id=person_id, bed_id=own_bed_id))
                 exit_beds.add(own_bed_id)
-                assignment.clear_after_exit()
 
         statuses = tuple(
             BedStatus(
                 bed_id=bed_id,
                 box=bed_box,
                 occupancy=(
-                    "exit"
-                    if bed_id in exit_beds
-                    else "occupied"
-                    if bed_id in occupied
-                    else "empty"
+                    "exit" if bed_id in exit_beds else "occupied" if bed_id in occupied else "empty"
                 ),
                 person_id=occupied.get(bed_id),
             )
@@ -576,19 +631,6 @@ class BedExitMonitor:
         snapshots = tuple(item.snapshot for item in decisions) + tuple(extra)
         self.last_shadow_trace_snapshots = snapshots
         return snapshots
-
-    def _business_event(self, event: BedExitEvent, time_sec: float) -> BusinessEvent:
-        return BusinessEvent(
-            domain="bed_exit",
-            event_type="bed-exit",
-            identity=f"{event.person_id}:{event.bed_id}",
-            camera_id=self._config.camera_id,
-            facility_id=self._config.facility_id,
-            time_sec=time_sec,
-            probability=1.0,
-            person_id=event.person_id,
-            bed_id=event.bed_id,
-        )
 
 
 def _bed_region_is_usable(source: BedRegionCacheState) -> bool:

@@ -121,14 +121,10 @@ def extract_window_features(window: NDArray[np.float32]) -> NDArray[np.float32]:
 
     absolute_centroid_y_delta: NDArray[np.float32] = np.abs(np.diff(centroid_y))
     features.append(
-        float(absolute_centroid_y_delta.mean())
-        if len(absolute_centroid_y_delta) > 0
-        else 0.0
+        float(absolute_centroid_y_delta.mean()) if len(absolute_centroid_y_delta) > 0 else 0.0
     )
     features.append(
-        float(absolute_centroid_y_delta.max())
-        if len(absolute_centroid_y_delta) > 0
-        else 0.0
+        float(absolute_centroid_y_delta.max()) if len(absolute_centroid_y_delta) > 0 else 0.0
     )
 
     torso_height_values: list[float] = []
@@ -152,9 +148,7 @@ def extract_window_features(window: NDArray[np.float32]) -> NDArray[np.float32]:
             torso_height_values,
             dtype=np.float32,
         )
-        features.extend(
-            (float(torso_height_array.mean()), float(torso_height_array.std()))
-        )
+        features.extend((float(torso_height_array.mean()), float(torso_height_array.std())))
     else:
         features.extend((0.0, 0.0))
 

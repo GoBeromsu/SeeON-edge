@@ -74,9 +74,7 @@ def _write_clip(root: Path, clip_id: str) -> None:
 
 
 def _login(client: TestClient) -> None:
-    response = client.post(
-        "/api/v1/auth/session", json={"username": "admin", "password": "admin"}
-    )
+    response = client.post("/api/v1/auth/session", json={"username": "admin", "password": "admin"})
     assert response.status_code == 204
 
 
@@ -144,9 +142,7 @@ def test_valid_video_200_and_206_append_one_success_audit_each(
 
         # When: complete and satisfiable-range responses are prepared and served.
         complete = client.get("/api/v1/clips/clip-a/video")
-        partial = client.get(
-            "/api/v1/clips/clip-a/video", headers={"Range": "bytes=0-7"}
-        )
+        partial = client.get("/api/v1/clips/clip-a/video", headers={"Range": "bytes=0-7"})
 
         with sqlite3.connect(AuditStore().path) as connection:
             after = connection.execute(
@@ -192,8 +188,12 @@ def test_camera_and_topology_mutations_roll_back_with_audit_failure() -> None:
     # When: camera and location mutations reach their shared transaction callback.
     with pytest.raises(sqlite3.OperationalError, match="full"):
         store.create(
-            camera_id="camera-a", label="Camera A", rtsp_url="rtsp://example/camera-a",
-            space_id=None, status="unknown", after_write=reject,
+            camera_id="camera-a",
+            label="Camera A",
+            rtsp_url="rtsp://example/camera-a",
+            space_id=None,
+            status="unknown",
+            after_write=reject,
         )
     with pytest.raises(sqlite3.OperationalError, match="full"):
         store.create_floor(edge_ref="floor-a", name="Floor A", order_index=0, after_write=reject)
@@ -224,8 +224,12 @@ def test_review_cas_rolls_back_with_audit_failure() -> None:
     # When: the review and audit share a transaction whose append fails.
     with pytest.raises(sqlite3.OperationalError, match="full"):
         CentralEvidenceReviewStore(path).update(
-            incident_id="incident-a", expected_version=0, actor_id="admin",
-            reviewed_at=stamp, disposition=ReviewDisposition.TRUE_POSITIVE, notes=None,
+            incident_id="incident-a",
+            expected_version=0,
+            actor_id="admin",
+            reviewed_at=stamp,
+            disposition=ReviewDisposition.TRUE_POSITIVE,
+            notes=None,
             after_write=reject,
         )
 
@@ -237,46 +241,6 @@ def test_review_cas_rolls_back_with_audit_failure() -> None:
     assert version == 0
 
 
-def test_delete_intent_refuses_before_relay_when_audit_fails(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    # Given: an authenticated request and a relay seam that records invocation.
-    app = create_app(lifespan=no_lifespan)
-    calls: list[str] = []
-    monkeypatch.setattr(
-        "backend.app.features.clips.router.control_clip_deletion",
-        lambda request, clip_id: calls.append(clip_id),
-    )
-    with TestClient(app) as client:
-        _login(client)
-        healthy_store = app.state.audit_store
-        with sqlite3.connect(healthy_store.path) as connection:
-            connection.execute(
-                "INSERT INTO clips(clip_id,camera_id,event_facet,started_at,duration_ms,"
-                "codec,mime_type,manifest_relpath,media_relpath,manifest_sha256,media_sha256,"
-                "manifest_size_bytes,media_size_bytes,local_state,publish_state,published_at,"
-                "retention_state,revision,created_at,updated_at) VALUES "
-                "('clip-a','camera-a','fall','2026-05-01T00:00:00Z',1000,'h264',"
-                "'video/mp4','clips/clip-a/manifest.json','clips/clip-a/clip.mp4',?,?,1,1,"
-                "'AVAILABLE','PUBLISHED','2026-05-01T00:00:00Z','RETAINED',1,"
-                "'2026-05-01T00:00:00Z','2026-05-01T00:00:00Z')",
-                ("a" * 64, "b" * 64),
-            )
-        app.state.audit_store = FailingAuditStore(healthy_store.path)
-        monkeypatch.setattr(
-            "backend.app.features.clips.router.preflight_clip_deletion",
-            lambda _request, clip_id: {"clip_id": clip_id, "status": "READY"},
-        )
-
-        # When: backend-intent deletion reaches audit before relay.
-        response = client.request(
-            "DELETE", "/api/v1/clips/clip-a", json={"confirm_clip_id": "clip-a"}
-        )
-
-    # Then: no intent escaped and no response body started.
-    assert (response.status_code, response.content) == (503, b"")
-    assert calls == []
-
 
 def test_audit_router_uses_unique_descending_keyset_pages() -> None:
     # Given: three existing events plus the authenticated login event.
@@ -286,8 +250,11 @@ def test_audit_router_uses_unique_descending_keyset_pages() -> None:
         parsed = AuditAction(action)
         store.append(
             AuditEvent(
-                occurred_at=utc_now(), actor_id="seed", action=parsed,
-                target_id=action, detail=empty_detail(parsed),
+                occurred_at=utc_now(),
+                actor_id="seed",
+                action=parsed,
+                target_id=action,
+                detail=empty_detail(parsed),
             )
         )
     with TestClient(app) as client:
@@ -296,9 +263,7 @@ def test_audit_router_uses_unique_descending_keyset_pages() -> None:
         # When: the caller follows the bounded keyset cursor.
         first = client.get("/api/v1/audit", params={"limit": 2})
         cursor = first.json()["next_before_id"]
-        second = client.get(
-            "/api/v1/audit", params={"limit": 2, "before_id": cursor}
-        )
+        second = client.get("/api/v1/audit", params={"limit": 2, "before_id": cursor})
 
     # Then: ordering is deterministic and pages do not overlap.
     first_ids = [event["audit_id"] for event in first.json()["events"]]

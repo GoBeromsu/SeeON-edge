@@ -32,7 +32,7 @@ LOGGER: Final = logging.getLogger(__name__)
 
 
 class SnapshotRenderer(Protocol):
-    """Structural seam matched by ``worker.pipeline.output.overlay.OverlayRenderer``."""
+    """Structural seam for bounded JPEG snapshot encoding."""
 
     def encode_jpeg_bounded(
         self,
@@ -56,7 +56,7 @@ class AlertEvidenceAttacher:
     """
 
     domain_audit: Mapping[str, Mapping[str, object]]
-    overlay_renderer: SnapshotRenderer | None = None
+    snapshot_renderer: SnapshotRenderer | None = None
     debug_snapshots_provider: Callable[[int], tuple[Any, ...]] | None = None
     runtime_manifest_sha256: str | None = None
 
@@ -89,13 +89,13 @@ class AlertEvidenceAttacher:
             return event
         try:
             snapshot_jpeg = None
-            if self.overlay_renderer is not None:
+            if self.snapshot_renderer is not None:
                 debug_snapshots = (
                     ()
                     if self.debug_snapshots_provider is None
                     else self.debug_snapshots_provider(packet.frame.index)
                 )
-                snapshot_jpeg = self.overlay_renderer.encode_jpeg_bounded(
+                snapshot_jpeg = self.snapshot_renderer.encode_jpeg_bounded(
                     packet, observation, debug_snapshots
                 )
             return replace(event, audit=audit, snapshot_jpeg=snapshot_jpeg)

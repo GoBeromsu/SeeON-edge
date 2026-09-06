@@ -16,6 +16,7 @@ from worker.domains.module_definition import (
     DetectionModuleActivationError,
     DetectionModuleCompilationError,
     DetectionModuleDefinition,
+    RuntimeResolvedArtifactDigest,
 )
 from worker.types import TemporalProfile
 
@@ -169,6 +170,8 @@ class CompiledDetectionModuleRegistry:
                 if rule.skip_when_flag is not None and flags.get(rule.skip_when_flag, False):
                     continue
                 interval = rule.resolve(camera_frame_stride, temporal_profile)
+                if interval is None:
+                    continue
                 previous = schedule.setdefault(rule.component_id, interval)
                 if previous != interval:
                     raise DetectionModuleActivationError(
@@ -281,7 +284,15 @@ def _validate_definition(
                 raise DetectionModuleCompilationError(
                     f"component binding {binding.component_id!r} is missing provisioner provenance"
                 )
-            if binding.artifact_digest == "" or binding.preprocessing_identity == "":
+            if (
+                binding.artifact_digest is None
+                or not isinstance(
+                    binding.artifact_digest,
+                    (str, RuntimeResolvedArtifactDigest),
+                )
+                or binding.artifact_digest == ""
+                or binding.preprocessing_identity == ""
+            ):
                 raise DetectionModuleCompilationError(
                     f"component binding {binding.component_id!r} has invalid provenance"
                 )
@@ -312,7 +323,10 @@ def _validate_definition(
             raise DetectionModuleCompilationError(
                 f"schedule rule {rule.component_id!r} does not target an extractor"
             )
-        if rule.resolve(1, temporal_profile) <= 0:
+        interval = rule.resolve(1, temporal_profile)
+        # An on-demand extractor resolves to no interval: it is provisioned but
+        # never scheduled per frame.
+        if interval is not None and interval <= 0:
             raise DetectionModuleCompilationError("schedule intervals must be positive")
 
 

@@ -26,6 +26,7 @@ from worker.tools.fetch_models.manifest import MANIFEST_PATH, ManifestError, loa
 
 DEST_ENV: Final = "ML_WORKER_FETCH_MODELS_DEST"
 PROG: Final = "fetch_models"
+MODEL_SELECTION_PATH: Final = Path("/app/model-selection.json")
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -60,6 +61,15 @@ def _build_parser() -> argparse.ArgumentParser:
         "--check",
         action="store_true",
         help="only verify what is on disk; exit 1 if anything is missing or mismatched",
+    )
+    parser.add_argument(
+        "--selection-path",
+        type=Path,
+        default=MODEL_SELECTION_PATH,
+        help=(
+            "deployment model selection to provision when present "
+            f"(default: {MODEL_SELECTION_PATH})"
+        ),
     )
     return parser
 
@@ -111,6 +121,7 @@ def main(argv: Sequence[str] | None = None, *, env: Mapping[str, str] | None = N
             retry=RetryPolicy(attempts=attempts),
             force=args.force,
             log=log,
+            selection_path=args.selection_path,
         )
     except (SourceError, VerificationError, OSError) as exc:
         log(f"FAILED: {exc}")

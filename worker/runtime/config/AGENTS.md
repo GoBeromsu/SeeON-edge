@@ -3,6 +3,8 @@
 Own load, pull, LKG, restart identity, and typed models. YAML is a developer hatch.
 Production authority is the backend relay pull plus numeric policies.
 No env roster.
+`ML_WORKER_PROFILE=flow` is infrastructure selection only. Its DeepStream
+artifact paths are image-owned wiring, never camera/config authority.
 
 `--config` is the only local path. `resolve_config_path` reads no env, so a roster cannot arrive through compose or Git.
 JSON is refused. Mapping only. Hatch fields: `relay`, `runtime`, empty `cameras`, `dev_mjpeg`.

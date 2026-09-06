@@ -6,13 +6,18 @@ from dataclasses import replace
 from pathlib import Path
 
 import pytest
-import yaml
 
 from backend.app.edge_db.bootstrap import bootstrap_database
 from backend.app.edge_db.compatibility import CURRENT_SCHEMA_RANGE
 from shared.detection_policies import default_policy_bundle, make_effective_policy
+from tests_support.pose_bbox56_bundle_artifact import write_pose_bbox56_bundle
+from worker.adapters.model.ort_pose_bbox56 import load_packaged_fall_bundle
 from worker.domains import DETECTION_MODULE_REGISTRY
-from worker.domains.module_definition import SharedComponentIdentity
+from worker.domains.module_definition import (
+    RUNTIME_RESOLVED_PREPROCESSING_IDENTITY,
+    RuntimeResolvedArtifactDigest,
+    SharedComponentIdentity,
+)
 from worker.pipeline.output.evidence.evidence_stager import DurableEvidenceStager
 from worker.runtime.profile.boot import BootContext
 from worker.runtime.profile.registry import PROFILE_REGISTRY
@@ -24,26 +29,26 @@ from worker.runtime.provenance.manifest import (
     build_applied_camera_state,
     build_applied_runtime_manifest,
 )
-from worker.runtime.provenance.models import AppliedBedZone
+from worker.runtime.provenance.models import AppliedBedZone, AppliedBedZoneRegion
 from worker.runtime.provenance.store import AppliedRuntimeManifestStore
+from worker.tools.fetch_models.manifest import load_manifest
 
 _BUILD_REVISION = "1" * 40
-_PACKAGED_FALL_METADATA_PATH = (
-    Path(__file__).resolve().parents[1] / "models" / "fall" / "lstm" / "metadata.yaml"
-)
 
 
-def _packaged_fall_identity() -> tuple[str, str]:
-    metadata = yaml.safe_load(_PACKAGED_FALL_METADATA_PATH.read_text(encoding="utf-8"))
-    assert isinstance(metadata, dict)
-    artifact_digest = metadata.get("artifact_digest")
-    preprocessing_identity = metadata.get("preprocessing_identity")
-    assert isinstance(artifact_digest, str)
-    assert isinstance(preprocessing_identity, str)
-    return artifact_digest, preprocessing_identity
+def _fall_preprocessing_identity() -> str:
+    definition = DETECTION_MODULE_REGISTRY.get("fall", 2)
+    [binding] = [
+        binding
+        for binding in definition.component_bindings
+        if binding.component_id == "fall-classifier"
+    ]
+    assert binding.preprocessing_identity is RUNTIME_RESOLVED_PREPROCESSING_IDENTITY
+    return "coco17-xyc-plus-pose-head-xyxy-valid-f32-v1"
 
 
-_FALL_ARTIFACT_DIGEST, _FALL_PREPROCESSING_IDENTITY = _packaged_fall_identity()
+_FALL_ARTIFACT_DIGEST = "a" * 64
+_FALL_PREPROCESSING_IDENTITY = _fall_preprocessing_identity()
 _ARTIFACTS = {
     "pose": "eb3bb8268828aeaf515cec23a4bfafd793944a86fe9af94ba7823609c14522a9",
     "person": "9b09cc8bf347f0fc8a5f7657480587f25db09b34bf33b0652110fb03a8ad4fef",
@@ -84,7 +89,7 @@ def _boot(profile: str) -> BootContext:
 
 
 def _identities(
-    *, runtime: str = "cpu", device: str = "cpu"
+    *, runtime: str = "onnxruntime", device: str = "cuda"
 ) -> tuple[SharedComponentIdentity, ...]:
     return tuple(
         SharedComponentIdentity(
@@ -102,10 +107,10 @@ def _cameras(*, threshold: float = 0.5) -> tuple[AppliedCameraState, ...]:
     bundle = default_policy_bundle(("camera:opaque/a", "camera:opaque/b"))
     fall = make_effective_policy(
         module_id="fall",
-        module_version=1,
+        module_version=2,
         values=replace(
-            bundle.resolve("camera:opaque/a", "fall", 1).values,
-            operating_threshold=threshold,
+            bundle.resolve("camera:opaque/a", "fall", 2).values,
+            transition_threshold=threshold,
         ),
         source="facility-default",
         facility_revision_id=17,
@@ -118,14 +123,14 @@ def _cameras(*, threshold: float = 0.5) -> tuple[AppliedCameraState, ...]:
                 camera_id=camera_id,
                 effective_decode_backend="opencv",
                 ingest_target_fps=5.0,
-                module_qualified_ids=("bed_exit.v1", "fall.v1"),
+                module_qualified_ids=("bed_exit.v1", "fall.v2"),
                 schedule={"pose": 2, "bed": 30},
                 detection_windows={"fall": None, "bed_exit": None},
                 policies={
                     "fall": fall,
                     "bed_exit": bundle.resolve(camera_id, "bed_exit", 1),
                 },
-                bed_zone_polygon=None,
+                bed_zone_regions=(),
                 bed_zone_image_width=None,
                 bed_zone_image_height=None,
             )
@@ -138,11 +143,22 @@ def _persisted_bed_camera() -> AppliedCameraState:
         camera_id="camera:opaque/a",
         effective_decode_backend="opencv",
         ingest_target_fps=5.0,
-        module_qualified_ids=("bed_exit.v1", "fall.v1"),
+        module_qualified_ids=("bed_exit.v1", "fall.v2"),
         schedule={"pose": 2, "bed": 30},
         detection_windows={"fall": None, "bed_exit": None},
         policies=_cameras()[0].policies,
-        bed_zone_polygon=((1, 2), (9, 2), (9, 8), (1, 8)),
+        bed_zone_regions=(
+            AppliedBedZoneRegion(
+                id="bed-a",
+                polygon=((1, 2), (9, 2), (9, 8), (1, 8)),
+                origin="manual",
+            ),
+            AppliedBedZoneRegion(
+                id="bed-b",
+                polygon=((20, 12), (30, 12), (30, 20), (20, 20)),
+                origin="model",
+            ),
+        ),
         bed_zone_image_width=640,
         bed_zone_image_height=480,
     )
@@ -150,7 +166,7 @@ def _persisted_bed_camera() -> AppliedCameraState:
 
 def _manifest(
     *,
-    profile: str = "cpu",
+    profile: str = "flow",
     identities: tuple[SharedComponentIdentity, ...] | None = None,
     cameras: tuple[AppliedCameraState, ...] | None = None,
     facts: RuntimeEnvironmentFacts | None = None,
@@ -162,7 +178,7 @@ def _manifest(
     return build_applied_runtime_manifest(
         boot=boot,
         module_registry=DETECTION_MODULE_REGISTRY,
-        module_versions={"fall": 1, "bed_exit": 1},
+        module_versions={"fall": 2, "bed_exit": 1},
         component_identities=identities
         or _identities(
             runtime=boot.runtime_profile.effective_inference_backend,
@@ -172,7 +188,7 @@ def _manifest(
         config_version=42,
         restart_generation=7,
         detector_version="worker-domain-detectors-v1",
-        environment=facts or _facts(nvidia=profile == "nvidia"),
+        environment=facts or _facts(nvidia=True),
         edge_database_schema_version=5,
     )
 
@@ -180,15 +196,22 @@ def _manifest(
 def test_manifest_is_canonical_hashable_and_repeatable() -> None:
     first = _manifest()
     second = build_applied_runtime_manifest(
-        boot=_boot("cpu"),
+        boot=_boot("flow"),
         module_registry=DETECTION_MODULE_REGISTRY,
-        module_versions={"bed_exit": 1, "fall": 1},
+        module_versions={"bed_exit": 1, "fall": 2},
         component_identities=tuple(reversed(_identities())),
-        cameras=tuple(reversed(_cameras())),
+        cameras=tuple(
+            reversed(
+                tuple(
+                    replace(camera, effective_decode_backend=_boot("flow").decode)
+                    for camera in _cameras()
+                )
+            )
+        ),
         config_version=42,
         restart_generation=7,
         detector_version="worker-domain-detectors-v1",
-        environment=_facts(),
+        environment=_facts(nvidia=True),
         edge_database_schema_version=5,
     )
 
@@ -205,20 +228,30 @@ def test_manifest_is_canonical_hashable_and_repeatable() -> None:
     )
 
 
-
 def test_camera_projection_records_canonical_effective_applied_semantics() -> None:
     camera = build_applied_camera_state(
         camera_id="camera:opaque/a",
         effective_decode_backend="cpu",
         ingest_target_fps=7.5,
-        module_qualified_ids=("fall.v1", "bed_exit.v1"),
+        module_qualified_ids=("fall.v2", "bed_exit.v1"),
         schedule={"pose": 3, "bed": 30},
         detection_windows={
             "fall": AppliedDetectionWindow(start="21:00", end="06:00", timezone="UTC"),
             "bed_exit": AppliedDetectionWindow(start="22:15", end="05:45", timezone="Asia/Seoul"),
         },
         policies=_cameras()[0].policies,
-        bed_zone_polygon=((1, 2), (9, 2), (9, 8), (1, 8)),
+        bed_zone_regions=(
+            AppliedBedZoneRegion(
+                id="bed-a",
+                polygon=((1, 2), (9, 2), (9, 8), (1, 8)),
+                origin="manual",
+            ),
+            AppliedBedZoneRegion(
+                id="bed-b",
+                polygon=((20, 12), (30, 12), (30, 20), (20, 20)),
+                origin="model",
+            ),
+        ),
         bed_zone_image_width=640,
         bed_zone_image_height=480,
     )
@@ -231,33 +264,65 @@ def test_camera_projection_records_canonical_effective_applied_semantics() -> No
             "ingest_target_fps": 7.5,
             "schedule_interval_basis": "ingested-frame-index",
         },
-        "modules": ["bed_exit.v1", "fall.v1"],
+        "modules": ["bed_exit.v1", "fall.v2"],
         "schedule": {"bed": 30, "pose": 3},
         "detection_windows": {
             "bed_exit": {"end": "05:45", "start": "22:15", "timezone": "Asia/Seoul"},
             "fall": {"end": "06:00", "start": "21:00", "timezone": "UTC"},
         },
         "bed_zone": {
-            "authority": "persisted-polygon",
+            "authority": "persisted-regions",
             "coordinate_schema_version": 1,
             "coordinate_space": "source-image-pixels",
-            "polygon": [[1, 2], [1, 8], [9, 8], [9, 2]],
+            "regions": [
+                {
+                    "id": "bed-a",
+                    "origin": "manual",
+                    "polygon": [[1, 2], [1, 8], [9, 8], [9, 2]],
+                },
+                {
+                    "id": "bed-b",
+                    "origin": "model",
+                    "polygon": [[20, 12], [20, 20], [30, 20], [30, 12]],
+                },
+            ],
             "source_dimensions": {"height": 480, "width": 640},
         },
         "policies": content["policies"],
     }
 
 
-def test_absent_bed_zone_explicitly_records_live_segmentation_semantics() -> None:
+def test_absent_bed_zone_explicitly_records_no_persisted_region_semantics() -> None:
     content = json.loads(_manifest().canonical_json)["cameras"][0]
 
     assert content["bed_zone"] == {
-        "authority": "live-segmentation",
+        "authority": "none",
         "coordinate_schema_version": 1,
         "coordinate_space": None,
-        "polygon": None,
+        "regions": [],
         "source_dimensions": None,
     }
+
+
+def test_none_bed_zone_regions_records_no_persisted_region_semantics() -> None:
+    camera = _cameras()[0]
+    rebuilt = build_applied_camera_state(
+        camera_id=camera.camera_id,
+        effective_decode_backend=camera.effective_decode_backend,
+        ingest_target_fps=camera.ingest_target_fps,
+        module_qualified_ids=camera.module_qualified_ids,
+        schedule=camera.schedule,
+        detection_windows=camera.detection_windows,
+        policies=camera.policies,
+        bed_zone_regions=None,
+        bed_zone_image_width=640,
+        bed_zone_image_height=480,
+    )
+
+    assert rebuilt.bed_zone.authority == "none"
+    assert rebuilt.bed_zone.regions == ()
+    assert rebuilt.bed_zone.source_width is None
+    assert rebuilt.bed_zone.source_height is None
 
 
 @pytest.mark.parametrize(
@@ -297,7 +362,37 @@ def test_each_effective_camera_semantic_changes_manifest_hash(
     (
         replace(
             _persisted_bed_camera().bed_zone,
-            polygon=((1, 2), (10, 2), (9, 8), (1, 8)),
+            regions=(
+                replace(
+                    _persisted_bed_camera().bed_zone.regions[0],
+                    polygon=((1, 2), (10, 2), (9, 8), (1, 8)),
+                ),
+                _persisted_bed_camera().bed_zone.regions[1],
+            ),
+        ),
+        replace(
+            _persisted_bed_camera().bed_zone,
+            regions=(
+                _persisted_bed_camera().bed_zone.regions[0],
+                replace(
+                    _persisted_bed_camera().bed_zone.regions[1],
+                    polygon=((20, 12), (31, 12), (30, 20), (20, 20)),
+                ),
+            ),
+        ),
+        replace(
+            _persisted_bed_camera().bed_zone,
+            regions=(
+                _persisted_bed_camera().bed_zone.regions[0],
+                replace(_persisted_bed_camera().bed_zone.regions[1], id="bed-c"),
+            ),
+        ),
+        replace(
+            _persisted_bed_camera().bed_zone,
+            regions=(
+                _persisted_bed_camera().bed_zone.regions[0],
+                replace(_persisted_bed_camera().bed_zone.regions[1], origin="manual"),
+            ),
         ),
         replace(_persisted_bed_camera().bed_zone, source_width=1280),
         replace(_persisted_bed_camera().bed_zone, source_height=960),
@@ -323,19 +418,46 @@ def test_equivalent_polygon_start_and_winding_order_do_not_change_hash() -> None
         schedule=baseline.schedule,
         detection_windows=baseline.detection_windows,
         policies=baseline.policies,
-        bed_zone_polygon=((9, 8), (1, 8), (1, 2), (9, 2)),
+        bed_zone_regions=(
+            AppliedBedZoneRegion(
+                id="bed-a",
+                polygon=((9, 8), (1, 8), (1, 2), (9, 2)),
+                origin="manual",
+            ),
+            AppliedBedZoneRegion(
+                id="bed-b",
+                polygon=((30, 20), (20, 20), (20, 12), (30, 12)),
+                origin="model",
+            ),
+        ),
         bed_zone_image_width=640,
         bed_zone_image_height=480,
     )
     reversed_winding = replace(
         rotated,
-        bed_zone=replace(rotated.bed_zone, polygon=tuple(reversed(rotated.bed_zone.polygon or ()))),
+        bed_zone=replace(
+            rotated.bed_zone,
+            regions=tuple(
+                replace(region, polygon=tuple(reversed(region.polygon)))
+                for region in rotated.bed_zone.regions
+            ),
+        ),
     )
     closed_ring = replace(
         baseline,
         bed_zone=replace(
             baseline.bed_zone,
-            polygon=(*tuple(baseline.bed_zone.polygon or ()), (1, 2)),
+            regions=tuple(
+                replace(region, polygon=(*region.polygon, region.polygon[0]))
+                for region in baseline.bed_zone.regions
+            ),
+        ),
+    )
+    reordered_regions = replace(
+        baseline,
+        bed_zone=replace(
+            baseline.bed_zone,
+            regions=tuple(reversed(baseline.bed_zone.regions)),
         ),
     )
 
@@ -343,6 +465,7 @@ def test_equivalent_polygon_start_and_winding_order_do_not_change_hash() -> None
     assert _manifest(cameras=(rotated,)).sha256 == expected
     assert _manifest(cameras=(reversed_winding,)).sha256 == expected
     assert _manifest(cameras=(closed_ring,)).sha256 == expected
+    assert _manifest(cameras=(reordered_regions,)).sha256 == expected
 
 
 def test_camera_semantic_mapping_and_selection_order_do_not_change_hash() -> None:
@@ -364,51 +487,20 @@ def test_persisted_bed_zone_requires_source_dimensions() -> None:
             camera_id="camera:opaque/a",
             effective_decode_backend="opencv",
             ingest_target_fps=5.0,
-            module_qualified_ids=("bed_exit.v1", "fall.v1"),
+            module_qualified_ids=("bed_exit.v1", "fall.v2"),
             schedule={"pose": 2, "bed": 30},
             detection_windows={"fall": None, "bed_exit": None},
             policies=_cameras()[0].policies,
-            bed_zone_polygon=((1, 2), (9, 2), (9, 8), (1, 8)),
+            bed_zone_regions=(
+                AppliedBedZoneRegion(
+                    id="bed-a",
+                    polygon=((1, 2), (9, 2), (9, 8), (1, 8)),
+                    origin="manual",
+                ),
+            ),
             bed_zone_image_width=None,
             bed_zone_image_height=None,
         )
-
-
-def test_cpu_and_nvidia_preserve_semantics_but_record_execution_difference() -> None:
-    cpu = _manifest()
-    nvidia = _manifest(
-        profile="nvidia",
-        identities=_identities(runtime="cuda", device="cuda"),
-        facts=_facts(nvidia=True),
-    )
-    cpu_content = json.loads(cpu.canonical_json)
-    nvidia_content = json.loads(nvidia.canonical_json)
-
-    assert cpu.sha256 != nvidia.sha256
-    assert cpu_content["modules"] == nvidia_content["modules"]
-    assert [camera["effective_decode_backend"] for camera in cpu_content["cameras"]] == [
-        "opencv",
-        "opencv",
-    ]
-    assert [camera["effective_decode_backend"] for camera in nvidia_content["cameras"]] == [
-        "nvdec",
-        "nvdec",
-    ]
-    for cpu_camera, nvidia_camera in zip(
-        cpu_content["cameras"], nvidia_content["cameras"], strict=True
-    ):
-        assert {
-            key: value for key, value in cpu_camera.items() if key != "effective_decode_backend"
-        } == {
-            key: value for key, value in nvidia_camera.items() if key != "effective_decode_backend"
-        }
-    assert cpu_content["profile"]["canonical"] == "cpu-host"
-    assert nvidia_content["profile"]["canonical"] == "nvidia"
-    # The unified `nvidia` profile keeps frames on the device after nvdec, so the
-    # host-bridge era's two H2D full-frame uploads (inference input + nvenc input)
-    # are gone from the recorded memory path.
-    assert nvidia_content["profile"]["device_resident_after_decode"] is True
-    assert nvidia_content["profile"]["full_frame_copy_counts"] == {"d2h": 0, "h2d": 0}
 
 
 def test_policy_content_change_changes_only_applied_identity() -> None:
@@ -430,16 +522,54 @@ def test_unresolved_or_contradictory_component_identity_refuses_manifest() -> No
     with pytest.raises(AppliedRuntimeManifestError, match="unresolved applied identity.*bed"):
         _manifest(
             identities=tuple(
-                identity for identity in _identities() if identity.component_id != "bed"
+                identity
+                for identity in _identities(
+                    runtime="onnxruntime",
+                    device="cuda",
+                )
+                if identity.component_id != "bed"
             )
         )
 
     contradictory = tuple(
         replace(identity, artifact_digest="f" * 64) if identity.component_id == "pose" else identity
-        for identity in _identities()
+        for identity in _identities(runtime="onnxruntime", device="cuda")
     )
     with pytest.raises(AppliedRuntimeManifestError, match="contradictory artifact identity.*pose"):
         _manifest(identities=contradictory)
+
+
+def test_runtime_resolved_fall_identity_names_loaded_bundle_digest(tmp_path: Path) -> None:
+    definition = DETECTION_MODULE_REGISTRY.get("fall", 2)
+    binding = next(
+        binding
+        for binding in definition.component_bindings
+        if binding.component_id == "fall-classifier"
+    )
+    assert isinstance(binding.artifact_digest, RuntimeResolvedArtifactDigest)
+
+    bundle = load_packaged_fall_bundle(write_pose_bbox56_bundle(tmp_path / "fall-bundle"))
+    loaded_digest = bundle.published_weights_digest
+    shipped_digest = next(
+        artifact.sha256
+        for artifact in load_manifest().artifacts
+        if artifact.path == "fall/pose-bbox56-gru/model.pt"
+    )
+    assert loaded_digest != shipped_digest
+    manifest = _manifest(
+        identities=tuple(
+            replace(identity, artifact_digest=loaded_digest)
+            if identity.component_id == "fall-classifier"
+            else identity
+            for identity in _identities(runtime="onnxruntime", device="cuda")
+        )
+    )
+
+    components = json.loads(manifest.canonical_json)["components"]
+    fall = next(
+        component for component in components if component["component_id"] == "fall-classifier"
+    )
+    assert fall["artifact_sha256"] == loaded_digest
 
 
 def test_secret_url_and_absolute_path_are_never_serialized() -> None:
@@ -453,15 +583,6 @@ def test_secret_url_and_absolute_path_are_never_serialized() -> None:
     assert "/var/lib/" not in manifest.canonical_json
     assert "facility_id" not in manifest.canonical_json
     assert "relay" not in manifest.canonical_json
-
-
-def test_nvidia_manifest_requires_verified_driver_and_runtime_facts() -> None:
-    with pytest.raises(AppliedRuntimeManifestError, match="NVIDIA applied identity"):
-        _manifest(
-            profile="nvidia",
-            identities=_identities(runtime="cuda", device="cuda"),
-            facts=_facts(),
-        )
 
 
 def test_local_manifest_record_preserves_opaque_camera_identity_bytes(

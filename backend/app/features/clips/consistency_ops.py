@@ -364,9 +364,9 @@ def _inspect_finalized_directory(
                 or payload.get("path") != f"clips/{directory.name}/clip.mp4"
             ):
                 raise ValueError  # noqa: TRY301
-            if payload.get("size_bytes") != media_info.st_size or payload.get(
-                "sha256"
-            ) != _sha256(media):
+            if payload.get("size_bytes") != media_info.st_size or payload.get("sha256") != _sha256(
+                media
+            ):
                 raise ValueError  # noqa: TRY301
             evidence = FinalizedClipEvidence(
                 "VERIFIED",
@@ -421,9 +421,7 @@ def _inspect_finalized_directory_at(
 ) -> tuple[FinalizedClipEvidence, tuple[str, ...]]:
     """Read and hash a finalized clip without resolving the store pathname."""
     try:
-        manifest_info = os.stat(
-            "manifest.json", dir_fd=directory_fd, follow_symlinks=False
-        )
+        manifest_info = os.stat("manifest.json", dir_fd=directory_fd, follow_symlinks=False)
         if stat.S_ISLNK(manifest_info.st_mode) or not stat.S_ISREG(manifest_info.st_mode):
             raise ValueError  # noqa: TRY301
         manifest_fd = os.open("manifest.json", os.O_RDONLY | os.O_NOFOLLOW, dir_fd=directory_fd)
@@ -447,17 +445,20 @@ def _inspect_finalized_directory_at(
                 or payload.get("path") != f"clips/{directory.name}/clip.mp4"
             ):
                 raise ValueError  # noqa: TRY301
-            media_fd = os.open(
-                "clip.mp4", os.O_RDONLY | os.O_NOFOLLOW, dir_fd=directory_fd
-            )
+            media_fd = os.open("clip.mp4", os.O_RDONLY | os.O_NOFOLLOW, dir_fd=directory_fd)
             with os.fdopen(media_fd, "rb") as media:
                 digest = hashlib.file_digest(media, "sha256").hexdigest()
             if payload.get("size_bytes") != media_info.st_size or payload.get("sha256") != digest:
                 raise ValueError  # noqa: TRY301
             evidence = FinalizedClipEvidence(
-                "VERIFIED", None, directory / "manifest.json",
-                f"clips/{directory.name}/clip.mp4", str(payload["sha256"]),
-                int(payload["size_bytes"]), str(payload["mime_type"]), str(payload["codec"]),
+                "VERIFIED",
+                None,
+                directory / "manifest.json",
+                f"clips/{directory.name}/clip.mp4",
+                str(payload["sha256"]),
+                int(payload["size_bytes"]),
+                str(payload["mime_type"]),
+                str(payload["codec"]),
                 int(payload["duration_ms"]),
                 str(payload["finalized_at"]) if payload.get("finalized_at") is not None else None,
             )
@@ -470,8 +471,15 @@ def _inspect_finalized_directory_at(
                 raise ValueError  # noqa: TRY301
             reason = payload.get("reason_code")
             evidence = FinalizedClipEvidence(
-                "UNAVAILABLE", reason if reason in _UNAVAILABLE_REASONS else "MISSING",
-                directory / "manifest.json", None, None, None, None, None, None,
+                "UNAVAILABLE",
+                reason if reason in _UNAVAILABLE_REASONS else "MISSING",
+                directory / "manifest.json",
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
                 str(payload["finalized_at"]) if payload.get("finalized_at") is not None else None,
             )
         else:
@@ -598,9 +606,7 @@ def _receipt_from_payload(payload: dict[str, object], path: Path) -> RepairRecei
     schema_version = payload["schema_version"]
     if not isinstance(schema_version, int):
         raise ClipConsistencyError("receipt_invalid", "schema_version is not an integer")
-    return RepairReceipt(
-        1, "apply", "DONE", schema_version, RepairCounters(**counters), str(path)
-    )
+    return RepairReceipt(1, "apply", "DONE", schema_version, RepairCounters(**counters), str(path))
 
 
 def _write_receipt(

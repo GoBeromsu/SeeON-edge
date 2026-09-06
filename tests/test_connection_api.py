@@ -178,9 +178,7 @@ def test_put_connection_verifies_persists_and_publishes_one_bundle_immediately(
         assert body["enrollment_generation"] == 3
         assert body["facility_token_masked"] == "****cret"
         assert "eft_v1.token.secret" not in response.text
-        assert EnrollmentVerifyHandler.received_paths == [
-            "/api/v1/edge/enrollments/verify"
-        ]
+        assert EnrollmentVerifyHandler.received_paths == ["/api/v1/edge/enrollments/verify"]
         assert EnrollmentVerifyHandler.received_auth == ["Bearer eft_v1.token.secret"]
         assert EnrollmentVerifyHandler.received_bodies == [
             {

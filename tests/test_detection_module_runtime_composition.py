@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from dataclasses import replace
 from datetime import UTC, datetime
-from pathlib import Path
 from types import MappingProxyType
 from typing import final
 
@@ -24,6 +23,8 @@ from worker.domains.module_definition import (
     DetectionModuleCompilationError,
     DetectionModuleDefinition,
     PolicySchemaIdentity,
+    RuntimeResolvedArtifactDigest,
+    RuntimeResolvedPreprocessingIdentity,
     ScheduleRule,
 )
 from worker.domains.registry import (
@@ -32,12 +33,8 @@ from worker.domains.registry import (
     DETECTION_MODULE_REGISTRY,
 )
 from worker.pipeline.analytics.merge import merge_module_results, result_merger_names
-from worker.runtime.config import WorkerConfig
 from worker.runtime.config.domain_models import DomainsConfig
 from worker.runtime.model_composition import SharedComponentPool, compose_shared_components
-from worker.runtime.profile.boot import BootContext
-from worker.runtime.profile.registry import PROFILE_REGISTRY
-from worker.runtime.worker import WorkerRuntime
 from worker.types import CURRENT_TEMPORAL_PROFILE, BusinessEvent, DecisionInput, FramePacket
 
 ServingOption = str | int | float | bool | None
@@ -278,7 +275,7 @@ def test_compiler_rejects_two_output_writers_inside_one_module() -> None:
 
 def test_activation_rejects_distinct_active_writers_to_one_output_adapter() -> None:
     registry = _registry(DETECTION_MODULE_DEFINITIONS[0], _third_definition())
-    selection = {"fall": 1, "mobility_risk": 3}
+    selection = {"fall": 2, "mobility_risk": 3}
     components = registry.shared_component_ids(selection, flags={})
 
     with pytest.raises(DetectionModuleActivationError, match="output adapter.*pose"):
@@ -294,54 +291,8 @@ def test_activation_rejects_distinct_active_writers_to_one_output_adapter() -> N
         )
 
 
-@pytest.mark.parametrize(
-    ("profile_name", "device"),
-    (("cpu-host", "cpu"),),
-)
-def test_worker_runtime_preflights_third_module_without_name_dispatch(
-    tmp_path: Path,
-    profile_name: str,
-    device: str,
-) -> None:
-    definition = _third_definition()
-    registry = _registry(definition)
-    config = WorkerConfig.model_validate(
-        {
-            "relay": {"url": "http://relay.test", "token": "token"},
-            "domains": {"versions": {"mobility_risk": 3}},
-            "clip": {"enabled": False},
-            "cameras": [
-                {
-                    "camera_id": "camera-1",
-                    "facility_id": "facility-1",
-                    "rtsp_url": "rtsp://example.test/camera-1",
-                    "frame_stride": 7,
-                }
-            ],
-        }
-    )
-    runtime = WorkerRuntime(
-        config,
-        serving_client=_Serving(),
-        module_registry=registry,
-        state_dir=tmp_path,
-        clip_store_dir=tmp_path,
-    )
-    profile = PROFILE_REGISTRY[profile_name]
-    boot = BootContext(profile, profile.device, profile.decode, profile.encode)
-
-    graph = runtime._initialize_models(boot)  # noqa: SLF001
-    runtime._warmed_component_ids = frozenset(graph.components)  # noqa: SLF001
-    plan = runtime._preflight_camera_graph(config.cameras[0])  # noqa: SLF001
-
-    assert plan.schedule == {"mobility-pose": 7, "mobility-bed": 11}
-    assert tuple(plan.definitions) == ("mobility_risk",)
-    assert tuple(plan.domain_deciders) == ("mobility_risk",)
-    assert {identity.device for identity in graph.identities} == {device}
-
-
 def test_production_shared_component_semantics_are_equal_on_cpu_and_nvidia() -> None:
-    selection = {"fall": 1, "bed_exit": 1}
+    selection = {"fall": 2, "bed_exit": 1}
     bindings = DETECTION_MODULE_REGISTRY.shared_bindings(selection, flags={})
     by_task = {
         binding.serving_task: binding for binding in bindings if binding.serving_task is not None
@@ -352,6 +303,10 @@ def test_production_shared_component_semantics_are_equal_on_cpu_and_nvidia() -> 
         def __init__(self, binding: ComponentBinding) -> None:
             artifact_digest = binding.artifact_digest
             preprocessing_identity = binding.preprocessing_identity
+            if isinstance(artifact_digest, RuntimeResolvedArtifactDigest):
+                artifact_digest = "f" * 64
+            if isinstance(preprocessing_identity, RuntimeResolvedPreprocessingIdentity):
+                preprocessing_identity = "coco17-xyc-plus-pose-head-xyxy-valid-f32-v1"
             assert isinstance(artifact_digest, str)
             assert isinstance(preprocessing_identity, str)
             self.artifact_digest: str = artifact_digest
@@ -420,7 +375,7 @@ def test_production_pose_binding_rejects_reported_identity_mismatch_before_pooli
     field: str,
     message: str,
 ) -> None:
-    pose = DETECTION_MODULE_REGISTRY.get("fall", 1).shared_bindings[0]
+    pose = DETECTION_MODULE_REGISTRY.get("fall", 2).shared_bindings[0]
 
     class _MismatchedPose(_Runner):
         artifact_digest = pose.artifact_digest
@@ -437,7 +392,7 @@ def test_production_pose_binding_rejects_reported_identity_mismatch_before_pooli
     with pytest.raises(DetectionModuleActivationError, match=message):
         compose_shared_components(
             DETECTION_MODULE_REGISTRY,
-            module_versions={"fall": 1},
+            module_versions={"fall": 2},
             serving_client=_ProductionServing(),
             runtime="cpu",
             device="cpu",
@@ -474,7 +429,7 @@ def test_missing_runner_preprocessing_identity_never_reaches_pool() -> None:
     assert pool.identities == ()
 
 
-def test_unresolved_artifact_identity_never_reaches_applied_graph() -> None:
+def test_missing_artifact_identity_refuses_registry_compilation() -> None:
     definition = _third_definition()
     broken = replace(
         definition,
@@ -485,23 +440,5 @@ def test_unresolved_artifact_identity_never_reaches_applied_graph() -> None:
             for binding in definition.component_bindings
         ),
     )
-    registry = _registry(broken)
-
-    class _UnidentifiedRunner:
-        def __call__(self, _image: Image) -> RunnerResult:
-            return pose_result((), ())
-
-    class _UnidentifiedServing:
-        def create(self, task: str, **_options: ServingOption) -> _UnidentifiedRunner:
-            return _UnidentifiedRunner()
-
-    with pytest.raises(DetectionModuleActivationError, match="artifact identity"):
-        compose_shared_components(
-            registry,
-            module_versions={"mobility_risk": 3},
-            serving_client=_UnidentifiedServing(),
-            runtime="cuda",
-            device="cuda",
-            flags={},
-            pool=SharedComponentPool(),
-        )
+    with pytest.raises(DetectionModuleCompilationError, match="invalid provenance"):
+        _registry(broken)

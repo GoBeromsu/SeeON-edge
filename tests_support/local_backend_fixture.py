@@ -167,9 +167,7 @@ class LocalBackendFixture:
             self._require_auth(request)
             if facility_id != self.facility_id:
                 raise HTTPException(404, "unknown facility")
-            return JSONResponse(
-                {"configVersion": 1, "detectionWindows": {}, "cameras": []}
-            )
+            return JSONResponse({"configVersion": 1, "detectionWindows": {}, "cameras": []})
 
         @app.get("/api/v1/events/capabilities")
         async def capabilities(camera_id: str, request: Request) -> JSONResponse:
@@ -201,9 +199,7 @@ class LocalBackendFixture:
                     raise HTTPException(409, "idempotency conflict")
                 accepted = self._accepted_event_ids[edge_event_id]
                 if self.faulty_event_identity:
-                    event_id = str(
-                        uuid5(_FIXTURE_NAMESPACE, f"{edge_event_id}:{len(accepted)}")
-                    )
+                    event_id = str(uuid5(_FIXTURE_NAMESPACE, f"{edge_event_id}:{len(accepted)}"))
                     accepted.append(event_id)
                 else:
                     event_id = existing.event_id
@@ -244,9 +240,7 @@ class LocalBackendFixture:
             if total == 0:
                 raise HTTPException(413, "invalid snapshot size")
             self._snapshot_bytes_discarded += total
-            return JSONResponse(
-                {"snapshotKey": f"events/{event_id}/snapshot.jpg"}, status_code=201
-            )
+            return JSONResponse({"snapshotKey": f"events/{event_id}/snapshot.jpg"}, status_code=201)
 
         @app.put("/api/v1/edge/topology-snapshots/{snapshot_id}")
         async def topology(snapshot_id: str, request: Request) -> JSONResponse:

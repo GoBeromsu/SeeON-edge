@@ -1,0 +1,23 @@
+{
+  "source": "live RTSP stream with people, Flow profile, real backend on schema 18",
+  "clip_id": "a4fedb16-de9a-4a48-96bf-0e7ed7d85c4f",
+  "duration_ms": 92900,
+  "video_codec": "h264",
+  "detected_at": "2026-09-04T12:49:38.413384Z",
+  "truncation_reasons": [],
+  "extension_boundary": "extension_bounded",
+  "extension_duration_s": 92.9,
+  "contributors": 38,
+  "contributors_ordered_by_detected_at": [
+    "2026-09-04T12:49:38.413384Z",
+    "2026-09-04T12:49:38.416187Z",
+    "2026-09-04T12:49:40.072828Z"
+  ],
+  "artifacts_published": [
+    "clip.mp4",
+    "manifest.json",
+    "thumbnail.jpg",
+    "terminal-outcome.json"
+  ],
+  "note": "P1b-AC3 coalescing proven live: many admitted alerts became ONE clip whose extension block lists every contributor in detected_at order with a covering duration, published with its thumbnail and terminal outcome."
+}

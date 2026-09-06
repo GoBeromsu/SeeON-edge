@@ -12,7 +12,7 @@ import pytest
 
 _SCRIPT = Path("scripts/ops/alert-amplification-diagnostic.py")
 # Split so the cleartext-policy scan does not match this file.
-_INSECURE_HTTP_ENV = "API_BACKEND_" "ALLOW_INSECURE_HTTP"  # noqa: ISC001
+_INSECURE_HTTP_ENV = "API_BACKEND_ALLOW_INSECURE_HTTP"  # noqa: ISC001
 
 
 def _load_script() -> ModuleType:
@@ -148,9 +148,7 @@ def test_semantic_http_reads_complete_compose_service_map(
         json.dumps(
             {
                 "services": {
-                    "ml-api": {
-                        "environment": {_INSECURE_HTTP_ENV: "1"}
-                    },
+                    "ml-api": {"environment": {_INSECURE_HTTP_ENV: "1"}},
                     "ml-worker": {"environment": {}},
                     "diagnostic-hub": {"environment": []},
                 }
@@ -159,9 +157,7 @@ def test_semantic_http_reads_complete_compose_service_map(
     )
     package.write_text(json.dumps({"services": {"ml-api": {"environment": {}}}}))
     image_id = "sha256:" + "1" * 64
-    image.write_text(
-        json.dumps([{"Id": image_id, "Config": {"Env": ["HOST=127.0.0.1"]}}])
-    )
+    image.write_text(json.dumps([{"Id": image_id, "Config": {"Env": ["HOST=127.0.0.1"]}}]))
     container.write_text(
         json.dumps(
             [
@@ -285,8 +281,7 @@ def test_measured_run_keeps_identity_findings_without_projection_timestamp(
                 "attempt_times": {"edge-1": [1.0]},
                 "receipt_times": {"edge-1": [2.0]},
                 "clock_samples": [
-                    {"offset_ms": 0, "uncertainty_ms": 1, "rtt_ms": 2}
-                    for _ in range(5)
+                    {"offset_ms": 0, "uncertainty_ms": 1, "rtt_ms": 2} for _ in range(5)
                 ],
             }
         )
@@ -355,9 +350,7 @@ def test_host_probe_emits_only_privacy_safe_booleans(
     try:
         os.write(
             write_fd,
-            json.dumps(
-                {"clip_path": clip_path, "expected_clip_sha256": clip_digest}
-            ).encode(),
+            json.dumps({"clip_path": clip_path, "expected_clip_sha256": clip_digest}).encode(),
         )
         os.close(write_fd)
         write_fd = -1

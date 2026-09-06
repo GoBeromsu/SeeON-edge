@@ -1,10 +1,11 @@
-import { getCameraStreamUrl, type Camera, type OverlayMode, type RuntimeCameraDiagnostics } from '@/shared/api/client';
+import { getCameraStreamUrl, type Camera, type OverlaySelection, type RuntimeCameraDiagnostics } from '@/shared/api/client';
 import { useMjpegStream } from '@/shared/api/useMjpegStream';
+import { OverlayTargetIcon } from '@/features/operations/OverlayModeControl';
 
 type LiveStreamPanelProps = {
   camera: Camera;
   diagnostics: RuntimeCameraDiagnostics | undefined;
-  overlayMode: OverlayMode | null;
+  overlaySelection: OverlaySelection | null;
   onRetryConnection: () => void;
   onManageConnection: () => void;
 };
@@ -28,13 +29,11 @@ type LiveStreamPanelProps = {
  * (not a full-frame overlay) while `stream.status === 'stalled'`, so the frozen last frame stays
  * visible underneath instead of being hidden.
  *
- * The bottom-left badge label mirrors design-handoff/Eldercare Prototype.dc.html:645's `liveLabel`
- * data model: '라이브 · 낙상 없음' when the camera's overlay mode is 'fall', else '라이브 · 온라인'.
- * `overlayMode` is the OverlayModeControl selection lifted to the shared RoomDetail ancestor
- * (issue #102) rather than fetched again here, so the badge always agrees with what the operator
- * actually selected.
+ * The bottom-left badge reports only the selected preview annotations. The
+ * OverlaySelectionControl selection is lifted to the shared RoomDetail ancestor (issue #102), not
+ * detection state, so the label must not imply that a fall or bed presence was evaluated.
  */
-export function LiveStreamPanel({ camera, diagnostics, overlayMode, onRetryConnection, onManageConnection }: LiveStreamPanelProps): JSX.Element {
+export function LiveStreamPanel({ camera, diagnostics, overlaySelection, onRetryConnection, onManageConnection }: LiveStreamPanelProps): JSX.Element {
   const online = camera.status === 'online';
   const stream = useMjpegStream(online ? getCameraStreamUrl(camera.id) : null);
 
@@ -44,6 +43,18 @@ export function LiveStreamPanel({ camera, diagnostics, overlayMode, onRetryConne
   // 아직 측정 전인 경우와 값이 있지만 멈춰버린 경우를 구분해서 보여준다.
   const isStale = diagnostics?.stale === true;
   const fpsKnown = fps !== null && fps !== undefined;
+  // Icons only (owner preference, front/AGENTS.md): the badge shows which
+  // subjects are drawn, never a detection outcome or a sentence.
+  const drawnTargets = (['person', 'bed'] as const).filter((target) => overlaySelection?.[target] === true);
+  const liveLabel = drawnTargets.length === 2
+    ? '라이브 · 사람·침대 표시'
+    : drawnTargets[0] === 'person'
+      ? '라이브 · 사람 표시'
+      : drawnTargets[0] === 'bed'
+        ? '라이브 · 침대 표시'
+        : overlaySelection
+          ? '라이브 · 원본'
+          : '라이브';
 
   if (!online) {
     return (
@@ -92,8 +103,13 @@ export function LiveStreamPanel({ camera, diagnostics, overlayMode, onRetryConne
             : 'FPS 측정 중'}
       </span>
 
-      <span className="media-status-overlay absolute bottom-2 left-2 rounded-control px-2.5 py-1 text-xs font-semibold">
-        {overlayMode === 'fall' ? '라이브 · 낙상 없음' : '라이브 · 온라인'}
+      <span
+        className="media-status-overlay absolute bottom-2 left-2 inline-flex items-center gap-1.5 rounded-control px-2.5 py-1 text-xs font-semibold"
+        aria-label={liveLabel}
+        title={liveLabel}
+      >
+        라이브
+        {drawnTargets.map((target) => <OverlayTargetIcon key={target} target={target} />)}
       </span>
 
       {stream.status === 'stalled' ? (

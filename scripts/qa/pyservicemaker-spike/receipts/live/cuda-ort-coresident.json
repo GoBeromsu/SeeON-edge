@@ -1,0 +1,14 @@
+{
+  "torch_imported": false,
+  "ort_providers": [
+    "CPUExecutionProvider"
+  ],
+  "ort_inferences": 8499,
+  "ort_per_sec": 188.8,
+  "cuda_compute_apps": [
+    "pid, used_gpu_memory [MiB]",
+    "82, 822 MiB"
+  ],
+  "cuda_process_count": 1,
+  "torch_imported_at_snapshot": false
+}

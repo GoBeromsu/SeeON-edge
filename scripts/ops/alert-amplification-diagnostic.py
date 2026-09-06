@@ -458,8 +458,7 @@ def _measured_run(
         # False blocks every order-dependent claim and is promotion-ineligible,
         # even when an identity-derived finding remains reportable.
         "order_dependent_claims_eligible": order_evidence_valid,
-        "promotion_eligible": order_evidence_valid
-        and result.outcome.value != "판정 불가",
+        "promotion_eligible": order_evidence_valid and result.outcome.value != "판정 불가",
         "frontend_display_tested": False,
         "human_adjudication_used": False,
     }
@@ -631,10 +630,7 @@ def _validate_image_environment(path: Path) -> list[str]:
             not isinstance(item, str) for item in environment
         ):
             raise TypeError("image Config.Env must be a string list")
-        if any(
-            item.partition("=")[0] == INSECURE_HTTP_ENV
-            for item in environment
-        ):
+        if any(item.partition("=")[0] == INSECURE_HTTP_ENV for item in environment):
             raise ValueError("cleartext opt-in leaked into an image environment")
     return image_ids
 
@@ -714,8 +710,10 @@ def _load_run_receipt(path: Path) -> dict[str, Any]:
         if not _is_sha256(raw[key]):
             raise ValueError(f"run receipt contains invalid {key}")
     image_hashes = raw["image_inspect_sha256"]
-    if not isinstance(image_hashes, list) or not image_hashes or any(
-        not _is_sha256(value) for value in image_hashes
+    if (
+        not isinstance(image_hashes, list)
+        or not image_hashes
+        or any(not _is_sha256(value) for value in image_hashes)
     ):
         raise ValueError("run receipt contains invalid image inspect hashes")
     if (
@@ -727,29 +725,28 @@ def _load_run_receipt(path: Path) -> dict[str, Any]:
         raise ValueError("run receipt contains invalid run/source identity")
     for key in ("diagnostic_services", "package_services", "image_ids"):
         values = raw[key]
-        if not isinstance(values, list) or not values or any(
-            not isinstance(value, str) or not value for value in values
+        if (
+            not isinstance(values, list)
+            or not values
+            or any(not isinstance(value, str) or not value for value in values)
         ):
             raise ValueError(f"run receipt contains invalid {key}")
         if len(values) != len(set(values)):
             raise ValueError(f"run receipt contains duplicate {key}")
-    if any(
-        re.fullmatch(r"sha256:[0-9a-f]{64}", value) is None for value in raw["image_ids"]
-    ):
+    if any(re.fullmatch(r"sha256:[0-9a-f]{64}", value) is None for value in raw["image_ids"]):
         raise ValueError("run receipt contains invalid image IDs")
     for key in ("running_container_ids", "service_image_ids"):
         mapping = raw[key]
-        if not isinstance(mapping, dict) or not mapping or any(
-            not isinstance(name, str)
-            or not name
-            or not isinstance(value, str)
-            or not value
-            for name, value in mapping.items()
+        if (
+            not isinstance(mapping, dict)
+            or not mapping
+            or any(
+                not isinstance(name, str) or not name or not isinstance(value, str) or not value
+                for name, value in mapping.items()
+            )
         ):
             raise ValueError(f"run receipt contains invalid {key}")
-    if any(
-        value not in raw["image_ids"] for value in raw["service_image_ids"].values()
-    ):
+    if any(value not in raw["image_ids"] for value in raw["service_image_ids"].values()):
         raise ValueError("run receipt service image binding is not in image IDs")
     return raw
 

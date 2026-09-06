@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import math
 import re
 from collections.abc import Mapping
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 from typing import TypedDict
 
@@ -13,6 +15,18 @@ from pydantic import JsonValue, TypeAdapter, ValidationError
 _CLIP_ID_RE = re.compile(r"^[A-Za-z0-9:_-]{1,128}$")
 _MEDIA_SUFFIXES = {".mp4", ".mov", ".m4v", ".webm", ".mkv"}
 _MANIFEST_PAYLOAD = TypeAdapter(dict[str, JsonValue])
+_EXTENSION_BOUNDARIES = {"none", "extension_bounded", "extension_raced"}
+
+
+class ExtensionContributorPayload(TypedDict):
+    event_ref: str
+    detected_at: str
+
+
+class ClipExtensionPayload(TypedDict):
+    contributors: list[ExtensionContributorPayload]
+    duration_s: float
+    boundary: str
 
 
 class ClipManifestPayload(TypedDict):
@@ -29,17 +43,22 @@ class ClipManifestPayload(TypedDict):
     finalized: bool
     size_bytes: int | None
     thumbnail_available: bool
-    scene_available: bool
-    scene_frame_count: int | None
+    detected_at: str | None
+    truncation_reasons: list[str]
+    extension: ClipExtensionPayload | None
 
 
 @dataclass(frozen=True, slots=True)
-class SceneIndexClaim:
-    path: str
-    sha256: str
-    size_bytes: int
-    schema: int
-    frame_count: int
+class ExtensionContributor:
+    event_ref: str
+    detected_at: str
+
+
+@dataclass(frozen=True, slots=True)
+class ClipExtension:
+    contributors: tuple[ExtensionContributor, ...]
+    duration_s: float
+    boundary: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -57,7 +76,10 @@ class ClipManifest:
     finalized: bool
     size_bytes: int | None = None
     thumbnail_available: bool = False
-    scene_index: SceneIndexClaim | None = None
+    detected_at: str | None = None
+    truncation_reasons: tuple[str, ...] = ()
+    event_refs: tuple[str, ...] = ()
+    extension: ClipExtension | None = None
 
     def as_response(self) -> ClipManifestPayload:
         return {
@@ -74,9 +96,22 @@ class ClipManifest:
             "finalized": self.finalized,
             "size_bytes": self.size_bytes,
             "thumbnail_available": self.thumbnail_available,
-            "scene_available": False,
-            "scene_frame_count": (
-                None if self.scene_index is None else self.scene_index.frame_count
+            "detected_at": self.detected_at,
+            "truncation_reasons": list(self.truncation_reasons),
+            "extension": (
+                {
+                    "contributors": [
+                        {
+                            "event_ref": contributor.event_ref,
+                            "detected_at": contributor.detected_at,
+                        }
+                        for contributor in self.extension.contributors
+                    ],
+                    "duration_s": self.extension.duration_s,
+                    "boundary": self.extension.boundary,
+                }
+                if self.extension is not None
+                else None
             ),
         }
 
@@ -126,13 +161,18 @@ def _manifest_from_mapping(data: Mapping[str, JsonValue]) -> ClipManifest | None
     event_ref = _text(data.get("event_ref"))
     event_type = _text(data.get("event_type")) or None
     started_at = _text(data.get("started_at"))
+    detected_at = _optional_rfc3339_z(data.get("detected_at"))
     codec = _text(data.get("codec"))
     path = _text(data.get("path")) or None
     video_error = _text(data.get("reason_code")) or _text(data.get("video_error")) or None
     video_available_raw = data.get("video_available")
     finalized = data.get("finalized")
     duration_s_raw = data.get("duration_s")
-    if not all((clip_id, camera_id, event_ref, started_at)) or not is_valid_clip_id(clip_id):
+    if (
+        not all((clip_id, camera_id, event_ref, started_at))
+        or not is_valid_clip_id(clip_id)
+        or (data.get("detected_at") is not None and detected_at is None)
+    ):
         return None
     if not isinstance(finalized, bool):
         return None
@@ -144,7 +184,11 @@ def _manifest_from_mapping(data: Mapping[str, JsonValue]) -> ClipManifest | None
         video_available = video_available_raw
     else:
         video_available = path is not None
-    scene_index = _scene_index_claim(data.get("scene_index"))
+    truncation_reasons = _truncation_reasons(data.get("truncation_reasons"))
+    event_refs = _event_refs(data.get("event_refs"), event_ref)
+    extension = _extension(data.get("extension"))
+    if data.get("extension") is not None and extension is None:
+        return None
     return ClipManifest(
         clip_id=clip_id,
         camera_id=camera_id,
@@ -157,7 +201,10 @@ def _manifest_from_mapping(data: Mapping[str, JsonValue]) -> ClipManifest | None
         video_available=video_available,
         video_error=video_error,
         finalized=finalized,
-        scene_index=scene_index,
+        detected_at=detected_at,
+        truncation_reasons=truncation_reasons,
+        event_refs=event_refs,
+        extension=extension,
     )
 
 
@@ -167,34 +214,79 @@ def _text(value: JsonValue | None) -> str:
     return value.strip()
 
 
-def _scene_index_claim(value: JsonValue | None) -> SceneIndexClaim | None:
-    if not isinstance(value, Mapping):
+def _optional_rfc3339_z(value: JsonValue | None) -> str | None:
+    if not isinstance(value, str) or not value.endswith("Z"):
         return None
-    path = value.get("path")
-    sha256 = value.get("sha256")
-    size_bytes = value.get("size_bytes")
-    schema = value.get("schema")
-    frame_count = value.get("count")
+    try:
+        datetime.fromisoformat(value)
+    except ValueError:
+        return None
+    return value
+
+
+def _truncation_reasons(value: JsonValue | None) -> tuple[str, ...]:
+    if not isinstance(value, list) or any(
+        not isinstance(reason, str) or not reason for reason in value
+    ):
+        return ()
+    return tuple(value)
+
+
+def _event_refs(value: JsonValue | None, event_ref: str) -> tuple[str, ...]:
+    if not isinstance(value, list) or any(
+        not isinstance(reference, str) or not reference.strip() for reference in value
+    ):
+        return (event_ref,)
+    references = tuple(dict.fromkeys(reference.strip() for reference in value))
+    return references or (event_ref,)
+
+
+def _extension(value: JsonValue | None) -> ClipExtension | None:
+    if not isinstance(value, dict) or set(value) != {
+        "contributors",
+        "duration_s",
+        "boundary",
+    }:
+        return None
+    boundary = value["boundary"]
+    duration_s = value["duration_s"]
+    contributors = value["contributors"]
     if (
-        path != "scene-index.json"
-        or not isinstance(sha256, str)
-        or re.fullmatch(r"[0-9a-f]{64}", sha256) is None
-        or not _non_negative_int(size_bytes)
-        or size_bytes > 8 * 1024 * 1024
-        or schema != 1
-        or not _non_negative_int(frame_count)
+        not isinstance(boundary, str)
+        or boundary not in _EXTENSION_BOUNDARIES
+        or isinstance(duration_s, bool)
+        or not isinstance(duration_s, int | float)
+        or not math.isfinite(duration_s)
+        or duration_s < 0
+        or not isinstance(contributors, list)
+        or not contributors
     ):
         return None
-    return SceneIndexClaim(path, sha256, size_bytes, schema, frame_count)
-
-
-def _non_negative_int(value: object) -> bool:
-    return isinstance(value, int) and not isinstance(value, bool) and value >= 0
+    parsed_contributors: list[ExtensionContributor] = []
+    for contributor in contributors:
+        if not isinstance(contributor, dict) or set(contributor) != {"event_ref", "detected_at"}:
+            return None
+        event_ref = contributor["event_ref"]
+        detected_at = contributor["detected_at"]
+        if not isinstance(event_ref, str) or not event_ref.strip():
+            return None
+        parsed_detected_at = _optional_rfc3339_z(detected_at)
+        if parsed_detected_at is None:
+            return None
+        parsed_contributors.append(
+            ExtensionContributor(event_ref=event_ref, detected_at=parsed_detected_at)
+        )
+    return ClipExtension(
+        contributors=tuple(parsed_contributors),
+        duration_s=float(duration_s),
+        boundary=boundary,
+    )
 
 
 __all__ = [
+    "ClipExtension",
     "ClipManifest",
-    "SceneIndexClaim",
+    "ExtensionContributor",
     "discover_manifest_paths",
     "is_valid_clip_id",
     "read_manifest_file",

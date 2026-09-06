@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from types import MappingProxyType
@@ -26,7 +27,7 @@ MpsProbeSource: TypeAlias = Callable[[], bool]
 DeviceResidentProbeSource: TypeAlias = Callable[[], "VerifyResult"]
 
 ML_WORKER_PROFILE_ENV: Final = "ML_WORKER_PROFILE"
-DEFAULT_PROFILE_NAME: Final = "cpu"
+DEFAULT_PROFILE_NAME: Final = "flow"
 
 
 class ProfileError(RuntimeError):
@@ -96,61 +97,22 @@ class ProfileSpec:
         )
 
 
-_CPU_HOST = ProfileSpec(
-    "cpu-host",
-    ("cpu-host", "cpu"),
-    "cpu",
-    "opencv",
-    "numpy-rgb24",
-    "cpu",
-    "numpy-host",
-    "libx264",
-    None,
-)
-_NVIDIA = ProfileSpec(
-    "nvidia",
-    ("nvidia",),
+_FLOW = ProfileSpec(
+    "flow",
+    ("flow",),
     "cuda",
     "nvdec",
-    "cuda-nv12-to-rgb24",
-    "tensorrt",
-    "cuda-device",
+    "deepstream-flow",
+    "onnxruntime",
+    "deepstream-flow",
     "h264_nvenc",
     None,
     concrete_stages_available=True,
 )
-_INTEL_VAAPI_HOST = ProfileSpec(
-    "intel-vaapi-host",
-    ("intel-vaapi-host", "igpu"),
-    "cpu",
-    "vaapi",
-    "numpy-rgb24",
-    "cpu",
-    "numpy-host",
-    "libx264",
-    None,
-    decode_fallback="opencv",
-)
-_APPLE_MPS_HOST = ProfileSpec(
-    "apple-mps-host",
-    ("apple-mps-host", "mps"),
-    "mps",
-    "opencv",
-    "mps-tensor-upload",
-    "mps",
-    "numpy-host",
-    "libx264",
-    None,
-)
 CANONICAL_PROFILE_REGISTRY: Final[Mapping[str, ProfileSpec]] = MappingProxyType(
     {
         spec.name: spec
-        for spec in (
-            _CPU_HOST,
-            _INTEL_VAAPI_HOST,
-            _APPLE_MPS_HOST,
-            _NVIDIA,
-        )
+        for spec in (_FLOW,)
     }
 )
 PROFILE_ALIASES: Final[Mapping[str, str]] = MappingProxyType(
@@ -199,7 +161,9 @@ def select_profile(
         return ProfileSelection(requested, registry[requested])
     except KeyError as error:
         choices = "|".join(sorted(registry))
-        raise ProfileError(f"unknown ML_WORKER_PROFILE {requested!r}; set {choices}") from error
+        raise ProfileError(
+            f"ADR-0002: unsupported ML_WORKER_PROFILE {requested!r}; set {choices}"
+        ) from error
 
 
 def _edge(
@@ -222,30 +186,7 @@ def _memory_path_for(
     tuple[RuntimeProfileEdge, ...],
 ]:
     del decode, encode  # Device vs host path is selected by spec.name, not these.
-    if spec.name == "apple-mps-host":
-        return (
-            (
-                MemoryPathStep("decode", MemoryKind.HOST, PixelFormat.RGB24),
-                MemoryPathStep("preprocess", MemoryKind.HOST, PixelFormat.RGB24),
-                MemoryPathStep("inference", MemoryKind.MPS_DEVICE, PixelFormat.RGB24),
-                MemoryPathStep("overlay", MemoryKind.HOST, PixelFormat.RGB24),
-                MemoryPathStep("encode", MemoryKind.HOST, PixelFormat.RGB24),
-            ),
-            (ProfileConverter("mps-inference-host-input-upload", _HOST_RGB, _MPS_RGB, "h2d"),),
-            (
-                _edge("decode", "preprocess", _HOST_RGB, _HOST_RGB),
-                _edge(
-                    "preprocess",
-                    "inference",
-                    _HOST_RGB,
-                    _MPS_RGB,
-                    "mps-inference-host-input-upload",
-                ),
-                _edge("decode", "overlay", _HOST_RGB, _HOST_RGB),
-                _edge("overlay", "encode", _HOST_RGB, _HOST_RGB),
-            ),
-        )
-    if spec.name == "nvidia":
+    if spec.name == "flow":
         device_stages: tuple[tuple[ProfileStage, PixelFormat], ...] = (
             ("decode", PixelFormat.NV12),
             ("preprocess", PixelFormat.NV12),
@@ -272,23 +213,7 @@ def _memory_path_for(
                 _edge("overlay", "encode", _CUDA_RGB, _CUDA_RGB),
             ),
         )
-    host_stages: tuple[ProfileStage, ...] = (
-        "decode",
-        "preprocess",
-        "inference",
-        "overlay",
-        "encode",
-    )
-    return (
-        tuple(MemoryPathStep(stage, MemoryKind.HOST, PixelFormat.RGB24) for stage in host_stages),
-        (),
-        (
-            _edge("decode", "preprocess", _HOST_RGB, _HOST_RGB),
-            _edge("preprocess", "inference", _HOST_RGB, _HOST_RGB),
-            _edge("decode", "overlay", _HOST_RGB, _HOST_RGB),
-            _edge("overlay", "encode", _HOST_RGB, _HOST_RGB),
-        ),
-    )
+    raise ProfileError(f"unsupported production profile {spec.name!r}")
 
 
 def runtime_descriptor_for(
@@ -325,9 +250,7 @@ def runtime_descriptor_for(
         effective_converters=effective_converters,
         effective_edges=effective_edges,
         degraded_reasons=degraded_reasons,
-        device_resident_after_decode=(
-            spec.name == "nvidia" and decode == "nvdec"
-        ),
+        device_resident_after_decode=(spec.name == "flow" and decode == "nvdec"),
         concrete_stages_available=spec.concrete_stages_available,
     )
 
@@ -377,15 +300,28 @@ def default_verifiers(
     def device_resident() -> VerifyResult:
         return _verify_device_resident(device_resident_source)
 
+    def flow() -> VerifyResult:
+        """Fail closed on the flow profile's own boot inputs.
+
+        The flow media plane has no native manifest, so the shared
+        device-resident verifier would pass vacuously when none is configured.
+        Its equivalent proof is the engine identity file written by
+        ``edge-engine-build``: every recorded artifact must exist and match
+        before any camera can be admitted (ADR-0002 - engines are verified,
+        never built at boot).
+        """
+        from worker.runtime.flow.cold_start import verify_flow_boot_inputs
+
+        try:
+            verify_flow_boot_inputs(os.environ)
+        except Exception as error:  # noqa: BLE001 - reported as a boot verdict
+            return VerifyResult(False, "flow", "flow_engine_identity", str(error))
+        result = device_resident()
+        return VerifyResult(result.ok, "flow", result.stage, result.reason)
+
     return MappingProxyType(
         {
-            "cpu": _verify_cpu,
-            "cpu-host": _verify_cpu,
-            "nvidia": device_resident,
-            "mps": mps,
-            "apple-mps-host": mps,
-            "igpu": _verify_igpu_device,
-            "intel-vaapi-host": _verify_igpu_device,
+            "flow": flow,
         }
     )
 
@@ -405,9 +341,7 @@ def default_decode_probe(
 
 
 def default_encode_probe() -> VerifyResult:
-    return VerifyResult(
-        False, "cuda", "encode", "h264_nvenc capability probe is not configured"
-    )
+    return VerifyResult(False, "cuda", "encode", "h264_nvenc capability probe is not configured")
 
 
 __all__ = [

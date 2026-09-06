@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path
 
@@ -17,7 +18,6 @@ from contracts.observation import (
     BoundingBox,
     FrameObservation,
 )
-from worker.pipeline.analytics.composite import CompositeResult
 from worker.pipeline.trace import (
     BoundedTraceWriter,
     TraceCapture,
@@ -34,6 +34,13 @@ from worker.types.trace import (
     DecisionTraceValueName,
     canonical_trace_number,
 )
+
+
+@dataclass(frozen=True)
+class _TraceResult:
+    module_results: tuple[object, ...]
+    observation: FrameObservation
+    decision_input: DecisionInput
 
 _RUNTIME_SHA256 = "a" * 64
 _COMPONENT_SHA256 = "b" * 64
@@ -140,6 +147,29 @@ BED_EXIT_MISSING_REASONS: frozenset[str] = frozenset(
         "bed-polygon-invalid",
     }
 )
+FALL_V2_REASONS: frozenset[str] = frozenset(
+    {
+        "transition-candidate",
+        "transition-confirmed",
+        "fall-recovered",
+    }
+)
+FALL_V2_STATES: frozenset[str] = frozenset(
+    {
+        "transition-candidate",
+        "transition-confirmed",
+        "fallen",
+    }
+)
+FALL_V2_VALUE_NAMES: frozenset[str] = frozenset(
+    {
+        "fall_transition_probability",
+        "fallen_probability",
+        "transition_threshold",
+        "transition_votes",
+        "transition_window",
+    }
+)
 BED_EXIT_REASONS: frozenset[str] = frozenset(
     {
         "in-bed-hold",
@@ -195,7 +225,7 @@ def _packet() -> FramePacket:
     )
 
 
-def _result() -> CompositeResult:
+def _result() -> _TraceResult:
     person = BoundingBox(0, 0, 2, 3, 0.9)
     bed = BoundingBox(0, 0, 4, 4, 0.8)
     observation = FrameObservation(
@@ -212,7 +242,7 @@ def _result() -> CompositeResult:
         frame_index=7,
         bed_region=BedRegionDebugSnapshot(BedRegionCacheState.FRESH),
     )
-    return CompositeResult((), observation, decision_input)
+    return _TraceResult((), observation, decision_input)
 
 
 def _capture(snapshots: tuple[DecisionTraceSnapshot, ...]) -> TraceCapture:
@@ -345,9 +375,9 @@ def test_baseline_vocabularies_are_exactly_the_pre_extension_sets() -> None:
     extra_missing = current_missing - BASELINE_MISSING_REASONS
 
     if extra_reasons | extra_states | extra_value_names | extra_missing:
-        assert extra_reasons == BED_EXIT_REASONS
-        assert extra_states == BED_EXIT_STATES
-        assert extra_value_names == BED_EXIT_VALUE_NAMES
+        assert extra_reasons == BED_EXIT_REASONS | FALL_V2_REASONS
+        assert extra_states == BED_EXIT_STATES | FALL_V2_STATES
+        assert extra_value_names == BED_EXIT_VALUE_NAMES | FALL_V2_VALUE_NAMES
         assert extra_missing == BED_EXIT_MISSING_REASONS
     else:
         assert current_reasons == BASELINE_REASONS
@@ -356,10 +386,13 @@ def test_baseline_vocabularies_are_exactly_the_pre_extension_sets() -> None:
         assert current_missing == BASELINE_MISSING_REASONS
 
 
-def test_bed_exit_tokens_are_additive_and_closed() -> None:
-    assert _values(DecisionTraceReason) == BASELINE_REASONS | BED_EXIT_REASONS
-    assert _values(DecisionTraceState) == BASELINE_STATES | BED_EXIT_STATES
-    assert _values(DecisionTraceValueName) == BASELINE_VALUE_NAMES | BED_EXIT_VALUE_NAMES
+def test_bed_exit_and_fall_v2_tokens_are_additive_and_closed() -> None:
+    assert _values(DecisionTraceReason) == BASELINE_REASONS | BED_EXIT_REASONS | FALL_V2_REASONS
+    assert _values(DecisionTraceState) == BASELINE_STATES | BED_EXIT_STATES | FALL_V2_STATES
+    assert (
+        _values(DecisionTraceValueName)
+        == BASELINE_VALUE_NAMES | BED_EXIT_VALUE_NAMES | FALL_V2_VALUE_NAMES
+    )
     assert (
         _values(DecisionTraceMissingReason) == BASELINE_MISSING_REASONS | BED_EXIT_MISSING_REASONS
     )

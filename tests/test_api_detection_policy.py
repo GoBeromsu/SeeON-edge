@@ -56,12 +56,16 @@ def _request(
     values: dict[str, object] | None,
     camera_id: str | None = None,
     expected_revision_id: int | None = None,
+    module_version: int | None = None,
+    schema_version: int | None = None,
 ) -> dict[str, object]:
+    # fall is on module/schema v2 (transition_threshold); bed_exit stays v1.
+    default_version = 2 if module_id == "fall" else 1
     body: dict[str, object] = {
         "module_id": module_id,
-        "module_version": 1,
+        "module_version": default_version if module_version is None else module_version,
         "schema_id": schema_id,
-        "schema_version": 1,
+        "schema_version": default_version if schema_version is None else schema_version,
         "camera_id": camera_id,
         "values": values,
     }
@@ -103,7 +107,7 @@ def _rollback(
     client: TestClient,
     *,
     module_id: str,
-    module_version: int = 1,
+    module_version: int | None = None,
     camera_id: str | None,
     expected_revision_id: int,
 ):
@@ -111,7 +115,9 @@ def _rollback(
         "/api/v1/detection-policies/rollback",
         json={
             "module_id": module_id,
-            "module_version": module_version,
+            "module_version": (
+                (2 if module_id == "fall" else 1) if module_version is None else module_version
+            ),
             "camera_id": camera_id,
             "expected_revision_id": expected_revision_id,
         },
@@ -125,13 +131,13 @@ def test_policy_diff_apply_precedence_revision_activation_and_rollback(tmp_path:
     facility_fall = _request(
         module_id="fall",
         schema_id="fall.policy",
-        values={"operating_threshold": 0.62},
+        values={"transition_threshold": 0.62},
     )
     camera_fall = _request(
         module_id="fall",
         schema_id="fall.policy",
         camera_id=CANONICAL_CAMERA_ID,
-        values={"operating_threshold": 0.81},
+        values={"transition_threshold": 0.81},
     )
 
     with TestClient(app) as client:
@@ -143,11 +149,11 @@ def test_policy_diff_apply_precedence_revision_activation_and_rollback(tmp_path:
         assert diff.json()["concurrency_token"] == 0
         assert diff.json()["compared_payload"] == {
             "module_id": "fall",
-            "module_version": 1,
+            "module_version": 2,
             "schema_id": "fall.policy",
-            "schema_version": 1,
+            "schema_version": 2,
             "camera_id": None,
-            "values": {"operating_threshold": 0.62},
+            "values": {"transition_threshold": 0.62},
         }
         with sqlite3.connect(database) as connection:
             assert connection.execute("SELECT count(*) FROM policies").fetchone() == (0,)
@@ -169,9 +175,9 @@ def test_policy_diff_apply_precedence_revision_activation_and_rollback(tmp_path:
         assert body["cameras"][0]["facility_id"] == FACILITY_ID
         default = body["detection_policies"]["defaults"]["fall"]
         effective = body["detection_policies"]["cameras"][CANONICAL_CAMERA_ID]["fall"]
-        assert default["values"] == {"operating_threshold": 0.62}
+        assert default["values"] == {"transition_threshold": 0.62}
         assert default["source"] == "facility-default"
-        assert effective["values"] == {"operating_threshold": 0.81}
+        assert effective["values"] == {"transition_threshold": 0.81}
         assert effective["source"] == "camera-override"
         assert effective["facility_revision_id"] == first_revision
         assert effective["camera_revision_id"] == override_revision
@@ -192,7 +198,7 @@ def test_policy_diff_apply_precedence_revision_activation_and_rollback(tmp_path:
         activations = status.json()["activations"]
         assert {activation["status"] for activation in activations} == {"applied"}
 
-        second_payload = facility_fall | {"values": {"operating_threshold": 0.67}}
+        second_payload = facility_fall | {"values": {"transition_threshold": 0.67}}
         second = _apply(client, second_payload, expected_revision_id=first_revision)
         assert second.status_code == 202
         second_revision = second.json()["active_revision_id"]
@@ -212,7 +218,7 @@ def test_policy_diff_apply_precedence_revision_activation_and_rollback(tmp_path:
             "WHERE facility_id=? AND camera_id IS NULL",
             (FACILITY_ID,),
         ).fetchall()
-    assert rows == [('{"operating_threshold":0.62}', 0, None)]
+    assert rows == [('{"transition_threshold":0.62}', 0, None)]
 
 
 def test_policy_resolution_uses_only_worker_camera_ids_when_namespaces_collide(
@@ -239,7 +245,7 @@ def test_policy_resolution_uses_only_worker_camera_ids_when_namespaces_collide(
                 module_id="fall",
                 schema_id="fall.policy",
                 camera_id=CANONICAL_CAMERA_ID,
-                values={"operating_threshold": 0.81},
+                values={"transition_threshold": 0.81},
             ),
             expected_revision_id=0,
         )
@@ -249,9 +255,9 @@ def test_policy_resolution_uses_only_worker_camera_ids_when_namespaces_collide(
     policies = config["detection_policies"]["cameras"]
     assert set(policies) == {CANONICAL_CAMERA_ID, second_worker_id}
     assert policies[CANONICAL_CAMERA_ID]["fall"]["source"] == "camera-override"
-    assert policies[CANONICAL_CAMERA_ID]["fall"]["values"] == {"operating_threshold": 0.81}
+    assert policies[CANONICAL_CAMERA_ID]["fall"]["values"] == {"transition_threshold": 0.81}
     assert policies[second_worker_id]["fall"]["source"] == "image-default"
-    assert policies[second_worker_id]["fall"]["values"] == {"operating_threshold": 0.5}
+    assert policies[second_worker_id]["fall"]["values"] == {"transition_threshold": 0.5}
 
 
 def test_policy_diff_reports_equal_numeric_values_with_new_source_as_changed(
@@ -263,7 +269,7 @@ def test_policy_diff_reports_equal_numeric_values_with_new_source_as_changed(
     facility_default = _request(
         module_id="fall",
         schema_id="fall.policy",
-        values={"operating_threshold": 0.5},
+        values={"transition_threshold": 0.5},
     )
     camera_override = facility_default | {"camera_id": CANONICAL_CAMERA_ID}
 
@@ -299,7 +305,7 @@ def test_rollback_keeps_only_immediately_previous_policy_state(tmp_path: Path) -
                 _request(
                     module_id="fall",
                     schema_id="fall.policy",
-                    values={"operating_threshold": threshold},
+                    values={"transition_threshold": threshold},
                 ),
                 expected_revision_id=expected,
             )
@@ -392,7 +398,7 @@ def test_api_rejects_malformed_nonfinite_unknown_cross_field_and_unknown_camera(
         _request(
             module_id="fall",
             schema_id="fall.policy",
-            values={"operating_threshold": 0.5, "unknown": 1},
+            values={"transition_threshold": 0.5, "unknown": 1},
         ),
         _request(
             module_id="bed_exit",
@@ -403,7 +409,7 @@ def test_api_rejects_malformed_nonfinite_unknown_cross_field_and_unknown_camera(
             module_id="fall",
             schema_id="fall.policy",
             camera_id="missing/opaque-camera",
-            values={"operating_threshold": 0.5},
+            values={"transition_threshold": 0.5},
         ),
     )
     with TestClient(app) as client:
@@ -413,7 +419,7 @@ def test_api_rejects_malformed_nonfinite_unknown_cross_field_and_unknown_camera(
             json=_request(
                 module_id="fall",
                 schema_id="fall.policy",
-                values={"operating_threshold": 0.5},
+                values={"transition_threshold": 0.5},
             ),
         )
         nonfinite = client.post(
@@ -423,7 +429,7 @@ def test_api_rejects_malformed_nonfinite_unknown_cross_field_and_unknown_camera(
                 '{"module_id":"fall","module_version":1,'
                 '"schema_id":"fall.policy","schema_version":1,'
                 '"camera_id":null,"expected_revision_id":0,'
-                '"values":{"operating_threshold":NaN}}'
+                '"values":{"transition_threshold":NaN}}'
             ),
         )
         responses = [
@@ -438,7 +444,7 @@ def test_api_rejects_malformed_nonfinite_unknown_cross_field_and_unknown_camera(
             json=_request(
                 module_id="fall",
                 schema_id="fall.policy",
-                values={"operating_threshold": 0.5},
+                values={"transition_threshold": 0.5},
                 expected_revision_id=0,
             )
             | {"schema_version": 99},
@@ -462,7 +468,7 @@ def test_corrupt_revision_is_refused_and_failed_status_persists(tmp_path: Path) 
             _request(
                 module_id="fall",
                 schema_id="fall.policy",
-                values={"operating_threshold": 0.62},
+                values={"transition_threshold": 0.62},
             ),
             expected_revision_id=0,
         )
@@ -489,7 +495,7 @@ def test_corrupt_revision_is_refused_and_failed_status_persists(tmp_path: Path) 
             _request(
                 module_id="fall",
                 schema_id="fall.policy",
-                values={"operating_threshold": 0.74},
+                values={"transition_threshold": 0.74},
             ),
             expected_revision_id=revision_id,
         )
@@ -498,7 +504,7 @@ def test_corrupt_revision_is_refused_and_failed_status_persists(tmp_path: Path) 
         recovered_config = client.get("/api/v1/cameras/worker-config", headers=RELAY_HEADERS)
         assert recovered_config.status_code == 200
         assert recovered_config.json()["detection_policies"]["defaults"]["fall"]["values"] == {
-            "operating_threshold": 0.74
+            "transition_threshold": 0.74
         }
 
     with sqlite3.connect(database) as connection:
@@ -522,7 +528,7 @@ def test_fresh_apply_recovers_corrupt_active_without_prior_read(tmp_path: Path) 
             _request(
                 module_id="fall",
                 schema_id="fall.policy",
-                values={"operating_threshold": 0.62},
+                values={"transition_threshold": 0.62},
             ),
             expected_revision_id=0,
         )
@@ -539,7 +545,7 @@ def test_fresh_apply_recovers_corrupt_active_without_prior_read(tmp_path: Path) 
             _request(
                 module_id="fall",
                 schema_id="fall.policy",
-                values={"operating_threshold": 0.75},
+                values={"transition_threshold": 0.75},
             ),
             expected_revision_id=corrupt_revision_id,
         )
@@ -549,7 +555,7 @@ def test_fresh_apply_recovers_corrupt_active_without_prior_read(tmp_path: Path) 
         config = client.get("/api/v1/cameras/worker-config", headers=RELAY_HEADERS)
         assert config.status_code == 200
         assert config.json()["detection_policies"]["defaults"]["fall"]["values"] == {
-            "operating_threshold": 0.75
+            "transition_threshold": 0.75
         }
 
 
@@ -562,12 +568,12 @@ def test_two_operator_first_facility_apply_race_uses_generation_zero_token(
     operator_a = _request(
         module_id="fall",
         schema_id="fall.policy",
-        values={"operating_threshold": 0.61},
+        values={"transition_threshold": 0.61},
     )
     operator_b = _request(
         module_id="fall",
         schema_id="fall.policy",
-        values={"operating_threshold": 0.71},
+        values={"transition_threshold": 0.71},
     )
 
     with TestClient(app) as client:
@@ -589,7 +595,9 @@ def test_two_operator_first_facility_apply_race_uses_generation_zero_token(
     with config:
         _login(config)
         body = config.get("/api/v1/cameras/worker-config", headers=RELAY_HEADERS).json()
-    assert body["detection_policies"]["defaults"]["fall"]["values"] == {"operating_threshold": 0.61}
+    assert body["detection_policies"]["defaults"]["fall"]["values"] == {
+        "transition_threshold": 0.61
+    }
 
 
 def test_two_operator_inherited_camera_apply_race_uses_token_zero(
@@ -601,19 +609,19 @@ def test_two_operator_inherited_camera_apply_race_uses_token_zero(
     facility = _request(
         module_id="fall",
         schema_id="fall.policy",
-        values={"operating_threshold": 0.55},
+        values={"transition_threshold": 0.55},
     )
     operator_a = _request(
         module_id="fall",
         schema_id="fall.policy",
         camera_id=CANONICAL_CAMERA_ID,
-        values={"operating_threshold": 0.66},
+        values={"transition_threshold": 0.66},
     )
     operator_b = _request(
         module_id="fall",
         schema_id="fall.policy",
         camera_id=CANONICAL_CAMERA_ID,
-        values={"operating_threshold": 0.77},
+        values={"transition_threshold": 0.77},
     )
 
     with TestClient(app) as client:
@@ -634,7 +642,7 @@ def test_two_operator_inherited_camera_apply_race_uses_token_zero(
         _login(client)
         body = client.get("/api/v1/cameras/worker-config", headers=RELAY_HEADERS).json()
     effective = body["detection_policies"]["cameras"][CANONICAL_CAMERA_ID]["fall"]
-    assert effective["values"] == {"operating_threshold": 0.66}
+    assert effective["values"] == {"transition_threshold": 0.66}
     assert effective["source"] == "camera-override"
 
 
@@ -650,7 +658,7 @@ def test_two_operator_rollback_race_requires_cas_token(tmp_path: Path) -> None:
             _request(
                 module_id="fall",
                 schema_id="fall.policy",
-                values={"operating_threshold": 0.61},
+                values={"transition_threshold": 0.61},
             ),
             expected_revision_id=0,
         )
@@ -659,7 +667,7 @@ def test_two_operator_rollback_race_requires_cas_token(tmp_path: Path) -> None:
             _request(
                 module_id="fall",
                 schema_id="fall.policy",
-                values={"operating_threshold": 0.72},
+                values={"transition_threshold": 0.72},
             ),
             expected_revision_id=first.json()["active_revision_id"],
         )
@@ -691,11 +699,11 @@ def test_policy_authority_writes_only_the_compact_policy_table(tmp_path: Path) -
     activation = DetectionPolicyStore(database).apply(
         facility_id=FACILITY_ID,
         module_id="fall",
-        module_version=1,
+        module_version=2,
         schema_id="fall.policy",
-        schema_version=1,
+        schema_version=2,
         camera_id=None,
-        values={"operating_threshold": 0.62},
+        values={"transition_threshold": 0.62},
         expected_revision_id=0,
     )
 

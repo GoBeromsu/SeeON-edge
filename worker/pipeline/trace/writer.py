@@ -390,9 +390,8 @@ class BoundedTraceWriter:
                 )
             except BaseException as caught:  # noqa: BLE001 - delivered to exact submitter
                 error = caught
-                if (
-                    _attempt + 1 < self.policy.max_persistence_attempts
-                    and any(token in str(caught).lower() for token in ("busy", "locked"))
+                if _attempt + 1 < self.policy.max_persistence_attempts and any(
+                    token in str(caught).lower() for token in ("busy", "locked")
                 ):
                     with self._lock:
                         self._retry_attempts += 1
@@ -436,9 +435,7 @@ class BoundedTraceWriter:
                         # without limit. Oldest are shed first so the retained
                         # tail is the most recent, and the shed count is kept so
                         # the loss is observable rather than silent.
-                        retained = (self._unpublished + list(frames))[
-                            -_MAX_UNPUBLISHED_FRAMES:
-                        ]
+                        retained = (self._unpublished + list(frames))[-_MAX_UNPUBLISHED_FRAMES:]
                         self._unpublished_shed += (
                             len(self._unpublished) + len(frames) - len(retained)
                         )

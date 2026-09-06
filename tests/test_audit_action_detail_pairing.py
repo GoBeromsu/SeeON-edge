@@ -26,9 +26,7 @@ def test_action_detail_pairing_rejects_a_different_valid_action(tmp_path: Path) 
         empty_detail(AuditAction.TOPOLOGY_CONFIRM),
     )
 
-    with pytest.raises(
-        AuditVerificationError, match="audit action/detail variants do not match"
-    ):
+    with pytest.raises(AuditVerificationError, match="audit action/detail variants do not match"):
         AuditStore(path).append(event)
 
     with sqlite3.connect(path) as connection:

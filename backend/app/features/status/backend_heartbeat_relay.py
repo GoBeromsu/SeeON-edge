@@ -119,9 +119,7 @@ def relay_heartbeats_once(app: object, now: float | None = None) -> RelayTickRes
     expected = registry_expected_cameras(registry_store)
     snapshot = get_heartbeat_store(app).snapshot(expected, now=now)
     online_camera_ids = [
-        camera_id
-        for camera_id, info in snapshot["cameras"].items()
-        if info["status"] == ONLINE
+        camera_id for camera_id, info in snapshot["cameras"].items() if info["status"] == ONLINE
     ]
     if not online_camera_ids:
         return RelayTickResult(skipped_reason="no_online_cameras")

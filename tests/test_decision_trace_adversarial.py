@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
 from datetime import UTC, datetime
 
 import numpy as np
@@ -15,7 +16,6 @@ from contracts.observation import (
 )
 from contracts.runner import pose_result
 from worker.domains.detection_window import DetectionWindow
-from worker.pipeline.analytics.composite import CompositeResult
 from worker.pipeline.trace import TraceCapture, TraceIdentity
 from worker.types import (
     BusinessEvent,
@@ -29,6 +29,13 @@ from worker.types.trace import canonical_trace_number
 _RUNTIME_SHA256 = "a" * 64
 _COMPONENT_SHA256 = "b" * 64
 _POLICY_SHA256 = "c" * 64
+
+
+@dataclass(frozen=True)
+class _TraceResult:
+    module_results: tuple[object, ...]
+    observation: FrameObservation
+    decision_input: DecisionInput
 
 
 def _packet(*, camera_id: str = "camera-a", pts: float | None = 1.0) -> FramePacket:
@@ -51,7 +58,7 @@ def _result(
     bed_confidence: float = 0.8,
     source_time: float | None = 1.0,
     observed_components: tuple[str, ...] = (),
-) -> CompositeResult:
+) -> _TraceResult:
     person = BoundingBox(0, 0, 2, 3, person_confidence)
     bed = BoundingBox(0, 0, 4, 4, bed_confidence)
     observation = FrameObservation(
@@ -72,7 +79,7 @@ def _result(
         ModuleResult(name, pose_result((), ()), 0.0, output_adapter=name)
         for name in observed_components
     )
-    return CompositeResult(module_results, observation, decision_input)
+    return _TraceResult(module_results, observation, decision_input)
 
 
 def _snapshot(

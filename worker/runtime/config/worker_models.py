@@ -37,7 +37,7 @@ class FallModelConfig(BaseModel):
 
     # Issue #65: the fall-model family is config/metadata-driven, not code-pinned.
     # A brand-new AI model family (a different architecture, not a same-family
-    # weights version-up) is added by implementing FallModelProtocol and
+    # weights version-up) is added by implementing FallV2ModelProtocol and
     # registering a factory in
     # ``worker.adapters.model.fall_family_registry.DEFAULT_FALL_MODEL_FAMILY_REGISTRY``
     # under the same string used here -- no edits to this Literal, and no edits
@@ -45,7 +45,7 @@ class FallModelConfig(BaseModel):
     # refuses to boot (fail-closed, ADR-0002); this field only rejects empty
     # strings, the registry decides which values are actually valid.
     type: str = Field(min_length=1)
-    framework: Literal["pytorch"]
+    framework: Literal["pytorch", "onnxruntime"]
     mode: Literal["sequence"]
     artifact_dir: Path
     weights: str = Field(default="model.pt", min_length=1)
@@ -72,11 +72,13 @@ class FallModelConfig(BaseModel):
 
     @model_validator(mode="after")
     def _validate_artifact_contract(self) -> FallModelConfig:
-        if self.input_shape != (self.window, 51):
-            raise ConfigValidationError("input_shape must be [window, 51]")
+        if self.input_shape != (self.window, 56):
+            raise ConfigValidationError("input_shape must be [window, 56]")
         for relative in (self.weights, self.architecture, self.metadata):
             if not (self.artifact_dir / relative).exists():
                 raise ConfigValidationError(f"missing {relative} at configured artifact directory")
+        if self.framework == "onnxruntime" and not (self.artifact_dir / "model.onnx").exists():
+            raise ConfigValidationError("missing model.onnx at configured artifact directory")
         return self
 
 
@@ -107,7 +109,13 @@ class WorkerModelsConfig(BaseModel):
     box_source: Literal["pose", "person"] = "pose"
 
     @model_validator(mode="after")
-    def _validate_selected_bundle_box_source(self) -> WorkerModelsConfig:
+    def _validate_fall_model_source(self) -> WorkerModelsConfig:
+        if (self.fall is None) == (self.selected is None):
+            raise ConfigValidationError(
+                "no fall model configured"
+                if self.fall is None
+                else "packaged and selected fall models cannot coexist"
+            )
         if self.selected is not None and self.box_source != "pose":
             raise ConfigValidationError("selected fall bundle requires box_source=pose")
         return self
@@ -174,7 +182,9 @@ class WorkerConfig(BaseModel):
     version: int = 1
     relay: RelayConfig
     runtime: WorkerRuntimeConfig = Field(default_factory=WorkerRuntimeConfig)
-    models: WorkerModelsConfig = Field(default_factory=WorkerModelsConfig)
+    # Config loading settles this local overlay after parsing the optional
+    # YAML hatch. A composed runtime always receives a WorkerModelsConfig.
+    models: WorkerModelsConfig | None = None
     domains: DomainsConfig = Field(default_factory=DomainsConfig)
     detection_policies: PolicyBundle = Field(default_factory=default_policy_bundle)
     dev_mjpeg: DevMjpegConfig = Field(default_factory=DevMjpegConfig)

@@ -8,16 +8,21 @@ and writes, ``backend/app/features/cameras/*`` names what the backend sends
 and expects, and ``tests/test_backend_worker_runtime_contracts.py`` round-trips
 one through the other so drift fails a test instead of a deploy.
 
-Stdlib only -- ``_mjpeg_http.py`` keeps the sockets, the auth gate, and the
-frame plumbing; nothing here touches a frame.
+Only stdlib plus the image-free preview envelope -- ``_mjpeg_http.py`` keeps
+the sockets, the auth gate, and the frame plumbing; nothing here touches a
+frame.
 """
 
 from __future__ import annotations
 
+import math
 from collections.abc import Mapping
 from dataclasses import dataclass
+from numbers import Real
 from typing import Final, Literal, TypeAlias
 from urllib.parse import unquote
+
+from worker.types.preview import OverlaySelection
 
 # Shared secret header; the token-gated routes fail closed (403) without it.
 RELAY_TOKEN_HEADER: Final = "X-Edge-Relay-Token"
@@ -36,8 +41,6 @@ SNAPSHOT_PREFIX: Final = "/snapshot/"
 OVERLAY_PREFIX: Final = "/overlay/"
 POSE_SUFFIX: Final = "/pose"
 BED_ZONE_SUFFIX: Final = "/bed-zone/recognize"
-CLIPS_SEGMENT: Final = "clips"
-CLIP_DELETION_PREFLIGHT_SEGMENT: Final = "deletion-preflight"
 
 
 def stream_camera_id(path: str) -> str | None:
@@ -71,51 +74,27 @@ def _overlay_camera_id(path: str, suffix: str) -> str | None:
     return camera_id or None
 
 
-def clip_deletion_clip_id(path: str) -> str | None:
-    """``DELETE /clips/{clip_id}`` (exactly); ``None`` for an empty clip id."""
-    parts = path.split("/")
-    if len(parts) != 3 or parts[1] != CLIPS_SEGMENT:
+# --- /overlay/{camera_id}/pose: ``{"person": bool, "bed": bool}`` both ways -
+
+
+def parse_overlay_selection(payload: object) -> OverlaySelection | None:
+    """Accept exactly the two required boolean overlay-selection fields."""
+    if not isinstance(payload, Mapping) or set(payload) != {"person", "bed"}:
         return None
-    return unquote(parts[2]) or None
-
-
-def clip_deletion_preflight_clip_id(path: str) -> str | None:
-    """``GET /clips/{clip_id}/deletion-preflight``; ``None`` for an empty clip id."""
-    parts = path.split("/")
-    if len(parts) != 4 or parts[1] != CLIPS_SEGMENT or parts[3] != CLIP_DELETION_PREFLIGHT_SEGMENT:
+    person = payload["person"]
+    bed = payload["bed"]
+    if not isinstance(person, bool) or not isinstance(bed, bool):
         return None
-    return unquote(parts[2]) or None
+    return OverlaySelection(person=person, bed=bed)
 
 
-# --- /overlay/{camera_id}/pose: ``{"mode": ...}`` both ways ----------------
-
-OverlayMode: TypeAlias = Literal["none", "bedexit", "fall"]
-
-
-def parse_overlay_mode(value: object) -> OverlayMode | None:
-    if value == "none":
-        return "none"
-    if value == "bedexit":
-        return "bedexit"
-    if value == "fall":
-        return "fall"
-    return None
-
-
-def parse_pose_body(payload: object) -> OverlayMode | None:
-    """Accept exactly ``{"mode": <OverlayMode>}``; anything else is ``None``."""
-    if not isinstance(payload, Mapping) or len(payload) != 1 or "mode" not in payload:
-        return None
-    return parse_overlay_mode(payload["mode"])
-
-
-def pose_body(mode: OverlayMode) -> dict[str, str]:
-    return {"mode": mode}
+def overlay_selection_body(selection: OverlaySelection) -> dict[str, bool]:
+    return {"person": selection.person, "bed": selection.bed}
 
 
 # --- POST /probe -----------------------------------------------------------
 
-ProbeErrorClass: TypeAlias = Literal["auth", "timeout", "decode", "unsupported"]
+ProbeErrorClass: TypeAlias = Literal["auth", "timeout", "decode", "unsupported", "unavailable"]
 
 
 def normalize_probe_error_class(value: object) -> ProbeErrorClass:
@@ -126,6 +105,8 @@ def normalize_probe_error_class(value: object) -> ProbeErrorClass:
         return "timeout"
     if value == "unsupported":
         return "unsupported"
+    if value == "unavailable":
+        return "unavailable"
     return "decode"
 
 
@@ -187,19 +168,55 @@ class ProbeResponse:
 
 # Structured 404 body when recognition ran but found no bed.
 BED_ZONE_NOT_FOUND_BODY: Final = {"error_class": "bed_not_found"}
+DEFAULT_BED_ZONE_CONFIDENCE: Final = 0.25
+MIN_BED_ZONE_CONFIDENCE: Final = 0.05
+MAX_BED_ZONE_CONFIDENCE: Final = 0.95
+
+
+def parse_bed_zone_recognize_request(payload: object) -> float | None:
+    """Return a valid requested confidence, defaulting an empty object."""
+    if not isinstance(payload, dict) or not payload.keys() <= {"confidence"}:
+        return None
+    confidence = payload.get("confidence", DEFAULT_BED_ZONE_CONFIDENCE)
+    if (
+        isinstance(confidence, bool)
+        or not isinstance(confidence, Real)
+        or not math.isfinite(float(confidence))
+    ):
+        return None
+    parsed = float(confidence)
+    if not MIN_BED_ZONE_CONFIDENCE <= parsed <= MAX_BED_ZONE_CONFIDENCE:
+        return None
+    return parsed
+
+
+@dataclass(frozen=True, slots=True)
+class BedZoneRecognizeRegion:
+    """One model-segmented bed candidate in image pixel coordinates."""
+
+    id: str
+    polygon: tuple[tuple[int, int], ...]
+    origin: Literal["model"] = "model"
+
+    def as_dict(self) -> dict[str, object]:
+        return {
+            "id": self.id,
+            "polygon": [[x, y] for x, y in self.polygon],
+            "origin": self.origin,
+        }
 
 
 @dataclass(frozen=True, slots=True)
 class BedZoneRecognizeResponse:
-    """The 200 body: pixel polygon of the best bed plus the image it was found in."""
+    """The 200 body: model-segmented beds plus the image they were found in."""
 
-    polygon: tuple[tuple[int, int], ...]
+    regions: tuple[BedZoneRecognizeRegion, ...]
     image_width: int
     image_height: int
 
     def as_dict(self) -> dict[str, object]:
         return {
-            "polygon": [[x, y] for x, y in self.polygon],
+            "regions": [region.as_dict() for region in self.regions],
             "image_width": self.image_width,
             "image_height": self.image_height,
         }
@@ -207,23 +224,24 @@ class BedZoneRecognizeResponse:
 
 __all__ = [
     "BED_ZONE_NOT_FOUND_BODY",
+    "DEFAULT_BED_ZONE_CONFIDENCE",
+    "MAX_BED_ZONE_CONFIDENCE",
+    "MIN_BED_ZONE_CONFIDENCE",
     "MJPEG_BOUNDARY",
     "MJPEG_MEDIA_TYPE",
     "PROBE_PATH",
     "RELAY_TOKEN_HEADER",
     "REPLAY_PATH",
+    "BedZoneRecognizeRegion",
     "BedZoneRecognizeResponse",
-    "OverlayMode",
     "ProbeErrorClass",
     "ProbeResponse",
     "bed_zone_camera_id",
-    "clip_deletion_clip_id",
-    "clip_deletion_preflight_clip_id",
     "normalize_probe_error_class",
-    "parse_overlay_mode",
-    "parse_pose_body",
+    "overlay_selection_body",
+    "parse_bed_zone_recognize_request",
+    "parse_overlay_selection",
     "parse_probe_request",
-    "pose_body",
     "pose_camera_id",
     "snapshot_camera_id",
     "stream_camera_id",

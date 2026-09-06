@@ -8,7 +8,7 @@ import pytest
 
 from backend.app.edge_db.bootstrap import bootstrap_database
 from backend.app.edge_db.configuration import open_configuration_database
-from backend.app.features.cameras.bed_zone_store import BedZoneStore
+from backend.app.features.cameras.bed_zone_store import BedZoneRegion, BedZoneStore
 from backend.app.features.cameras.edge_topology_sync_state import EdgeTopologySyncStateStore
 from backend.app.features.cameras.store import CameraRegistryStore
 from backend.app.features.cameras.topology_confirmation_state import TopologyConfirmationStore
@@ -109,7 +109,19 @@ def test_configuration_authorities_round_trip_on_only_compact_tables(tmp_path: P
     )
     bed_zones.put(
         "camera-1",
-        polygon=[[1, 2], [3, 4], [5, 6]],
+        regions=tuple(
+            BedZoneRegion(
+                id=f"bed-{index}",
+                polygon=(
+                    (index * 10 + 1, 2),
+                    (index * 10 + 8, 2),
+                    (index * 10 + 8, 8),
+                    (index * 10 + 1, 8),
+                ),
+                origin="manual" if index % 2 == 0 else "model",
+            )
+            for index in range(4)
+        ),
         image_width=640,
         image_height=480,
         recognized_at="2026-08-24T00:00:00Z",
@@ -126,7 +138,21 @@ def test_configuration_authorities_round_trip_on_only_compact_tables(tmp_path: P
     assert reloaded_credentials.username == "operator"
     assert ConnectionSettingsStore(database).load().facility_id == "facility-1"
     assert CameraRegistryStore(database).topology_snapshot().floors[0].rooms[0].name == "Room 1"
-    assert BedZoneStore(database).get("camera-1") is not None
+    stored_bed_zone = BedZoneStore(database).get("camera-1")
+    assert stored_bed_zone is not None
+    assert [region.as_dict() for region in stored_bed_zone.regions] == [
+        {
+            "id": f"bed-{index}",
+            "polygon": [
+                [index * 10 + 1, 2],
+                [index * 10 + 8, 2],
+                [index * 10 + 8, 8],
+                [index * 10 + 1, 8],
+            ],
+            "origin": "manual" if index % 2 == 0 else "model",
+        }
+        for index in range(4)
+    ]
     assert RuntimeSettingsStore(database).get().clip_export_enabled is True
     assert DetectionSettingsStore(database).get_all()["fall"].on is True
     with sqlite3.connect(database) as raw:

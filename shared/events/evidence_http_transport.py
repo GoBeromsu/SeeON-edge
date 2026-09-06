@@ -17,6 +17,7 @@ from shared.events.evidence_export_contract import (
     ClipReceipt,
     DeliveryDisposition,
     DeliveryFailure,
+    DeliveryFailureCode,
     EventReceipt,
 )
 
@@ -116,7 +117,7 @@ def parse_event_result(
         return receipt
     if 200 <= status < 300:
         return DeliveryFailure(DeliveryDisposition.RETRY, "MALFORMED_RECEIPT")
-    return classify_http_failure(status, headers)
+    return classify_http_failure(status, headers, body)
 
 
 def parse_clip_result(
@@ -141,7 +142,7 @@ def parse_clip_result(
         return receipt
     if 200 <= status < 300:
         return DeliveryFailure(DeliveryDisposition.RETRY, "MALFORMED_RECEIPT")
-    return classify_http_failure(status, headers)
+    return classify_http_failure(status, headers, body)
 
 
 def parse_capabilities(body: bytes) -> BackendCapabilities | DeliveryFailure:
@@ -152,7 +153,9 @@ def parse_capabilities(body: bytes) -> BackendCapabilities | DeliveryFailure:
     return BackendCapabilities(1, cast(Literal[0, 1], clip_export))
 
 
-def classify_http_failure(status: int, headers: Mapping[str, str]) -> DeliveryFailure:
+def classify_http_failure(
+    status: int, headers: Mapping[str, str], body: bytes | None = None
+) -> DeliveryFailure:
     # 401/403 are ambient auth/facility-config state, not a property of this
     # specific payload (unlike 400/413/415/422, which are genuinely permanent
     # -- retrying the exact same bytes cannot change a schema/size rejection).
@@ -163,7 +166,10 @@ def classify_http_failure(status: int, headers: Mapping[str, str]) -> DeliveryFa
     # backoff behavior this needs: retry_after_seconds when the response
     # supplies one, else capped exponential backoff (EvidenceSender._delay),
     # indefinitely -- it never gives up on its own.
-    if status in {404, 405}:
+    failure_code = _failure_code(body)
+    if failure_code is DeliveryFailureCode.CAMERA_MAPPING_MISSING:
+        disposition = DeliveryDisposition.RETRY
+    elif status in {404, 405}:
         disposition = DeliveryDisposition.COMPATIBILITY
     elif status in {401, 403, 408, 425, 429} or 500 <= status <= 599:
         disposition = DeliveryDisposition.RETRY
@@ -171,10 +177,23 @@ def classify_http_failure(status: int, headers: Mapping[str, str]) -> DeliveryFa
         disposition = DeliveryDisposition.PERMANENT
     return DeliveryFailure(
         disposition,
-        f"HTTP_{status}",
+        f"HTTP_{status}" if failure_code is None else failure_code,
         status_code=status,
         retry_after_seconds=_retry_after(_header_value(headers, "Retry-After")),
     )
+
+
+def _failure_code(body: bytes | None) -> DeliveryFailureCode | None:
+    if body is None:
+        return None
+    detail = parse_json_object(body).get("detail")
+    if not isinstance(detail, dict):
+        return None
+    code = detail.get("code")
+    try:
+        return DeliveryFailureCode(code) if isinstance(code, str) else None
+    except ValueError:
+        return None
 
 
 def _header_value(headers: Mapping[str, str], name: str) -> str | None:

@@ -44,9 +44,7 @@ def test_connection_test_verifies_without_persisting(
         thread.join(timeout=1.0)
 
 
-def test_connection_test_requires_auth(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_connection_test_requires_auth(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     response = connection_client(tmp_path, monkeypatch).post(
         "/api/v1/connection/test", json=_PAYLOAD
     )

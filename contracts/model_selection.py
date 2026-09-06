@@ -9,7 +9,12 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Final
 
-SCHEMA_VERSION: Final = 1
+SCHEMA_VERSION: Final = 2
+# The pose+bbox56 preprocessing identity: 17 COCO keypoints as (x, y, confidence)
+# plus the pose-head bbox as (x1, y1, x2, y2, valid) in float32 -- 56 values per
+# row. Both the training publisher and the edge adapters name this exact string,
+# so it is contract vocabulary rather than a per-package constant.
+POSE_BBOX56_PREPROCESSING_IDENTITY: Final = "coco17-xyc-plus-pose-head-xyxy-valid-f32-v1"
 _SHA256_RE: Final = re.compile(r"^[0-9a-f]{64}$")
 _REVISION_RE: Final = re.compile(r"^[0-9a-f]{40}$")
 _SOURCE_LOCATOR_RE: Final = re.compile(
@@ -50,6 +55,10 @@ class ModelSelection:
     output_class_semantics_digest: str
     policy_digest: str
     runtime_format: str
+    bundle_format: str
+    preprocessing_identity: str
+    transition_threshold: float
+    threshold_source: str
 
     def as_dict(self) -> dict[str, object]:
         return {
@@ -74,6 +83,10 @@ class ModelSelection:
             "output_class_semantics_digest": self.output_class_semantics_digest,
             "policy_digest": self.policy_digest,
             "runtime_format": self.runtime_format,
+            "bundle_format": self.bundle_format,
+            "preprocessing_identity": self.preprocessing_identity,
+            "transition_threshold": self.transition_threshold,
+            "threshold_source": self.threshold_source,
         }
 
     @property
@@ -96,6 +109,10 @@ class AppliedModelSelection:
     output_class_semantics_digest: str
     policy_digest: str
     runtime_format: str
+    bundle_format: str
+    preprocessing_identity: str
+    transition_threshold: float
+    threshold_source: str
     boot_id: str
     restart_id: str
     verified_at: str
@@ -172,6 +189,23 @@ def _positive_integer(raw: Mapping[str, object], key: str, where: str) -> int:
     return value
 
 
+def _probability(raw: Mapping[str, object], key: str, where: str) -> float:
+    value = raw.get(key)
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ContractError(f"{where}.{key} must be a probability")
+    parsed = float(value)
+    if not 0.0 <= parsed <= 1.0:
+        raise ContractError(f"{where}.{key} must be in [0, 1]")
+    return parsed
+
+
+def _threshold_source(raw: Mapping[str, object], key: str, where: str) -> str:
+    value = _string(raw, key, where)
+    if value not in {"default", "receipt"}:
+        raise ContractError(f"{where}.{key} must be default or receipt")
+    return value
+
+
 _SELECTION_KEYS: Final = frozenset(
     {
         "schema_version",
@@ -187,6 +221,10 @@ _SELECTION_KEYS: Final = frozenset(
         "output_class_semantics_digest",
         "policy_digest",
         "runtime_format",
+        "bundle_format",
+        "preprocessing_identity",
+        "transition_threshold",
+        "threshold_source",
     }
 )
 
@@ -218,6 +256,10 @@ def _desired_fields(raw: Mapping[str, object], where: str) -> dict[str, object]:
         "output_class_semantics_digest": _digest(raw, "output_class_semantics_digest", where),
         "policy_digest": _digest(raw, "policy_digest", where),
         "runtime_format": _string(raw, "runtime_format", where),
+        "bundle_format": _string(raw, "bundle_format", where),
+        "preprocessing_identity": _string(raw, "preprocessing_identity", where),
+        "transition_threshold": _probability(raw, "transition_threshold", where),
+        "threshold_source": _threshold_source(raw, "threshold_source", where),
     }
 
 
@@ -352,6 +394,10 @@ def compare_desired_to_applied(
             output_class_semantics_digest=applied.output_class_semantics_digest,
             policy_digest=applied.policy_digest,
             runtime_format=applied.runtime_format,
+            bundle_format=applied.bundle_format,
+            preprocessing_identity=applied.preprocessing_identity,
+            transition_threshold=applied.transition_threshold,
+            threshold_source=applied.threshold_source,
         ).as_dict(),
     }
     return tuple(key for key in expected if actual[key] != expected[key])
@@ -375,6 +421,7 @@ def validate_applied_against_desired(
 
 
 __all__ = [
+    "POSE_BBOX56_PREPROCESSING_IDENTITY",
     "SCHEMA_VERSION",
     "AppliedModelSelection",
     "ContractError",

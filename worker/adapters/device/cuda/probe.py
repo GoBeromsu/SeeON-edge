@@ -4,7 +4,7 @@
 (``worker/runtime/worker.py``) construct every model backend with
 ``device=boot.device`` -- when the resolved profile is ``cuda`` that is the
 literal string ``"cuda"`` passed straight into ``torch``-backed adapters
-(``worker/adapters/model/torch_lstm_fall.py``, ``yolo_*.py``). This probe
+(``yolo_*.py``). This probe
 answers, before any lease is held or model is constructed, whether that
 ``device="cuda"`` call can possibly succeed in this process -- it is the
 composition root's real signal for the ``profile_device`` bootstrap stage
@@ -76,8 +76,8 @@ def probe_cuda_capability(*, importer: TorchImporter = _import_torch) -> CudaCap
     exceptions, device-visible-but-unusable) without needing a real GPU or a
     broken torch install -- mirrors the ``Cv2Importer``/``ProbeRunner``
     injection pattern already used elsewhere in this package
-    (``worker/adapters/decode/cpu_av/probe.py``,
-    ``worker/adapters/decode/nvdec_cuvid/probe.py``). Production callers never
+    (``Flow media plane/cpu_av/probe.py``,
+    ``Flow media plane/nvdec_cuvid/probe.py``). Production callers never
     pass ``importer``.
 
     Never raises: every ``torch.cuda.*`` call is individually guarded so one
@@ -140,7 +140,7 @@ def probe_cuda_capability(*, importer: TorchImporter = _import_torch) -> CudaCap
 
 # Matches the `h264_nvenc` encoder token in `ffmpeg -encoders` output without
 # false-matching unrelated substrings (mirrors `_CUVID_DECODER_PATTERN` in
-# worker/adapters/decode/nvdec_cuvid/probe.py).
+# Flow media plane/nvdec_cuvid/probe.py).
 _NVENC_ENCODER_PATTERN: Final = re.compile(r"\bh264_nvenc\b", re.IGNORECASE)
 
 
@@ -158,7 +158,7 @@ def run_ffmpeg_encoders_query(args: tuple[str, ...], timeout_sec: float) -> str:
     """Run a bounded `ffmpeg -encoders` query, returning combined stdout+stderr.
 
     Same rationale as `run_ffmpeg_query` in
-    worker/adapters/decode/nvdec_cuvid/probe.py: some ffmpeg builds report
+    Flow media plane/nvdec_cuvid/probe.py: some ffmpeg builds report
     capability listings on stderr rather than stdout, so both streams are
     combined rather than relying on just one.
     """
@@ -181,7 +181,7 @@ def probe_nvenc_capability(
     """Never-raise ffmpeg-build capability probe for the `h264_nvenc` encoder.
 
     This is the encode-side counterpart to `probe_nvdec_cuvid_capability`
-    (worker/adapters/decode/nvdec_cuvid/probe.py), and answers a question that
+    (Flow media plane/nvdec_cuvid/probe.py), and answers a question that
     `probe_cuda_capability` above deliberately does not: `torch.cuda.is_available()`
     only proves a CUDA *device* is usable for model inference, it says nothing
     about whether the `ffmpeg` binary on `ffmpeg_bin` was built with NVENC
@@ -195,7 +195,7 @@ def probe_nvenc_capability(
     build claim to support h264_nvenc at all"; whether a session can actually
     be opened (e.g. consumer-GPU concurrent-session limits) is a separate,
     per-camera runtime concern handled by `FFmpegSegmentEncoder`
-    (worker/adapters/encode/ffmpeg_segment_encoder.py).
+    (Flow media plane/ffmpeg_segment_encoder.py).
 
     Returns `available=False` -- never a guess, never raises -- when the
     binary is missing, the query times out, exits non-zero, or the encoder

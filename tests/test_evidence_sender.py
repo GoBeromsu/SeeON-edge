@@ -103,9 +103,7 @@ def test_attachment_conflict_is_retained_without_delivery_proof(tmp_path: Path) 
     )
 
     assert _sender(tmp_path, transport).run_once() is SenderStep.RETRY_SCHEDULED
-    assert [entry["kind"] for entry in DeliveryQueue(tmp_path).entries()] == [
-        "SNAPSHOT_ATTACHMENT"
-    ]
+    assert [entry["kind"] for entry in DeliveryQueue(tmp_path).entries()] == ["SNAPSHOT_ATTACHMENT"]
 
 
 def test_attachment_acknowledgement_does_not_remove_event_or_disposition(tmp_path: Path) -> None:

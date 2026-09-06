@@ -155,8 +155,10 @@ def put_detection_settings(
     actor = _authorize(request)
     settings = {domain: _to_domain_setting(getattr(payload.domains, domain)) for domain in DOMAINS}
     event = AuditEvent(
-        occurred_at=audit_now(), actor_id=actor,
-        action=AuditAction.DETECTION_SETTINGS_UPDATE, target_id="detection-settings",
+        occurred_at=audit_now(),
+        actor_id=actor,
+        action=AuditAction.DETECTION_SETTINGS_UPDATE,
+        target_id="detection-settings",
         detail=empty_detail(AuditAction.DETECTION_SETTINGS_UPDATE),
     )
     _store(request.app).replace_all(
@@ -254,7 +256,9 @@ def apply_detection_policy(
             detail="expected_revision_id is required for policy apply",
         )
     event = AuditEvent(
-        occurred_at=audit_now(), actor_id=actor, action=AuditAction.POLICY_APPLY,
+        occurred_at=audit_now(),
+        actor_id=actor,
+        action=AuditAction.POLICY_APPLY,
         target_id=payload.camera_id or payload.module_id,
         detail=empty_detail(AuditAction.POLICY_APPLY),
     )
@@ -288,7 +292,9 @@ def rollback_detection_policy(
     facility_id = _require_enrolled_facility(request.app)
     _require_policy_camera(request.app, payload.camera_id)
     event = AuditEvent(
-        occurred_at=audit_now(), actor_id=actor, action=AuditAction.POLICY_ROLLBACK,
+        occurred_at=audit_now(),
+        actor_id=actor,
+        action=AuditAction.POLICY_ROLLBACK,
         target_id=payload.camera_id or payload.module_id,
         detail=empty_detail(AuditAction.POLICY_ROLLBACK),
     )

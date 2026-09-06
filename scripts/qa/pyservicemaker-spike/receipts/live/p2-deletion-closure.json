@@ -1,0 +1,40 @@
+{
+  "criterion": "P2-AC1 through AC5",
+  "AC1": {
+    "trees_absent": [
+      "worker/native",
+      "worker/runtime/deepstream",
+      "worker/adapters/decode",
+      "worker/adapters/encode",
+      "worker/pipeline/ingest",
+      "worker/pipeline/bus",
+      "worker/tools/deepstream_canary",
+      "worker/pipeline/perception/tracker.py"
+    ],
+    "lint_imports": "13 kept, 0 broken",
+    "one_process_per_container": true
+  },
+  "AC2": {
+    "worker_python_lines_before": 61192,
+    "worker_python_lines_after": 35918,
+    "files_before": 379,
+    "files_after": 222,
+    "target": "<=20k",
+    "met": false,
+    "note": "reported by direct line count because tokei is not installed here; the target is not met and the criterion gates nothing alone. What remains is the surviving Flow worker, its domains, evidence path and runtime - not dead weight."
+  },
+  "AC3": {
+    "docker_build_edge": "succeeds",
+    "native_or_smoke_stage_in_image": false,
+    "boot_smoke": "docker run --network none -e RELAY_TOKEN=... python -m worker --check-config exits 0 on the freshly built image",
+    "contract_tests": "169 passed across topology, privacy and dead-surface suites"
+  },
+  "AC4": {
+    "note": "MJPEG live view and bed-zone recognize round trip are covered by tests/test_api_bed_zone.py and tests/test_worker_bed_zone_recognizer.py, which pass; the burned-overlay snapshot comes from nvdsosd inside the SDK and was never part of the deleted host overlay path"
+  },
+  "AC5": {
+    "closure_scan": "scripts/deletion_closure_scan.py reports zero surviving references to all eight deleted trees across every tracked non-binary file"
+  },
+  "suite": "2741 passed, 8 pre-existing workstation failures",
+  "live": "post-deletion image verified on live video: 3600 frames, 5715 objects, 5715 matched tracks"
+}

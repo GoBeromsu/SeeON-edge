@@ -31,20 +31,6 @@ function expectNoRetiredRequest(fetchMock: ReturnType<typeof vi.fn>): void {
   }
 }
 
-function findButton(root: ParentNode, label: string): HTMLButtonElement {
-  const button = Array.from(root.querySelectorAll('button')).find((candidate) => candidate.textContent === label);
-  if (!button) throw new Error(`missing button ${label}`);
-  return button;
-}
-
-function typeConfirm(input: HTMLInputElement, value: string): void {
-  act(() => {
-    const valueSetter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value')?.set;
-    valueSetter?.call(input, value);
-    input.dispatchEvent(new Event('input', { bubbles: true }));
-  });
-}
-
 afterEach(() => {
   cleanupPages();
   document.body.innerHTML = '';
@@ -66,7 +52,6 @@ describe('EventsPage bounded failure states', () => {
     const fetchMock = vi.fn((input: RequestInfo | URL) => {
       const url = String(input);
       if (url.includes('/cameras')) return Promise.resolve(jsonResponse(cameraRegistry));
-      if (url.includes('/incidents')) return Promise.resolve(jsonResponse({ incidents: [] }));
       if (url.endsWith('/clips/clip-503/artifacts')) {
         return Promise.resolve(jsonResponse({ clip_id: 'clip-503', clean: 'UNAVAILABLE', snapshot: null }));
       }
@@ -97,7 +82,6 @@ describe('EventsPage bounded failure states', () => {
     const fetchMock = vi.fn((input: RequestInfo | URL) => {
       const url = String(input);
       if (url.includes('/cameras')) return Promise.resolve(jsonResponse(cameraRegistry));
-      if (url.includes('/incidents')) return Promise.resolve(jsonResponse({ incidents: [] }));
       if (url.endsWith('/artifacts')) {
         return Promise.resolve(jsonResponse({ clip_id: 'clip-nothumb', clean: 'AVAILABLE', snapshot: null }));
       }
@@ -122,90 +106,6 @@ describe('EventsPage bounded failure states', () => {
     expectNoRetiredRequest(fetchMock);
   });
 
-  it('reloads incidents and keeps the review dialog bounded on a stale CAS conflict', async () => {
-    resetLocation();
-    const incident = {
-      incident_id: 'incident-1', edge_event_id: 'event-1', camera_id: 'cam-1', event_type: 'fall',
-      detected_at: '2026-08-02T03:12:00Z', lifecycle_state: 'COMPLETE', revision: 3, failure_reason: null,
-      runtime_manifest_sha256: null, decision_trace_id: null, module_qualified_id: null,
-      policy_qualified_id: null, primary_clip_id: 'clip-1', primary_artifact_state: 'AVAILABLE',
-      snapshot_artifact_state: 'AVAILABLE', event_delivery_state: 'DELIVERED',
-      clip_publish_state: 'PUBLISHED', retention_state: 'RETAINED', review: null,
-    };
-    let incidentReads = 0;
-    const reviewBodies: unknown[] = [];
-    const fetchMock = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
-      const url = String(input);
-      if (url.includes('/cameras')) return Promise.resolve(jsonResponse(cameraRegistry));
-      if (url.includes('/incident-reviews/')) {
-        reviewBodies.push(init?.body);
-        return Promise.resolve(jsonResponse({ detail: 'stale review version' }, 409));
-      }
-      if (url.includes('/incidents')) {
-        incidentReads += 1;
-        return Promise.resolve(jsonResponse({ incidents: [incident] }));
-      }
-      if (url.includes('/clips')) return Promise.resolve(jsonResponse(keysetBody([], 48, null)));
-      return Promise.reject(new Error(`unexpected fetch: ${url}`));
-    });
-    vi.stubGlobal('fetch', fetchMock);
-
-    const { host } = await renderPage();
-    const incidentCard = Array.from(host.querySelectorAll<HTMLButtonElement>('button'))
-      .find((button) => button.textContent?.includes('cam-1')) as HTMLButtonElement;
-    act(() => incidentCard.click());
-    await flush();
-
-    const readsBeforeReview = incidentReads;
-    await act(async () => { findButton(document.body, '실제 알림으로 검토').click(); });
-    await flush();
-
-    expect(reviewBodies).toEqual([JSON.stringify({ expected_version: 0, disposition: 'TRUE_POSITIVE', notes: null })]);
-    // The 409 reloads authoritative state instead of writing an optimistic review.
-    expect(incidentReads).toBeGreaterThan(readsBeforeReview);
-    expect(document.querySelector('[data-testid="incident-artifact-states"]')?.textContent).toBe('AVAILABLE / AVAILABLE');
-    expectNoRetiredControl();
-    expectNoRetiredRequest(fetchMock);
-  });
-
-  it('keeps playback and the delete control when the worker holds the deletion', async () => {
-    resetLocation();
-    const clip = clipManifest({ clip_id: 'clip-held', event_ref: 'event-held' });
-    const fetchMock = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
-      const url = String(input);
-      if (url.includes('/cameras')) return Promise.resolve(jsonResponse(cameraRegistry));
-      if (url.includes('/incidents')) return Promise.resolve(jsonResponse({ incidents: [] }));
-      if (url.endsWith('/artifacts')) {
-        return Promise.resolve(jsonResponse({ clip_id: 'clip-held', clean: 'AVAILABLE', snapshot: null }));
-      }
-      if (url.endsWith('/clips/clip-held') && init?.method === 'DELETE') {
-        return Promise.resolve(jsonResponse({ clip_id: 'clip-held', status: 'HELD' }, 202));
-      }
-      if (url.includes('/clips')) return Promise.resolve(jsonResponse(keysetBody([clip], 48, null)));
-      return Promise.reject(new Error(`unexpected fetch: ${url}`));
-    });
-    vi.stubGlobal('fetch', fetchMock);
-    vi.spyOn(HTMLMediaElement.prototype, 'play').mockResolvedValue();
-
-    const { host } = await renderPage();
-    act(() => (host.querySelector('button.rounded-card') as HTMLButtonElement).click());
-    await flush();
-    act(() => findButton(document.body, '클립 삭제').click());
-    // Located by the confirm input's stable id, never by the dialog's rendered copy.
-    const confirmInput = document.querySelector('#delete-confirm-input') as HTMLInputElement;
-    const confirmDialog = confirmInput.closest('[role="dialog"]') as HTMLElement;
-    typeConfirm(confirmInput, 'clip-held');
-    await act(async () => { findButton(confirmDialog, '삭제').click(); });
-    await flush();
-
-    expect(document.querySelector('[data-testid="clip-delete-status"]')).not.toBeNull();
-    expect(document.querySelectorAll('[role="dialog"] video')).toHaveLength(1);
-    expect(findButton(document.body, '클립 삭제')).toBeDefined();
-    expect(host.querySelectorAll('button.rounded-card')).toHaveLength(1);
-    expectNoRetiredControl();
-    expectNoRetiredRequest(fetchMock);
-  });
-
   it('bounds the cursor boundary: the last keyset page disables 다음 and never retries the same cursor', async () => {
     resetLocation();
     const clips = Array.from({ length: 60 }, (_, index) => clipManifest({
@@ -216,7 +116,6 @@ describe('EventsPage bounded failure states', () => {
     const fetchMock = vi.fn((input: RequestInfo | URL) => {
       const url = String(input);
       if (url.includes('/cameras')) return Promise.resolve(jsonResponse(cameraRegistry));
-      if (url.includes('/incidents')) return Promise.resolve(jsonResponse({ incidents: [] }));
       const params = new URL(url, 'http://localhost').searchParams;
       return Promise.resolve(jsonResponse(keysetBody(clips, Number(params.get('limit')), params.get('cursor'))));
     });

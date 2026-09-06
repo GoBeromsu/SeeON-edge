@@ -2,6 +2,44 @@ import { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { OperationsPage } from '@/app/pages/OperationsPage';
+import type { BedZone } from '@/shared/api/client';
+
+const savedFourRegionZone: BedZone = {
+  regions: [
+    { id: 'bed-1', polygon: [[0, 0], [10, 0], [10, 10]], origin: 'model' },
+    { id: 'bed-2', polygon: [[20, 0], [30, 0], [30, 10]], origin: 'model' },
+    { id: 'bed-3', polygon: [[40, 0], [50, 0], [50, 10]], origin: 'manual' },
+    { id: 'bed-4', polygon: [[60, 0], [70, 0], [70, 10]], origin: 'manual' },
+  ],
+  image_width: 1920,
+  image_height: 1080,
+  recognized_at: '2026-09-05T00:00:00Z',
+};
+
+vi.mock('@/shared/ui/BedZoneRecognitionPanel', () => ({
+  BedZoneRecognitionPanel: ({
+    bedZone,
+    onSaved,
+    onCancel,
+  }: {
+    bedZone: BedZone | null;
+    onSaved: (zone: BedZone | null) => void;
+    onCancel: () => void;
+  }) => (
+    <div>
+      <output aria-label="저장된 침대 영역 수">{bedZone?.regions.length ?? 0}</output>
+      <button type="button">모의 후보 인식</button>
+      <button
+        type="button"
+        onClick={() => onSaved(savedFourRegionZone)}
+      >
+        모의 저장 성공
+      </button>
+      <button type="button" onClick={() => onSaved(null)}>모의 지우기 성공</button>
+      <button type="button" onClick={onCancel}>모의 취소</button>
+    </div>
+  ),
+}));
 
 function resetLocation(search = '?page=operations'): void {
   window.history.replaceState(null, '', `/${search}`);
@@ -62,13 +100,23 @@ const allClips = [
   clipManifest({ clip_id: 'clip-2', camera_id: 'cam-1', event_type: 'bed-exit', started_at: '2026-08-02T02:00:00Z' }),
 ];
 
-let overlayMode = 'none';
+let overlaySelection = { person: true, bed: true };
+let cameraBedZone: BedZone | null = null;
 
 function installFetchMock(): ReturnType<typeof vi.fn> {
   const fetchMock = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
     const url = typeof input === 'string' ? input : input.toString();
     if (url.includes('/cameras')) {
-      return Promise.resolve({ ok: true, status: 200, json: async () => cameraRegistry });
+      return Promise.resolve({
+        ok: true,
+        status: 200,
+        json: async () => ({
+          ...cameraRegistry,
+          cameras: cameraRegistry.cameras.map((camera) => (
+            camera.id === 'cam-1' ? { ...camera, bed_zone: cameraBedZone } : camera
+          )),
+        }),
+      });
     }
     if (url.includes('/status')) {
       return Promise.resolve({ ok: true, status: 200, json: async () => statusSnapshot });
@@ -79,9 +127,9 @@ function installFetchMock(): ReturnType<typeof vi.fn> {
     if (url.includes('/streams/') && url.includes('/pose')) {
       if (init?.method === 'POST') {
         const body = init.body ? JSON.parse(init.body as string) : {};
-        overlayMode = body.mode ?? overlayMode;
+        overlaySelection = body;
       }
-      return Promise.resolve({ ok: true, status: 200, json: async () => ({ mode: overlayMode }) });
+      return Promise.resolve({ ok: true, status: 200, json: async () => overlaySelection });
     }
     if (url.includes('/clips')) {
       const match = /camera_id=([^&]+)/.exec(url);
@@ -103,20 +151,29 @@ async function flush(): Promise<void> {
   });
 }
 
+const mountedRoots: Root[] = [];
+
 async function renderPage(): Promise<{ host: HTMLDivElement; root: Root }> {
   const host = document.createElement('div');
   document.body.append(host);
   const root = createRoot(host);
+  mountedRoots.push(root);
   act(() => root.render(<OperationsPage />));
   await flush();
   return { host, root };
 }
 
 afterEach(() => {
+  // Unmount before wiping the body: a still-mounted root whose portal DOM was
+  // removed underneath it throws NotFoundError on its next commit, which
+  // surfaces as an uncaught error inside the following test.
+  for (const root of mountedRoots.splice(0)) act(() => root.unmount());
   document.body.innerHTML = '';
   vi.unstubAllGlobals();
   vi.restoreAllMocks();
-  overlayMode = 'none';
+  overlaySelection = { person: true, bed: true };
+  cameraBedZone = null;
+  detectionSettings.domains.bed_exit.on = false;
 });
 
 describe('OperationsPage', () => {
@@ -195,29 +252,81 @@ describe('OperationsPage', () => {
     const buttons = Array.from(host.querySelectorAll('button')).map((button) => button.textContent);
     expect(buttons).toContain('재연결 시도');
     expect(buttons).toContain('연결 관리');
-    expect(host.textContent).toContain('중단됨');
+    expect(host.querySelectorAll('svg[aria-label="중단됨"]')).toHaveLength(2);
   });
 
-  it('shows the global detection settings summary and lets the overlay mode be changed', async () => {
+  it('shows the global detection settings summary and lets overlay targets be changed independently', async () => {
     resetLocation('?page=operations&camera=cam-1');
     const fetchMock = installFetchMock();
     const { host } = await renderPage();
 
-    expect(host.textContent).toContain('탐지 중');
-    expect(host.textContent).toContain('꺼짐');
+    expect(host.querySelector('svg[aria-label="탐지 중"]')).not.toBeNull();
+    expect(host.querySelector('svg[aria-label="꺼짐"]')).not.toBeNull();
+    expect(host.querySelector('button[aria-label="침대 영역 편집"]')?.getAttribute('title')).toBe('침대 영역 편집');
 
-    const fallChip = Array.from(host.querySelectorAll<HTMLButtonElement>('button[aria-pressed]')).find((button) => button.textContent === '낙상');
-    expect(fallChip?.getAttribute('aria-pressed')).toBe('false');
+    const personToggle = Array.from(host.querySelectorAll<HTMLButtonElement>('button[aria-pressed]')).find((button) => button.textContent === '사람');
+    const bedToggle = Array.from(host.querySelectorAll<HTMLButtonElement>('button[aria-pressed]')).find((button) => button.textContent === '침대');
+    expect(personToggle?.getAttribute('aria-pressed')).toBe('true');
+    expect(bedToggle?.getAttribute('aria-pressed')).toBe('true');
 
-    act(() => fallChip?.click());
+    act(() => personToggle?.click());
     await flush();
 
-    expect(fallChip?.getAttribute('aria-pressed')).toBe('true');
+    expect(personToggle?.getAttribute('aria-pressed')).toBe('false');
+    expect(bedToggle?.getAttribute('aria-pressed')).toBe('true');
     const overlayCalls = fetchMock.mock.calls.filter(([input]) => {
       const url = typeof input === 'string' ? input : (input as URL | Request).toString();
       return url.includes('/pose');
     });
-    expect(overlayCalls.some(([, init]) => (init as RequestInit | undefined)?.method === 'POST')).toBe(true);
+    expect(overlayCalls.some(([, init]) => (
+      (init as RequestInit | undefined)?.method === 'POST'
+      && (init as RequestInit).body === JSON.stringify({ person: false, bed: true })
+    ))).toBe(true);
+  });
+
+  it('keeps readiness tied to refreshed persisted geometry, not unsaved recognition candidates', async () => {
+    resetLocation('?page=operations&camera=cam-1');
+    detectionSettings.domains.bed_exit.on = true;
+    const fetchMock = installFetchMock();
+    const { host } = await renderPage();
+    const cameraRequestCount = () => fetchMock.mock.calls.filter(([input]) => {
+      const url = typeof input === 'string' ? input : (input as URL | Request).toString();
+      return url.includes('/cameras');
+    }).length;
+
+    expect(host.querySelector('svg[aria-label="침대 영역 미설정"]')).not.toBeNull();
+    const initialCameraRequests = cameraRequestCount();
+    const editAction = host.querySelector<HTMLButtonElement>('button[aria-label="침대 영역 편집"]');
+    act(() => editAction?.click());
+    expect(document.querySelector('[role="dialog"]')?.textContent).toContain('침대 영역 편집');
+
+    const candidate = Array.from(document.querySelectorAll('button'))
+      .find((button) => button.textContent === '모의 후보 인식');
+    act(() => candidate?.click());
+    await flush();
+    expect(host.querySelector('svg[aria-label="침대 영역 미설정"]')).not.toBeNull();
+    expect(cameraRequestCount()).toBe(initialCameraRequests);
+
+    cameraBedZone = savedFourRegionZone;
+    const save = Array.from(document.querySelectorAll('button'))
+      .find((button) => button.textContent === '모의 저장 성공');
+    act(() => save?.click());
+    await flush();
+    expect(host.querySelector('svg[aria-label="침대 영역 미설정"]')).toBeNull();
+    expect(cameraRequestCount()).toBeGreaterThan(initialCameraRequests);
+    expect(document.querySelector('[role="dialog"]')).toBeNull();
+
+    act(() => host.querySelector<HTMLButtonElement>('button[aria-label="침대 영역 편집"]')?.click());
+    await flush();
+    expect(document.querySelector('[role="dialog"]')).not.toBeNull();
+    expect(document.querySelector('output[aria-label="저장된 침대 영역 수"]')?.textContent).toBe('4');
+
+    cameraBedZone = null;
+    const clear = Array.from(document.querySelectorAll('button'))
+      .find((button) => button.textContent === '모의 지우기 성공');
+    act(() => clear?.click());
+    await flush();
+    expect(host.querySelector('svg[aria-label="침대 영역 미설정"]')).not.toBeNull();
   });
 
   it('lists event history for the selected camera and opens the clip player modal', async () => {

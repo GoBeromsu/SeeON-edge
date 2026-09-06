@@ -141,12 +141,8 @@ def test_distinct_transitions_never_attribute_model_cause(tmp_path: Path) -> Non
                 _SECOND_EDGE_EVENT_ID: [str(second["event_id"])],
             },
             incidents=[
-                IncidentProjection(
-                    "incident-1", _EDGE_EVENT_ID, "t", "OPEN", "ACKED", "t"
-                ),
-                IncidentProjection(
-                    "incident-2", _SECOND_EDGE_EVENT_ID, "t", "OPEN", "ACKED", "t"
-                ),
+                IncidentProjection("incident-1", _EDGE_EVENT_ID, "t", "OPEN", "ACKED", "t"),
+                IncidentProjection("incident-2", _SECOND_EDGE_EVENT_ID, "t", "OPEN", "ACKED", "t"),
             ],
             terminal_states={
                 _EDGE_EVENT_ID: "ACKED",
@@ -179,10 +175,7 @@ def test_faulty_hub_identity_is_detected_through_the_real_client(
             terminal_states={_EDGE_EVENT_ID: "ACKED"},
             clock_order_valid=True,
         )
-        assert (
-            classify_rows(rows).outcome
-            is DiagnosticOutcome.BACKEND_IDENTITY_DUPLICATION
-        )
+        assert classify_rows(rows).outcome is DiagnosticOutcome.BACKEND_IDENTITY_DUPLICATION
 
 
 def test_measured_run_touches_only_allowed_hub_routes(tmp_path: Path) -> None:
@@ -193,6 +186,4 @@ def test_measured_run_touches_only_allowed_hub_routes(tmp_path: Path) -> None:
 
         validate_route_ledger(served.fixture.route_ledger)
         assert served.fixture.retained_media_bytes == 0
-        assert {record.path for record in served.fixture.route_ledger} == {
-            "/api/v1/events"
-        }
+        assert {record.path for record in served.fixture.route_ledger} == {"/api/v1/events"}

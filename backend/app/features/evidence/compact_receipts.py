@@ -10,6 +10,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
+from backend.app.edge_db.configuration import utc_now
 from backend.app.edge_db.connection import RuntimeActor, open_runtime_database, write_transaction
 from backend.app.features.clips.descriptor_files import (
     OpenedRegularFile,
@@ -20,13 +21,19 @@ from backend.app.features.evidence.compact_receipt_sql import (
     ClipProjection,
     commit_clip,
     commit_primary_artifact,
+    commit_unavailable_primary,
 )
 from backend.app.features.evidence.receipt_store import (
     ArtifactReceipt,
+    ArtifactReceiptPersistenceError,
     ArtifactReceiptVerificationError,
     VerifiedArtifact,
     verified_artifact,
 )
+
+
+class CompactReceiptMissingIncidentError(ArtifactReceiptPersistenceError):
+    """A manifest references an incident that has not reached compact storage."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -85,6 +92,7 @@ class CompactArtifactReceiptStore:
         connection = open_runtime_database(self._database_path, actor=RuntimeActor.API)
         try:
             with write_transaction(connection):
+                receipt_timestamp = utc_now()
                 transaction_verified = self._verify_descriptor(route_verified, receipt)
                 self._verify_current_path(media_path, transaction_verified.identity)
                 projection = ClipProjection(
@@ -97,12 +105,16 @@ class CompactArtifactReceiptStore:
                     manifest_size=projection_facts[2],
                 )
                 commit_clip(connection, projection)
-                incident = connection.execute(
-                    "SELECT incident_id FROM incidents WHERE edge_event_id = ?",
-                    (located.manifest.event_ref,),
-                ).fetchone()
-                if incident is not None:
-                    commit_primary_artifact(connection, str(incident[0]), projection)
+                for incident_id, edge_event_id in _manifest_incidents(
+                    connection, located.manifest.event_refs
+                ):
+                    commit_primary_artifact(
+                        connection,
+                        incident_id,
+                        edge_event_id,
+                        projection,
+                        timestamp=receipt_timestamp,
+                    )
                 _run_hook(self._hooks.before_final_check)
                 final_verified = self._verify_descriptor(route_verified, receipt)
                 if final_verified.identity != transaction_verified.identity:
@@ -119,6 +131,20 @@ class CompactArtifactReceiptStore:
             final_verified.sha256,
             final_verified.size_bytes,
         )
+
+    def commit_unavailable(self, clip_id: str, reason: str) -> None:
+        located = self._clip_store.locate_manifest(clip_id)
+        if located is None:
+            raise ArtifactReceiptVerificationError("clip manifest is missing")
+        timestamp = utc_now()
+        connection = open_runtime_database(self._database_path, actor=RuntimeActor.API)
+        try:
+            with write_transaction(connection):
+                incidents = _manifest_incidents(connection, located.manifest.event_refs)
+                for incident_id, _edge_event_id in incidents:
+                    commit_unavailable_primary(connection, incident_id, reason, timestamp)
+        finally:
+            connection.close()
 
     def _verify_descriptor(
         self,
@@ -178,6 +204,21 @@ class CompactArtifactReceiptStore:
         finally:
             connection.close()
         return None if row is None else ArtifactReceipt(artifact_id, str(row[0]), int(row[1]))
+
+
+def _manifest_incidents(
+    connection: sqlite3.Connection, event_refs: tuple[str, ...]
+) -> list[tuple[str, str]]:
+    incidents: list[tuple[str, str]] = []
+    for event_ref in event_refs:
+        incident = connection.execute(
+            "SELECT incident_id, edge_event_id FROM incidents WHERE edge_event_id = ?",
+            (event_ref,),
+        ).fetchone()
+        if incident is None:
+            raise CompactReceiptMissingIncidentError(f"manifest incident is missing: {event_ref}")
+        incidents.append((str(incident[0]), str(incident[1])))
+    return incidents
 
 
 def _run_hook(hook: Callable[[], None] | None) -> None:

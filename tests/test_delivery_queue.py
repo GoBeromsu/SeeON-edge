@@ -10,7 +10,9 @@ from shared.events.delivery_queue import (
     MAX_ACCEPTED_BYTES,
     MAX_ACCEPTED_ENTRIES,
     AdmissionFault,
+    ClipEntry,
     DeliveryQueue,
+    EntryKind,
     EventEntry,
     SnapshotAttachmentEntry,
     SnapshotDispositionEntry,
@@ -19,8 +21,13 @@ from shared.events.delivery_queue import (
 
 def _event(number: int) -> EventEntry:
     return EventEntry(
-        edge_event_id=f"event-{number}", event_type="fall", detected_at="2026-08-21T00:00:00Z",
-        camera_id="camera", facility_id="facility", decision_trace=b"trace", values=b"values",
+        edge_event_id=f"event-{number}",
+        event_type="fall",
+        detected_at="2026-08-21T00:00:00Z",
+        camera_id="camera",
+        facility_id="facility",
+        decision_trace=b"trace",
+        values=b"values",
     )
 
 
@@ -37,6 +44,27 @@ def _attachment() -> SnapshotAttachmentEntry:
 
 def _disposition() -> SnapshotDispositionEntry:
     return SnapshotDispositionEntry("event-1", "snapshot-1", "unavailable", "camera offline")
+
+
+def _clip() -> ClipEntry:
+    return ClipEntry(
+        clip_id="clip-1",
+        event_ids=("event-1", "event-2"),
+        camera_id="camera",
+        facility_id="facility",
+        local_state="VERIFIED",
+        state_version=2,
+        media_reference="clips/clip-1/clip.mp4",
+        sha256="a" * 64,
+        size_bytes=10,
+        mime_type="video/mp4",
+        codec="h264",
+        duration_ms=1000,
+        clip_start_at="2026-08-21T00:00:00Z",
+        clip_end_at="2026-08-21T00:00:01Z",
+        finalized_at="2026-08-21T00:00:02Z",
+        unavailable_reason=None,
+    )
 
 
 def test_temp_left_by_kill_before_publish_is_not_an_admitted_entry(tmp_path: Path) -> None:
@@ -107,6 +135,12 @@ def test_startup_reconstructs_count_and_bytes_from_published_files(tmp_path: Pat
     assert DeliveryQueue(tmp_path).accepted_bytes == sum(
         path.stat().st_size for path in expected_paths
     )
+
+
+def test_capacity_snapshot_counts_clip_entries_by_kind(tmp_path: Path) -> None:
+    queue = DeliveryQueue(tmp_path)
+    assert queue.try_admit(_clip()).accepted
+    assert queue.capacity_snapshot.by_kind[EntryKind.CLIP] == 1
 
 
 def test_acknowledgement_removes_only_the_named_entry(tmp_path: Path) -> None:

@@ -73,9 +73,7 @@ def main(argv: list[str] | None = None) -> int:
     queue = DeliveryQueue(queue_directory)
     retention = queue.dead_letter_directory
     retained = (
-        sorted(path for path in retention.iterdir() if path.is_file())
-        if retention.is_dir()
-        else []
+        sorted(path for path in retention.iterdir() if path.is_file()) if retention.is_dir() else []
     )
 
     # The refusal status is the leading filename component, so the operator sees

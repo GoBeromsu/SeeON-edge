@@ -240,10 +240,7 @@ class BedExitStateMachine:
             BedExitState.IN_BED,
         )
         would_trigger = (
-            entered
-            and committed is BedExitState.OUT_OF_BED
-            and live_exit
-            and not track.fired
+            entered and committed is BedExitState.OUT_OF_BED and live_exit and not track.fired
         )
         if would_trigger:
             track.fired = True

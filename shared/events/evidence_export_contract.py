@@ -11,6 +11,12 @@ class DeliveryDisposition(StrEnum):
     COMPATIBILITY = "COMPATIBILITY"
 
 
+class DeliveryFailureCode(StrEnum):
+    """Stable backend reasons that change delivery ownership."""
+
+    CAMERA_MAPPING_MISSING = "CAMERA_MAPPING_MISSING"
+
+
 @dataclass(frozen=True, slots=True)
 class BackendCapabilities:
     event_idempotency: Literal[1]
@@ -57,5 +63,6 @@ __all__ = [
     "ClipReceipt",
     "DeliveryDisposition",
     "DeliveryFailure",
+    "DeliveryFailureCode",
     "EventReceipt",
 ]

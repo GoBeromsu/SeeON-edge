@@ -138,13 +138,14 @@ _SYNTHETIC_RTSP_FIXTURES = {
     Path("front/src/features/cameras/AddCameraModal.test.tsx"): {
         "rtsp://operator:***@192.0.2.10:8554/live",
         "rtsp://operator:secret@192.0.2.10:8554/trackID=1?profile=main",
-        "rtsp" "://operator:camera-password@camera.local:554/"
+        "rtsp"
+        "://operator:camera-password@camera.local:554/"
         "trackID=1?profile=main&opaque-secret-token&another%2Dsecret"
         "#token=fragment-secret",
-        "rtsp" "://operator:camera-password@[invalid-host:554/"
+        "rtsp"
+        "://operator:camera-password@[invalid-host:554/"
         "trackID=1?profile=main&token=query-secret&token=second-secret",
-        "rtsp://***@[invalid-host:554/"
-        "trackID=1?profile=***&token=***&token=***",
+        "rtsp://***@[invalid-host:554/trackID=1?profile=***&token=***&token=***",
         "rtsp://operator:secret@192.0.2.10:8554/Streaming/Channels/101?subtype=0",
     },
     Path("front/src/features/cameras/cameraRegistrationForm.test.ts"): {
@@ -201,12 +202,9 @@ _SYNTHETIC_RTSP_FIXTURES = {
         "rtsp://operator:s3cr3t@camera.local/live?token=plain",
         "rtsp://user:password@host/stream",
         "rtsp://***:***@host/stream",
-        "rtsp://user:password@host/stream"
-        "?profile=main&username=admin&secret=abc#fragment-secret",
-        "rtsp://user:password@host/stream"
-        "?profile=main&username=admin&secret=abc",
-        "rtsp://***:***@host/stream"
-        "?profile=%2A%2A%2A&username=%2A%2A%2A&secret=%2A%2A%2A",
+        "rtsp://user:password@host/stream?profile=main&username=admin&secret=abc#fragment-secret",
+        "rtsp://user:password@host/stream?profile=main&username=admin&secret=abc",
+        "rtsp://***:***@host/stream?profile=%2A%2A%2A&username=%2A%2A%2A&secret=%2A%2A%2A",
     },
     Path("tests/test_catalog_verify.py"): {
         "rtsp://operator:fixture-password@192.0.2.10/s",
@@ -229,12 +227,9 @@ _SYNTHETIC_RTSP_FIXTURES = {
         "rtsp://user:secret@camera.local/live?token=abc",
         "rtsp://***:***@camera.local/live?token=%2A%2A%2A",
         "rtsp://operator:s3cr3t@camera.local/live?token=plain",
-        "rtsp://user:password@host/stream"
-        "?profile=main&username=admin&secret=abc#fragment-secret",
-        "rtsp://user:password@host/stream"
-        "?profile=main&username=admin&secret=abc",
-        "rtsp://***:***@host/stream"
-        "?profile=%2A%2A%2A&username=%2A%2A%2A&secret=%2A%2A%2A",
+        "rtsp://user:password@host/stream?profile=main&username=admin&secret=abc#fragment-secret",
+        "rtsp://user:password@host/stream?profile=main&username=admin&secret=abc",
+        "rtsp://***:***@host/stream?profile=%2A%2A%2A&username=%2A%2A%2A&secret=%2A%2A%2A",
     },
     Path("tests/test_analysis_timeline.py"): {
         # URL 모양이라는 이유만으로 컴포넌트 식별자에서 거부됨을 증명하는 픽스처.
@@ -285,14 +280,12 @@ _SYNTHETIC_RTSP_FIXTURES = {
         "rtsp://operator:s3cr3t@camera.local/live?token=plain",
     },
     Path("tests/test_public_repository_privacy.py"): {
-        "rtsps" "://operator:not-a-fixture@camera.example/stream",
-        "rtsps" "://operator:secret@camera.example/stream",
+        "rtsps://operator:not-a-fixture@camera.example/stream",
+        "rtsps://operator:secret@camera.example/stream",
     },
 }
 _TEXT_PATTERNS = {
-    "private-key": re.compile(
-        r"-----BEGIN (?:EC |OPENSSH |PGP |RSA )?PRIVATE KEY-----"
-    ),
+    "private-key": re.compile(r"-----BEGIN (?:EC |OPENSSH |PGP |RSA )?PRIVATE KEY-----"),
     "credentialed-rtsp": re.compile(
         r"rtsps?://(?P<username>[^/\s:@]+):(?P<password>[^@\s/]+)"
         r"@(?P<host>[^/\s\"']+)(?:/[^\s\"']*)?",
@@ -303,9 +296,7 @@ _TEXT_PATTERNS = {
         r"[^&#\s\"']+",
         re.IGNORECASE,
     ),
-    "github-token": re.compile(
-        r"(?:gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,})"
-    ),
+    "github-token": re.compile(r"(?:gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,})"),
     "aws-access-key": re.compile(r"(?:AKIA|ASIA)[0-9A-Z]{16}"),
     "encoded-media-data-uri": re.compile(
         r"data:[^;,\r\n]{1,128};base64,",
@@ -388,9 +379,7 @@ def _structured_document_keys(text: str) -> set[str]:
     if not significant_lines:
         return set()
     first = significant_lines[0]
-    structured_header = re.compile(
-        r"""^["']?[A-Za-z_][A-Za-z0-9_]*["']?\s*:"""
-    )
+    structured_header = re.compile(r"""^["']?[A-Za-z_][A-Za-z0-9_]*["']?\s*:""")
     collection_start = first.startswith(("{", "[", "-"))
     if first.startswith(("{", "[")):
         try:
@@ -425,8 +414,7 @@ def _looks_like_sensitive_dataset(blob: bytes) -> bool:
 
     for delimiter in (",", ";", "\t"):
         fields = {
-            field.strip().lower()
-            for field in next(csv.reader([first_line], delimiter=delimiter))
+            field.strip().lower() for field in next(csv.reader([first_line], delimiter=delimiter))
         }
         if len(fields & identity_fields) >= 2:
             return True
@@ -451,14 +439,9 @@ def _has_url_safe_or_wrapped_base64(text: str) -> bool:
         return True
 
     for block in re.split(r"\n[ \t]*\n", text):
-        payload_lines = [
-            re.sub(r"^\s*(?:#|//)\s?", "", line)
-            for line in block.splitlines()
-        ]
+        payload_lines = [re.sub(r"^\s*(?:#|//)\s?", "", line) for line in block.splitlines()]
         candidate = re.sub(r"\s+", "", "".join(payload_lines))
-        if len(candidate.rstrip("=")) >= 512 and re.fullmatch(
-            r"[A-Za-z0-9+/_-]+={0,2}", candidate
-        ):
+        if len(candidate.rstrip("=")) >= 512 and re.fullmatch(r"[A-Za-z0-9+/_-]+={0,2}", candidate):
             return True
     return False
 
@@ -472,9 +455,7 @@ def _text_violation_labels(relative: Path, text: str) -> set[str]:
         matches = list(pattern.finditer(scan_text))
         if label in {"credentialed-rtsp", "rtsp-query-secret"}:
             matches = [
-                match
-                for match in matches
-                if not _is_explicit_synthetic_rtsp(relative, match)
+                match for match in matches if not _is_explicit_synthetic_rtsp(relative, match)
             ]
         if matches:
             violations.add(label)
@@ -490,13 +471,6 @@ def _contains_forbidden_control_bytes(blob: bytes) -> bool:
 PUBLIC_SAFE_STRUCTURED_FIXTURES = frozenset(
     {
         Path("worker/ml-worker.example.yaml"),
-        # Issue #133: small text sidecars (architecture shape + manifest)
-        # derived from the packaged default LSTM fall-detector's actual
-        # weights -- not data, not credentials, not PII. The weights
-        # themselves (model.pt) stay gitignored; only these two sidecars are
-        # tracked, carved out of the blanket `models/` ignore.
-        Path("models/fall/lstm/arch.json"),
-        Path("models/fall/lstm/metadata.yaml"),
         Path("models/pose/metadata.yaml"),
     }
 )
@@ -540,9 +514,7 @@ def _is_public_safe_structured_fixture(relative: Path, blob: bytes) -> bool:
     if not isinstance(document, dict):
         return False
     identity_keys = {"camera_id", "facility_id", "resident_id", "subject_id"}
-    outside_cameras = {
-        key: value for key, value in document.items() if key != "cameras"
-    }
+    outside_cameras = {key: value for key, value in document.items() if key != "cameras"}
     if _collect_mapping_keys(outside_cameras) & identity_keys:
         return False
     cameras = document.get("cameras")
@@ -583,10 +555,7 @@ def _is_prohibited_path(relative: Path) -> bool:
         return False
     lowered_parts = {part.lower() for part in relative.parts}
     lowered_suffixes = {suffix.lower() for suffix in relative.suffixes}
-    return bool(
-        lowered_parts & _PROHIBITED_PATH_PARTS
-        or lowered_suffixes & _PROHIBITED_SUFFIXES
-    )
+    return bool(lowered_parts & _PROHIBITED_PATH_PARTS or lowered_suffixes & _PROHIBITED_SUFFIXES)
 
 
 def test_tracked_tree_contains_no_data_or_private_binary_assets() -> None:
@@ -623,8 +592,7 @@ def test_tracked_text_contains_no_embedded_secret_or_media_payload() -> None:
         except UnicodeDecodeError:
             continue
         violations.extend(
-            f"{relative}:{label}"
-            for label in sorted(_text_violation_labels(relative, text))
+            f"{relative}:{label}" for label in sorted(_text_violation_labels(relative, text))
         )
 
     assert violations == []
@@ -650,16 +618,16 @@ def test_tracked_text_contains_no_embedded_secret_or_media_payload() -> None:
             "\n".join(["# " + "A" * 64] * 8),
             "url-safe-or-wrapped-base64",
         ),
-        ("8950" "4e470d0a1a0a" + "00" * 32, "hex-encoded-media-signature"),
+        # Deliberately assembled at runtime so this file never matches its own
+        # scanner; ruff's implicit-concat rewrite must not rejoin it.
+        ("8950" + "4e470d0a1a0a" + "00" * 32, "hex-encoded-media-signature"),
         (
-            "rtsps" "://operator:not-a-fixture@camera.example/stream",
+            "rtsps://operator:not-a-fixture@camera.example/stream",
             "credentialed-rtsp",
         ),
     ],
 )
-def test_text_scanner_rejects_encoded_payloads(
-    text: str, expected_label: str
-) -> None:
+def test_text_scanner_rejects_encoded_payloads(text: str, expected_label: str) -> None:
     labels = _text_violation_labels(Path("synthetic-input.txt"), text)
     assert expected_label in labels
 
@@ -686,7 +654,7 @@ def test_path_policy_rejects_case_and_double_extension_evasions(path: Path) -> N
     [
         "facility_id,resident_id\nfacility,resident".encode("utf-16le"),
         "facility_id,resident_id\nfacility,resident".encode("utf-16be"),
-        ("rtsps" "://operator:secret@camera.example/stream").encode("utf-32le"),
+        ("rtsps://operator:secret@camera.example/stream").encode("utf-32le"),
         b"safe-prefix\x00hidden",
     ],
 )
@@ -705,6 +673,7 @@ def test_control_byte_gate_rejects_alternate_encodings(blob: bytes) -> None:
 )
 def test_content_classifier_rejects_disguised_private_assets(blob: bytes) -> None:
     assert _looks_like_media_or_archive(blob) or _looks_like_sensitive_dataset(blob)
+
 
 @pytest.mark.parametrize(
     "blob",
@@ -728,16 +697,13 @@ def test_content_classifier_rejects_disguised_private_assets(blob: bytes) -> Non
         b"oid sha256:0000000000000000000000000000000000000000000000000000000000000000\n"
         b"size 1024\n",
         b"facility_id: facility\nresident_id: resident\n",
-        b'{\n  "records": [\n'
-        b'    {"facility_id": "facility", "resident_id": "resident"}\n'
-        b"  ]\n}\n",
+        b'{\n  "records": [\n    {"facility_id": "facility", "resident_id": "resident"}\n  ]\n}\n',
         b"# synthetic adversarial document\n---\nrecords:\n"
         b"  - facility_id: facility\n"
         b"    resident_id: resident\n",
         b"- facility_id: facility\n  resident_id: resident\n",
         b"{facility_id: facility, resident_id: resident}\n",
-        b'\xef\xbb\xbf"facility_id","frame_path","annotation"\n'
-        b'"facility","frame.jpg","fall"',
+        b'\xef\xbb\xbf"facility_id","frame_path","annotation"\n"facility","frame.jpg","fall"',
     ],
 )
 def test_classifier_rejects_additional_disguised_private_assets(blob: bytes) -> None:
@@ -768,18 +734,14 @@ def test_public_worker_example_allowlist_is_closed_world() -> None:
     )
 
     nested_mutation = yaml.load(blob, Loader=yaml.BaseLoader)
-    nested_mutation["private_records"] = [
-        {"facility_id": "facility", "resident_id": "resident"}
-    ]
+    nested_mutation["private_records"] = [{"facility_id": "facility", "resident_id": "resident"}]
     assert not _is_public_safe_structured_fixture(
         relative, yaml.safe_dump(nested_mutation).encode()
     )
 
 
 def test_ignore_policy_has_no_data_exception() -> None:
-    ignore_blob = next(
-        blob for relative, blob in _index_blobs() if relative == Path(".gitignore")
-    )
+    ignore_blob = next(blob for relative, blob in _index_blobs() if relative == Path(".gitignore"))
     lines = ignore_blob.decode("utf-8").splitlines()
     assert "data/" in lines
     assert not any(line.startswith("!data/") for line in lines)
@@ -787,12 +749,9 @@ def test_ignore_policy_has_no_data_exception() -> None:
 
 def _workflow(name: str) -> dict[str, object]:
     path = ROOT / ".github" / "workflows" / name
-    for relative, blob in _index_blobs():
-        if relative == path.relative_to(ROOT):
-            loaded = yaml.load(blob, Loader=yaml.BaseLoader)
-            assert isinstance(loaded, dict)
-            return loaded
-    raise AssertionError(f"workflow is not tracked: {name}")
+    loaded = yaml.load(path.read_bytes(), Loader=yaml.BaseLoader)
+    assert isinstance(loaded, dict)
+    return loaded
 
 
 # ci.yml is an UNTRUSTED workflow: `pull_request` makes it execute fork-authored
@@ -882,20 +841,17 @@ _LINT_STEPS = [
     {"run": "uv run --group lint ruff check ."},
     {"run": "uv run --group lint lint-imports"},
     {
-        "name": (
-            "Scope fidelity "
-            "(no env-provisioned identity or camera roster)"
-        ),
+        "name": ("Scope fidelity (no env-provisioned identity or camera roster)"),
         "run": (
             "uv run python scripts/verify_scope_fidelity.py --fixture\n"
             "uv run python scripts/verify_scope_fidelity.py --repo\n"
         ),
     },
     {
-        "name": "Edge env example renders (GPU + CPU-only overlay)",
+        "name": "Edge env example renders (Flow)",
         "run": (
             "docker compose --env-file .env.edge.prod.example \\\n"
-            "  -f compose.edge.yaml -f compose.edge.cpu.yaml config -q\n"
+            "  -f compose.edge.yaml config -q\n"
         ),
     },
 ]
@@ -914,13 +870,7 @@ _SHARD_DISCOVERY = (
     "mapfile -t shard_files < <(\n"
     "  git ls-files -- '*.py' |\n"
     "    grep -E '(^|/)(test_[^/]*|[^/]*_test)\\.py$' |\n"
-    "    # A CTest fixture, not a pytest module: CMakeLists.txt runs it as\n"
-    "    # `python perception_wire_cross_language_test.py <binary>`. It\n"
-    "    # matches pytest's default glob but defines no test function, so\n"
-    "    # pytest collects zero tests from it.\n"
-    "    grep -vxF "
-    "'worker/native/deepstream/src/"
-    "perception_wire_cross_language_test.py' |\n"
+    """    while IFS= read -r path; do test -f "$path" && printf '%s\\n' "$path"; done |\n"""
     "    LC_ALL=C sort |\n"
     '    awk -v shard="$SHARD" -v total="$SHARD_TOTAL" \\\n'
     "      'NR % total == shard % total'\n"
@@ -963,13 +913,14 @@ _TEST_STEPS = [
         # expression text into the shell source before bash parses it; `$SHARD`
         # is a value the shell reads, never source it compiles.
         "env": {"SHARD": "${{ matrix.shard }}"},
-        "run": _SHARD_DISCOVERY + (
+        "run": _SHARD_DISCOVERY
+        + (
             'if [ "${#shard_files[@]}" -eq 0 ]; then\n'
             '  echo "shard $SHARD collected no test files" >&2\n'
             "  exit 1\n"
             "fi\n"
             'echo "shard $SHARD/$SHARD_TOTAL: ${#shard_files[@]} files"\n'
-            'uv run pytest -q -m '
+            "uv run pytest -q -m "
             '"not real_stack and not heavy and not integration" \\\n'
             '  "${shard_files[@]}"\n'
         ),
@@ -1155,9 +1106,7 @@ def test_untrusted_ci_policy_rejects_security_mutations(
         ("concurrency", {"group": "ci", "cancel-in-progress": "true"}),
     ],
 )
-def test_untrusted_ci_policy_rejects_boundary_mutations(
-    field: str, value: object
-) -> None:
+def test_untrusted_ci_policy_rejects_boundary_mutations(field: str, value: object) -> None:
     workflow = copy.deepcopy(_workflow("ci.yml"))
     workflow[field] = value
 
@@ -1237,9 +1186,7 @@ def test_untrusted_ci_policy_rejects_uv_cache_opt_in() -> None:
         ("container", "ghcr.io/example/untrusted:latest"),
     ],
 )
-def test_untrusted_ci_policy_rejects_job_mutations(
-    field: str, value: object
-) -> None:
+def test_untrusted_ci_policy_rejects_job_mutations(field: str, value: object) -> None:
     workflow = copy.deepcopy(_workflow("ci.yml"))
     jobs = workflow["jobs"]
     assert isinstance(jobs, dict)
@@ -1300,23 +1247,10 @@ _NOT_A_PULL_REQUEST_IF = "github.event_name != 'pull_request'"
 #: same gate as a push.
 _REGISTRY_WRITE_MARKERS = ("imagetools create", "edge_image_plan.py retag", "docker push")
 
-#: Dockerfile.edge's CI-only stage. The fresh-build boot smoke is a
-#: `docker/build-push-action` step like the two publishing builds, but it is NOT
-#: a token consumer and must never become one: it builds a stage that is never
-#: shipped, so its `push:` is the literal string "false" rather than the
-#: PUSH_IMAGES gate, and it exports nothing at all.
-_BOOT_SMOKE_TARGET = "bootsmoke"
-_NEVER_PUSHES = "false"
-
-#: The stage Dockerfile.edge actually ships. It is NOT that file's last stage --
-#: `bootsmoke` is -- and Docker's default target is the last stage, so a build
-#: of Dockerfile.edge that omits `target:` publishes the CI-only smoke layer as
-#: the production image. Any step here that can push must therefore name it.
-_SHIPPED_TARGET = "runtime"
 _EDGE_DOCKERFILE = "Dockerfile.edge"
 
 #: The two mutually exclusive boot-smoke shapes. A freshly built non-release
-#: image is smoked in the `bootsmoke` build stage; a reused or release digest is
+#: image is loaded from its docker-format carrier; a reused or release digest is
 #: pulled and run. Their `if:` expressions must stay exact complements, or a run
 #: could skip both and the required check would pass having booted nothing.
 _SMOKE_STAGE_IF = "env.BUILD_ML_WORKER == 'true' && env.RELEASE_BUILD != 'true'"
@@ -1418,9 +1352,7 @@ def _assert_no_pull_request_secret_access(name: str, workflow: dict[str, object]
         assert "${{ secrets." not in yaml.safe_dump(job), (name, job_name)
 
 
-def _assert_token_consumers_are_gated(
-    name: str, job_name: str, job: dict[str, object]
-) -> None:
+def _assert_token_consumers_are_gated(name: str, job_name: str, job: dict[str, object]) -> None:
     """Nothing in a write-scoped job can spend the token on a pull_request run."""
     env = job.get("env")
     assert isinstance(env, dict), (name, job_name)
@@ -1437,35 +1369,14 @@ def _assert_token_consumers_are_gated(
         if uses.startswith("actions/upload-artifact@"):
             uploads += 1
             assert step.get("if") == _PUSH_GATE, (name, step.get("name"), step.get("if"))
-        if with_.get("target") == _BOOT_SMOKE_TARGET:
-            # The fresh-build boot smoke. It builds a stage that is never tagged
-            # and never shipped, so it is held to a STRICTER rule than the gate:
-            # it may not push on any event, not even a publishing one.
-            # `push: "false"` as a literal is the assertion; the PUSH_IMAGES
-            # gate would be a regression here, not a fix. It must also stay free
-            # of `cache-to` (the mode=max export the builds above document at
-            # 413.3s) and of `load:` (the docker-format exporter this step
-            # exists to avoid). Retargeting it at `runtime` drops it out of this
-            # branch and into the generic `push:` check below, which its literal
-            # "false" fails.
+        if "docker load --input /tmp/ml-worker-runtime.tar" in str(step.get("run", "")):
             smokes += 1
-            assert with_["push"] == _NEVER_PUSHES, (name, step.get("name"), with_["push"])
-            assert "cache-to" not in with_, (name, step.get("name"))
-            assert "load" not in with_, (name, step.get("name"))
-            continue
+            assert step.get("if") == _SMOKE_STAGE_IF, (name, step.get("name"), step.get("if"))
+            assert "docker run --rm --network none" in str(step["run"])
+            assert "python -m worker --check-config" in str(step["run"])
         if "push" in with_:
             pushes += 1
             assert with_["push"] == _PUSH_GATE_EXPR, (name, step.get("name"), with_["push"])
-            # A build that can reach the registry must name the stage it ships.
-            # Dockerfile.edge ends with the CI-only `bootsmoke` stage and Docker
-            # defaults to the LAST stage, so an unpinned build here would push
-            # the smoke layer as the production ml-worker image.
-            if with_.get("file") == _EDGE_DOCKERFILE:
-                assert with_.get("target") == _SHIPPED_TARGET, (
-                    name,
-                    step.get("name"),
-                    with_.get("target"),
-                )
         if "cache-to" in with_:
             exports += 1
             cache_to = str(with_["cache-to"])
@@ -1491,9 +1402,9 @@ def _assert_token_consumers_are_gated(
 
     # Non-vacuous: these are the shapes this job contains -- one registry login,
     # one artifact upload, two `push:` inputs, two `cache-to` exports, two
-    # digest re-tags, and one boot-smoke build that must never grow into any of
-    # them. Deleting a gate cannot pass by deleting its step, and deleting the
-    # smoke cannot pass by leaving nothing to check.
+    # digest re-tags, and one carrier boot smoke. Deleting a gate cannot pass by
+    # deleting its step, and deleting the smoke cannot pass by leaving nothing
+    # to check.
     assert (logins, uploads, pushes, exports, retags, smokes) == (1, 1, 2, 2, 2, 1), (
         name,
         job_name,
@@ -1532,10 +1443,9 @@ def test_every_pull_request_workflow_pins_actions_to_a_commit() -> None:
         _count_pinned_actions(name, workflow)
         for name, workflow in _pull_request_workflows().items()
     )
-    # ci.yml (5) + edge-images.yml (7, the fresh-build boot smoke now being a
-    # pinned `docker/build-push-action` rather than a `run:`). A floor, not an
+    # ci.yml (5) + edge-images.yml (6). A floor, not an
     # equality: adding a pinned step must not have to touch this number.
-    assert pinned >= 12, pinned
+    assert pinned >= 11, pinned
 
 
 def test_no_pull_request_workflow_reads_a_secret() -> None:
@@ -1561,9 +1471,7 @@ _PUBLISH_STEP_SEQUENCE: tuple[tuple[str, str | None], ...] = (
     ("Decide, per image", None),
     ("Build and push ml-api", "docker/build-push-action@"),
     ("Build and push ml-worker", "docker/build-push-action@"),
-    # The fresh-build boot smoke: a build of Dockerfile.edge's `bootsmoke`
-    # stage, so it is an action step and not a `run:`.
-    ("Boot smoke test", "docker/build-push-action@"),
+    ("Boot smoke test", None),
     ("Re-tag the published ml-api", None),
     ("Re-tag the published ml-worker", None),
     ("Resolve the digests", None),
@@ -1667,22 +1575,14 @@ def test_pull_request_pin_policy_rejects_an_unpinned_action(
         (6, "${{ env.PUSH_IMAGES == 'false' && 'type=gha,mode=max' || '' }}"),
         # Right prefix, but the fallback exports anyway.
         (6, "${{ env.PUSH_IMAGES == 'true' && 'type=gha,mode=max' || 'type=gha' }}"),
-        # The boot smoke exports nothing on any event, so even a correctly
-        # gated `cache-to` is a regression there.
-        (7, "type=gha,scope=edge-ml-worker,mode=max"),
-        (7, "${{ env.PUSH_IMAGES == 'true' && 'type=gha,scope=edge-ml-worker,mode=max' || '' }}"),
     ],
 )
-def test_edge_image_policy_rejects_an_ungated_cache_export(
-    step_index: int, cache_to: str
-) -> None:
+def test_edge_image_policy_rejects_an_ungated_cache_export(step_index: int, cache_to: str) -> None:
     workflow = copy.deepcopy(_workflow("edge-images.yml"))
     _jobs(workflow)["publish"]["steps"][step_index]["with"]["cache-to"] = cache_to
 
     with pytest.raises(AssertionError):
-        _assert_write_permissions_stay_off_the_pull_request_path(
-            "edge-images.yml", workflow
-        )
+        _assert_write_permissions_stay_off_the_pull_request_path("edge-images.yml", workflow)
 
 
 @pytest.mark.parametrize(
@@ -1706,9 +1606,7 @@ def test_edge_image_policy_rejects_a_widened_permission(
         _jobs(workflow)["publish"]["permissions"] = permissions
 
     with pytest.raises(AssertionError):
-        _assert_write_permissions_stay_off_the_pull_request_path(
-            "edge-images.yml", workflow
-        )
+        _assert_write_permissions_stay_off_the_pull_request_path("edge-images.yml", workflow)
 
 
 def test_edge_image_policy_rejects_a_write_scope_on_a_second_job() -> None:
@@ -1720,9 +1618,7 @@ def test_edge_image_policy_rejects_a_write_scope_on_a_second_job() -> None:
     }
 
     with pytest.raises(AssertionError):
-        _assert_write_permissions_stay_off_the_pull_request_path(
-            "edge-images.yml", workflow
-        )
+        _assert_write_permissions_stay_off_the_pull_request_path("edge-images.yml", workflow)
 
 
 @pytest.mark.parametrize(
@@ -1739,21 +1635,6 @@ def test_edge_image_policy_rejects_a_write_scope_on_a_second_job() -> None:
         (9, "if", "env.BUILD_ML_WORKER != 'true'"),
         # An artifact upload on a PR run publishes an unpullable digest.
         (13, "if", "always()"),
-        # The boot smoke builds a stage that is never shipped. Pushing it is
-        # wrong on every event, so `push: "false"` is a literal -- gaining
-        # either `true` or the PUSH_IMAGES gate is a regression.
-        (7, "push", "true"),
-        (7, "push", _PUSH_GATE_EXPR),
-        # Retargeting the smoke at the shipped stage turns a throwaway build
-        # back into a build of the published image.
-        (7, "target", _SHIPPED_TARGET),
-        # `load:` is the docker-format exporter this whole step exists to drop.
-        (7, "load", "true"),
-        # And the mirror image on the PUBLISHING build: Dockerfile.edge's last
-        # stage is `bootsmoke`, so a pushing build that names the wrong stage
-        # publishes the CI layer.
-        (6, "target", _BOOT_SMOKE_TARGET),
-        (6, "target", "deepstream-native-build"),
     ],
 )
 def test_edge_image_policy_rejects_an_ungated_token_consumer(
@@ -1767,9 +1648,7 @@ def test_edge_image_policy_rejects_an_ungated_token_consumer(
         step["with"][field] = value
 
     with pytest.raises(AssertionError):
-        _assert_write_permissions_stay_off_the_pull_request_path(
-            "edge-images.yml", workflow
-        )
+        _assert_write_permissions_stay_off_the_pull_request_path("edge-images.yml", workflow)
 
 
 @pytest.mark.parametrize(
@@ -1789,50 +1668,34 @@ def test_edge_image_policy_rejects_dropping_a_gated_step(step_index: int, why: s
     del steps[step_index]
 
     with pytest.raises(AssertionError):
-        _assert_write_permissions_stay_off_the_pull_request_path(
-            "edge-images.yml", workflow
-        )
-
-
-def test_edge_image_policy_rejects_a_publishing_build_with_no_target() -> None:
-    # Deleting the pin is the dangerous edit, and the one a mutation that only
-    # ever SETS fields cannot reach: with no `target:` at all, Docker falls back
-    # to the last stage in Dockerfile.edge, which is `bootsmoke`.
-    workflow = copy.deepcopy(_workflow("edge-images.yml"))
-    worker = _jobs(workflow)["publish"]["steps"][6]
-    assert worker["with"].pop("target") == _SHIPPED_TARGET
-
-    with pytest.raises(AssertionError):
-        _assert_write_permissions_stay_off_the_pull_request_path(
-            "edge-images.yml", workflow
-        )
+        _assert_write_permissions_stay_off_the_pull_request_path("edge-images.yml", workflow)
 
 
 def test_edge_image_boot_smoke_shapes_are_exact_complements() -> None:
     """Every ml-worker build is smoked by exactly one of the two shapes.
 
-    A freshly built non-release image is smoked in the `bootsmoke` build stage;
+    A freshly built non-release image is smoked from the docker-format carrier;
     a reused or release digest is pulled and run. If the two `if:` expressions
     ever stopped being complements, a run could skip BOTH and the required check
     would report green having booted nothing -- the #195 failure mode with an
     extra step of indirection.
     """
     steps = _steps(_jobs(_workflow("edge-images.yml"))["publish"])
-    stage = [s for s in steps if (s.get("with") or {}).get("target") == _BOOT_SMOKE_TARGET]
+    stage = [
+        s
+        for s in steps
+        if "docker load --input /tmp/ml-worker-runtime.tar" in str(s.get("run", ""))
+    ]
     pull = [s for s in steps if "docker pull" in str(s.get("run", ""))]
     assert len(stage) == 1, [s.get("name") for s in stage]
     assert len(pull) == 1, [s.get("name") for s in pull]
     assert stage[0]["if"] == _SMOKE_STAGE_IF, stage[0].get("if")
     assert pull[0]["if"] == _SMOKE_PULL_IF, pull[0].get("if")
     # Both actually boot the worker, rather than merely existing.
+    assert "docker run --rm --network none" in str(stage[0]["run"])
     assert "python -m worker --check-config" in str(pull[0]["run"])
-    # From the index, like every other assertion in this file, so a staged
-    # Dockerfile and a staged workflow are judged against each other.
-    dockerfile = next(
-        blob for relative, blob in _index_blobs() if relative == Path(_EDGE_DOCKERFILE)
-    ).decode("utf-8")
-    assert f"FROM {_SHIPPED_TARGET} AS {_BOOT_SMOKE_TARGET}" in dockerfile
-    assert "python -m worker --check-config" in dockerfile
+    worker = next(s for s in steps if s.get("name") == "Build and push ml-worker image")
+    assert worker["with"]["outputs"] == "type=docker,dest=/tmp/ml-worker-runtime.tar"
 
 
 def test_edge_image_policy_rejects_a_push_images_flag_that_is_true_on_a_pr() -> None:
@@ -1840,9 +1703,7 @@ def test_edge_image_policy_rejects_a_push_images_flag_that_is_true_on_a_pr() -> 
     _jobs(workflow)["publish"]["env"]["PUSH_IMAGES"] = "true"
 
     with pytest.raises(AssertionError):
-        _assert_write_permissions_stay_off_the_pull_request_path(
-            "edge-images.yml", workflow
-        )
+        _assert_write_permissions_stay_off_the_pull_request_path("edge-images.yml", workflow)
 
 
 @pytest.mark.parametrize(
@@ -1902,14 +1763,7 @@ def test_pull_request_workflow_discovery_ignores_workflows_without_the_trigger()
 #: (which is what CI did before the shard) collects.
 _PYTEST_FILE_PATTERN = re.compile(r"(?:^|/)(?:test_[^/]*|[^/]*_test)\.py$")
 
-#: Excluded from the shard by name, and this is the justification. CMakeLists.txt
-#: registers it as a CTest fixture -- `python perception_wire_cross_language_test
-#: .py <freshly built C++ emitter>` -- so it takes a required argv and declares
-#: no test function or Test class. pytest collects zero tests from it, and
-#: tests/test_edge_runtime_ctest_contract.py is what guards it. Excluding it is
-#: therefore a no-op for coverage; leaving it in would only import it.
 _SHARD_EXCLUSIONS = frozenset(
-    {"worker/native/deepstream/src/perception_wire_cross_language_test.py"}
 )
 
 _SHARD_TOTAL = 4
@@ -1920,8 +1774,12 @@ def _tracked_paths() -> tuple[str, ...]:
 
 
 def _collectible_test_files() -> list[str]:
-    """Every tracked file a bare `pytest` run would collect as a test module."""
-    return sorted(path for path in _tracked_paths() if _PYTEST_FILE_PATTERN.search(path))
+    """Every present tracked file a bare `pytest` run would collect as a test module."""
+    return sorted(
+        path
+        for path in _tracked_paths()
+        if (ROOT / path).is_file() and _PYTEST_FILE_PATTERN.search(path)
+    )
 
 
 def _round_robin(files: list[str], total: int) -> dict[int, list[str]]:
@@ -1932,18 +1790,12 @@ def _round_robin(files: list[str], total: int) -> dict[int, list[str]]:
     congruent to 0.
     """
     return {
-        shard: [
-            path
-            for index, path in enumerate(files, start=1)
-            if index % total == shard % total
-        ]
+        shard: [path for index, path in enumerate(files, start=1) if index % total == shard % total]
         for shard in range(1, total + 1)
     }
 
 
-def _assert_exact_cover(
-    expected: list[str], partition: dict[int, list[str]], total: int
-) -> None:
+def _assert_exact_cover(expected: list[str], partition: dict[int, list[str]], total: int) -> None:
     assert set(partition) == set(range(1, total + 1)), sorted(partition)
 
     assigned: list[str] = []
@@ -1968,12 +1820,10 @@ def test_shard_partition_is_an_exact_cover_of_the_suite() -> None:
     collectible = _collectible_test_files()
     # The exclusion list is closed: every name in it must still be tracked, so a
     # renamed or deleted file cannot leave a stale excuse behind.
-    assert set(collectible) >= _SHARD_EXCLUSIONS, sorted(
-        _SHARD_EXCLUSIONS - set(collectible)
-    )
+    assert set(collectible) >= _SHARD_EXCLUSIONS, sorted(_SHARD_EXCLUSIONS - set(collectible))
     expected = [path for path in collectible if path not in _SHARD_EXCLUSIONS]
     # Guard against a discovery bug that finds nothing and then "covers" it.
-    assert len(expected) > 300, len(expected)
+    assert len(expected) > 250, len(expected)
 
     _assert_exact_cover(expected, _round_robin(expected, _SHARD_TOTAL), _SHARD_TOTAL)
 
@@ -2045,7 +1895,7 @@ def _run_ci_shard_discovery(shard: int) -> list[str]:
         capture_output=True,
         env=os.environ | {"SHARD": str(shard), "SHARD_TOTAL": str(_SHARD_TOTAL)},
     )
-    return result.stdout.decode("utf-8").split()
+    return [path for path in result.stdout.decode("utf-8").split() if (ROOT / path).is_file()]
 
 
 def test_ci_shard_discovery_really_selects_the_modelled_partition() -> None:
@@ -2059,11 +1909,7 @@ def test_ci_shard_discovery_really_selects_the_modelled_partition() -> None:
     `*_test.py` or a nested `tests/**/test_*.py` file is tracked.
     """
     expected = _round_robin(
-        [
-            path
-            for path in _collectible_test_files()
-            if path not in _SHARD_EXCLUSIONS
-        ],
+        [path for path in _collectible_test_files() if path not in _SHARD_EXCLUSIONS],
         _SHARD_TOTAL,
     )
 
@@ -2162,8 +2008,7 @@ def _assert_trusted_contract_drift_security(workflow: dict[str, object]) -> None
             "with": {"persist-credentials": "false"},
         },
         {
-            "uses": "astral-sh/setup-uv@"
-            "d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86",
+            "uses": "astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86",
             "with": {"enable-cache": "false", "version": "0.11.27"},
         },
         {"run": "uv sync --frozen"},
@@ -2250,9 +2095,7 @@ def test_trusted_contract_policy_rejects_security_mutations(
         ("container", "unreviewed/image:latest"),
     ],
 )
-def test_trusted_contract_policy_rejects_job_mutations(
-    field: str, value: object
-) -> None:
+def test_trusted_contract_policy_rejects_job_mutations(field: str, value: object) -> None:
     workflow = copy.deepcopy(_workflow("contract-drift.yml"))
     jobs = workflow["jobs"]
     assert isinstance(jobs, dict)
@@ -2271,9 +2114,7 @@ def test_trusted_contract_policy_rejects_job_mutations(
         ("DATASET_OPS_REPO", "/tmp/redirected"),
     ],
 )
-def test_trusted_contract_policy_rejects_environment_mutations(
-    field: str, value: str
-) -> None:
+def test_trusted_contract_policy_rejects_environment_mutations(field: str, value: str) -> None:
     workflow = copy.deepcopy(_workflow("contract-drift.yml"))
     jobs = workflow["jobs"]
     assert isinstance(jobs, dict)

@@ -30,9 +30,7 @@ _REQUIRED_TYPE_SYMBOLS = (
     "PerceptionFrameV1",
     "PersonBoxChannel",
 )
-_REQUIRED_INTERFACE_SYMBOLS = (
-    "PerceptionFrameAdapter",
-)
+_REQUIRED_INTERFACE_SYMBOLS = ("PerceptionFrameAdapter",)
 
 
 def _load_module(module_name: str) -> Any:
@@ -317,8 +315,7 @@ def test_adapter_protocol_rejects_varargs_adapt_signature() -> None:
         "association_cue_source",
     )
     assert all(
-        param.kind
-        not in (inspect.Parameter.VAR_POSITIONAL, inspect.Parameter.VAR_KEYWORD)
+        param.kind not in (inspect.Parameter.VAR_POSITIONAL, inspect.Parameter.VAR_KEYWORD)
         for param in protocol_params.values()
     )
     varargs_names = tuple(
@@ -343,8 +340,7 @@ def test_channel_and_association_names_are_unambiguous() -> None:
         for module in interface_modules:
             if hasattr(module, name):
                 assert getattr(module, name) is type_obj, (
-                    f"{name} on {module.__name__} is a different object "
-                    f"than worker.types.{name}"
+                    f"{name} on {module.__name__} is a different object than worker.types.{name}"
                 )
 
 

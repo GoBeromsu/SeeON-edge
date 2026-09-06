@@ -132,6 +132,30 @@ def _write_ready_media(tmp_path: Path) -> Path:
     return media
 
 
+def _write_unavailable_manifest(tmp_path: Path, *, event_refs: list[str] | None = None) -> None:
+    path = tmp_path / "clip-store" / "clips" / "clip-1" / "manifest.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        json.dumps(
+            {
+                "clip_id": "clip-1",
+                "camera_id": "camera-1",
+                "event_ref": EVENT_ID,
+                **({"event_refs": event_refs} if event_refs is not None else {}),
+                "event_type": "fall",
+                "started_at": "2026-07-16T00:00:00Z",
+                "duration_s": 1.0,
+                "codec": "",
+                "path": None,
+                "video_available": False,
+                "video_error": "CAPTURE_FAILED",
+                "finalized": True,
+            }
+        ),
+        encoding="utf-8",
+    )
+
+
 def _ready_payload() -> dict[str, object]:
     return {
         "state": "READY",
@@ -311,9 +335,7 @@ def test_evidence_receipt_route_commits_canonical_action_and_detail(tmp_path: Pa
             "SELECT action,target_id,actor_type,auth_mechanism,detail_json "
             "FROM audit_events WHERE action NOT LIKE 'audit.%'"
         ).fetchall()
-    assert rows == [
-        ("evidence.receipt", "clip-1", "service", "relay_token", '{"version":1}')
-    ]
+    assert rows == [("evidence.receipt", "clip-1", "service", "relay_token", '{"version":1}')]
 
 
 def test_unavailable_relay_passes_complete_immutable_state_request(tmp_path: Path) -> None:
@@ -321,6 +343,7 @@ def test_unavailable_relay_passes_complete_immutable_state_request(tmp_path: Pat
     backend = FakeBackendEvidenceClient(
         clip_result=ClipReceipt("clip-1", "UNAVAILABLE", 3, None, None)
     )
+    _write_unavailable_manifest(tmp_path)
     client = _client(tmp_path, backend, enabled=True)
 
     # When: the worker reports the terminal unavailable state.
@@ -350,6 +373,46 @@ def test_unavailable_relay_passes_complete_immutable_state_request(tmp_path: Pat
     ) == ("clip-1", "cmsnvr-camera-1", (EVENT_ID,), 3, "CAPTURE_FAILED")
     with pytest.raises(FrozenInstanceError):
         _set_attribute(unavailable_request, "reason", "CORRUPT")
+    with sqlite3.connect(tmp_path / "catalog.sqlite3") as connection:
+        assert connection.execute(
+            "SELECT lifecycle_state, failure_reason FROM incidents WHERE edge_event_id = ?",
+            (EVENT_ID,),
+        ).fetchone() == ("FAILED", "CAPTURE_FAILED")
+
+
+def test_unavailable_relay_replay_is_noop_and_conflict_rolls_back(tmp_path: Path) -> None:
+    backend = FakeBackendEvidenceClient(
+        clip_result=ClipReceipt("clip-1", "UNAVAILABLE", 3, None, None)
+    )
+    _write_unavailable_manifest(tmp_path)
+    client = _client(tmp_path, backend, enabled=True)
+    headers = {"X-Edge-Relay-Token": TOKEN}
+
+    first = client.put(
+        "/api/v1/relay/clips/clip-1",
+        json=_unavailable_payload(),
+        headers=headers,
+    )
+    assert first.status_code == 200
+    replay = client.put(
+        "/api/v1/relay/clips/clip-1",
+        json=_unavailable_payload(),
+        headers=headers,
+    )
+    assert replay.status_code == 200
+    conflicting = {**_unavailable_payload(), "reason": "CORRUPT"}
+    conflict = client.put(
+        "/api/v1/relay/clips/clip-1",
+        json=conflicting,
+        headers=headers,
+    )
+    assert conflict.status_code == 409
+    with sqlite3.connect(tmp_path / "catalog.sqlite3") as connection:
+        assert connection.execute("SELECT count(*) FROM artifacts").fetchone() == (1,)
+        assert connection.execute(
+            "SELECT lifecycle_state, failure_reason FROM incidents WHERE edge_event_id = ?",
+            (EVENT_ID,),
+        ).fetchone() == ("FAILED", "CAPTURE_FAILED")
 
 
 def test_ready_relay_uploads_verified_descriptor_when_path_is_swapped(
@@ -461,7 +524,7 @@ def test_export_refused_when_camera_has_no_hub_mapping(tmp_path: Path) -> None:
     )
 
     assert response.status_code == 409
-    assert "backend mapping" in response.json()["detail"]
+    assert response.json()["detail"]["code"] == "CAMERA_MAPPING_MISSING"
     # The decisive property: the backend was never addressed at all.
     assert backend.ready_calls == 0
     assert backend.unavailable_request is None

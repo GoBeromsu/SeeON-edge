@@ -26,8 +26,7 @@ class CentralClipArtifactQuery:
         connection = open_runtime_database(self.database_path, actor=RuntimeActor.API)
         try:
             row = connection.execute(
-                "SELECT incident_id,state FROM artifacts "
-                "WHERE clip_id=? AND kind='PRIMARY_CLIP'",
+                "SELECT incident_id,state FROM artifacts WHERE clip_id=? AND kind='PRIMARY_CLIP'",
                 (clip_id,),
             ).fetchone()
             if row is None:

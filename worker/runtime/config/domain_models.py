@@ -63,9 +63,7 @@ class NightWindowConfig(BaseModel):
         try:
             _ = ZoneInfo(value)
         except (ValueError, ZoneInfoNotFoundError) as error:
-            raise ConfigValidationError(
-                "night window tz must be a valid IANA timezone"
-            ) from error
+            raise ConfigValidationError("night window tz must be a valid IANA timezone") from error
         return value
 
     @model_validator(mode="after")
@@ -152,9 +150,7 @@ class DomainsConfig(BaseModel):
                 "domains.versions cannot be combined with legacy domain selection"
             )
         if self.enabled is not None and configured_names:
-            raise ConfigValidationError(
-                "domains.enabled cannot be combined with per-domain config"
-            )
+            raise ConfigValidationError("domains.enabled cannot be combined with per-domain config")
         return self
 
     def selected_versions(

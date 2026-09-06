@@ -174,6 +174,25 @@ class CameraDiagnosticsSnapshot:
     geometry_batch_sizes: tuple[GeometryBatchHistogram, ...] = ()
     forward_p50_sec: float = 0.0
     forward_p95_sec: float = 0.0
+    track_id_switch_total: int = 0
+    replay_trace_write_failures: int = 0
+    track_id_switch_absorbed_total: int = 0
+    resample_gap_rows_total: int = 0
+    incident_cooldown_suppressed_total: int = 0
+    bed_polygon_source: str = "none"
+    inference_fps: float | None = None
+    camera_fps_unpinned: bool = False
+    fall_inference_device: str = "unknown"
+    # An operator facility/camera fall transition threshold that was received
+    # but is not authoritative in P1a (P1a-AC7: eligible receipt, else the image
+    # default). Reported so the setting is visible instead of silently dropped.
+    fall_unapplied_policy_threshold: float | None = None
+    smart_record_extended_total: int = 0
+    smart_record_extension_raced_total: int = 0
+    smart_record_start_refused_total: int = 0
+    nvenc_sessions_active: int = 0
+    flow_source_outages_total: int = 0
+    flow_source_recoveries_total: int = 0
 
 
 @dataclass(frozen=True, slots=True)

@@ -13,4 +13,4 @@ or durable decision documentation. `init` creates no ADR files and requires no A
 | [0004](0004-camera-roster-sync-contract-assumptions.md) | Camera Roster Sync Contract Assumptions | Superseded for mapper push path | 2026-08-02 |
 | [0005](0005-edge-component-ownership.md) | Edge Component Ownership | Accepted | 2026-08-21 |
 | [0006](0006-vendored-contracts-typed-vocabulary.md) | Vendored `contracts/` Typed Vocabulary | Accepted | 2026-08-21 |
-| [0008](0008-evidence-overlay-is-a-sidecar-not-burned-pixels.md) | Evidence Overlay Is a Sidecar, Not Burned Pixels | Accepted | 2026-09-01 |
+| [0008](0008-evidence-overlay-is-a-sidecar-not-burned-pixels.md) | Evidence Overlay Is Not Persisted with Clip Media | Accepted (amended from the 2026-09-01 sidecar decision) | 2026-09-03 |

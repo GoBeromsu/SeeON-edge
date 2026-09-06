@@ -18,6 +18,19 @@ class AuditContext:
 class DomainAuditSnapshot:
     model_version: str | None
     operating_threshold: float | None
+    threshold_source: str | None = None
+    receipt_threshold: float | None = None
+    # An operator facility/camera threshold that was received but is not yet
+    # authoritative for the fall transition threshold (P1a-AC7). Recorded so the
+    # setting is visible rather than silently dropped or silently applied.
+    unapplied_policy_threshold: float | None = None
+    transition_votes: int | None = None
+    transition_window: int | None = None
+    confirmation_rule_source: str | None = None
+    receipt_transition_votes: int | None = None
+    receipt_transition_window: int | None = None
+    unapplied_transition_votes: int | None = None
+    unapplied_transition_window: int | None = None
 
 
 @dataclass(slots=True)

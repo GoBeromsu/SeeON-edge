@@ -25,7 +25,7 @@ from fastapi import HTTPException
 
 from backend.app.features.cameras import bed_zone_router, router, streams_router
 from backend.app.features.cameras.store import ProbeResult
-from backend.app.features.clips import catalog, deletion_control
+from backend.app.features.clips import catalog
 from backend.app.features.clips.manifest import read_manifest_file
 from backend.app.features.clips.store import ClipStore
 from worker.pipeline.output import live_view_api
@@ -43,6 +43,7 @@ from worker.pipeline.output.evidence.manifest_models import (
     ReadyClipManifest,
     UnavailableClipManifest,
 )
+from worker.types.preview import OverlaySelection
 
 EVENT_ONE = EdgeEventId("00000000-0000-4000-8000-000000000001")
 START = datetime(2026, 7, 16, 1, 2, 3, tzinfo=UTC)
@@ -58,6 +59,7 @@ def _metadata() -> ClipPublicationMetadata:
         clip_end_at=START + timedelta(seconds=1),
         finalized_at=START + timedelta(seconds=2),
         started_at=START,
+        detected_at=START + timedelta(seconds=30),
         duration_s=1.0,
         encoder="libx264",
         # The real pipeline always sets this (BusinessEvent.domain is required);
@@ -158,18 +160,8 @@ def _path(url: str) -> str:
             live_view_api.bed_zone_camera_id,
             "cam/one two",
         ),  # noqa: SLF001
-        (
-            lambda i: deletion_control._clip_path(i, ""),
-            live_view_api.clip_deletion_clip_id,
-            "clip:a/b",
-        ),  # noqa: SLF001
-        (
-            lambda i: deletion_control._clip_path(i, deletion_control._PREFLIGHT_SUFFIX),
-            live_view_api.clip_deletion_preflight_clip_id,
-            "clip:a/b",
-        ),  # noqa: SLF001
     ],
-    ids=["stream", "snapshot", "pose", "bed-zone", "clip-delete", "clip-delete-preflight"],
+    ids=["stream", "snapshot", "pose", "bed-zone"],
 )
 def test_backend_built_paths_are_matched_by_the_worker_route(
     backend_path, worker_match, identity
@@ -181,8 +173,6 @@ def test_backend_built_paths_are_matched_by_the_worker_route(
         live_view_api.snapshot_camera_id,
         live_view_api.pose_camera_id,
         live_view_api.bed_zone_camera_id,
-        live_view_api.clip_deletion_clip_id,
-        live_view_api.clip_deletion_preflight_clip_id,
     } - {worker_match}
     assert all(other(path) is None for other in others)
 
@@ -192,7 +182,6 @@ def test_fixed_routes_headers_and_media_type_agree() -> None:
     assert router.RELAY_TOKEN_HEADER == live_view_api.RELAY_TOKEN_HEADER
     assert streams_router._RELAY_TOKEN_HEADER == live_view_api.RELAY_TOKEN_HEADER  # noqa: SLF001
     assert bed_zone_router._RELAY_TOKEN_HEADER == live_view_api.RELAY_TOKEN_HEADER  # noqa: SLF001
-    assert deletion_control._RELAY_TOKEN_HEADER == live_view_api.RELAY_TOKEN_HEADER  # noqa: SLF001
     assert streams_router._DEFAULT_MEDIA_TYPE == live_view_api.MJPEG_MEDIA_TYPE  # noqa: SLF001
 
 
@@ -227,26 +216,41 @@ def test_probe_response_round_trips_worker_sanitizer_to_backend_reader() -> None
 
 
 def test_pose_overlay_body_round_trips_both_ways() -> None:
-    for mode in ("none", "bedexit", "fall"):
-        wire = json.dumps(live_view_api.pose_body(mode)).encode("utf-8")
-        assert streams_router._parse_pose_payload(wire).mode == mode  # noqa: SLF001
-        assert live_view_api.parse_pose_body(json.loads(json.dumps({"mode": mode}))) == mode
+    for selection in (
+        OverlaySelection(),
+        OverlaySelection(person=False, bed=True),
+        OverlaySelection(person=True, bed=False),
+        OverlaySelection(person=False, bed=False),
+    ):
+        body = live_view_api.overlay_selection_body(selection)
+        wire = json.dumps(body).encode("utf-8")
+        parsed = streams_router._parse_pose_payload(wire)  # noqa: SLF001
+        assert (parsed.person, parsed.bed) == (selection.person, selection.bed)
+        assert live_view_api.parse_overlay_selection(json.loads(json.dumps(body))) == selection
     with pytest.raises(HTTPException):
-        streams_router._parse_pose_payload(b'{"mode": "sideways"}')  # noqa: SLF001
-    assert live_view_api.parse_pose_body({"mode": "sideways"}) is None
-    assert live_view_api.parse_pose_body({"mode": "fall", "extra": 1}) is None
+        streams_router._parse_pose_payload(b'{"mode": "fall"}')  # noqa: SLF001
+    assert live_view_api.parse_overlay_selection({"mode": "fall"}) is None
+    assert live_view_api.parse_overlay_selection({"person": True, "bed": False, "extra": 1}) is None
 
 
 def test_bed_zone_response_round_trips_to_the_backend_parser() -> None:
     bed = live_view_api.BedZoneRecognizeResponse(
-        polygon=((1, 2), (3, 2), (3, 4)), image_width=16, image_height=9
+        regions=(
+            live_view_api.BedZoneRecognizeRegion(
+                id="bed-left",
+                polygon=((1, 2), (3, 2), (3, 4)),
+            ),
+            live_view_api.BedZoneRecognizeRegion(
+                id="bed-right",
+                polygon=((8, 2), (12, 2), (12, 6), (8, 6)),
+            ),
+        ),
+        image_width=16,
+        image_height=9,
     )
     wire = json.dumps(bed.as_dict()).encode("utf-8")
-    assert bed_zone_router._parse_worker_payload(wire) == (  # noqa: SLF001
-        [[1, 2], [3, 2], [3, 4]],
-        16,
-        9,
-    )
+    parsed = bed_zone_router._parse_worker_payload(wire)  # noqa: SLF001
+    assert parsed.model_dump(mode="json") == bed.as_dict()
     not_found = json.dumps(live_view_api.BED_ZONE_NOT_FOUND_BODY).encode("utf-8")
     assert bed_zone_router._is_bed_not_found(not_found)  # noqa: SLF001
     assert not bed_zone_router._is_bed_not_found(wire)  # noqa: SLF001

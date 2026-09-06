@@ -53,16 +53,6 @@ for line_number, original in enumerate(env_path.read_text(encoding="utf-8").spli
     seen[normalized] = (key, line_number)
     entry = by_name.get(normalized)
     value = stripped.split("=", 1)[1].strip()
-    if normalized == "ML_WORKER_PROFILE":
-        allowed_profiles = set(entry["canonical_choices"]) if entry is not None else set()
-        if entry is not None:
-            allowed_profiles.update(entry.get("legacy_aliases", {}))
-        if value not in allowed_profiles:
-            errors.append(
-                f"line {line_number}: unsupported profile ML_WORKER_PROFILE={value!r}; "
-                f"set one of {'|'.join(sorted(allowed_profiles))}"
-            )
-            continue
     if entry is None:
         errors.append(f"line {line_number}: unsupported key {key}; add an inventory disposition first")
         continue
@@ -82,71 +72,7 @@ PY
   die "remove retired/duplicate/unsupported keys, then re-run this check"
 fi
 
-profile=$(python3 - "$env_file" <<'PY'
-import sys
-from pathlib import Path
-
-for original in Path(sys.argv[1]).read_text(encoding="utf-8").splitlines():
-    stripped = original.strip()
-    if stripped.startswith("ML_WORKER_PROFILE="):
-        print(stripped.split("=", 1)[1].strip())
-        break
-PY
-)
-
-# Classify caller-supplied infrastructure overlays before adding the deterministic
-# profile default. Docker Compose otherwise accepts a contradictory NVIDIA
-# overlay for a host-only profile and silently reserves a GPU.
-nvidia_overlay_supplied=0
-igpu_overlay_supplied=0
-expect_compose_file=0
-record_compose_file() {
-  compose_file=${1##*/}
-  case "$compose_file" in
-    compose.edge.nvidia.yaml) nvidia_overlay_supplied=1 ;;
-    compose.edge.igpu.yaml) igpu_overlay_supplied=1 ;;
-  esac
-}
-for argument in "$@"; do
-  if [ "$expect_compose_file" -eq 1 ]; then
-    record_compose_file "$argument"
-    expect_compose_file=0
-    continue
-  fi
-  case "$argument" in
-    -f|--file) expect_compose_file=1 ;;
-    --file=*) record_compose_file "${argument#*=}" ;;
-    -f?*)
-      compose_file_argument=${argument#-f}
-      record_compose_file "${compose_file_argument#=}"
-      ;;
-  esac
-done
-[ "$expect_compose_file" -eq 0 ] || die "missing compose file after -f/--file"
-
 set -- -f compose.edge.yaml "$@"
-case "$profile" in
-  nvidia)
-    if [ "$nvidia_overlay_supplied" -eq 0 ]; then
-      set -- "$@" -f compose.edge.nvidia.yaml
-    fi
-    ;;
-  igpu|intel-vaapi-host)
-    [ "$nvidia_overlay_supplied" -eq 0 ] || \
-      die "ML_WORKER_PROFILE=$profile cannot use compose.edge.nvidia.yaml"
-    if [ "$igpu_overlay_supplied" -eq 0 ]; then
-      set -- "$@" -f compose.edge.igpu.yaml
-    fi
-    ;;
-  cpu|cpu-host|mps|apple-mps-host)
-    [ "$nvidia_overlay_supplied" -eq 0 ] || \
-      die "ML_WORKER_PROFILE=$profile cannot use compose.edge.nvidia.yaml"
-    ;;
-  *)
-    [ "$nvidia_overlay_supplied" -eq 0 ] || \
-      die "compose.edge.nvidia.yaml requires an NVIDIA ML_WORKER_PROFILE"
-    ;;
-esac
 if ! render=$(docker compose --env-file "$env_file" "$@" config -q 2>&1); then
   printf '%s compose failed to render from %s:\n' "$prefix" "$env_file" >&2
   printf '%s\n' "$render" >&2

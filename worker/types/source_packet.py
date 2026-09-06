@@ -71,13 +71,18 @@ class SourceStreamDescriptor:
             raise ValueError("video stream dimensions must be positive")
         if self.media_type == "audio" and (self.sample_rate is None or self.sample_rate <= 0):
             raise ValueError("audio sample rate must be positive")
-        if not self.stream_format or not self.alignment or (
-            self.nal_length_size is not None and self.nal_length_size not in {1, 2, 3, 4}
-        ) or (
-            self.parser_caps_sha256 is not None
-            and (
-                len(self.parser_caps_sha256) != 64
-                or any(character not in "0123456789abcdef" for character in self.parser_caps_sha256)
+        if (
+            not self.stream_format
+            or not self.alignment
+            or (self.nal_length_size is not None and self.nal_length_size not in {1, 2, 3, 4})
+            or (
+                self.parser_caps_sha256 is not None
+                and (
+                    len(self.parser_caps_sha256) != 64
+                    or any(
+                        character not in "0123456789abcdef" for character in self.parser_caps_sha256
+                    )
+                )
             )
         ):
             raise ValueError("source packet framing is invalid")

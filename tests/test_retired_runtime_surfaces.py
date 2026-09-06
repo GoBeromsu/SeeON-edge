@@ -56,9 +56,7 @@ def _module_sql_kinds(path: Path) -> frozenset[str]:
             text = node.value.upper()
             if "CREATE TABLE" in text:
                 kinds.add("ddl:create-table")
-            if "INSERT INTO" in text and any(
-                table.upper() in text for table in RETIRED_TABLES
-            ):
+            if "INSERT INTO" in text and any(table.upper() in text for table in RETIRED_TABLES):
                 kinds.add("dml:retired-upsert")
     return frozenset(kinds)
 

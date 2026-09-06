@@ -26,7 +26,11 @@ from shared.detection_policies import (
     default_policy_bundle,
     parse_policy_bundle,
 )
-from worker.runtime.config.camera_models import CameraRuntimeConfig, RelayConfig
+from worker.runtime.config.camera_models import (
+    BedZoneRegionConfig,
+    CameraRuntimeConfig,
+    RelayConfig,
+)
 from worker.runtime.config.domain_models import (
     KNOWN_DOMAIN_NAMES,
     BedExitDomainConfig,
@@ -77,7 +81,7 @@ class _CameraPayload(BaseModel):
     # needs to resolve to decide between the ambient registry default and a
     # genuine opt-out.
     domains: tuple[str, ...] | None = None
-    bed_zone_polygon: tuple[tuple[int, int], ...] | None = None
+    bed_zone_regions: tuple[BedZoneRegionConfig, ...] = Field(default=(), max_length=8)
     bed_zone_image_width: int | None = Field(default=None, gt=0)
     bed_zone_image_height: int | None = Field(default=None, gt=0)
 
@@ -365,9 +369,7 @@ class BackendWorkerConfigPayload(BaseModel):
         # for yet -- and must boot with an empty usable roster rather than
         # reject the pull.
         if self.cameras and not resolved_cameras:
-            raise WorkerConfigError(
-                "worker config declared cameras but none of them parsed"
-            )
+            raise WorkerConfigError("worker config declared cameras but none of them parsed")
         detection_windows: dict[str, NightWindowConfig | None] = {
             domain: NightWindowConfig(start=window.start, end=window.end, tz=window.tz)
             for domain, window in self.resolved_detection_windows.items()
@@ -433,7 +435,7 @@ class BackendWorkerConfigPayload(BaseModel):
         return WorkerConfig(
             version=self.directive.version,
             relay=RelayConfig.model_validate({"url": relay_url, "token": token}),
-            models=models if models is not None else WorkerModelsConfig(),
+            models=models,
             domains=domains_config,
             detection_policies=self.resolved_detection_policies,
             clip=resolved_clip,
@@ -515,7 +517,7 @@ def _runtime_camera(payload: _CameraPayload) -> CameraRuntimeConfig:
         frame_stride=payload.frame_stride or 1,
         decode_backend=payload.decode_backend,
         label=payload.label,
-        bed_zone_polygon=payload.bed_zone_polygon,
+        bed_zone_regions=payload.bed_zone_regions,
         bed_zone_image_width=payload.bed_zone_image_width,
         bed_zone_image_height=payload.bed_zone_image_height,
     )

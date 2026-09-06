@@ -233,9 +233,7 @@ def test_load_yolo_model_times_out_instead_of_hanging_forever(tmp_path: Path) ->
         raise AssertionError("should have timed out before reaching this point")
 
     with pytest.raises(YoloLoadError, match="pose.*model.pt"):
-        _ = load_yolo_model(
-            artifact, "pose", timeout_seconds=0.05, construct=_hang_forever
-        )
+        _ = load_yolo_model(artifact, "pose", timeout_seconds=0.05, construct=_hang_forever)
     assert started.is_set()
     release.set()  # let the leaked thread exit cleanly instead of leaking past the test
 

@@ -24,7 +24,6 @@ _ROOT = Path(__file__).resolve().parents[1]
 _COMPOSE = (_ROOT / "compose.edge.yaml").read_text(encoding="utf-8")
 
 
-
 def _service_block(name: str) -> str:
     match = re.search(
         rf"^  {re.escape(name)}:\n(.*?)(?=^  \S|\Z)", _COMPOSE, re.MULTILINE | re.DOTALL
@@ -89,9 +88,7 @@ def test_the_refused_evidence_command_can_actually_be_run() -> None:
     assert "scripts/ops/review-refused-evidence.py" in block, (
         "the service does not invoke the documented command"
     )
-    assert f"- {mounted}" in block, (
-        "the command is not pointed at the volume the service mounts"
-    )
+    assert f"- {mounted}" in block, "the command is not pointed at the volume the service mounts"
     assert 'profiles: ["ops"]' in block or "- ops" in block, (
         "a one-shot operator tool must not start with the stack"
     )

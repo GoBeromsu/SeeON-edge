@@ -66,9 +66,7 @@ def _registered_paths() -> set[str]:
 
 
 def _login(client: TestClient) -> None:
-    response = client.post(
-        "/api/v1/auth/session", json={"username": "admin", "password": "admin"}
-    )
+    response = client.post("/api/v1/auth/session", json={"username": "admin", "password": "admin"})
     assert response.status_code == 204
 
 

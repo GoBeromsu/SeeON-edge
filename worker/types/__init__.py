@@ -26,6 +26,7 @@ from worker.types.frame_memory import (
     PixelFormat,
 )
 from worker.types.frame_packet import FrameKey, FramePacket
+from worker.types.metadata import MetadataCounters, MetadataFrame, SourceBinding
 from worker.types.module_result import ModuleResult
 from worker.types.perception_frame import (
     AssociationResult,
@@ -40,7 +41,6 @@ from worker.types.perception_frame import (
     PersonBox,
     PersonBoxChannel,
 )
-from worker.types.scene_record import SceneRecord
 from worker.types.temporal_profile import (
     CURRENT_TEMPORAL_PROFILE,
     TemporalProfile,
@@ -74,6 +74,8 @@ __all__ = [
     "HumanPoseChannel",
     "Keypoint",
     "MemoryKind",
+    "MetadataCounters",
+    "MetadataFrame",
     "ModuleResult",
     "NativeEvidenceTrigger",
     "NumericTraceValue",
@@ -84,7 +86,7 @@ __all__ = [
     "PersonBoxChannel",
     "PipelineProfile",
     "PixelFormat",
-    "SceneRecord",
+    "SourceBinding",
     "StageCapabilities",
     "TemporalProfile",
     "TemporalProfileError",

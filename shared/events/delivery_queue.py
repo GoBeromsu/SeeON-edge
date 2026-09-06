@@ -34,6 +34,7 @@ _SAFE_TEXT = re.compile(r"^[ -~]*$")
 
 class EntryKind(StrEnum):
     EVENT = "EVENT"
+    CLIP = "CLIP"
     SNAPSHOT_ATTACHMENT = "SNAPSHOT_ATTACHMENT"
     SNAPSHOT_DISPOSITION = "SNAPSHOT_DISPOSITION"
 
@@ -72,9 +73,8 @@ class EventEntry:
         _validate_text(self.facility_id, limits.FACILITY_ID_MAX_CHARS, "facility_id")
         _validate_bytes(self.decision_trace, limits.DECISION_TRACE_BYTES_MAX, "decision_trace")
         _validate_bytes(self.values, limits.VALUES_BYTES_MAX, "values")
-        if (
-            not isinstance(self.shed_detail_keys, tuple)
-            or any(not isinstance(key, str) or not key for key in self.shed_detail_keys)
+        if not isinstance(self.shed_detail_keys, tuple) or any(
+            not isinstance(key, str) or not key for key in self.shed_detail_keys
         ):
             raise ValueError("shed_detail_keys must be a tuple of non-empty strings")
 
@@ -111,6 +111,70 @@ class SnapshotAttachmentEntry:
 
 
 @dataclass(frozen=True, slots=True)
+class ClipEntry:
+    clip_id: str
+    event_ids: tuple[str, ...]
+    camera_id: str
+    facility_id: str
+    local_state: str
+    state_version: int
+    media_reference: str | None
+    sha256: str | None
+    size_bytes: int | None
+    mime_type: str | None
+    codec: str | None
+    duration_ms: int | None
+    clip_start_at: str | None
+    clip_end_at: str | None
+    finalized_at: str | None
+    unavailable_reason: str | None
+    entry_id: str = ""
+
+    @property
+    def kind(self) -> EntryKind:
+        return EntryKind.CLIP
+
+    def __post_init__(self) -> None:
+        if not self.entry_id:
+            object.__setattr__(self, "entry_id", _keyed_id("clip", self.clip_id))
+        _validate_text(self.entry_id, limits.ENTRY_ID_MAX_CHARS, "entry_id")
+        _validate_text(self.clip_id, limits.EDGE_EVENT_ID_MAX_CHARS, "clip_id")
+        _validate_text(self.camera_id, limits.CAMERA_ID_MAX_CHARS, "camera_id")
+        _validate_text(self.facility_id, limits.FACILITY_ID_MAX_CHARS, "facility_id")
+        if not self.event_ids:
+            raise ValueError("event_ids must not be empty")
+        for event_id in self.event_ids:
+            _validate_text(event_id, limits.EDGE_EVENT_ID_MAX_CHARS, "event_id")
+        if self.local_state not in {"VERIFIED", "UNAVAILABLE"}:
+            raise ValueError("local_state must be VERIFIED or UNAVAILABLE")
+        if self.state_version < 1:
+            raise ValueError("state_version must be positive")
+        if self.local_state == "VERIFIED":
+            for name, value, maximum in (
+                ("media_reference", self.media_reference, limits.MEDIA_REFERENCE_MAX_CHARS),
+                ("sha256", self.sha256, limits.SHA256_MAX_CHARS),
+                ("mime_type", self.mime_type, limits.MIME_TYPE_MAX_CHARS),
+                ("codec", self.codec, limits.MIME_TYPE_MAX_CHARS),
+                ("clip_start_at", self.clip_start_at, limits.DETECTED_AT_MAX_CHARS),
+                ("clip_end_at", self.clip_end_at, limits.DETECTED_AT_MAX_CHARS),
+                ("finalized_at", self.finalized_at, limits.DETECTED_AT_MAX_CHARS),
+            ):
+                _validate_text(value, maximum, name)
+            if self.size_bytes is None or self.size_bytes <= 0:
+                raise ValueError("size_bytes must be positive for verified clips")
+            if self.duration_ms is None or self.duration_ms <= 0:
+                raise ValueError("duration_ms must be positive for verified clips")
+            if self.unavailable_reason is not None:
+                raise ValueError("verified clips cannot have an unavailable_reason")
+        elif self.unavailable_reason is None:
+            raise ValueError("unavailable clips require an unavailable_reason")
+        else:
+            _validate_text(
+                self.unavailable_reason, limits.DISPOSITION_REASON_MAX_CHARS, "unavailable_reason"
+            )
+
+
+@dataclass(frozen=True, slots=True)
 class SnapshotDispositionEntry:
     edge_event_id: str
     snapshot_id: str
@@ -136,7 +200,9 @@ class SnapshotDispositionEntry:
         _validate_text(self.reason, limits.DISPOSITION_REASON_MAX_CHARS, "reason")
 
 
-DeliveryEntry: TypeAlias = EventEntry | SnapshotAttachmentEntry | SnapshotDispositionEntry
+DeliveryEntry: TypeAlias = (
+    ClipEntry | EventEntry | SnapshotAttachmentEntry | SnapshotDispositionEntry
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -314,9 +380,7 @@ class DeliveryQueue:
             # retained copy -- reintroducing exactly the evidence loss this
             # directory exists to prevent. A monotonic suffix keeps every
             # distinct refusal.
-            retained = sorted(
-                path for path in destination_directory.iterdir() if path.is_file()
-            )
+            retained = sorted(path for path in destination_directory.iterdir() if path.is_file())
             retained_bytes = sum(path.stat().st_size for path in retained)
             if (
                 len(retained) >= MAX_DEAD_LETTERED_ENTRIES
@@ -473,9 +537,9 @@ def _serialize(entry: DeliveryEntry) -> bytes:
         data["decision_trace_b64"] = base64.b64encode(data.pop("decision_trace")).decode("ascii")
         data["values_b64"] = base64.b64encode(data.pop("values")).decode("ascii")
     data["kind"] = entry.kind.value
-    return json.dumps(
-        data, sort_keys=True, separators=(",", ":"), ensure_ascii=True
-    ).encode("ascii")
+    return json.dumps(data, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode(
+        "ascii"
+    )
 
 
 def _keyed_id(prefix: str, *parts: str) -> str:
@@ -525,6 +589,7 @@ __all__ = [
     "MAX_ACCEPTED_ENTRIES",
     "AdmissionFault",
     "AdmissionResult",
+    "ClipEntry",
     "DeliveryEntry",
     "DeliveryQueue",
     "DeliveryQueueCapacitySnapshot",

@@ -6,10 +6,9 @@ import pytest
 
 from shared.detection_policies import (
     BED_EXIT_POLICY_V1_DEFAULT,
-    FALL_POLICY_V1_DEFAULT,
+    FALL_POLICY_V2_DEFAULT,
     LATEST_POLICY_VERSIONS,
     BedExitPolicyV1,
-    FallPolicyV1,
     FallPolicyV2,
     PolicyDocumentError,
     make_effective_policy,
@@ -18,9 +17,9 @@ from shared.detection_policies import (
 )
 
 
-def test_fall_v2_is_shared_frozen_authority_but_not_an_active_policy_version() -> None:
+def test_fall_v2_is_the_shared_frozen_authority_and_the_active_policy_version() -> None:
     assert FallPolicyV2() == FallPolicyV2(
-        transition_threshold=0.7,
+        transition_threshold=0.5,
         transition_votes=3,
         transition_window=5,
         fallen_threshold=0.8,
@@ -31,7 +30,7 @@ def test_fall_v2_is_shared_frozen_authority_but_not_an_active_policy_version() -
         track_ttl_frames=45,
         cooldown_frames=90,
     )
-    assert LATEST_POLICY_VERSIONS["fall"] == 1
+    assert LATEST_POLICY_VERSIONS["fall"] == 2
     with pytest.raises(ValueError, match="transition_votes"):
         FallPolicyV2(transition_votes=6)
     with pytest.raises(ValueError, match="track_ttl_frames"):
@@ -41,10 +40,10 @@ def test_fall_v2_is_shared_frozen_authority_but_not_an_active_policy_version() -
 def test_versioned_policy_parser_returns_typed_numeric_values() -> None:
     fall = parse_policy_values(
         module_id="fall",
-        module_version=1,
+        module_version=2,
         schema_id="fall.policy",
-        schema_version=1,
-        values={"operating_threshold": 0.73},
+        schema_version=2,
+        values={"transition_threshold": 0.73},
     )
     bed_exit = parse_policy_values(
         module_id="bed_exit",
@@ -54,13 +53,13 @@ def test_versioned_policy_parser_returns_typed_numeric_values() -> None:
         values={"min_containment": 0.42, "hold_frames": 4, "grace_frames": 7},
     )
 
-    assert fall == FallPolicyV1(operating_threshold=0.73)
+    assert fall == FallPolicyV2(transition_threshold=0.73)
     assert bed_exit == BedExitPolicyV1(
         min_containment=0.42,
         hold_frames=4,
         grace_frames=7,
     )
-    assert FallPolicyV1(operating_threshold=0.5) == FALL_POLICY_V1_DEFAULT
+    assert FallPolicyV2(transition_threshold=0.5) == FALL_POLICY_V2_DEFAULT
     assert (
         BedExitPolicyV1(
             min_containment=0.35,
@@ -74,11 +73,11 @@ def test_versioned_policy_parser_returns_typed_numeric_values() -> None:
 @pytest.mark.parametrize(
     ("module_id", "module_version", "schema_id", "schema_version", "values", "message"),
     [
-        ("fall", 2, "fall.policy", 1, {"operating_threshold": 0.5}, "module version"),
-        ("fall", 1, "fall.policy", 2, {"operating_threshold": 0.5}, "schema"),
-        ("fall", 1, "fall.policy", 1, {"operating_threshold": 0.5, "extra": 1}, "unknown"),
-        ("fall", 1, "fall.policy", 1, {"operating_threshold": True}, "numeric"),
-        ("fall", 1, "fall.policy", 1, {"operating_threshold": math.inf}, "finite"),
+        ("fall", 1, "fall.policy", 1, {"operating_threshold": 0.5}, "module version"),
+        ("fall", 2, "fall.policy", 1, {"transition_threshold": 0.5}, "schema"),
+        ("fall", 2, "fall.policy", 2, {"transition_threshold": 0.5, "extra": 1}, "unknown"),
+        ("fall", 2, "fall.policy", 2, {"transition_threshold": True}, "numeric"),
+        ("fall", 2, "fall.policy", 2, {"transition_threshold": math.inf}, "finite"),
         (
             "bed_exit",
             1,
@@ -126,8 +125,8 @@ def test_policy_parser_rejects_numeric_and_identity_drift(
 def test_effective_policy_identity_is_deterministic_and_profile_independent() -> None:
     first = make_effective_policy(
         module_id="fall",
-        module_version=1,
-        values=FallPolicyV1(operating_threshold=0.61),
+        module_version=2,
+        values=FallPolicyV2(transition_threshold=0.61),
         source="camera-override",
         facility_revision_id=8,
         camera_revision_id=13,

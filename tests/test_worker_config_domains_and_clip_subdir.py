@@ -27,7 +27,7 @@ from pydantic import ValidationError
 from worker.pipeline.output.evidence.clip_config import DEFAULT_CLIP_STORE_DIR
 from worker.runtime.config.pull_models import BackendWorkerConfigPayload
 from worker.runtime.config.worker_models import ClipRecordingConfig
-from worker.runtime.worker import WorkerRuntime, _required_extractor_names
+from worker.runtime.worker import WorkerRuntime
 
 
 def _camera_payload(camera_id: str = "camera-1") -> dict[str, object]:
@@ -255,31 +255,6 @@ def test_to_worker_config_with_specific_camera_domains_resolves_exactly_as_given
     assert config.enabled_domains == ("fall",)
 
 
-def test_no_domains_signal_still_schedules_the_registry_default_extractors() -> None:
-    """The actual production consequence of issue #191: with no domains
-    signal at all, the runtime must resolve a non-empty active-domain set
-    and schedule the extractors those domains require, not silently
-    schedule nothing (``Scheduler.task_intervals`` empty,
-    ``CompositeExtractor.process`` calling no extractors)."""
-    from types import SimpleNamespace
-
-    payload = BackendWorkerConfigPayload.model_validate(
-        {"config_version": 1, "cameras": [_camera_payload()]}
-    )
-    config = payload.to_worker_config("http://ml-api:8000", "relay-secret")
-    runtime = SimpleNamespace(
-        config=config,
-        _module_versions=config.selected_module_versions,
-    )
-
-    domain_names = WorkerRuntime._active_domain_names(runtime)
-    required = _required_extractor_names(domain_names)
-
-    assert domain_names == ("fall", "bed_exit")
-    assert required != ()
-    assert "pose" in required
-
-
 def test_to_worker_config_clip_store_subdir_merges_into_a_local_clip_config() -> None:
     """The pulled subdir must land on top of a locally-sourced ``clip``
     config (e.g. clip.enabled from env, see #66/#68) rather than replacing it
@@ -366,6 +341,5 @@ def test_resolved_clip_store_dir_defensively_rejects_an_unsafe_subdir(
     re-checked here rather than trusted at a distance."""
     runtime = _fake_runtime(unsafe_subdir, clip_store_dir=tmp_path)
 
-    resolved = WorkerRuntime._resolved_clip_store_dir(runtime)
-
-    assert resolved == tmp_path
+    with pytest.raises(RuntimeError, match="relative and traversal-free"):
+        WorkerRuntime._resolved_clip_store_dir(runtime)

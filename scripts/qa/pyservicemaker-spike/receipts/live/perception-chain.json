@@ -1,0 +1,13 @@
+{
+  "stream": "people-proof rtsp (DeepStream sample_1080p_h264 loop)",
+  "frames": 6320,
+  "rows_with_tracks": 4894,
+  "distinct_nvdcf_track_ids": 46,
+  "objects_observed": 4252,
+  "matched_tracks": 4252,
+  "frames_without_pose_tensor": 0,
+  "match_rate": 1.0,
+  "incidents_created": 183,
+  "threshold": 0.5,
+  "note": "Perception chain proven end to end in the worker after three defects: the parser bound its output layer by position, the terminal sink paced the graph off the clock, and the letterbox inverse removed a centred pad where nvinfer pads right/bottom. Every object the tracker delivered is now matched to a pose row."
+}

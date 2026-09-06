@@ -102,9 +102,7 @@ _CASES: tuple[tuple[str, dict[str, Any]], ...] = (
 
 
 @pytest.mark.parametrize(("name", "overrides"), _CASES, ids=[case[0] for case in _CASES])
-def test_both_inspection_paths_agree(
-    tmp_path: Path, name: str, overrides: dict[str, Any]
-) -> None:
+def test_both_inspection_paths_agree(tmp_path: Path, name: str, overrides: dict[str, Any]) -> None:
     """A clip must not be judged differently depending on how it was reached."""
     store = _store(tmp_path, _manifest(**overrides))
 

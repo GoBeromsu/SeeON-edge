@@ -61,9 +61,7 @@ def test_vendored_fixture_has_declared_source_and_semantic_jcs_digest() -> None:
 
 
 def test_enrollment_verification_serializer_is_frozen_to_v1_fields() -> None:
-    request = EnrollmentVerification(
-        "NH-7H2K9M4QXP", "8b0f5ba2-d359-4d8e-948f-e386ac40c347"
-    )
+    request = EnrollmentVerification("NH-7H2K9M4QXP", "8b0f5ba2-d359-4d8e-948f-e386ac40c347")
 
     serialized = serialize_enrollment_verification(request)
     assert serialized == {
@@ -180,9 +178,7 @@ def test_topology_snapshot_parser_rejects_invalid_revisions(field: str, value: i
 
 
 def test_topology_confirmation_serializer_uses_only_confirmation_state() -> None:
-    confirmation = TopologyConfirmation(
-        "0197f671-3a31-7a6c-a6e4-83ed412de81b", "a" * 64, 1
-    )
+    confirmation = TopologyConfirmation("0197f671-3a31-7a6c-a6e4-83ed412de81b", "a" * 64, 1)
 
     serialized = serialize_topology_confirmation(confirmation)
 
@@ -279,7 +275,10 @@ def _snapshot() -> TopologySnapshot:
                 order_index=2,
                 rooms=(
                     TopologyRoom(
-                        edge_ref="room-201", name="Room Test", room_type="ROOM", capacity=1,
+                        edge_ref="room-201",
+                        name="Room Test",
+                        room_type="ROOM",
+                        capacity=1,
                         cameras=(TopologyCamera(edge_ref="camera-001", label="Camera Test"),),
                     ),
                 ),

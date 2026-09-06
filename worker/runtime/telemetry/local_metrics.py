@@ -83,9 +83,7 @@ def log_snapshot(snapshot: RuntimeDiagnosticsSnapshot) -> None:
             None
             if camera.decode_backend is None
             else {
-                "requested_profile_decode": (
-                    camera.decode_backend.requested_profile_decode
-                ),
+                "requested_profile_decode": (camera.decode_backend.requested_profile_decode),
                 "resolved_backend": camera.decode_backend.resolved_backend,
                 "actual_adapter_class": camera.decode_backend.actual_adapter_class,
             }
@@ -125,12 +123,8 @@ def log_snapshot(snapshot: RuntimeDiagnosticsSnapshot) -> None:
             None
             if camera.bed_exit_scoring is None
             else {
-                "max_containment_observed": (
-                    camera.bed_exit_scoring.max_containment_observed
-                ),
-                "grace_positive_transitions": (
-                    camera.bed_exit_scoring.grace_positive_transitions
-                ),
+                "max_containment_observed": (camera.bed_exit_scoring.max_containment_observed),
+                "grace_positive_transitions": (camera.bed_exit_scoring.grace_positive_transitions),
                 "assignments_made": camera.bed_exit_scoring.assignments_made,
                 "updated_at_sec": camera.bed_exit_scoring.updated_at_sec,
             }
@@ -171,7 +165,17 @@ def log_snapshot(snapshot: RuntimeDiagnosticsSnapshot) -> None:
             "worker.runtime.telemetry camera_id=%s failure_category=%s "
             "stage_timings=%s bus=%s encoder=%s encode=%s bed_region=%s "
             "bed_exit_scoring=%s inference=%s"
-            + (" decode_backend=%s" if decode_backend is not None else ""),
+            " smart_record_extended_total=%d smart_record_extension_raced_total=%d"
+            " smart_record_start_refused_total=%d nvenc_sessions_active=%d"
+            + (" decode_backend=%s" if decode_backend is not None else "")
+            # P1a-AC7: an operator threshold the runtime received but does not
+            # apply is named in the message itself, because basicConfig renders
+            # %(message)s only and an extra= field would be invisible.
+            + (
+                " fall_unapplied_policy_threshold=%s"
+                if camera.fall_unapplied_policy_threshold is not None
+                else ""
+            ),
             camera.camera_id,
             camera.failure_category,
             stage_timings,
@@ -181,7 +185,16 @@ def log_snapshot(snapshot: RuntimeDiagnosticsSnapshot) -> None:
             bed_region,
             bed_exit_scoring,
             inference,
+            camera.smart_record_extended_total,
+            camera.smart_record_extension_raced_total,
+            camera.smart_record_start_refused_total,
+            camera.nvenc_sessions_active,
             *((decode_backend,) if decode_backend is not None else ()),
+            *(
+                (camera.fall_unapplied_policy_threshold,)
+                if camera.fall_unapplied_policy_threshold is not None
+                else ()
+            ),
             extra={
                 "camera_id": camera.camera_id,
                 "failure_category": camera.failure_category,
@@ -192,6 +205,7 @@ def log_snapshot(snapshot: RuntimeDiagnosticsSnapshot) -> None:
                 "bed_region": bed_region,
                 "bed_exit_scoring": bed_exit_scoring,
                 "inference": inference,
+                "fall_unapplied_policy_threshold": camera.fall_unapplied_policy_threshold,
             },
         )
 

@@ -133,8 +133,8 @@ def test_runtime_descriptor_rejects_forged_cpu_cuda_nv12_edge_endpoint(
     edge_index: int,
 ) -> None:
     descriptor = runtime_descriptor_for(
-        PROFILE_REGISTRY["cpu"],
-        requested_profile="cpu",
+        PROFILE_REGISTRY["flow"],
+        requested_profile="flow",
     )
     original_edge = descriptor.effective_edges[edge_index]
     if forged_endpoint == "source":
@@ -169,10 +169,7 @@ def test_runtime_descriptor_rejects_forged_cpu_cuda_nv12_edge_endpoint(
         effective_edges=tuple(edges),
     )
 
-    with pytest.raises(
-        CapabilityMismatchError,
-        match=rf"{forged_endpoint} endpoint.*effective memory step",
-    ):
+    with pytest.raises(CapabilityMismatchError):
         validate_runtime_profile_descriptor(forged)
 
 

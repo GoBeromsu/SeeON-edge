@@ -532,7 +532,7 @@ def test_pose_get_forwards_and_returns_current_state_with_a_dashboard_session(
                 "method": request.get_method(),
             }
         )
-        return PoseJsonResponse(json.dumps({"mode": "fall"}).encode())
+        return PoseJsonResponse(json.dumps({"person": True, "bed": False}).encode())
 
     monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
 
@@ -541,7 +541,7 @@ def test_pose_get_forwards_and_returns_current_state_with_a_dashboard_session(
         response = client.get("/api/v1/streams/cam_sp_201/pose")
 
     assert response.status_code == 200
-    assert response.json() == {"mode": "fall"}
+    assert response.json() == {"person": True, "bed": False}
     assert calls == [
         {
             "url": "http://worker.local:8090/overlay/cam_sp_201/pose",
@@ -565,22 +565,25 @@ def test_pose_set_forwards_the_requested_value_with_a_dashboard_session(
                 "body": request.data,
             }
         )
-        return PoseJsonResponse(json.dumps({"mode": "bedexit"}).encode())
+        return PoseJsonResponse(json.dumps({"person": False, "bed": True}).encode())
 
     monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
 
     with TestClient(create_app(lifespan=NO_LIFESPAN)) as client:
         _login(client)
-        response = client.post("/api/v1/streams/cam_sp_201/pose", json={"mode": "bedexit"})
+        response = client.post(
+            "/api/v1/streams/cam_sp_201/pose",
+            json={"person": False, "bed": True},
+        )
 
     assert response.status_code == 200
-    assert response.json() == {"mode": "bedexit"}
+    assert response.json() == {"person": False, "bed": True}
     assert calls == [
         {
             "url": "http://worker.local:8090/overlay/cam_sp_201/pose",
             "timeout": 3.0,
             "method": "POST",
-            "body": json.dumps({"mode": "bedexit"}).encode("utf-8"),
+            "body": json.dumps({"person": False, "bed": True}).encode("utf-8"),
         }
     ]
 
@@ -647,7 +650,7 @@ def test_pose_get_forwards_the_relay_token_to_the_worker(
                 "headers": dict(request.headers),
             }
         )
-        return PoseJsonResponse(json.dumps({"mode": "none"}).encode())
+        return PoseJsonResponse(json.dumps({"person": False, "bed": False}).encode())
 
     monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
 
@@ -680,13 +683,16 @@ def test_pose_set_forwards_the_relay_token_to_the_worker(
                 "headers": dict(request.headers),
             }
         )
-        return PoseJsonResponse(json.dumps({"mode": "fall"}).encode())
+        return PoseJsonResponse(json.dumps({"person": True, "bed": False}).encode())
 
     monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
 
     with TestClient(create_app(lifespan=NO_LIFESPAN)) as client:
         _login(client)
-        response = client.post("/api/v1/streams/cam_sp_201/pose", json={"mode": "fall"})
+        response = client.post(
+            "/api/v1/streams/cam_sp_201/pose",
+            json={"person": True, "bed": False},
+        )
 
     assert response.status_code == 200
     assert calls == [
@@ -706,13 +712,16 @@ def test_pose_get_and_set_require_a_dashboard_session(
 ) -> None:
     def fake_urlopen(request: urllib.request.Request, timeout: float) -> PoseJsonResponse:
         del timeout
-        return PoseJsonResponse(json.dumps({"mode": "none"}).encode())
+        return PoseJsonResponse(json.dumps({"person": True, "bed": True}).encode())
 
     monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
 
     with TestClient(create_app(lifespan=NO_LIFESPAN)) as client:
         missing = client.get("/api/v1/streams/cam_sp_201/pose")
-        missing_post = client.post("/api/v1/streams/cam_sp_201/pose", json={"mode": "fall"})
+        missing_post = client.post(
+            "/api/v1/streams/cam_sp_201/pose",
+            json={"person": True, "bed": True},
+        )
         _login(client)
         authorized = client.get("/api/v1/streams/cam_sp_201/pose")
 
@@ -721,7 +730,19 @@ def test_pose_get_and_set_require_a_dashboard_session(
     assert authorized.status_code == 200
 
 
-def test_pose_set_rejects_unknown_fields(
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"mode": "fall"},
+        {"person": True},
+        {"bed": True},
+        {"person": "true", "bed": True},
+        {"person": True, "bed": 1},
+        {"person": True, "bed": True, "unexpected": "field"},
+    ],
+)
+def test_pose_set_rejects_invalid_body(
+    payload: dict[str, object],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     def fake_urlopen(request: urllib.request.Request, timeout: float) -> NoReturn:
@@ -734,26 +755,7 @@ def test_pose_set_rejects_unknown_fields(
         _login(client)
         response = client.post(
             "/api/v1/streams/cam_sp_201/pose",
-            json={"mode": "fall", "unexpected": "field"},
-        )
-
-    assert response.status_code == 422
-
-
-def test_pose_set_rejects_unknown_mode_value(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    def fake_urlopen(request: urllib.request.Request, timeout: float) -> NoReturn:
-        del request, timeout
-        raise AssertionError("upstream must not be called for a rejected payload")
-
-    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
-
-    with TestClient(create_app(lifespan=NO_LIFESPAN)) as client:
-        _login(client)
-        response = client.post(
-            "/api/v1/streams/cam_sp_201/pose",
-            json={"mode": "show_pose"},
+            json=payload,
         )
 
     assert response.status_code == 422

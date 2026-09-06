@@ -106,9 +106,7 @@ class RuntimeStatusStore:
         clip_export = None if clip_export_raw is None else object_dict(clip_export_raw)
         gpu = None if gpu_raw is None else object_dict(gpu_raw)
         worker = None if worker_raw is None else object_dict(worker_raw)
-        delivery_queue = (
-            None if delivery_queue_raw is None else object_dict(delivery_queue_raw)
-        )
+        delivery_queue = None if delivery_queue_raw is None else object_dict(delivery_queue_raw)
         requested_generation = optional_int(payload.get("generation"), field="generation")
         with self._lock:
             now = self.clock()
@@ -141,9 +139,7 @@ class RuntimeStatusStore:
                 delivery_queue=deepcopy(delivery_queue),
             )
             self._latest_generation[facility_id] = max(latest_generation, generation)
-            accept_camera_samples(
-                self._detection_health, facility_id, cameras, accepted_at=stamped
-            )
+            accept_camera_samples(self._detection_health, facility_id, cameras, accepted_at=stamped)
             return RuntimeStatusRecordResult(True, generation)
 
     def snapshot(self, *, now: float | None = None) -> JsonObject:

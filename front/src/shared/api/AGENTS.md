@@ -10,14 +10,14 @@ HTTP + DTO boundary. Features call this. Screens stay out.
 - `*Normalizer.ts` + `normalizerFields.ts`: parse or throw. Barrel is `normalizers.ts`.
 - `http.ts` + `session.ts`: `requestJson`, `HttpError`, 401/403 bus, `getApiBase()`, media URLs.
 - `usePollingResource.ts`: shared poller plus named resource hooks.
-- `useMjpegStream.ts`: `fetch` + canvas MJPEG hook (Content-Length framed parts, 3s stall reconnect, backoff). Used by operations `LiveStreamPanel` and settings `BedZoneRecognitionPanel`.
+- `useMjpegStream.ts`: `fetch` + canvas MJPEG hook (Content-Length framed parts, 3s stall reconnect, backoff). Used by operations `LiveStreamPanel` and `shared/ui/BedZoneRecognitionPanel`.
 
 ## client.ts
 All traffic goes through `requestJson`. Paths are `/api/v1`-relative. Encode ids.
 `cameraBody` and `connectionBody` omit unset keys. Included `null` clears. Omitted means leave it.
 Connection writes send facility code, token, and installation ref. Hub address stays env/image.
 `saveDetectionSettings` is a full replace. Send every domain.
-Clip delete posts `{ confirm_clip_id }`. A mismatch is 422 before the worker runs.
+
 Narrow failures here: `cameraProbeFailureDetail` (422), `cameraDuplicateDetail` (409), `bedZoneRecognitionFailureDetail` (422). Features don't parse `HttpError.body`.
 New 200 envelopes get a normalizer. Don't add another `as Type` on `requestJson`. Policies, incidents, and artifacts still cast. Shrink that set.
 

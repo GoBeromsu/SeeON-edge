@@ -72,9 +72,7 @@ class ConnectionStoreDatabase:
             return _empty_data()
         return _empty_data() if row is None else dict(zip(COLUMNS, row, strict=True))
 
-    def write(
-        self, data: ConnectionData, after_write: ConnectionWriteHook | None = None
-    ) -> None:
+    def write(self, data: ConnectionData, after_write: ConnectionWriteHook | None = None) -> None:
         with closing(self._connect()) as connection:
             connection.execute("BEGIN IMMEDIATE")
             try:

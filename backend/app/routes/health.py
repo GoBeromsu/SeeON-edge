@@ -47,9 +47,7 @@ def legacy_health(request: Request) -> dict[str, Any]:
     return {
         "status": "ok",
         "gateway": (
-            "ready"
-            if getattr(request.app.state, "readiness", {}).get("ready")
-            else "booting"
+            "ready" if getattr(request.app.state, "readiness", {}).get("ready") else "booting"
         ),
         "relay": {
             "token_configured": bool(getattr(request.app.state, "edge_relay_token", None)),

@@ -55,9 +55,7 @@ class _Client:
         self.sent.append(pending)
         return self.put_outcomes.pop(0)(pending)
 
-    def confirm(
-        self, snapshot_id: str, confirmation: TopologyConfirmation
-    ) -> TopologyPutResult:
+    def confirm(self, snapshot_id: str, confirmation: TopologyConfirmation) -> TopologyPutResult:
         self.confirmations.append((snapshot_id, confirmation))
         return self.confirm_outcomes.pop(0)
 
@@ -128,6 +126,7 @@ def _primed(
 ) -> tuple[TopologyRetryCoordinator, CameraRegistryStore, _Client, TopologyAccepted]:
     registry = _registry(path)
     client = _Client(PRINCIPAL, [], [])
+
     def accept(pending: PendingTopologySnapshot) -> TopologyPutResult:
         client.confirm_outcomes.append(_terminal(pending))
         return _preview_acceptance(pending, expires_at=expires_at)
@@ -241,9 +240,7 @@ def test_stale_request_revision_rejects_without_upstream_call(
 
     # When
     result = coordinator.confirm(
-        TopologyConfirmationCommand(
-            CONFIRMATION_ID, DIGEST, client_revision, server_revision
-        )
+        TopologyConfirmationCommand(CONFIRMATION_ID, DIGEST, client_revision, server_revision)
     )
 
     # Then
@@ -264,9 +261,7 @@ def test_changed_digest_rejects_without_upstream_call_or_local_mutation(
     before = EdgeTopologySyncStateStore(path).load()
 
     # When
-    result = coordinator.confirm(
-        TopologyConfirmationCommand(CONFIRMATION_ID, "b" * 64, 1, 7)
-    )
+    result = coordinator.confirm(TopologyConfirmationCommand(CONFIRMATION_ID, "b" * 64, 1, 7))
 
     # Then
     assert isinstance(result, TopologyConfirmationRejected)
@@ -282,9 +277,7 @@ def test_changed_generation_rejects_without_upstream_call(tmp_path: Path) -> Non
     # Given
     path = tmp_path / "catalog.sqlite3"
     coordinator, registry, original_client, _expected = _primed(path)
-    changed_client = _Client(
-        MachinePrincipal(PRINCIPAL.edge_installation_id, 4), [], []
-    )
+    changed_client = _Client(MachinePrincipal(PRINCIPAL.edge_installation_id, 4), [], [])
     changed = TopologyRetryCoordinator(
         registry, EdgeTopologySyncStateStore(path), lambda: changed_client
     )

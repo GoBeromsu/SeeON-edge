@@ -19,7 +19,6 @@ from backend.app.features.clips.manifest import (
     read_manifest_file,
     video_file_from_dir,
 )
-from backend.app.features.clips.scene_files import resolve_scene_index
 from backend.app.features.clips.thumbnail_files import (
     bounded_clip_roots,
     contained_thumbnail_path,
@@ -30,6 +29,7 @@ from backend.app.shared.state_dir import resolve_state_dir
 CLIP_STORE_DIR_ENV = "CLIP_STORE_DIR"
 API_LABEL_STORE_ENV = "API_LABEL_STORE"
 DEFAULT_CLIP_STORE_DIR = "/var/lib/clip-store"
+
 
 @dataclass(frozen=True, slots=True)
 class LocatedClip:
@@ -147,9 +147,7 @@ class ClipStore:
                 continue
             finalized = [item for item in candidates if item.located() is not None]
             if len(finalized) > 1:
-                raise DuplicateClipIdError(
-                    clip_id, tuple(item.manifest_path for item in finalized)
-                )
+                raise DuplicateClipIdError(clip_id, tuple(item.manifest_path for item in finalized))
             scanned.extend(finalized)
         return scanned
 
@@ -189,27 +187,14 @@ class ClipStore:
         )
         if len(manifest_paths) > 1:
             raise DuplicateClipIdError(clip_id, manifest_paths)
-        return bool(manifest_paths) and contained_thumbnail_path(
-            self.root, manifest_paths[0]
-        ) is not None
+        return (
+            bool(manifest_paths)
+            and contained_thumbnail_path(self.root, manifest_paths[0]) is not None
+        )
 
     def read_thumbnail(self, located: LocatedClip) -> bytes:
         thumbnail_path = located.manifest_path.parent / "thumbnail.jpg"
         return read_regular_file(self.root, thumbnail_path)
-
-    def scene_available(self, located: LocatedClip) -> bool:
-        opened = resolve_scene_index(
-            self.root, located.manifest_path, located.manifest.scene_index
-        )
-        if opened is None:
-            return False
-        opened.handle.close()
-        return True
-
-    def resolve_scene_index(self, located: LocatedClip) -> OpenedRegularFile | None:
-        return resolve_scene_index(
-            self.root, located.manifest_path, located.manifest.scene_index
-        )
 
     def resolve_video_path(self, manifest: ClipManifest) -> Path:
         located = self.locate_manifest(manifest.clip_id)
@@ -232,9 +217,10 @@ class ClipStore:
         else:
             recording_prefix = recording_root.relative_to(self.root).parts
             worker_relative = raw_path.parts[:1] == ("clips",)
-            legacy_relative = bool(recording_prefix) and raw_path.parts[
-                : len(recording_prefix)
-            ] == recording_prefix
+            legacy_relative = (
+                bool(recording_prefix)
+                and raw_path.parts[: len(recording_prefix)] == recording_prefix
+            )
             anchor = self.root if legacy_relative and not worker_relative else recording_root
             candidate = anchor / raw_path
         resolved = candidate.resolve(strict=False)
@@ -249,6 +235,7 @@ class ClipStore:
 
     def _read_manifest_file(self, path: Path) -> ClipManifest | None:
         return read_manifest_file(path)
+
 
 def default_label_store_dir() -> Path:
     """Default root for clip labels + the audit log, absent ``API_LABEL_STORE``.

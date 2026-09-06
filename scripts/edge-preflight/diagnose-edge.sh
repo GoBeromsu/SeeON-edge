@@ -202,24 +202,6 @@ step_cuda_context() {
   fi
 }
 
-step_worker_processes() {
-  if ! need_command nvidia-smi; then
-    record 5 SKIP 'nvidia-smi가 없어 워커 GPU 프로세스를 조회할 수 없습니다.' '런북 1-3절에서 워커 상태를 확인하세요.'
-    return
-  fi
-  local output rc
-  output=$(run_timeout nvidia-smi --query-compute-apps=pid,process_name --format=csv,noheader 2>&1); rc=$?
-  if ((rc != 0)); then
-    record 5 FAIL "GPU 프로세스 조회 실패(rc=$rc)." '런북 2절 또는 런북 4절을 처리하세요.'
-  elif grep -Eqi 'ffmpeg' <<<"$output"; then
-    record 5 FAIL 'C7 토폴로지에서 금지된 per-camera ffmpeg GPU 프로세스가 있습니다.' 'ml-worker가 Python PID 1 + native DeepStream child 하나인지 확인하세요.'
-  elif [[ $(grep -Eic 'seeon-deepstream|deepstream-child' <<<"$output") -eq 1 ]]; then
-    record 5 OK "native DeepStream GPU child 하나 확인: $(printf '%s' "$output" | tr '\n' ';' | cut -c1-180)"
-  else
-    record 5 FAIL 'GPU에 native DeepStream child가 정확히 하나가 아닙니다(Python parent는 CUDA context를 만들면 안 됩니다).' 'ml-worker가 Python PID 1 + native DeepStream child 하나인지 확인하세요.'
-  fi
-}
-
 step_service() {
   if ! need_command curl; then
     record 6 SKIP 'curl이 없어 ml-api 상태를 조회할 수 없습니다.' '런북 1-4절에서 ml-api와 포트 바인딩을 확인하세요.'
@@ -353,14 +335,13 @@ except (KeyError, TypeError, ValueError) as exc:
   if ((rc == 0)); then record 6 OK "서비스 상태: $summary"; else record 6 FAIL "상태 응답에 필수 필드가 없거나 비정상입니다: $summary" '런북 1-4절에서 API heartbeat와 런타임 상태를 확인하세요.'; fi
 }
 
-say '조회 전용 6단계 진단을 시작합니다. 기본 모드는 컨테이너를 생성하지 않습니다.'
+say '조회 전용 5단계 진단을 시작합니다. 기본 모드는 컨테이너를 생성하지 않습니다.'
 if "$container_probe"; then say '경고: --with-container-probe는 컨테이너를 생성·삭제하고 이미지를 내려받을 수 있습니다.'; fi
 step_driver
 step_kernel_log
 step_version
 step_container_gpu
 step_cuda_context
-step_worker_processes
 step_service
 say "요약: OK=${ok_count}, FAIL=${fail_count}, SKIP=${skip_count}"
 if ((fail_count > 0)); then say "가장 가능성 높은 원인: ${fail_reasons[0]}"; exit 1; fi

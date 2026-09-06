@@ -7,9 +7,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from enum import StrEnum
 from time import time
-from typing import final
-
-from worker.pipeline.ingest.lifecycle import IngestEvent
+from typing import Protocol, final
 
 
 class CameraStatus(StrEnum):
@@ -115,7 +113,7 @@ class StatusStore:
         *,
         detail: str | None = None,
         timestamp: float | None = None,
-        ) -> None:
+    ) -> None:
         with self._lock:
             _ = self.set_status(
                 camera_id,
@@ -140,7 +138,7 @@ class StatusStore:
         *,
         detail: str | None = None,
         timestamp: float | None = None,
-        ) -> None:
+    ) -> None:
         with self._lock:
             _ = self.set_status(
                 camera_id,
@@ -164,9 +162,7 @@ class StatusStore:
     def snapshot(self) -> StatusSnapshot:
         with self._lock:
             return StatusSnapshot(
-                cameras=tuple(
-                    self._statuses[camera_id] for camera_id in sorted(self._statuses)
-                ),
+                cameras=tuple(self._statuses[camera_id] for camera_id in sorted(self._statuses)),
                 ops_events=tuple(self._ops_events),
             )
 
@@ -205,7 +201,7 @@ class IngestStatusReporter:
             error_category=category,
         )
 
-    def emit(self, event: IngestEvent) -> None:
+    def emit(self, event: LifecycleEvent) -> None:
         _ = self._store.record_ops_event(
             event.event_type,
             event.camera_id,
@@ -227,3 +223,11 @@ __all__ = [
     "StatusSnapshot",
     "StatusStore",
 ]
+class LifecycleEvent(Protocol):
+    event_type: str
+    camera_id: str
+    facility_id: str
+    category: str
+    detail: str | None
+
+

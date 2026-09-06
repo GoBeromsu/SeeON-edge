@@ -1,0 +1,128 @@
+import json
+import sqlite3
+from pathlib import Path
+
+import pytest
+
+from scripts.qa.export_incident_corpus import CorpusValidationError, export
+
+
+def _snapshot(path: Path) -> None:
+    connection = sqlite3.connect(path)
+    connection.execute(
+        "CREATE TABLE incidents (incident_id TEXT, edge_event_id TEXT, camera_id TEXT, "
+        "event_type TEXT, detected_at TEXT)"
+    )
+    connection.execute(
+        "INSERT INTO incidents VALUES ('i1', 'event-1', 'camera-1', 'fall', "
+        "'2026-01-01T00:00:00+00:00')"
+    )
+    connection.commit()
+    connection.close()
+
+
+def _clip(store: Path, clip_id: str, refs: list[str], *, media: bool = True) -> Path:
+    directory = store / "clips" / clip_id
+    directory.mkdir(parents=True)
+    (directory / "manifest.json").write_text(
+        json.dumps(
+            {
+                "clip_id": clip_id,
+                "event_refs": refs,
+                "started_at": "2026-01-01T00:00:00Z",
+                "duration_s": 12,
+            }
+        ),
+        encoding="utf-8",
+    )
+    if media:
+        (directory / "clip.mp4").write_bytes(b"video")
+    return directory
+
+
+def test_export_reads_only_claimed_canonical_clip_manifest(tmp_path: Path) -> None:
+    snapshot = tmp_path / "edge.sqlite3"
+    store = tmp_path / "store"
+    output = tmp_path / "corpus.jsonl"
+    _snapshot(snapshot)
+    _clip(store, "clip-1", ["event-1"])
+    _clip(store / "ignored", "clip-2", ["event-1"])
+
+    assert export(snapshot, store, output)[:2] == (1, 1)
+    record = json.loads(output.read_text())
+    assert record["clip_id"] == "clip-1"
+    assert record["clip_path"].endswith("clips/clip-1/clip.mp4")
+    assert record["clip_started_at"] == "2026-01-01T00:00:00Z"
+    assert record["clip_duration_s"] == 12
+
+
+def test_export_fails_closed_for_every_malformed_claimed_clip(tmp_path: Path) -> None:
+    snapshot = tmp_path / "edge.sqlite3"
+    store = tmp_path / "store"
+    _snapshot(snapshot)
+    _clip(store, "bad-one", ["event-1"])
+    (store / "clips" / "bad-one" / "manifest.json").write_text("{", encoding="utf-8")
+    _clip(store, "bad-two", [])
+
+    with pytest.raises(CorpusValidationError, match="bad-one: malformed manifest") as exc:
+        export(snapshot, store, tmp_path / "out.jsonl")
+    assert "bad-two: invalid event_refs" in str(exc.value)
+
+
+def test_export_rejects_duplicate_event_ref_claims(tmp_path: Path) -> None:
+    snapshot = tmp_path / "edge.sqlite3"
+    store = tmp_path / "store"
+    _snapshot(snapshot)
+    _clip(store, "clip-one", ["event-1"])
+    _clip(store, "clip-two", ["event-1"])
+
+    with pytest.raises(CorpusValidationError) as exc:
+        export(snapshot, store, tmp_path / "out.jsonl")
+    assert "event-1: duplicate event_ref claimed by clip-one and clip-two" in str(exc.value)
+
+
+def test_export_requires_media_for_claimed_clip(tmp_path: Path) -> None:
+    snapshot = tmp_path / "edge.sqlite3"
+    store = tmp_path / "store"
+    _snapshot(snapshot)
+    _clip(store, "clip-one", ["event-1"], media=False)
+
+    with pytest.raises(CorpusValidationError, match="clip-one: missing clip.mp4"):
+        export(snapshot, store, tmp_path / "out.jsonl")
+
+
+def test_export_rejects_absent_clips_tree_without_creating_output(tmp_path: Path) -> None:
+    snapshot = tmp_path / "edge.sqlite3"
+    output = tmp_path / "out.jsonl"
+    _snapshot(snapshot)
+
+    with pytest.raises(CorpusValidationError, match="missing canonical clips tree"):
+        export(snapshot, tmp_path / "store", output)
+    assert not output.exists()
+
+
+def test_export_validates_timestamps_before_atomically_writing(tmp_path: Path) -> None:
+    snapshot = tmp_path / "edge.sqlite3"
+    store = tmp_path / "store"
+    output = tmp_path / "out.jsonl"
+    _snapshot(snapshot)
+    _clip(store, "clip-1", ["event-1"])
+    with sqlite3.connect(snapshot) as connection:
+        connection.execute("UPDATE incidents SET detected_at='not-a-timestamp'")
+
+    with pytest.raises(CorpusValidationError, match="invalid detected_at"):
+        export(snapshot, store, output)
+    assert not output.exists()
+
+
+@pytest.mark.parametrize("timing", ({"started_at": "bad"}, {"duration_s": -1}))
+def test_export_rejects_invalid_clip_timing(tmp_path: Path, timing: dict[str, object]) -> None:
+    snapshot = tmp_path / "edge.sqlite3"
+    store = tmp_path / "store"
+    _snapshot(snapshot)
+    clip = _clip(store, "clip-1", ["event-1"])
+    manifest = json.loads((clip / "manifest.json").read_text())
+    manifest.update(timing)
+    (clip / "manifest.json").write_text(json.dumps(manifest))
+    with pytest.raises(CorpusValidationError, match="invalid clip timing"):
+        export(snapshot, store, tmp_path / "out.jsonl")

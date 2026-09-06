@@ -61,8 +61,7 @@ def validated_batch_images(
                 task=task,
                 camera_id=camera_id,
                 detail=(
-                    f"shape must be (height, width, {_EXPECTED_CHANNELS}), "
-                    f"received {array.shape}"
+                    f"shape must be (height, width, {_EXPECTED_CHANNELS}), received {array.shape}"
                 ),
             )
         geometry = (int(array.shape[0]), int(array.shape[1]))

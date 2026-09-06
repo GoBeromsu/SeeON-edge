@@ -51,10 +51,6 @@ def _write_config(tmp_path: Path, *, camera_count: int = 1, version: int = 1) ->
     return config_path
 
 
-def _fake_loop_factory(camera: object, bus: object, reporter: object) -> None:
-    raise AssertionError("loop factory must not be invoked by CLI tests")
-
-
 class _FakeServingClient:
     def create(self, task: str, **_options: object) -> None:
         raise AssertionError("serving client must not be used by CLI tests")
@@ -62,39 +58,15 @@ class _FakeServingClient:
 
 @pytest.fixture(autouse=True)
 def _isolate_from_default_ingest_composition(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Keep this file's tests independent of `WorkerRuntime`'s default
-    `loop_factory` composition.
-
-    `worker/__main__.py` intentionally omits `loop_factory` when constructing
-    `WorkerRuntime`: composing the real per-camera ingest loop (decode
-    adapter selection, source wiring) is composition-root territory
-    (`worker/runtime/worker.py`), not the CLI's. That default composition has
-    its own dedicated coverage in `tests/test_worker_ingest_composition.py`,
-    including a bare-construction, no-`loop_factory` test proving the CLI's
-    omitted-kwarg call is safe end to end. This file's job is the CLI
-    contract (argparse, exit codes, config resolution, restart_check wiring,
-    signal handling), not ingest composition, so every test here injects a
-    fake `loop_factory` instead of exercising the real default -- CLI tests
-    must never construct real decode adapters. Applied globally here rather
-    than per test to keep that isolation guaranteed rather than opt-in.
-    """
-    real_init = WorkerRuntime.__init__
+    """Keep CLI tests hermetic while using the flow composition contract."""
     real_connect = socket.socket.connect
 
-    def _reject_network_connect(
-        client: socket.socket, address: tuple[str, int] | str
-    ) -> None:
+    def _reject_network_connect(client: socket.socket, address: tuple[str, int] | str) -> None:
         if client.family in (socket.AF_INET, socket.AF_INET6):
             raise AssertionError("entrypoint tests must not open network sockets")
         real_connect(client, address)
 
     monkeypatch.setattr(socket.socket, "connect", _reject_network_connect)
-
-    def _init_with_fake_loop_factory(self: WorkerRuntime, *args: object, **kwargs: object) -> None:
-        kwargs.setdefault("loop_factory", _fake_loop_factory)
-        real_init(self, *args, **kwargs)
-
-    monkeypatch.setattr(WorkerRuntime, "__init__", _init_with_fake_loop_factory)
 
     def load_fixture_config(path: str | Path) -> WorkerConfig:
         try:
@@ -304,36 +276,27 @@ def test_build_revision_environment_is_resolved_before_runtime_construction(
 def test_real_workerruntime_constructs_with_fake_collaborators_without_typeerror(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    """Guards the historical bug: `WorkerRuntime(config)` positionally, with
-    no `loop_factory`/`serving_client`, raised TypeError at runtime.
-
-    `worker/__main__.py` no longer passes `loop_factory` itself (composing
-    the real per-camera ingest loop is `WorkerRuntime`'s own responsibility);
-    this test supplies one explicitly as a fake seam, alongside the other
-    collaborators, so it keeps proving "real WorkerRuntime + fake
-    collaborators construct without TypeError" independent of whether
-    `loop_factory` is mandatory or has a real default at construction time.
-    """
+    """The CLI constructs the flow runtime with its fake serving collaborator."""
     config_path = _write_config(tmp_path)
     constructed: list[WorkerRuntime] = []
     real_init = WorkerRuntime.__init__
     fake_serving = _FakeServingClient()
 
     def _spy_init(self: WorkerRuntime, *args: object, **kwargs: object) -> None:
-        kwargs.setdefault("loop_factory", _fake_loop_factory)
         real_init(self, *args, **kwargs)
         constructed.append(self)
 
     monkeypatch.setattr(WorkerRuntime, "__init__", _spy_init)
     monkeypatch.setattr(WorkerRuntime, "run", lambda self: None)
-    monkeypatch.setattr(worker_main, "InProcessServingClient", lambda: fake_serving)
+    # The composition root selects the profile's model registry and passes it
+    # to the serving client (flow -> ORT bed, everything else -> the default).
+    monkeypatch.setattr(worker_main, "InProcessServingClient", lambda _registry=None: fake_serving)
 
     exit_code = worker_main.main(["--config", str(config_path)])
 
     assert exit_code == 0
     assert len(constructed) == 1
     runtime = constructed[0]
-    assert runtime._loop_factory is _fake_loop_factory  # noqa: SLF001
     assert runtime._serving is fake_serving  # noqa: SLF001
 
 

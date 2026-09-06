@@ -1,0 +1,7 @@
+image: nvcr.io/nvidia/deepstream@sha256:f6fa0247da9290979cbb05749e7da9435d089c93db7c4dcfe85ba2488b5f4994
+source: file:///opt/nvidia/deepstream/deepstream-9.1/samples/streams/sample_720p.mp4
+model_pt: /workspace/models/pose/yolo26n-pose.pt
+probe:
+  cameras: 13
+  fps: 15
+  callbacks: 19500

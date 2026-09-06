@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { bedZoneRecognitionFailureDetail, browseClipStorage, cameraDuplicateDetail, cameraProbeFailureDetail, createCamera, deleteClip, fetchCameraOverlay, fetchCameras, fetchClipArtifacts, fetchClips, fetchClipStorage, fetchDetectionSettings, fetchRuntimeSettings, fetchStatus, fetchSystem, getApiBase, getCameraSnapshotUrl, getCameraStreamUrl, loginDashboard, logoutDashboard, recognizeBedZone, saveClipStorageLocation, saveConnection, saveDetectionSettings, saveRuntimeSettings, setCameraOverlay, testCamera, testConnection, updateCamera, updateCameraDecodeBackend } from '@/shared/api/client';
+import { bedZoneRecognitionFailureDetail, browseClipStorage, cameraDuplicateDetail, cameraProbeFailureDetail, createCamera, fetchCameraOverlay, fetchCameras, fetchClipArtifacts, fetchClips, fetchClipStorage, fetchDetectionSettings, fetchRuntimeSettings, fetchStatus, fetchSystem, getApiBase, getCameraSnapshotUrl, getCameraStreamUrl, loginDashboard, logoutDashboard, recognizeBedZone, saveBedZone, saveClipStorageLocation, saveConnection, saveDetectionSettings, saveRuntimeSettings, setCameraOverlay, testCamera, testConnection, updateCamera, updateCameraDecodeBackend } from '@/shared/api/client';
 import { HttpError } from '@/shared/api/http';
 import type { DetectionSettings } from '@/shared/api/client';
 
@@ -39,21 +39,6 @@ describe('api client contracts', () => {
     }));
 
     await expect(load()).rejects.toThrow(/Invalid .* response/);
-  });
-
-  it('sends an encoded explicit clip-delete request and rejects invalid worker responses', async () => {
-    const fetchMock = vi.fn().mockResolvedValue({
-      ok: true, status: 202, json: async () => ({ clip_id: 'clip/a', status: 'PURGED' }),
-    });
-    vi.stubGlobal('fetch', fetchMock);
-
-    await expect(deleteClip('clip/a', 'clip/a')).resolves.toEqual({ clip_id: 'clip/a', status: 'PURGED' });
-    expect(fetchMock).toHaveBeenCalledWith('/api/v1/clips/clip%2Fa', expect.objectContaining({
-      method: 'DELETE', body: JSON.stringify({ confirm_clip_id: 'clip/a' }),
-    }));
-
-    fetchMock.mockResolvedValueOnce({ ok: true, status: 202, json: async () => ({ clip_id: 'clip-a', status: 'PENDING' }) });
-    await expect(deleteClip('clip-a', 'clip-a')).rejects.toThrow('Invalid clip deletion response');
   });
 
   it('keeps valid empty list envelopes as successful empty data', async () => {
@@ -238,41 +223,41 @@ describe('api client contracts', () => {
     expect(fetchMock).toHaveBeenCalledWith('/api/v1/cameras/cam-1/test', expect.objectContaining({ method: 'POST' }));
   });
 
-  it('fetches the current per-camera overlay mode', async () => {
+  it('fetches the current per-camera overlay selection', async () => {
     const fetchMock = vi.fn().mockResolvedValue({
       ok: true,
       status: 200,
-      json: async () => ({ mode: 'fall' }),
+      json: async () => ({ person: true, bed: false }),
     });
     vi.stubGlobal('fetch', fetchMock);
 
-    await expect(fetchCameraOverlay('cam/1')).resolves.toBe('fall');
+    await expect(fetchCameraOverlay('cam/1')).resolves.toEqual({ person: true, bed: false });
 
     expect(fetchMock).toHaveBeenCalledWith('/api/v1/streams/cam%2F1/pose', expect.objectContaining({ credentials: 'same-origin' }));
     expect(fetchMock.mock.calls[0]?.[1]?.method).toBeUndefined();
   });
 
-  it('posts the requested overlay mode and returns the confirmed value', async () => {
+  it('posts both overlay selections and returns the confirmed value', async () => {
     const fetchMock = vi.fn().mockResolvedValue({
       ok: true,
       status: 200,
-      json: async () => ({ mode: 'none' }),
+      json: async () => ({ person: false, bed: true }),
     });
     vi.stubGlobal('fetch', fetchMock);
 
-    await expect(setCameraOverlay('cam-1', 'none')).resolves.toBe('none');
+    await expect(setCameraOverlay('cam-1', { person: false, bed: true })).resolves.toEqual({ person: false, bed: true });
 
     expect(fetchMock).toHaveBeenCalledWith('/api/v1/streams/cam-1/pose', expect.objectContaining({
       method: 'POST',
-      body: JSON.stringify({ mode: 'none' }),
+      body: JSON.stringify({ person: false, bed: true }),
     }));
   });
 
-  it('rejects a contract-invalid overlay response', async () => {
+  it('rejects the retired mode-shaped overlay response', async () => {
     vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
       ok: true,
       status: 200,
-      json: async () => ({ mode: 'yes' }),
+      json: async () => ({ mode: 'legacy' }),
     }));
 
     await expect(fetchCameraOverlay('cam-1')).rejects.toThrow('Invalid overlay response');
@@ -365,13 +350,19 @@ describe('api client contracts', () => {
     expect(updated.decode_backend).toBe('nvdec');
   });
 
-  it('recognizes a bed zone via a POST to the camera-scoped endpoint', async () => {
+  it('preserves four recognition candidates and forwards confidence', async () => {
+    const regions = [
+      { id: 'bed-1', polygon: [[0, 0], [10, 0], [10, 10]], origin: 'model' },
+      { id: 'bed-2', polygon: [[20, 0], [30, 0], [30, 10]], origin: 'model' },
+      { id: 'bed-3', polygon: [[40, 0], [50, 0], [50, 10]], origin: 'model' },
+      { id: 'bed-4', polygon: [[60, 0], [70, 0], [70, 10]], origin: 'model' },
+    ];
     const fetchMock = vi.fn().mockResolvedValue({
       ok: true,
       status: 200,
       json: async () => ({
         bed_zone: {
-          polygon: [[0, 0], [10, 0], [10, 10], [0, 10]],
+          regions,
           image_width: 1920,
           image_height: 1080,
           recognized_at: '2026-08-02T00:00:00Z',
@@ -380,23 +371,82 @@ describe('api client contracts', () => {
     });
     vi.stubGlobal('fetch', fetchMock);
 
-    const bedZone = await recognizeBedZone('cam-1');
+    const bedZone = await recognizeBedZone('cam-1', 0.6);
 
     expect(fetchMock).toHaveBeenCalledWith('/api/v1/cameras/cam-1/bed-zone/recognize', expect.objectContaining({
       method: 'POST',
+      body: JSON.stringify({ confidence: 0.6 }),
     }));
     expect(bedZone).toEqual({
-      polygon: [[0, 0], [10, 0], [10, 10], [0, 10]],
+      regions,
       image_width: 1920,
       image_height: 1080,
       recognized_at: '2026-08-02T00:00:00Z',
     });
   });
 
-  it('rejects a malformed bed-zone recognition response', async () => {
-    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: true, status: 200, json: async () => ({ bed_zone: null }) }));
+  it.each([
+    ['null', { bed_zone: null }],
+    ['the old singleton polygon', {
+      bed_zone: {
+        polygon: [[0, 0], [10, 0], [10, 10]],
+        image_width: 1920,
+        image_height: 1080,
+        recognized_at: '2026-08-02T00:00:00Z',
+      },
+    }],
+    ['duplicate region ids', {
+      bed_zone: {
+        regions: [
+          { id: 'bed-1', polygon: [[0, 0], [10, 0], [10, 10]], origin: 'model' },
+          { id: 'bed-1', polygon: [[20, 0], [30, 0], [30, 10]], origin: 'model' },
+        ],
+        image_width: 1920,
+        image_height: 1080,
+        recognized_at: '2026-08-02T00:00:00Z',
+      },
+    }],
+  ])('rejects a recognition response containing %s', async (_case, response) => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: true, status: 200, json: async () => response }));
 
     await expect(recognizeBedZone('cam-1')).rejects.toThrow('Invalid bed-zone recognition response');
+  });
+
+  it('saves explicitly selected bed regions with a PUT and returns the persisted server shape', async () => {
+    const input = {
+      regions: [{ id: 'bed-1', polygon: [[0, 0], [10, 0], [10, 10]] as [number, number][], origin: 'manual' as const }],
+      image_width: 1920,
+      image_height: 1080,
+    };
+    const persisted = { ...input, recognized_at: '2026-08-02T00:00:00Z' };
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => ({ bed_zone: persisted }),
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    await expect(saveBedZone('cam/1', input)).resolves.toEqual(persisted);
+    expect(fetchMock).toHaveBeenCalledWith('/api/v1/cameras/cam%2F1/bed-zone', expect.objectContaining({
+      method: 'PUT',
+      body: JSON.stringify(input),
+    }));
+  });
+
+  it('clears bed regions with a PUT and returns null without optimistic geometry', async () => {
+    const input = { regions: [], image_width: 1920, image_height: 1080 };
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => ({ bed_zone: null }),
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    await expect(saveBedZone('cam-1', input)).resolves.toBeNull();
+    expect(fetchMock).toHaveBeenCalledWith('/api/v1/cameras/cam-1/bed-zone', expect.objectContaining({
+      method: 'PUT',
+      body: JSON.stringify(input),
+    }));
   });
 
   it('surfaces a 422 bed_not_found detail through bedZoneRecognitionFailureDetail, but not other errors', async () => {

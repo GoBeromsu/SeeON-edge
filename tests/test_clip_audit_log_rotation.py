@@ -27,9 +27,7 @@ def test_clip_list_records_sqlite_audit_without_jsonl(
     monkeypatch.delenv("API_BACKEND_CLIP_EVENTS_URL", raising=False)
     app = create_app(lifespan=no_lifespan)
     with TestClient(app) as client:
-        login = client.post(
-            "/api/v1/auth/session", json={"username": "admin", "password": "admin"}
-        )
+        login = client.post("/api/v1/auth/session", json={"username": "admin", "password": "admin"})
         assert login.status_code == 204
         listed = client.get("/api/v1/clips")
         audit = client.get("/api/v1/audit")

@@ -13,65 +13,25 @@ under test, not to nondeterministic extraction.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-
 from contracts.observation import (
     BedRegionCacheState,
     BedRegionDebugSnapshot,
     BoundingBox,
     FrameObservation,
 )
+from contracts.replay_trace import ReplayRow
+from worker.pipeline.perception import SceneState, build_decision_input, build_frame_observation
 from worker.pipeline.trace.models import AnalysisTrace
 from worker.types import DecisionInput
 
-_MAX_TRACKER_MISSES = 30
-
-
-@dataclass(slots=True)
-class _LiveTrackWindow:
-    """Deterministic replay of ``GreedyIouTracker.live_ids`` membership only.
-
-    The real tracker assigns ids from raw pixel IoU; replay does not have
-    (and must not need) pixel data. But every persisted ``TracePerson`` already
-    carries its assigned id, so only *liveness* (has this id been seen within
-    ``max_misses`` frames) needs to be replayed, not assignment.
-    """
-
-    max_misses: int = _MAX_TRACKER_MISSES
-    _misses: dict[int, int] | None = None
-
-    def __post_init__(self) -> None:
-        self._misses = {}
-
-    def update(self, seen_ids: frozenset[int]) -> tuple[int, ...]:
-        assert self._misses is not None
-        for track_id in seen_ids:
-            self._misses[track_id] = 0
-        for track_id in tuple(self._misses):
-            if track_id not in seen_ids:
-                self._misses[track_id] += 1
-                if self._misses[track_id] > self.max_misses:
-                    del self._misses[track_id]
-        return tuple(sorted(self._misses))
-
 
 def analysis_trace_to_decision_input(
-    trace: AnalysisTrace,
-    *,
-    live_track_ids: tuple[int, ...],
+    trace: AnalysisTrace, *, live_track_ids: tuple[int, ...]
 ) -> DecisionInput:
-    """Rebuild the exact ``DecisionInput`` a compiled decider originally saw.
-
-    Inverse of ``worker.pipeline.trace.capture.TraceCapture._analysis``: every
-    field it read off ``FrameObservation``/``DecisionInput`` is reconstructed
-    here from the persisted, image-free row. ``track_ids`` reconstructs
-    ``OptionalNumber(None, "tracker-unmatched")`` persons as unmatched (``None``)
-    entries, exactly mirroring the original capture.
-    """
+    """Rebuild an old persisted analysis frame for the surviving HTTP replay."""
     boxes = tuple(
         BoundingBox(*person.box, confidence=person.confidence) for person in trace.persons
     )
-    labels: tuple[object, ...] = ()
     poses = tuple(
         tuple((point.x, point.y, point.confidence) for point in person.keypoints)
         for person in trace.persons
@@ -80,14 +40,12 @@ def analysis_trace_to_decision_input(
         BoundingBox(*bed.box, confidence=bed.confidence, polygon=bed.polygon or None)
         for bed in trace.beds
     )
-    track_ids = tuple(replayed_track_id(person.track_id.value) for person in trace.persons)
     observation = FrameObservation(
-        detections=(boxes, labels),
+        detections=(boxes, ()),
         poses=poses,
         regions=(bed_boxes, ()),
-        track_ids=track_ids,
+        track_ids=tuple(replayed_track_id(person.track_id.value) for person in trace.persons),
     )
-    bed_region = BedRegionDebugSnapshot(source=BedRegionCacheState(trace.bed_region_provenance))
     return DecisionInput(
         observation=observation,
         frame_width=trace.frame_width,
@@ -95,12 +53,11 @@ def analysis_trace_to_decision_input(
         live_track_ids=live_track_ids,
         time_sec=trace.source_time.value,
         frame_index=trace.frame_key[3],
-        bed_region=bed_region,
+        bed_region=BedRegionDebugSnapshot(source=BedRegionCacheState(trace.bed_region_provenance)),
     )
 
 
 def replayed_track_id(value: int | float | None) -> int | None:
-    """Narrow a persisted numeric track_id back to its stored integer type."""
     if value is None:
         return None
     if isinstance(value, bool) or not isinstance(value, int):
@@ -108,4 +65,88 @@ def replayed_track_id(value: int | float | None) -> int | None:
     return value
 
 
-__all__ = ["_LiveTrackWindow", "analysis_trace_to_decision_input", "replayed_track_id"]
+def replay_trace_to_decision_input(
+    row: ReplayRow | None,
+    *,
+    pts_ns: int | None = None,
+    seq: int = 0,
+) -> DecisionInput:
+    """Build a decider input from one declared replay-trace-v2 frame.
+
+    V2 stores unit coordinates plus the real source frame size, so replay
+    projects every fact back into the exact pixel space production observed:
+    integer boxes and polygons for the bed rasteriser, float keypoints for the
+    pose head. pose+bbox56 rows therefore round-trip byte for byte.
+    """
+    width = row.frame_width if row is not None else 1
+    height = row.frame_height if row is not None else 1
+    boxes = []
+    poses = []
+    track_ids = []
+    live_ids = []
+    for track in row.tracks if row is not None else ():
+        if track.lifecycle not in ("new", "tracked"):
+            if track.lifecycle == "shadow":
+                live_ids.append(track.track_id)
+            continue
+        x1, y1, x2, y2, confidence = track.bbox
+        boxes.append(
+            BoundingBox(
+                round(x1 * width),
+                round(y1 * height),
+                round(x2 * width),
+                round(y2 * height),
+                confidence=confidence,
+            )
+        )
+        poses.append(tuple((x * width, y * height, score) for x, y, score in track.keypoints))
+        track_ids.append(track.track_id)
+        live_ids.append(track.track_id)
+    bed_boxes = ()
+    if row is not None and row.bed_polygon is not None:
+        assert row.bed_polygon_image_size is not None
+        polygon_width, polygon_height = row.bed_polygon_image_size
+        polygon = tuple(
+            (round(x * polygon_width), round(y * polygon_height)) for x, y in row.bed_polygon
+        )
+        xs, ys = zip(*polygon, strict=True)
+        bed_boxes = (
+            BoundingBox(
+                min(xs),
+                min(ys),
+                max(xs),
+                max(ys),
+                confidence=1.0,
+                polygon=polygon,
+            ),
+        )
+    observation = build_frame_observation(
+        boxes=tuple(boxes),
+        poses=tuple(poses),
+        bed_boxes=(),
+        track_ids=tuple(track_ids),
+    )
+    scene = SceneState(
+        camera_id=row.camera_id if row is not None else "replay",
+        persisted_bed_regions=bed_boxes,
+        bed_zone_image_width=polygon_width if bed_boxes else None,
+        bed_zone_image_height=polygon_height if bed_boxes else None,
+    )
+    return build_decision_input(
+        observation,
+        frame_width=width,
+        frame_height=height,
+        live_track_ids=tuple(sorted(live_ids)),
+        time_sec=(row.pts_ns if row is not None else pts_ns) / 1_000_000_000,
+        frame_index=seq,
+        scene_state=scene,
+        bed_scheduled=False,
+        bed_interval=1,
+    )
+
+
+__all__ = [
+    "analysis_trace_to_decision_input",
+    "replay_trace_to_decision_input",
+    "replayed_track_id",
+]

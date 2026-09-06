@@ -1,14 +1,12 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useState } from 'react';
 import { AccessibleDialog } from '@/shared/ui/AccessibleDialog';
 import { getEventTypeChipClassName, getEventTypeLabel } from '@/features/events/eventTypes';
 import { formatClipTimestamp, formatDuration, formatResolution } from '@/features/events/formatters';
 import { formatBytes } from '@/shared/format/bytes';
 import { AutoplayVideo } from '@/shared/ui/AutoplayVideo';
-import { deleteClip, fetchClipArtifacts } from '@/shared/api/client';
-import type { ClipArtifacts, ClipDeleteStatus, Clip } from '@/shared/api/types';
+import { fetchClipArtifacts } from '@/shared/api/client';
+import type { ClipArtifacts, Clip } from '@/shared/api/types';
 import type { ClipMetadataStatus } from '@/features/events/useClipMetadata';
-import { ClipSceneOverlay } from '@/features/events/ClipSceneOverlay';
-import { useClipScene } from '@/features/events/useClipScene';
 
 type Props = {
   clip: Clip | null;
@@ -17,133 +15,31 @@ type Props = {
   onClose: () => void;
   lookupStatus: ClipMetadataStatus;
   onRetry: () => void;
-  /** Fires when the operator submits an exact-match delete so the parent can stop metadata validation immediately. */
-  onDeleteStarted?: (clip: Clip) => void;
-  /** Fires only for accepted PURGED deletion. */
-  onDeleted: (clip: Clip) => void;
-  /** Fires when a started delete ends without PURGED (HELD/terminal/transport) so suppression can clear. */
-  onDeleteRejected?: (clip: Clip) => void;
 };
 type VideoMetadata = { duration: number; width: number; height: number };
 
 const artifactCopy = (state: string | null | undefined): string => ({ PENDING: '준비 중', AVAILABLE: '사용 가능', UNAVAILABLE: '사용 불가', CORRUPT: '손상됨', PURGED: '삭제됨' }[state ?? ''] ?? '확인 중');
 
-const DELETE_ACCEPTED_STATES = new Set<ClipDeleteStatus>(['PURGED']);
-
-const deleteStatusCopy = (deleteStatus: ClipDeleteStatus): string => ({
-  PURGED: '클립을 삭제했습니다.',
-  HELD: '다른 처리가 끝난 뒤 다시 시도하세요.',
-  MISSING: '클립을 찾을 수 없습니다.',
-  UNVERIFIABLE: '클립 상태를 확인할 수 없어 삭제하지 못했습니다.',
-  DELETE_FAILED: '클립 삭제에 실패했습니다. 잠시 후 다시 시도하세요.',
-  VERIFICATION_FAILED: '삭제 확인에 실패했습니다. 잠시 후 다시 시도하세요.',
-})[deleteStatus];
-
 /** Privacy-bounded evidence detail: only API-projected identities/states are shown, never paths or credentials. */
 export function ClipPlaybackModal({
-  clip, cameraLabel, open, onClose, lookupStatus, onRetry, onDeleteStarted, onDeleted, onDeleteRejected,
+  clip, cameraLabel, open, onClose, lookupStatus, onRetry,
 }: Props): JSX.Element | null {
   const [metadata, setMetadata] = useState<VideoMetadata | null>(null);
   const [artifacts, setArtifacts] = useState<ClipArtifacts | null>(null);
-  const [deleteDialogOpen, setDeleteDialogOpen] = useState(false);
-  const [confirmInput, setConfirmInput] = useState('');
-  const [deleteBusy, setDeleteBusy] = useState(false);
-  const [deleteStatus, setDeleteStatus] = useState<ClipDeleteStatus | null>(null);
-  const [deleteRequestFailed, setDeleteRequestFailed] = useState(false);
-  const [video, setVideo] = useState<HTMLVideoElement | null>(null);
-  const [mediaTimeMs, setMediaTimeMs] = useState(0);
-  const [showAnalysis, setShowAnalysis] = useState(true);
   const clipId = clip?.id;
-  // Guards a stale fetchClipArtifacts response that resolves after an accepted deletion from
-  // silently re-enabling playback (an old response for the same clip_id arriving late must never
-  // resurrect a clip the operator just deleted).
-  const deletedRef = useRef(false);
-  const generationRef = useRef(0);
-  const currentClipIdRef = useRef<string | undefined>(clipId);
-  currentClipIdRef.current = clipId;
-  const isDeleted = deleteStatus !== null && DELETE_ACCEPTED_STATES.has(deleteStatus);
-  const { scene, frame } = useClipScene(clip, open, mediaTimeMs);
 
   useEffect(() => {
-    const generation = ++generationRef.current;
-    setMetadata(null); setArtifacts(null);
-    setVideo(null); setMediaTimeMs(0); setShowAnalysis(true);
-    setDeleteDialogOpen(false); setConfirmInput(''); setDeleteBusy(false); setDeleteStatus(null); setDeleteRequestFailed(false);
-    deletedRef.current = false;
+    setMetadata(null);
+    setArtifacts(null);
     if (!clipId || !open) return;
+    let active = true;
     void fetchClipArtifacts(clipId).then((next) => {
-      if (generationRef.current !== generation || deletedRef.current) return;
-      setArtifacts(next);
-    }).catch(() => { if (generationRef.current === generation && !deletedRef.current) setArtifacts(null); });
+      if (active) setArtifacts(next);
+    }).catch(() => {
+      if (active) setArtifacts(null);
+    });
+    return () => { active = false; };
   }, [clipId, open]);
-
-  useEffect(() => {
-    if (!video || !open || !clipId) return;
-    let animationFrame: number | null = null;
-    let videoFrameCallback: number | null = null;
-    let cancelled = false;
-    const sync = (): void => { if (!cancelled) setMediaTimeMs(video.currentTime * 1000); };
-    type VideoFrameCallbackVideo = HTMLVideoElement & {
-      requestVideoFrameCallback?: (callback: () => void) => number;
-      cancelVideoFrameCallback?: (handle: number) => void;
-    };
-    const frameVideo = video as VideoFrameCallbackVideo;
-    if (frameVideo.requestVideoFrameCallback) {
-      const advance = (): void => {
-        sync();
-        if (!cancelled) videoFrameCallback = frameVideo.requestVideoFrameCallback!(advance);
-      };
-      videoFrameCallback = frameVideo.requestVideoFrameCallback(advance);
-    } else {
-      const advance = (): void => {
-        sync();
-        if (!cancelled) animationFrame = requestAnimationFrame(advance);
-      };
-      const onTimeUpdate = (): void => {
-        if (animationFrame === null) animationFrame = requestAnimationFrame(advance);
-      };
-      video.addEventListener('timeupdate', onTimeUpdate);
-      return () => {
-        cancelled = true;
-        video.removeEventListener('timeupdate', onTimeUpdate);
-        if (animationFrame !== null) cancelAnimationFrame(animationFrame);
-      };
-    }
-    return () => {
-      cancelled = true;
-      if (videoFrameCallback !== null) frameVideo.cancelVideoFrameCallback?.(videoFrameCallback);
-    };
-  }, [clipId, open, video]);
-
-  const confirmDelete = async (): Promise<void> => {
-    if (!clip || confirmInput !== clip.id || deleteBusy) return;
-    const requestedClip = clip;
-    const generation = generationRef.current;
-    setDeleteBusy(true);
-    setDeleteRequestFailed(false);
-    // Stop parent metadata validation before the worker responds; list convergence can drop the
-    // card while DELETE is in flight and must not issue a stale /metadata 404 for this clip.
-    onDeleteStarted?.(requestedClip);
-    try {
-      const result = await deleteClip(requestedClip.id, confirmInput);
-      if (generationRef.current !== generation || currentClipIdRef.current !== requestedClip.id) return;
-      setDeleteStatus(result.status);
-      setDeleteDialogOpen(false);
-      if (DELETE_ACCEPTED_STATES.has(result.status)) {
-        deletedRef.current = true;
-        onDeleted(requestedClip);
-      } else {
-        onDeleteRejected?.(requestedClip);
-      }
-    } catch {
-      if (generationRef.current === generation && currentClipIdRef.current === requestedClip.id) {
-        setDeleteRequestFailed(true);
-        onDeleteRejected?.(requestedClip);
-      }
-    } finally {
-      if (generationRef.current === generation && currentClipIdRef.current === requestedClip.id) setDeleteBusy(false);
-    }
-  };
 
   if (!clip) {
     if (!open || (lookupStatus !== 'loading' && lookupStatus !== 'error')) return null;
@@ -151,63 +47,12 @@ export function ClipPlaybackModal({
   }
   const title = `${getEventTypeLabel(clip.event_type)} · ${cameraLabel}`;
   const durationSeconds = clip.duration_s ?? (clip.video_available ? metadata?.duration ?? null : null);
-  const analysisAvailable = clip.scene_available;
-  return <AccessibleDialog open={open} title={title} onClose={() => { if (!deleteDialogOpen && !deleteBusy) onClose(); }} size="xl" initialFocus="heading">
+  return <AccessibleDialog open={open} title={title} onClose={onClose} size="xl" initialFocus="heading">
     <span className={`mb-4 inline-flex items-center rounded-full border px-2.5 py-1 text-xs font-semibold ${getEventTypeChipClassName(clip.event_type)}`}>{getEventTypeLabel(clip.event_type)}</span>
-    <div className="flex flex-wrap items-center justify-end gap-2">
-      {analysisAvailable ? <label className="inline-flex items-center gap-2 text-sm"><input type="checkbox" checked={showAnalysis} onChange={(event) => setShowAnalysis(event.target.checked)} />분석 표시</label> : null}
-      {!isDeleted ? (
-        <button
-          type="button"
-          className="inline-flex h-9 items-center justify-center rounded-control border border-destructive px-3 text-sm font-semibold text-destructive disabled:opacity-60"
-          disabled={deleteBusy}
-          onClick={() => { setDeleteRequestFailed(false); setDeleteDialogOpen(true); }}
-        >
-          클립 삭제
-        </button>
-      ) : null}
-    </div>
-    {deleteStatus !== null ? (
-      <p className={`mt-3 text-sm ${isDeleted ? 'text-status-pendingFg' : 'text-destructive'}`} role={isDeleted ? 'status' : 'alert'} data-testid="clip-delete-status">
-        {deleteStatusCopy(deleteStatus)}
-      </p>
-    ) : null}
-    {deleteRequestFailed ? <p className="mt-3 text-sm text-destructive" role="alert">클립 삭제 요청을 보내지 못했습니다. 연결을 확인한 뒤 다시 시도하세요.</p> : null}
-    {isDeleted || artifacts ? (
-      <p className="mt-3 text-sm text-muted-foreground" role="status" data-testid="clip-artifact-status">원본 {artifactCopy(artifacts?.clean)}{artifacts?.snapshot ? ` · 스냅샷 ${artifactCopy(artifacts.snapshot)}` : ''}</p>
+    {artifacts ? (
+      <p className="mt-3 text-sm text-muted-foreground" role="status" data-testid="clip-artifact-status">원본 {artifactCopy(artifacts.clean)}{artifacts.snapshot ? ` · 스냅샷 ${artifactCopy(artifacts.snapshot)}` : ''}</p>
     ) : <p className="mt-3 text-sm text-muted-foreground" data-testid="clip-artifact-status">증거 상태를 확인하지 못했습니다.</p>}
-    <div className="event-media-frame relative mt-4">{!isDeleted && clip.video_available ? <><AutoplayVideo key={clip.video_path} src={clip.video_path} className="h-full w-full" onLoadedMetadata={(nextVideo) => { setVideo(nextVideo); setMetadata({ duration: nextVideo.duration, width: nextVideo.videoWidth, height: nextVideo.videoHeight }); }} />{showAnalysis && scene ? <ClipSceneOverlay scene={scene} frame={frame} /> : null}</> : <div className="event-media-unavailable h-full px-4 text-center text-sm" data-testid="clip-modal-unavailable">{isDeleted ? '이 클립은 삭제되어 재생할 수 없습니다.' : (clip.video_error ?? '저장된 영상을 사용할 수 없습니다.')}</div>}</div>
-    <dl className="mt-4 grid grid-cols-2 gap-x-4 gap-y-2 text-sm"><dt className="text-muted-foreground">카메라</dt><dd className="text-right">{cameraLabel}</dd><dt className="text-muted-foreground">시간</dt><dd className="text-right tabular-nums">{formatClipTimestamp(clip.created_at)}</dd><dt className="text-muted-foreground">길이</dt><dd className="text-right tabular-nums">{durationSeconds !== null ? formatDuration(durationSeconds) : '-'}</dd><dt className="text-muted-foreground">해상도</dt><dd className="text-right tabular-nums">{clip.video_available ? formatResolution(metadata?.width ?? null, metadata?.height ?? null) : '-'}</dd>{clip.size_bytes !== null && clip.size_bytes !== undefined ? <><dt className="text-muted-foreground">크기</dt><dd className="text-right tabular-nums">{formatBytes(clip.size_bytes)}</dd></> : null}</dl>
-    <AccessibleDialog
-      open={deleteDialogOpen}
-      title="클립 삭제 확인"
-      onClose={() => { if (!deleteBusy) setDeleteDialogOpen(false); }}
-    >
-      <p className="text-sm text-foreground">이 작업은 되돌릴 수 없습니다. 삭제를 확인하려면 아래 클립 ID를 정확히 입력하세요.</p>
-      <p className="mt-2 break-all rounded-control bg-muted px-3 py-2 text-sm font-mono" data-testid="delete-confirm-clip-id">{clip.id}</p>
-      <label className="mt-3 block text-sm" htmlFor="delete-confirm-input">클립 ID 확인</label>
-      <input
-        id="delete-confirm-input"
-        type="text"
-        className="mt-1 w-full rounded-control border border-border bg-background px-3 py-2 text-sm"
-        value={confirmInput}
-        disabled={deleteBusy}
-        autoComplete="off"
-        spellCheck={false}
-        onChange={(event) => setConfirmInput(event.target.value)}
-      />
-      {deleteRequestFailed ? <p className="mt-2 text-sm text-destructive" role="alert">클립 삭제 요청을 보내지 못했습니다. 다시 시도하세요.</p> : null}
-      <div className="dialog-actions mt-4">
-        <button type="button" className="dialog-secondary-action" disabled={deleteBusy} onClick={() => setDeleteDialogOpen(false)}>취소</button>
-        <button
-          type="button"
-          className="inline-flex h-9 items-center justify-center rounded-control bg-destructive px-4 text-sm font-semibold text-destructive-foreground disabled:opacity-60"
-          disabled={deleteBusy || confirmInput !== clip.id}
-          onClick={() => void confirmDelete()}
-        >
-          {deleteBusy ? '삭제 중...' : '삭제'}
-        </button>
-      </div>
-    </AccessibleDialog>
+    <div className="event-media-frame relative mt-4">{clip.video_available ? <AutoplayVideo key={clip.video_path} src={clip.video_path} className="h-full w-full" onLoadedMetadata={(nextVideo) => { setMetadata({ duration: nextVideo.duration, width: nextVideo.videoWidth, height: nextVideo.videoHeight }); }} /> : <div className="event-media-unavailable h-full px-4 text-center text-sm" data-testid="clip-modal-unavailable">{clip.video_error ?? '저장된 영상을 사용할 수 없습니다.'}</div>}</div>
+    <dl className="mt-4 grid grid-cols-2 gap-x-4 gap-y-2 text-sm"><dt className="text-muted-foreground">카메라</dt><dd className="text-right">{cameraLabel}</dd><dt className="text-muted-foreground">시간</dt><dd className="text-right tabular-nums">{formatClipTimestamp(clip.detected_at ?? clip.created_at)}</dd><dt className="text-muted-foreground">길이</dt><dd className="text-right tabular-nums">{durationSeconds !== null ? formatDuration(durationSeconds) : '-'}</dd><dt className="text-muted-foreground">해상도</dt><dd className="text-right tabular-nums">{clip.video_available ? formatResolution(metadata?.width ?? null, metadata?.height ?? null) : '-'}</dd>{clip.size_bytes !== null && clip.size_bytes !== undefined ? <><dt className="text-muted-foreground">크기</dt><dd className="text-right tabular-nums">{formatBytes(clip.size_bytes)}</dd></> : null}</dl>
   </AccessibleDialog>;
 }
