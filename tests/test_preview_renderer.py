@@ -134,3 +134,24 @@ def test_four_persisted_beds_are_all_drawn(renderer: PreviewRenderer, jpeg: byte
 def test_missing_font_fails_at_construction(tmp_path: Path) -> None:
     with pytest.raises(OSError):
         PreviewRenderer(tmp_path / "missing-font.ttc")
+
+
+def test_person_label_reads_confidence_bed_and_state_without_tracker_counter() -> None:
+    label = PreviewRenderer._person_label  # noqa: SLF001 - label text is the contract under test
+    assert label(0.84, None, None) == "사람 84%"
+    assert label(0.28, FallPreviewState(7, "normal", 0.08), None) == "사람 28% · 정상"
+    assert (
+        label(0.9, FallPreviewState(7, "suspected", 0.83), 2) == "사람 90% · 침대2 · 낙상 의심 0.83"
+    )
+    assert label(0.9, FallPreviewState(7, "suspected", None), None) == "사람 90% · 낙상 의심"
+    assert "#" not in label(0.5, FallPreviewState(7, "normal", None), 1)
+
+
+def test_bed_number_uses_the_box_foot_point_inside_a_saved_polygon() -> None:
+    beds = PreviewRenderer._bed_number_at  # noqa: SLF001
+    square = (((10, 10), (50, 10), (50, 50), (10, 50)),)
+    two = (((10, 10), (50, 10), (50, 50), (10, 50)), ((60, 10), (90, 10), (90, 50), (60, 50)))
+    assert beds((30, 30), square) == 1
+    assert beds((55, 30), square) is None
+    assert beds((70, 40), two) == 2
+    assert beds((30, 5), two) is None

@@ -11,6 +11,8 @@ import subprocess
 from collections.abc import Callable
 from pathlib import Path
 
+from worker.runtime.flow.onnx_shape import OnnxShapeError, input_dims
+
 
 class EngineBuildError(RuntimeError):
     pass
@@ -56,6 +58,84 @@ def _verify_served_infer_config(infer_config: Path, engine: Path, batch_size: in
         raise EngineBuildError(
             "served Flow infer config must name the requested engine and deployed batch"
         )
+
+
+def _verify_onnx_shape(
+    onnx: Path, infer_config: Path, batch_size: int
+) -> tuple[int | str | None, ...]:
+    try:
+        dims = input_dims(onnx)
+    except OnnxShapeError as error:
+        raise EngineBuildError(str(error)) from error
+    if not dims:
+        raise EngineBuildError(f"ONNX input has no dimensions: {onnx}")
+    if batch_size > 1 and isinstance(dims[0], int):
+        raise EngineBuildError(
+            f"ONNX input has fixed batch dimension {dims[0]}; export it with "
+            "worker.tools.export_pose_onnx"
+        )
+    text = infer_config.read_text(encoding="utf-8")
+    infer_dims = re.findall(r"(?m)^infer-dims\s*=\s*(\d+)\s*;\s*(\d+)\s*;\s*(\d+)\s*$", text)
+    if infer_dims:
+        expected = tuple(int(value) for value in infer_dims[-1])
+        for index, value in enumerate(dims[1:4]):
+            if isinstance(value, int) and value != expected[index]:
+                raise EngineBuildError(
+                    f"ONNX input dimension {index + 1} is {value}, but served infer-dims is "
+                    f"{expected[0]};{expected[1]};{expected[2]}"
+                )
+    return dims
+
+
+def _engine_profile(
+    output: str,
+) -> tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...], tuple[int, ...]] | None:
+    block = re.search(r"\[FullDims Engine Info\](.*)", output, re.DOTALL)
+    if block is None:
+        return None
+
+    def dimensions(text: str) -> tuple[int, ...]:
+        return tuple(int(value) for value in text.split("x"))
+
+    input_line = re.search(
+        r"(?m)^\s*.*\bINPUT\b.*?\bmin:\s*(\d+(?:x\d+)*)\s+opt:\s*(\d+(?:x\d+)*)\s+Max:\s*(\d+(?:x\d+)*)",
+        block.group(1),
+    )
+    output_line = re.search(r"(?m)^\s*.*\bOUTPUT\b.*?(\d+(?:x\d+)*)\s+min:", block.group(1))
+    if input_line is None or output_line is None:
+        return None
+    return (
+        dimensions(input_line.group(1)),
+        dimensions(input_line.group(2)),
+        dimensions(input_line.group(3)),
+        dimensions(output_line.group(1)),
+    )
+
+
+def _verify_engine_profile(
+    output: str, dims: tuple[int | str | None, ...], batch_size: int
+) -> None:
+    profile = _engine_profile(output)
+    if profile is None:
+        raise EngineBuildError(f"nvinfer output lacks [FullDims Engine Info]:\n{output}")
+    min_dims, opt_dims, max_dims, output_dims = profile
+    if len(min_dims) != 4 or min_dims[0] != 1:
+        raise EngineBuildError(f"nvinfer profile has invalid input minimum:\n{output}")
+    for index, value in enumerate(dims[1:4], start=1):
+        if isinstance(value, int) and min_dims[index] != value:
+            raise EngineBuildError(
+                f"nvinfer profile does not match ONNX input dimensions:\n{output}"
+            )
+    expected_batch = (batch_size, *min_dims[1:])
+    if opt_dims != expected_batch or max_dims != expected_batch:
+        raise EngineBuildError(
+            f"nvinfer profile does not match requested batch and infer dimensions:\n{output}"
+        )
+    print(
+        "nvinfer profile: "
+        f"input min={'x'.join(map(str, min_dims))} opt={'x'.join(map(str, opt_dims))} "
+        f"max={'x'.join(map(str, max_dims))} output={'x'.join(map(str, output_dims))}"
+    )
 
 
 def identity_for(
@@ -147,6 +227,7 @@ def build_engine(
     if served_infer_config is not None:
         _render_infer_config(infer_config, served_infer_config, engine, batch_size)
     _verify_served_infer_config(active_infer_config, engine, batch_size)
+    dims = _verify_onnx_shape(onnx, active_infer_config, batch_size)
     if engine.exists() and identity_path.exists() and not force:
         existing = json.loads(identity_path.read_text(encoding="utf-8"))
         if isinstance(existing, dict) and existing == identity_for(
@@ -163,10 +244,6 @@ def build_engine(
         # A changed deployment batch is a cache miss. Rebuild it before any
         # source can activate rather than booting against a stale engine.
     engine.parent.mkdir(parents=True, exist_ok=True)
-    # The batch comes from the nvinfer config, not from the ONNX graph: nvinfer
-    # builds an engine for the batch it is configured with even when the graph
-    # fixes its own batch dimension, which is how the deployed 13-source roster
-    # is served by a model exported at batch 1.
     engine.unlink(missing_ok=True)
     # nvinfer writes its engine beside the ONNX, and the deployment mounts the
     # model directory read-only, so build against a staged copy in the writable
@@ -204,6 +281,8 @@ def build_engine(
             )
         engine.write_bytes(produced.read_bytes())
         produced.unlink()
+    output = f"{result.stdout}{result.stderr}"
+    _verify_engine_profile(output, dims, batch_size)
     shutil.rmtree(build_dir, ignore_errors=True)
     identity = identity_for(
         engine=engine,

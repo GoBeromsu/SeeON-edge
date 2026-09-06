@@ -10,18 +10,38 @@ from onnx import TensorProto, helper
 from worker.tools.edge_engine_build import EngineBuildError, build_engine, sha256
 
 
-def _write_onnx(path: Path, *, input_name: str = "frames") -> None:
+def _write_onnx(
+    path: Path, *, input_name: str = "frames", dims: list[int | str] | None = None
+) -> None:
     # A loadable graph, not just a signature: the build tool reads the input
     # through onnxruntime, which refuses a model with no nodes.
     graph = helper.make_graph(
         [helper.make_node("Identity", [input_name], ["output0"])],
         "pose",
-        [helper.make_tensor_value_info(input_name, TensorProto.FLOAT, ["batch", 3, 640, 640])],
-        [helper.make_tensor_value_info("output0", TensorProto.FLOAT, ["batch", 3, 640, 640])],
+        [
+            helper.make_tensor_value_info(
+                input_name, TensorProto.FLOAT, dims or ["batch", 3, 640, 640]
+            )
+        ],
+        [
+            helper.make_tensor_value_info(
+                "output0", TensorProto.FLOAT, dims or ["batch", 3, 640, 640]
+            )
+        ],
     )
     model = helper.make_model(graph, opset_imports=[helper.make_opsetid("", 13)])
     model.ir_version = 9
     onnx.save(model, path)
+
+
+def _engine_info(batch_size: int, *, opt: int | None = None, maximum: int | None = None) -> str:
+    return (
+        "[FullDims Engine Info]\n"
+        "0 INPUT kFLOAT images 3x640x640 "
+        f"min: 1x3x640x640 opt: {opt or batch_size}x3x640x640 "
+        f"Max: {maximum or batch_size}x3x640x640\n"
+        "1 OUTPUT kFLOAT output0 300x57 min: 0 opt: 0 Max: 0\n"
+    )
 
 
 def test_build_writes_identity(tmp_path: Path) -> None:
@@ -40,7 +60,7 @@ def test_build_writes_identity(tmp_path: Path) -> None:
 
     def run(command: list[str], **_: object) -> CompletedProcess[str]:
         engine.write_bytes(b"engine")
-        return CompletedProcess(command, 0, "", "")
+        return CompletedProcess(command, 0, _engine_info(14), "")
 
     identity = build_engine(
         onnx=onnx_path,
@@ -59,6 +79,16 @@ def test_build_writes_identity(tmp_path: Path) -> None:
     assert identity["batch_size"] == "14"
     assert identity["tracker_library_sha256"] == sha256(tracker_library)
     assert (tmp_path / "identity.json").is_file()
+    assert set(identity) == {
+        "engine_sha256",
+        "onnx_sha256",
+        "parser_lib_sha256",
+        "infer_config_sha256",
+        "tracker_config_sha256",
+        "tracker_library_sha256",
+        "image_digest",
+        "batch_size",
+    }
 
 
 def test_a_second_run_against_a_populated_cache_verifies_instead_of_building(
@@ -83,7 +113,7 @@ def test_a_second_run_against_a_populated_cache_verifies_instead_of_building(
         assert not engine.exists(), "nvinfer must rebuild rather than deserialize a stale engine"
         builds.append(command)
         engine.write_bytes(b"engine")
-        return CompletedProcess(command, 0, "", "")
+        return CompletedProcess(command, 0, _engine_info(14), "")
 
     def build() -> dict[str, str]:
         return build_engine(
@@ -124,7 +154,10 @@ def test_nvinfer_is_invoked_for_the_declared_batch_and_cached_by_batch(tmp_path:
         assert not engine.exists(), "nvinfer must rebuild rather than deserialize a stale engine"
         builds.append(command)
         engine.write_bytes(b"engine")
-        return CompletedProcess(command, 0, "", "")
+        batch = int(
+            next(part.split("=", 1)[1] for part in command if part.startswith("batch-size="))
+        )
+        return CompletedProcess(command, 0, _engine_info(batch), "")
 
     kwargs = {
         "onnx": onnx_path,
@@ -242,7 +275,7 @@ def test_the_engine_nvinfer_writes_beside_the_onnx_is_adopted(tmp_path: Path) ->
             if line.startswith("onnx-file=")
         )
         Path(f"{named}_b1_gpu0_fp16.engine").write_bytes(b"nvinfer-built-engine")
-        return CompletedProcess(command, 0, "", "")
+        return CompletedProcess(command, 0, _engine_info(1), "")
 
     identity = _build_against(tmp_path, onnx_path, batch_size=1, run=run, engine=engine)
 
@@ -277,10 +310,111 @@ def test_the_build_never_writes_into_the_model_directory(tmp_path: Path) -> None
             line.split("=", 1)[1] for line in text.splitlines() if line.startswith("onnx-file=")
         )
         Path(f"{named}_b1_gpu0_fp16.engine").write_bytes(b"engine")
-        return CompletedProcess(command, 0, "", "")
+        return CompletedProcess(command, 0, _engine_info(1), "")
 
     identity = _build_against(tmp_path, onnx_path, batch_size=1, run=run, engine=engine)
 
     assert {entry.name for entry in models.iterdir()} == before
     assert engine.read_bytes() == b"engine"
     assert identity["onnx_sha256"] == sha256(onnx_path)
+
+
+def test_fixed_batch_onnx_is_refused_before_engine_or_identity_write(tmp_path: Path) -> None:
+    onnx_path = tmp_path / "model.onnx"
+    _write_onnx(onnx_path, dims=[1, 3, 640, 640])
+
+    with pytest.raises(EngineBuildError, match=r"fixed batch dimension 1.*export_pose_onnx"):
+        _build_against(
+            tmp_path,
+            onnx_path,
+            batch_size=13,
+            run=lambda command, **_: CompletedProcess(command, 0, _engine_info(13), ""),
+        )
+    assert not (tmp_path / "model.engine").exists()
+    assert not (tmp_path / "identity.json").exists()
+
+
+def test_fixed_batch_onnx_is_refused_even_when_cache_exists(tmp_path: Path) -> None:
+    onnx_path = tmp_path / "model.onnx"
+    _write_onnx(onnx_path)
+    engine = tmp_path / "model.engine"
+
+    def build_run(command, **_kwargs):
+        engine.write_bytes(b"engine")
+        return CompletedProcess(command, 0, _engine_info(13), "")
+
+    _build_against(
+        tmp_path,
+        onnx_path,
+        batch_size=13,
+        engine=engine,
+        run=build_run,
+    )
+    _write_onnx(onnx_path, dims=[1, 3, 640, 640])
+
+    with pytest.raises(EngineBuildError, match="fixed batch dimension 1"):
+        _build_against(
+            tmp_path,
+            onnx_path,
+            batch_size=13,
+            engine=engine,
+            run=lambda *_args, **_kwargs: pytest.fail("cache must not be accepted"),
+        )
+
+
+def test_fixed_batch_onnx_builds_at_batch_one(tmp_path: Path) -> None:
+    onnx_path = tmp_path / "model.onnx"
+    _write_onnx(onnx_path, dims=[1, 3, 640, 640])
+
+    def run(command, **_kwargs):
+        (tmp_path / "model.engine").write_bytes(b"engine")
+        return CompletedProcess(command, 0, _engine_info(1), "")
+
+    identity = _build_against(
+        tmp_path,
+        onnx_path,
+        batch_size=1,
+        run=run,
+    )
+    assert identity["batch_size"] == "1"
+
+
+def test_symbolic_spatial_onnx_builds_at_batch_thirteen(tmp_path: Path) -> None:
+    onnx_path = tmp_path / "model.onnx"
+    _write_onnx(onnx_path, dims=["batch", 3, "height", "width"])
+
+    def run(command, **_kwargs):
+        (tmp_path / "model.engine").write_bytes(b"engine")
+        return CompletedProcess(command, 0, _engine_info(13), "")
+
+    identity = _build_against(
+        tmp_path,
+        onnx_path,
+        batch_size=13,
+        run=run,
+    )
+    assert identity["batch_size"] == "13"
+
+
+def test_build_refuses_missing_engine_profile_block(tmp_path: Path) -> None:
+    onnx_path = tmp_path / "model.onnx"
+    _write_onnx(onnx_path)
+
+    def run(command, **_kwargs):
+        (tmp_path / "model.engine").write_bytes(b"engine")
+        return CompletedProcess(command, 0, "", "")
+
+    with pytest.raises(EngineBuildError, match=r"lacks \[FullDims Engine Info\]"):
+        _build_against(tmp_path, onnx_path, batch_size=13, run=run)
+
+
+def test_build_refuses_profile_with_wrong_optimum_or_maximum(tmp_path: Path) -> None:
+    onnx_path = tmp_path / "model.onnx"
+    _write_onnx(onnx_path)
+
+    def run(command, **_kwargs):
+        (tmp_path / "model.engine").write_bytes(b"engine")
+        return CompletedProcess(command, 0, _engine_info(13, opt=12, maximum=12), "")
+
+    with pytest.raises(EngineBuildError, match="does not match requested batch"):
+        _build_against(tmp_path, onnx_path, batch_size=13, run=run)

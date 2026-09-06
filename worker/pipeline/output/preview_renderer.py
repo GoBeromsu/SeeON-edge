@@ -67,7 +67,7 @@ class PreviewRenderer:
             assert bed_geometry is not None
             self._draw_bed(image, bed_geometry)
         if draw_people:
-            self._draw_people(image, tracks, fall_states)
+            self._draw_people(image, tracks, fall_states, bed_geometry)
 
         output = io.BytesIO()
         try:
@@ -115,9 +115,11 @@ class PreviewRenderer:
         image: Image.Image,
         tracks: tuple[PreviewTrack, ...],
         fall_states: Mapping[int, FallPreviewState],
+        bed_geometry: BedZoneGeometry | None,
     ) -> None:
         draw = ImageDraw.Draw(image)
         width, height = image.size
+        beds = self._scaled_beds(bed_geometry, image.size)
         for track in tracks:
             if track.source_width <= 0 or track.source_height <= 0:
                 continue
@@ -131,10 +133,11 @@ class PreviewRenderer:
             state = fall_states.get(track.track_id) if track.track_id is not None else None
             color = self._status_color(state)
             draw.rectangle((left, top, right, bottom), outline=color, width=3)
+            bed_number = self._bed_number_at(((left + right) // 2, bottom), beds)
             self._draw_label(
                 draw,
                 (left, top),
-                self._person_label(track.track_id, state),
+                self._person_label(box.confidence, state, bed_number),
                 color,
                 image.size,
             )
@@ -146,13 +149,69 @@ class PreviewRenderer:
         return cls._SUSPECTED_COLOR if state.status == "suspected" else cls._NORMAL_COLOR
 
     @staticmethod
-    def _person_label(track_id: int | None, state: FallPreviewState | None) -> str:
-        label = "사람" if track_id is None else f"사람 #{track_id}"
-        if state is None:
-            return label
-        status = "낙상 의심" if state.status == "suspected" else "정상"
-        probability = "" if state.probability is None else f" · {state.probability:.2f}"
-        return f"{label} · {status}{probability}"
+    def _person_label(
+        confidence: float, state: FallPreviewState | None, bed_number: int | None
+    ) -> str:
+        """Operator-facing label: detection confidence, bed, and fall state.
+
+        The NvDCF track counter is deliberately absent: it restarts per
+        stream, climbs on every re-acquisition, and tells an operator nothing.
+        The detector confidence does - a 25 % box on a bed rail reads as the
+        weak guess it is.
+        """
+        parts = [f"사람 {confidence:.0%}"]
+        if bed_number is not None:
+            parts.append(f"침대{bed_number}")
+        if state is not None:
+            if state.status == "suspected":
+                probability = "" if state.probability is None else f" {state.probability:.2f}"
+                parts.append(f"낙상 의심{probability}")
+            else:
+                parts.append("정상")
+        return " · ".join(parts)
+
+    def _scaled_beds(
+        self, geometry: BedZoneGeometry | None, image_size: tuple[int, int]
+    ) -> tuple[tuple[tuple[int, int], ...], ...]:
+        if not self._valid_bed_geometry(geometry):
+            return ()
+        assert geometry is not None
+        width, height = image_size
+        return tuple(
+            tuple(
+                (
+                    self._scaled_coordinate(x, width, geometry.image_width),
+                    self._scaled_coordinate(y, height, geometry.image_height),
+                )
+                for x, y in polygon
+            )
+            for polygon in geometry.polygons
+        )
+
+    @staticmethod
+    def _bed_number_at(
+        point: tuple[int, int], beds: tuple[tuple[tuple[int, int], ...], ...]
+    ) -> int | None:
+        """1-based index of the first saved bed polygon containing the point.
+
+        The point is the bottom-centre of the person box, which is where a
+        standing person touches the floor and where a lying person's box sits
+        inside the bed. Ray casting; no shapely in the runtime image.
+        """
+        px, py = point
+        for bed_number, polygon in enumerate(beds, start=1):
+            inside = False
+            count = len(polygon)
+            for index in range(count):
+                x1, y1 = polygon[index]
+                x2, y2 = polygon[(index + 1) % count]
+                if (y1 > py) != (y2 > py):
+                    crossing = x1 + (py - y1) * (x2 - x1) / (y2 - y1)
+                    if px < crossing:
+                        inside = not inside
+            if inside:
+                return bed_number
+        return None
 
     def _draw_label(
         self,

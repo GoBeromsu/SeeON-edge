@@ -70,6 +70,23 @@ by hand. The optional `HF_TOKEN` in `.env.edge.prod` reaches this service
 only; leave it empty for the public pins. There is no host `./models` bind
 mount any more.
 
+## Pose ONNX export and engine rebuild
+
+On a Torch host, export the pose ONNX with:
+
+```sh
+uv run python -m worker.tools.export_pose_onnx
+```
+
+Record the ONNX SHA-256 and its `.onnx.sha256` sidecar. Stage the artifact
+beside, never over, the previous ONNX. Build its engine into a **new** engine
+cache directory. Before deployment, run `docker inspect` on the current
+container and record its invocation, mounts, and image digest. Recreate the
+container rather than restarting it, with the explicit tuple: image digest,
+worker tree revision, models directory, and new engine directory. Roll back by
+recreating the container with the previous tuple. A boot refusal means
+re-export and rebuild, never delete the identity.
+
 ## Deploying an admitted model selection
 
 `/app/model-selection.json` is a deployment-owned, read-only file; it is never

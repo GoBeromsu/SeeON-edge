@@ -49,6 +49,7 @@ the sole composition root. The worker is an RTSP client only.
 | Vendor adapter | `worker/adapters/deepstream/` | Lazy DeepStream Service Maker integration and vendor-metadata conversion. |
 | Domain decisions | `worker/domains/` | CPU fall and bed-exit decisions. |
 | Engine build and gate | `worker/tools/edge_engine_build.py` | Builds the nvinfer engine ahead of source activation; boot rejects an engine that does not match the deployed batch. |
+| Pose ONNX export | `worker/tools/export_pose_onnx.py` | Exports the dynamic-batch pose ONNX used by the engine build gate. |
 | Evidence | `worker/pipeline/output/evidence/` | Smart record actor, clip publication, sealed sidecar, durable stager, delivery queue, and snapshot store. |
 | Event wire | `shared/events/` | Schemas and `edge_ingest_client.py` (events and clip receipts to the backend over relay HTTP). |
 | Dashboard | `front/src/app/App.tsx` | `AuthGate` + `Dashboard`. Pages: events, operations, settings. |

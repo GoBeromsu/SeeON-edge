@@ -151,6 +151,7 @@ services:
 
   # Engines are built after models arrive and before Flow source activation.
   # The worker verifies this cache at boot and never creates engines itself.
+  # The ONNX must carry a dynamic batch axis; edge-engine-build refuses a fixed axis.
   edge-engine-build:
     image: ${ML_WORKER_IMAGE:?ML_WORKER_IMAGE is required in edge prod}
     build: !reset null
