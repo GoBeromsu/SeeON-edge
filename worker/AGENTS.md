@@ -48,6 +48,8 @@ Read the nearest `AGENTS.md` before changing that package.
 | `domains/fall/` | window classifier and rising-edge latch |
 | `domains/bed_exit/` | assignment, grace, and hold |
 | `runtime/worker.py` | composition root |
+| `runtime/flow/onnx_shape.py` | shared ONNX input-shape inspection for engine build and Flow boot gates |
+| `tools/export_pose_onnx.py` | owned dynamic-batch pose export; imports ultralytics only inside tool functions |
 | `runtime/flow/` | Flow media plane, policy pump, lifecycle, and evidence handoff |
 | `runtime/bootstrap.py` | named stages and boot gate |
 | `tools/edge_engine_build.py` | nvinfer engine build and deployed-batch identity |

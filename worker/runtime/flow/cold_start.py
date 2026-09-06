@@ -9,6 +9,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Final
 
+from worker.runtime.flow.onnx_shape import OnnxShapeError, batch_axis_is_dynamic, input_dims
+
 
 class EngineIdentityError(RuntimeError):
     """A prebuilt Flow engine is absent or does not match its identity proof."""
@@ -157,4 +159,15 @@ def verify_flow_boot_inputs(
             "Flow engine batch "
             f"{identity['batch_size']} does not match configured batch {configured_batch}"
         )
+    if configured_batch > 1:
+        onnx_path = Path(env["ML_WORKER_FLOW_ONNX_PATH"])
+        try:
+            dims = input_dims(onnx_path)
+        except OnnxShapeError as error:
+            raise EngineIdentityError(str(error)) from error
+        if not batch_axis_is_dynamic(dims):
+            raise EngineIdentityError(
+                f"Flow ONNX has fixed batch dimension {dims[0]}; rebuild with edge-engine-build "
+                "after exporting through worker.tools.export_pose_onnx"
+            )
     return identity
