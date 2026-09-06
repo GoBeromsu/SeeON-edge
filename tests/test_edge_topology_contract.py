@@ -193,10 +193,7 @@ def test_edge_model_fetch_owns_the_models_volume_before_worker_start() -> None:
         "--dest",
         "/models",
     ]
-    assert _list_field(fetch, "volumes") == [
-        f"{MODELS_VOLUME}:/models:rw",
-        "/deployment/model-selection.json:/app/model-selection.json:ro",
-    ]
+    assert _list_field(fetch, "volumes") == [f"{MODELS_VOLUME}:/models:rw"]
     assert set(_mapping_field(fetch, "environment")) == {"HF_TOKEN"}, (
         "only the optional HF token crosses into the fetcher; no relay secret, no profile"
     )
@@ -205,7 +202,15 @@ def test_edge_model_fetch_owns_the_models_volume_before_worker_start() -> None:
 
     worker_volumes = _list_field(services["ml-worker"], "volumes")
     assert f"{MODELS_VOLUME}:/models:ro" in worker_volumes
-    assert "/deployment/model-selection.json:/app/model-selection.json:ro" in worker_volumes
+    # The selection document is an opt-in overlay: binding it unconditionally
+    # makes Docker create a directory on a host without one and the worker
+    # refuses to boot (#498).
+    assert not any("model-selection.json" in str(volume) for volume in worker_volumes)
+    overlay = yaml.safe_load(Path("compose.edge.model-selection.yaml").read_text(encoding="utf-8"))
+    for service_name in ("edge-model-fetch", "ml-worker"):
+        assert _list_field(overlay["services"][service_name], "volumes") == [
+            "/deployment/model-selection.json:/app/model-selection.json:ro"
+        ]
     assert not any(str(volume).startswith("./models") for volume in worker_volumes)
     engine_build = services[EDGE_ENGINE_BUILD_SERVICE]
     assert _list_field(engine_build, "volumes") == [
