@@ -71,7 +71,7 @@ class BedZoneSaveRequest(BaseModel):
 class BedZoneRecognizeRequest(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
 
-    confidence: float = Field(default=0.25, ge=0.05, le=0.95, allow_inf_nan=False)
+    confidence: float = Field(default=0.15, ge=0.05, le=0.95, allow_inf_nan=False)
 
 
 class BedZoneResponse(BaseModel):
@@ -93,7 +93,7 @@ def recognize_bed_zone(
     upstream_request = urllib.request.Request(
         _bed_zone_url(settings.worker_stream_origin, camera_id),
         data=json.dumps(
-            {"confidence": 0.25 if payload is None else payload.confidence},
+            {"confidence": 0.15 if payload is None else payload.confidence},
             separators=(",", ":"),
         ).encode("utf-8"),
         method="POST",

@@ -156,7 +156,7 @@ def test_recognition_uses_default_confidence_when_body_is_omitted(
     with TestClient(_app(tmp_path)) as client:
         _login(client)
         assert client.post(RECOGNIZE_PATH).status_code == 200
-    assert bodies == [{"confidence": 0.25}]
+    assert bodies == [{"confidence": 0.15}]
 
 
 @pytest.mark.parametrize("confidence", [0.049, 0.951, "NaN", "Infinity"])
