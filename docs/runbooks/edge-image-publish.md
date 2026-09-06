@@ -71,6 +71,12 @@ by hand. The optional `HF_TOKEN` in `.env.edge.prod` reaches this service
 only; leave it empty for the public pins. There is no host `./models` bind
 mount any more.
 
+Pull-request CI provisions only public model artifacts with
+`python -m worker.tools.fetch_models --public-only`; it deliberately treats all
+Hugging Face sources as private and reports each skipped path. The full fall
+bundle fetch runs only in the non-pull-request `test-private-bundle` job, where
+`HF_TOKEN` is scoped to that job and is never available to fork-authored code.
+
 ## Pose ONNX export and engine rebuild
 
 On a Torch host, export the pose ONNX with:

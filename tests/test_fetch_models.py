@@ -435,6 +435,37 @@ def test_fetch_all_downloads_verifies_and_is_idempotent(tmp_path: Path) -> None:
     assert len(source.calls) == 2, "second run must not touch the network"
 
 
+def test_fetch_all_public_only_skips_huggingface_artifacts_and_fetches_public_ones(
+    tmp_path: Path,
+) -> None:
+    manifest = parse_manifest(_manifest_dict())
+    source = _fake_for(manifest)
+    messages: list[str] = []
+
+    report = fetch_all(
+        manifest,
+        tmp_path,
+        source,
+        env={},
+        retry=_no_sleep_policy(),
+        public_only=True,
+        log=messages.append,
+    )
+
+    assert [result.path for result in report.results] == ["fall/lstm/metadata.upstream.json"]
+    assert (tmp_path / "fall/lstm/metadata.upstream.json").read_bytes() == UPSTREAM
+    assert not (tmp_path / "fall/lstm/model.pt").exists()
+    assert [url for url, _headers in source.calls] == [manifest.artifacts[1].url]
+    assert messages == [
+        "skipped (private source, --public-only): fall/lstm/model.pt",
+        (
+            f"downloading {manifest.artifacts[1].url} -> "
+            f"{tmp_path / 'fall/lstm/metadata.upstream.json'}"
+        ),
+        f"fetched          {_sha(UPSTREAM)}  fall/lstm/metadata.upstream.json",
+    ]
+
+
 def test_fetch_all_delivers_and_rehearses_selected_bundle_not_listed_in_manifest(
     tmp_path: Path,
 ) -> None:
@@ -944,6 +975,32 @@ def test_cli_check_mode_reports_missing_files_without_downloading(
     assert code == 1
     assert "would need downloading" in err
     assert not any(path.is_file() for path in (tmp_path / "models").rglob("*"))
+
+
+def test_cli_public_only_skips_private_artifacts_and_succeeds(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    manifest = parse_manifest(_manifest_dict())
+    manifest_path = tmp_path / "manifest.json"
+    manifest_path.write_text(json.dumps(_manifest_dict()), encoding="utf-8")
+    source = _fake_for(manifest)
+    monkeypatch.setattr(cli, "UrllibSource", lambda: source)
+
+    code = cli.main(
+        [
+            "--dest",
+            str(tmp_path / "models"),
+            "--manifest",
+            str(manifest_path),
+            "--public-only",
+        ],
+        env={},
+    )
+
+    assert code == 0
+    assert "skipped (private source, --public-only): fall/lstm/model.pt" in capsys.readouterr().err
+    assert not (tmp_path / "models" / "fall/lstm/model.pt").exists()
+    assert (tmp_path / "models" / "fall/lstm/metadata.upstream.json").read_bytes() == UPSTREAM
 
 
 def test_cli_rejects_malformed_manifest_with_usage_exit(

@@ -131,9 +131,7 @@ jobs:
       # cache is cross-branch, so caching model weights here is a supply-chain
       # vector (aa5e2c0) bought for roughly zero seconds.
       - name: Fetch packaged default LSTM model
-        env:
-          HF_TOKEN: ${{ secrets.HF_TOKEN }}
-        run: bash scripts/fetch-models.sh
+        run: bash scripts/fetch-models.sh --public-only
 
       # The marker filter is unchanged. `integration` is deselected because that
       # is what the marker has always claimed in pyproject.toml; its one test
@@ -178,6 +176,35 @@ jobs:
           uv run pytest -q -m "not real_stack and not heavy and not integration" \
             "${shard_files[@]}"
 
+  # The fall bundle is held in a private Hugging Face repository. This job is
+  # excluded from pull_request runs before it can receive the repository token.
+  test-private-bundle:
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      HF_TOKEN: ${{ secrets.HF_TOKEN }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+
+      - uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86 # v5
+        with:
+          version: "0.11.27"
+          enable-cache: false
+
+      - run: uv sync --frozen --group lint
+
+      - name: Fetch private fall bundle and public model artifacts
+        run: bash scripts/fetch-models.sh
+
+      - name: Verify private fall bundle
+        run: >-
+          uv run pytest -q tests/test_fetch_models.py
+          tests/test_worker_real_warmup_no_stub.py
+          tests/test_worker_fall_model_selection.py
+
   # Single required status check for branch protection. Every dependency's
   # result is asserted explicitly: `needs` alone would let a skipped or
   # cancelled job pass silently under `if: always()`.
@@ -185,7 +212,7 @@ jobs:
     runs-on: ubuntu-latest
     # Reads `needs` results and exits; it does no work of its own.
     timeout-minutes: 5
-    needs: [secrets, lint, test]
+    needs: [secrets, lint, test, test-private-bundle]
     if: always()
     steps:
       - name: Assert every required job succeeded
@@ -194,10 +221,14 @@ jobs:
           for entry in \
             "secrets=${{ needs.secrets.result }}" \
             "lint=${{ needs.lint.result }}" \
-            "test=${{ needs.test.result }}"; do
+            "test=${{ needs.test.result }}" \
+            "test-private-bundle=${{ needs.test-private-bundle.result }}"; do
             name="${entry%%=*}"
             result="${entry#*=}"
             echo "$name: $result"
+            if [ "$name" = "test-private-bundle" ] && [ "$result" = "skipped" ]; then
+              continue
+            fi
             if [ "$result" != "success" ]; then
               failed=1
             fi
