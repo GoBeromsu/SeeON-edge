@@ -141,7 +141,6 @@ services:
       HF_TOKEN: ${HF_TOKEN:-}
     volumes:
       - worker-models:/models:rw
-      - /deployment/model-selection.json:/app/model-selection.json:ro
     command:
       - python
       - -m
@@ -226,8 +225,11 @@ services:
     volumes:
       # Fixed image-adjacent model root, populated by edge-model-fetch.
       - worker-models:/models:ro
-      # Deployment owns selection, not the image.
-      - /deployment/model-selection.json:/app/model-selection.json:ro
+      # Deployment owns the fall-model selection, not the image: the read-only
+      # selection mount lives in compose.edge.model-selection.yaml and is added
+      # with `-f` only when a selection document exists on the host. Binding it
+      # unconditionally made Docker create /deployment/model-selection.json as a
+      # directory on a fresh host and the worker refused to boot (#498).
       # The deployed pose+bbox56 bundle is mounted read-only.
       - worker-models:/app/models:ro
       # Engines are prepared explicitly from the image-pinned manifest. Runtime
