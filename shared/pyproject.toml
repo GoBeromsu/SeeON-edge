@@ -1,7 +1,7 @@
 # Workspace member: shared library (shared.events). Pure stdlib + contracts (path).
 [project]
 name = "eldercare-shared"
-version = "0.1.0"
+version = "0.1.1"
 requires-python = ">=3.11"
 dependencies = []
 

@@ -1,6 +1,6 @@
 [project]
 name = "ml"
-version = "0.1.0"
+version = "0.1.1"
 description = "Fall/bed-exit ML: FastAPI backend + edge inference worker + React front. Training in eldercare-dataset-ops."
 readme = "README.md"
 license = "AGPL-3.0-only"
