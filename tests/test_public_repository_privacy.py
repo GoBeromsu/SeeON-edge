@@ -944,12 +944,8 @@ _PRIVATE_BUNDLE_STEPS = [
         "run": "bash scripts/fetch-models.sh",
     },
     {
-        "name": "Verify private fall bundle",
-        "run": (
-            "uv run pytest -q tests/test_fetch_models.py "
-            "tests/test_worker_real_warmup_no_stub.py "
-            "tests/test_worker_fall_model_selection.py"
-        ),
+        "name": "Run the full suite with the private fall bundle",
+        "run": 'uv run pytest -q -m "not real_stack and not heavy and not integration"',
     },
 ]
 

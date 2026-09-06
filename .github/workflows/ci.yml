@@ -199,11 +199,11 @@ jobs:
       - name: Fetch private fall bundle and public model artifacts
         run: bash scripts/fetch-models.sh
 
-      - name: Verify private fall bundle
-        run: >-
-          uv run pytest -q tests/test_fetch_models.py
-          tests/test_worker_real_warmup_no_stub.py
-          tests/test_worker_fall_model_selection.py
+      # The full suite, with the private bundle on disk: the pull_request
+      # matrix skips the bundle-dependent modules (tests/conftest.py), so this
+      # is the run that proves them.
+      - name: Run the full suite with the private fall bundle
+        run: uv run pytest -q -m "not real_stack and not heavy and not integration"
 
   # Single required status check for branch protection. Every dependency's
   # result is asserted explicitly: `needs` alone would let a skipped or
