@@ -4,7 +4,12 @@
     "published-pose-bbox56-fall-model": {
       "kind": "huggingface",
       "source_locator": "Berom0227/seeon-model-v0.1.0-pose-bbox56-proxy-research",
-      "revision": "988bacc666a3e5935b70e9f546aea38a6d7e5399"
+      "revision": "2c46e52e52fe9319e5bcd5833bb0d0a66c062fb7"
+    },
+    "seeon-edge-onnx": {
+      "kind": "github-release",
+      "source_locator": "SeniorAILab/SeeON-edge",
+      "tag": "models-onnx-2026-09-07"
     },
     "ultralytics-assets": {
       "kind": "github-release",
@@ -56,11 +61,18 @@
       "sha256": "7bb75a2932e1a1250dc900013b2c80b220de5e23f3ea568e05f1db21d0a757e3"
     },
     {
+      "path": "fall/pose-bbox56-gru/model.onnx",
+      "source": "published-pose-bbox56-fall-model",
+      "remote_path": "model.onnx",
+      "size": 95978,
+      "sha256": "258ae9d9460534e659bf97af4bc55a083c830fa190ff6c8ed347db6bdbf32163"
+    },
+    {
       "path": "fall/pose-bbox56-gru/bundle-manifest.json",
       "source": "published-pose-bbox56-fall-model",
       "remote_path": "bundle-manifest.json",
-      "size": 1074,
-      "sha256": "55108ac7e1bb427d0387c29b55caa5e2019e7616e4bcd05c615c4805e85f91d6"
+      "size": 1194,
+      "sha256": "a60ede83da712d9488c81222c5dbbd77174e7136813b86052ed1eeb2fd1913bc"
     },
     {
       "path": "fall/pose-bbox56-gru/evaluation-receipt.json",
@@ -77,6 +89,13 @@
       "sha256": "eb3bb8268828aeaf515cec23a4bfafd793944a86fe9af94ba7823609c14522a9"
     },
     {
+      "path": "pose/yolo26n-pose.onnx",
+      "source": "seeon-edge-onnx",
+      "remote_path": "yolo26n-pose.onnx",
+      "size": 11814854,
+      "sha256": "724ae1b1b4420cea85f98ac7c5ccabf3d56229f7c25390475e09b7056e3b9526"
+    },
+    {
       "path": "person/yolo26n.pt",
       "source": "ultralytics-assets",
       "remote_path": "yolo26n.pt",
@@ -89,6 +108,20 @@
       "remote_path": "yolo26l-seg.pt",
       "size": 63700037,
       "sha256": "636024306410afa1732692322fba57d22ea2b1c2f07613fcee131a93d7dd380c"
+    },
+    {
+      "path": "bed/yolo26l-seg.onnx",
+      "source": "seeon-edge-onnx",
+      "remote_path": "yolo26l-seg.onnx",
+      "size": 112770612,
+      "sha256": "de1c081df29936d6cf42329ec53b4d22f1e02f13bf1ea3b769907dc1d95a3d86"
+    },
+    {
+      "path": "bed/yolo26l-seg.onnx.sha256",
+      "source": "seeon-edge-onnx",
+      "remote_path": "yolo26l-seg.onnx.sha256",
+      "size": 65,
+      "sha256": "f4e452e510f1716bda69126fcda073f5177d2d0f09543027af2c86a5c1bf6b80"
     }
   ]
 }

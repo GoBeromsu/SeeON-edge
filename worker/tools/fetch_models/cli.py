@@ -63,6 +63,11 @@ def _build_parser() -> argparse.ArgumentParser:
         help="only verify what is on disk; exit 1 if anything is missing or mismatched",
     )
     parser.add_argument(
+        "--public-only",
+        action="store_true",
+        help="fetch only public-source artifacts; skip Hugging Face artifacts",
+    )
+    parser.add_argument(
         "--selection-path",
         type=Path,
         default=MODEL_SELECTION_PATH,
@@ -122,6 +127,7 @@ def main(argv: Sequence[str] | None = None, *, env: Mapping[str, str] | None = N
             force=args.force,
             log=log,
             selection_path=args.selection_path,
+            public_only=args.public_only,
         )
     except (SourceError, VerificationError, OSError) as exc:
         log(f"FAILED: {exc}")

@@ -40,7 +40,6 @@ def isolate_central_edge_database(
         "backend.app.features.cameras.store",
         "backend.app.features.clips.artifacts",
         "backend.app.features.clips.catalog",
-
         "backend.app.features.clips.router",
         "backend.app.features.clips.storage_location_store",
         "backend.app.features.evidence.router",
@@ -219,3 +218,44 @@ def _deterministic_file_modes() -> Iterator[None]:
         yield
     finally:
         os.umask(previous)
+
+
+# --- private fall bundle gate -------------------------------------------------
+# The packaged fall bundle (models/fall/pose-bbox56-gru) lives in a private
+# Hugging Face repository. A pull_request run of CI fetches with
+# `fetch_models --public-only` and therefore has no bundle on disk; the test
+# modules below read the real bundle and are skipped there with an explicit
+# reason. The `test-private-bundle` job (never on pull_request) provisions the
+# bundle and runs the full suite, so nothing is silently untested on main.
+_PRIVATE_BUNDLE_SENTINEL = Path("models/fall/pose-bbox56-gru/model.onnx")
+_PRIVATE_BUNDLE_MODULES = frozenset(
+    {
+        "test_alert_amplification_diagnostic_cli.py",
+        "test_episode_metric.py",
+        "test_fall_model_family_registry.py",
+        "test_fall_v2_contract_fixtures.py",
+        "test_fetch_models.py",
+        "test_golden_toolchain.py",
+        "test_local_env_defaults.py",
+        "test_ort_pose_bbox56_runner.py",
+        "test_pose_bbox56_bundle_runner.py",
+        "test_runtime_manifest.py",
+        "test_worker_config_lifecycle.py",
+        "test_worker_config_local_overrides.py",
+        "test_worker_fall_model_selection.py",
+        "test_worker_real_warmup_no_stub.py",
+        "test_worker_startup_config_resolution.py",
+    }
+)
+
+
+def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item]) -> None:
+    if _PRIVATE_BUNDLE_SENTINEL.is_file():
+        return
+    skip = pytest.mark.skip(
+        reason="private fall bundle is not provisioned (fetch_models --public-only); "
+        "the test-private-bundle CI job runs these"
+    )
+    for item in items:
+        if Path(str(item.fspath)).name in _PRIVATE_BUNDLE_MODULES:
+            item.add_marker(skip)

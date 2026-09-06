@@ -283,6 +283,14 @@ _SYNTHETIC_RTSP_FIXTURES = {
         "rtsps://operator:not-a-fixture@camera.example/stream",
         "rtsps://operator:secret@camera.example/stream",
     },
+    # Native-frame grab tests prove the credentialed URL never reaches a log or
+    # an error message; the fixture must therefore carry a (fake) credential.
+    Path("tests/test_rtsp_native_frame.py"): {
+        "rtsp://user:secret@camera.example/stream",
+    },
+    Path("tests/test_deepstream_adapter_plane.py"): {
+        "rtsp://user:secret@camera.example/native",
+    },
 }
 _TEXT_PATTERNS = {
     "private-key": re.compile(r"-----BEGIN (?:EC |OPENSSH |PGP |RSA )?PRIVATE KEY-----"),
@@ -904,7 +912,7 @@ _TEST_STEPS = [
     {"run": "uv sync --frozen --group lint"},
     {
         "name": "Fetch packaged default LSTM model",
-        "run": "bash scripts/fetch-models.sh",
+        "run": "bash scripts/fetch-models.sh --public-only",
     },
     {
         "name": "Run test shard ${{ matrix.shard }} of 4",
@@ -927,6 +935,20 @@ _TEST_STEPS = [
     },
 ]
 
+_PRIVATE_BUNDLE_STEPS = [
+    _CHECKOUT_STEP,
+    _SETUP_UV_STEP,
+    {"run": "uv sync --frozen --group lint"},
+    {
+        "name": "Fetch private fall bundle and public model artifacts",
+        "run": "bash scripts/fetch-models.sh",
+    },
+    {
+        "name": "Run the full suite with the private fall bundle",
+        "run": 'uv run pytest -q -m "not real_stack and not heavy and not integration"',
+    },
+]
+
 # Branch protection points at this one job. `needs` alone is not enough under
 # `if: always()`: a skipped or cancelled dependency would let it pass, so every
 # dependency's result is asserted explicitly.
@@ -938,10 +960,14 @@ _CI_OK_STEPS = [
             "for entry in \\\n"
             '  "secrets=${{ needs.secrets.result }}" \\\n'
             '  "lint=${{ needs.lint.result }}" \\\n'
-            '  "test=${{ needs.test.result }}"; do\n'
+            '  "test=${{ needs.test.result }}" \\\n'
+            '  "test-private-bundle=${{ needs.test-private-bundle.result }}"; do\n'
             '  name="${entry%%=*}"\n'
             '  result="${entry#*=}"\n'
             '  echo "$name: $result"\n'
+            '  if [ "$name" = "test-private-bundle" ] && [ "$result" = "skipped" ]; then\n'
+            "    continue\n"
+            "  fi\n"
             '  if [ "$result" != "success" ]; then\n'
             "    failed=1\n"
             "  fi\n"
@@ -978,10 +1004,17 @@ _EXPECTED_JOBS: dict[str, dict[str, object]] = {
         "env": {"SHARD_TOTAL": "4"},
         "steps": _TEST_STEPS,
     },
+    "test-private-bundle": {
+        "if": "github.event_name != 'pull_request'",
+        "runs-on": "ubuntu-latest",
+        "timeout-minutes": "30",
+        "env": {"HF_TOKEN": "${{ secrets.HF_TOKEN }}"},
+        "steps": _PRIVATE_BUNDLE_STEPS,
+    },
     "ci-ok": {
         "runs-on": "ubuntu-latest",
         "timeout-minutes": "5",
-        "needs": ["secrets", "lint", "test"],
+        "needs": ["secrets", "lint", "test", "test-private-bundle"],
         "if": "always()",
         "steps": _CI_OK_STEPS,
     },
@@ -1030,17 +1063,22 @@ def _assert_untrusted_ci_security(workflow: dict[str, object]) -> None:
             if "uses" in step:
                 assert _ACTION_PIN.match(str(step["uses"])), (name, step["uses"])
 
-    serialized = yaml.safe_dump(workflow)
+    private_bundle = jobs["test-private-bundle"]
+    assert _NOT_A_PULL_REQUEST_IF in str(private_bundle["if"])
+    assert "${{ secrets." not in yaml.safe_dump(jobs["test"])
+
+    serialized = yaml.safe_dump({key: value for key, value in workflow.items() if key != "jobs"})
     assert "eldercare-dataset-ops" not in serialized
     assert "DATASET_OPS_TOKEN" not in serialized
     assert ".dataset-ops" not in serialized
     assert "upload-artifact" not in serialized
     assert "actions/cache" not in serialized
-    # No job may read a repository secret: this workflow runs fork code. The
-    # `${{ secrets.` prefix is matched rather than a bare "secrets", because the
-    # gitleaks job is itself named `secrets` and `ci-ok` reads
-    # `needs.secrets.result`.
+    # Every PR-reachable job is secret-free. The private bundle job is excluded
+    # at job level before its HF_TOKEN environment can be evaluated.
     assert "${{ secrets." not in serialized
+    for job_name, job in jobs.items():
+        if _NOT_A_PULL_REQUEST_IF not in str(job.get("if", "")):
+            assert "${{ secrets." not in yaml.safe_dump(job), job_name
 
 
 @pytest.mark.parametrize("mode", [b"120000", b"160000"])
@@ -1763,8 +1801,7 @@ def test_pull_request_workflow_discovery_ignores_workflows_without_the_trigger()
 #: (which is what CI did before the shard) collects.
 _PYTEST_FILE_PATTERN = re.compile(r"(?:^|/)(?:test_[^/]*|[^/]*_test)\.py$")
 
-_SHARD_EXCLUSIONS = frozenset(
-)
+_SHARD_EXCLUSIONS = frozenset()
 
 _SHARD_TOTAL = 4
 

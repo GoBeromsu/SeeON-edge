@@ -258,6 +258,7 @@ def test_single_clip_metadata_resolves_every_historical_layout(
         "started_at": "2026-08-09T00:00:00Z",
         "duration_s": 30.0,
         "codec": "h264",
+        "playback_codec": "h264",
         "path": "/".join(part for part in (layout_prefix, "clips", clip_id) if part),
         "video_available": True,
         "video_error": None,

@@ -375,11 +375,15 @@ def fetch_all(
     log: Callable[[str], None] = lambda _message: None,
     sidecar_root: Path = SIDECAR_ROOT,
     selection_path: Path | None = None,
+    public_only: bool = False,
 ) -> FetchReport:
     """Fetch every artifact and sidecar; raise on the first failure."""
     report = FetchReport()
     root.mkdir(parents=True, exist_ok=True)
     for artifact in manifest.artifacts:
+        if public_only and artifact.source.kind == "huggingface":
+            log(f"skipped (private source, --public-only): {artifact.path}")
+            continue
         result = fetch_artifact(artifact, root, source, env=env, retry=retry, force=force, log=log)
         log(f"{result.outcome:16} {result.sha256}  {result.path}")
         report.results.append(result)
@@ -388,6 +392,14 @@ def fetch_all(
         log(f"{result.outcome:16} {result.sha256}  {result.path}")
         report.results.append(result)
     for bundle in manifest.bundles:
+        if public_only and any(
+            artifact.source.kind == "huggingface"
+            for artifact in (*bundle.members, *bundle.receipts)
+        ):
+            for artifact in (*bundle.members, *bundle.receipts):
+                if artifact.source.kind == "huggingface":
+                    log(f"skipped (private source, --public-only): {artifact.path}")
+            continue
         bundle_report = fetch_bundle(bundle, root, source, env=env, retry=retry, log=log)
         for result in bundle_report.results:
             log(f"{result.outcome:16} {result.sha256}  bundles/{bundle.sha256}/{result.path}")
@@ -404,9 +416,9 @@ def fetch_all(
     # runner refuses - so a file-exists check alone reported success on a
     # bundle the worker could not load.
     artifact_paths = {artifact.path for artifact in manifest.artifacts}
-    if _FALL_PT_PATH in artifact_paths:
+    if not public_only and _FALL_PT_PATH in artifact_paths:
         _require_loadable_fall_bundle(root)
-    if selection_path is not None and selection_path.is_file():
+    if not public_only and selection_path is not None and selection_path.is_file():
         selected_report = _fetch_selected_bundle(
             root,
             source,
