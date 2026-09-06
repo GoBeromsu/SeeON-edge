@@ -335,14 +335,18 @@ def test_committed_manifest_parses_and_pins_every_family_the_worker_loads() -> N
     assert {
         "fall/pose-bbox56-gru/bundle-manifest.json",
         "fall/pose-bbox56-gru/model.pt",
+        "fall/pose-bbox56-gru/model.onnx",
         "fall/pose-bbox56-gru/arch.json",
         "fall/pose-bbox56-gru/calibration.json",
         "fall/pose-bbox56-gru/evaluation-receipt.json",
         "fall/pose-bbox56-gru/metadata.yaml",
         "fall/pose-bbox56-gru/conformance/pose-bbox56-v1.json",
         "pose/yolo26n-pose.pt",
+        "pose/yolo26n-pose.onnx",
         "person/yolo26n.pt",
         "bed/yolo26l-seg.pt",
+        "bed/yolo26l-seg.onnx",
+        "bed/yolo26l-seg.onnx.sha256",
     } <= paths
     # The V2 bundle is self-verifying from its own bundle-manifest.json, so no
     # tracked sidecar copies exist any more.
@@ -351,7 +355,12 @@ def test_committed_manifest_parses_and_pins_every_family_the_worker_loads() -> N
     published_source = manifest.sources["published-pose-bbox56-fall-model"]
     assert (published_source.source_locator, published_source.ref) == (
         "Berom0227/seeon-model-v0.1.0-pose-bbox56-proxy-research",
-        "988bacc666a3e5935b70e9f546aea38a6d7e5399",
+        "2c46e52e52fe9319e5bcd5833bb0d0a66c062fb7",
+    )
+    onnx_source = manifest.sources["seeon-edge-onnx"]
+    assert (onnx_source.source_locator, onnx_source.ref) == (
+        "SeniorAILab/SeeON-edge",
+        "models-onnx-2026-09-07",
     )
 
 
