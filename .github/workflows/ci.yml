@@ -131,6 +131,8 @@ jobs:
       # cache is cross-branch, so caching model weights here is a supply-chain
       # vector (aa5e2c0) bought for roughly zero seconds.
       - name: Fetch packaged default LSTM model
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
         run: bash scripts/fetch-models.sh
 
       # The marker filter is unchanged. `integration` is deselected because that
