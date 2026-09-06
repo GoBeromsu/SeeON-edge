@@ -290,7 +290,7 @@ export function bedZoneRecognitionFailureDetail(error: unknown): BedZoneRecognit
  * Returns one-shot YOLO bed candidates from the camera's latest frame without saving them. 422
  * (bed_not_found) and 503 (worker/frame unavailable) are surfaced as thrown HttpErrors.
  */
-export async function recognizeBedZone(cameraId: string, confidence = 0.25): Promise<BedZone> {
+export async function recognizeBedZone(cameraId: string, confidence = 0.15): Promise<BedZone> {
   return normalizeBedZoneRecognitionResponse(
     await requestJson(`/cameras/${encodeURIComponent(cameraId)}/bed-zone/recognize`, {
       method: 'POST',

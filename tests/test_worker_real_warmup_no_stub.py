@@ -37,7 +37,7 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 _TASK_ARTIFACTS: dict[str, Path] = {
     "pose": REPO_ROOT / "models" / "pose" / "yolo26n-pose.pt",
     "person": REPO_ROOT / "models" / "person" / "yolo26n.pt",
-    "bed": REPO_ROOT / "models" / "bed" / "yolo26m-seg.pt",
+    "bed": REPO_ROOT / "models" / "bed" / "yolo26l-seg.pt",
 }
 
 

@@ -78,6 +78,12 @@ On a Torch host, export the pose ONNX with:
 uv run python -m worker.tools.export_pose_onnx
 ```
 
+Export the bed segmentation ONNX at its native-recognition input size:
+
+```sh
+uv run python -m worker.tools.export_bed_seg_onnx --imgsz 1280
+```
+
 Record the ONNX SHA-256 and its `.onnx.sha256` sidecar. Stage the artifact
 beside, never over, the previous ONNX. Build its engine into a **new** engine
 cache directory. Before deployment, run `docker inspect` on the current

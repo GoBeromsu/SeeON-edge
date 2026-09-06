@@ -42,6 +42,7 @@ Read the nearest `AGENTS.md` before changing that package.
 | `interfaces/` | media-plane, association, output, and serving seams |
 | `adapters/deepstream/` | lazy `pyservicemaker`/`pyds` integration, sources, and metadata conversion |
 | `adapters/model/` | model registry and CPU model helpers |
+| `adapters/media/` | bounded native RTSP frame capture for one-off CPU recognition |
 | `pipeline/decision/` | `IncidentManager`, admission |
 | `pipeline/output/` | event publication and evidence handoff |
 | `pipeline/output/evidence/` | smart record actor, clip publication, sealed sidecar, durable stager, delivery queue, snapshot store |

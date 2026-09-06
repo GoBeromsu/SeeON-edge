@@ -342,7 +342,7 @@ def test_committed_manifest_parses_and_pins_every_family_the_worker_loads() -> N
         "fall/pose-bbox56-gru/conformance/pose-bbox56-v1.json",
         "pose/yolo26n-pose.pt",
         "person/yolo26n.pt",
-        "bed/yolo26m-seg.pt",
+        "bed/yolo26l-seg.pt",
     } <= paths
     # The V2 bundle is self-verifying from its own bundle-manifest.json, so no
     # tracked sidecar copies exist any more.
@@ -362,7 +362,7 @@ def test_committed_manifest_digests_agree_with_runtime_pins() -> None:
     by_path = {artifact.path: artifact.sha256 for artifact in load_manifest().artifacts}
     assert by_path["pose/yolo26n-pose.pt"] == _COMPONENT_ARTIFACT_DIGESTS["pose"]
     assert by_path["person/yolo26n.pt"] == _COMPONENT_ARTIFACT_DIGESTS["person"]
-    assert by_path["bed/yolo26m-seg.pt"] == _COMPONENT_ARTIFACT_DIGESTS["bed"]
+    assert by_path["bed/yolo26l-seg.pt"] == _COMPONENT_ARTIFACT_DIGESTS["bed"]
 
 
 def test_bundled_sidecars_are_byte_identical_to_tracked_models_dir() -> None:

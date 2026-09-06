@@ -849,7 +849,7 @@ class WorkerRuntime:
                 timeout_s=DEFAULT_BED_ZONE_RECOGNITION_TIMEOUT_S,
             ),
             bed_zone_snapshot=(
-                self._flow_media_plane.clean_snapshot
+                self._flow_media_plane.native_snapshot
                 if self._flow_media_plane is not None
                 else None
             ),

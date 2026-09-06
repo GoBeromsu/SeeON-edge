@@ -26,10 +26,15 @@ _JPEG = cv2.imencode(".jpg", np.zeros((16, 16, 3), dtype=np.uint8))[1].tobytes()
 class _FlowPlane:
     def __init__(self, stop_error: Exception | None = None) -> None:
         self.stop_error = stop_error
-        self.snapshot_calls: list[str] = []
+        self.clean_snapshot_calls: list[str] = []
+        self.native_snapshot_calls: list[str] = []
 
     def clean_snapshot(self, camera_id: str) -> bytes:
-        self.snapshot_calls.append(camera_id)
+        self.clean_snapshot_calls.append(camera_id)
+        return _JPEG
+
+    def native_snapshot(self, camera_id: str) -> bytes:
+        self.native_snapshot_calls.append(camera_id)
         return _JPEG
 
     def stop(self) -> None:
@@ -163,6 +168,7 @@ def test_flow_live_view_injects_bed_recognizer_and_recognize_request_reaches_it(
     ) -> MjpegServer:
         captured["bed_zone_recognizer"] = bed_zone_recognizer
         captured["replay_fall_model"] = replay_fall_model
+        captured["bed_zone_snapshot"] = bed_zone_snapshot
         server = MjpegServer(
             store,
             config,
@@ -179,6 +185,7 @@ def test_flow_live_view_injects_bed_recognizer_and_recognize_request_reaches_it(
     runtime._start_live_view_server()  # noqa: SLF001
     assert captured["bed_zone_recognizer"] is not None
     assert captured["replay_fall_model"] is fall_model
+    assert captured["bed_zone_snapshot"] == plane.native_snapshot
     server = runtime._mjpeg_server  # noqa: SLF001
     assert server is not None
     try:
@@ -201,7 +208,8 @@ def test_flow_live_view_injects_bed_recognizer_and_recognize_request_reaches_it(
         region_ids = [candidate["id"] for candidate in response_payload["regions"]]
         assert len(region_ids) == len(set(region_ids))
         assert serving.create_calls == [("bed", "cpu")]
-        assert plane.snapshot_calls == ["camera-a"]
+        assert plane.native_snapshot_calls == ["camera-a"]
+        assert plane.clean_snapshot_calls == []
     finally:
         runtime.stop()
 

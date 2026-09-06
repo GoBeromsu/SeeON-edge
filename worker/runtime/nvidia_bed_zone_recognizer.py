@@ -19,7 +19,7 @@ from worker.pipeline.output.live_view_api import (
 )
 from worker.pipeline.output.mjpeg_server import BedZoneNotFoundError
 
-DEFAULT_BED_ZONE_RECOGNITION_TIMEOUT_S = 5.0
+DEFAULT_BED_ZONE_RECOGNITION_TIMEOUT_S = 20.0
 
 
 class BedZoneRecognizerUnavailableError(RuntimeError):

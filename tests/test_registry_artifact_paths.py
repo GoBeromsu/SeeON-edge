@@ -23,4 +23,4 @@ def test_default_yolo_runners_use_canonical_worker_artifact_paths() -> None:
     bed_default = inspect.signature(YoloBedSegRunner).parameters["model_path"].default
 
     assert Path(pose_default).parts[-3:] == ("models", "pose", "yolo26n-pose.pt")
-    assert Path(bed_default).parts[-3:] == ("models", "bed", "yolo26m-seg.pt")
+    assert Path(bed_default).parts[-3:] == ("models", "bed", "yolo26l-seg.pt")

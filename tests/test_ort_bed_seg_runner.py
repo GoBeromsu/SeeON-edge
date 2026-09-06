@@ -13,9 +13,15 @@ from worker.adapters.model.ort_bed_seg import OrtBedSegRunner
 
 
 class _Session:
-    def __init__(self, outputs: list[object]) -> None:
+    def __init__(
+        self, outputs: list[object], shape: tuple[object, ...] = (1, 3, 1280, 1280)
+    ) -> None:
         self.outputs = outputs
+        self._shape = shape
         self.feeds: list[dict[str, np.ndarray]] = []
+
+    def get_inputs(self) -> list[object]:
+        return [type("_Input", (), {"shape": self._shape})()]
 
     def run(self, output_names: object, input_feed: dict[str, np.ndarray]) -> list[object]:
         assert output_names is None
@@ -32,11 +38,11 @@ def _model(tmp_path: Path, payload: bytes = b"onnx") -> Path:
     return path
 
 
-def _outputs() -> list[object]:
+def _outputs(model_size: int = 1280) -> list[object]:
     rows = np.zeros((1, 1, 38), dtype=np.float32)
-    rows[0, 0, :6] = (0, 0, 640, 640, 0.9, 59)
+    rows[0, 0, :6] = (0, 0, model_size, model_size, 0.9, 59)
     rows[0, 0, 6] = 1.0
-    return [rows, np.ones((1, 32, 160, 160), dtype=np.float32)]
+    return [rows, np.ones((1, 32, model_size // 4, model_size // 4), dtype=np.float32)]
 
 
 def test_ort_runner_refuses_non_cpu_provider_and_tampered_artifact(tmp_path: Path) -> None:
@@ -61,7 +67,24 @@ def test_ort_runner_uses_rgb_letterbox_and_returns_bed_result(tmp_path: Path) ->
     assert runner.preprocessing_identity == "rgb24-to-bed-regions.v1"
     assert result.kind == "bed"
     assert next(iter(result.boxes))[:5] == (0, 0, 640, 320, np.float32(0.9))
-    assert session.feeds[0]["images"].shape == (1, 3, 640, 640)
+    assert session.feeds[0]["images"].shape == (1, 3, 1280, 1280)
+
+
+@pytest.mark.parametrize(
+    "shape, message",
+    [
+        ((1, 3, "height", "width"), "fixed, not symbolic"),
+        ((1, 3, 720, 1280), "positive and square"),
+    ],
+)
+def test_ort_runner_refuses_dynamic_or_non_square_input(
+    tmp_path: Path, shape: tuple[object, ...], message: str
+) -> None:
+    with pytest.raises(ModelLoadError, match=message):
+        OrtBedSegRunner(
+            str(_model(tmp_path)),
+            session_factory=lambda _path, _providers: _Session(_outputs(), shape),
+        )
 
 
 def test_ort_runner_import_does_not_import_torch_or_ultralytics() -> None:
@@ -82,7 +105,12 @@ def test_ort_runner_import_does_not_import_torch_or_ultralytics() -> None:
 
 
 @pytest.mark.skipif(
-    not Path("models/bed/yolo26m-seg.pt").is_file(), reason="real bed weights are unavailable"
+    not (
+        Path("models/bed/yolo26l-seg.pt").is_file()
+        and Path("models/bed/yolo26l-seg.onnx").is_file()
+        and Path("models/bed/yolo26l-seg.onnx.sha256").is_file()
+    ),
+    reason="real bed ONNX artifact is unavailable",
 )
 def test_real_weights_ort_matches_ultralytics_on_synthetic_image() -> None:
     from worker.adapters.model.yolo_bed_seg import YoloBedSegRunner

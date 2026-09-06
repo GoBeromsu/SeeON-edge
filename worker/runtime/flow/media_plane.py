@@ -102,6 +102,9 @@ class FlowMediaPlane:
     def clean_snapshot(self, camera_id: str) -> bytes:
         return self.plane.snapshot(camera_id, draw_objects=False)
 
+    def native_snapshot(self, camera_id: str) -> bytes:
+        return self.plane.native_snapshot(camera_id)
+
     def bind_live_frames(self, live_frames: LatestFrameStore) -> None:
         if self._live_frames is not None and self._live_frames is not live_frames:
             raise RuntimeError("Flow live-frame store is already bound")

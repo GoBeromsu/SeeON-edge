@@ -21,4 +21,4 @@ def pose_weight_path(size: str) -> Path:
 
 
 def bed_seg_weight_path() -> Path:
-    return BED_WEIGHTS_DIR / "yolo26m-seg.pt"
+    return BED_WEIGHTS_DIR / "yolo26l-seg.pt"

@@ -122,7 +122,10 @@ class _Flow:
 
 
 def _plane(
-    pipeline: _Pipeline | None = None, *, snapshot_branch_enabled: bool = False
+    pipeline: _Pipeline | None = None,
+    *,
+    snapshot_branch_enabled: bool = False,
+    native_frame_grabber: Callable[[str], bytes] | None = None,
 ) -> tuple[DeepStreamMediaPlane, _Pipeline]:
     pipeline = pipeline or _Pipeline()
     config = DeepStreamMediaPlaneConfig(
@@ -135,6 +138,9 @@ def _plane(
         360,
         snapshot_branch_enabled=snapshot_branch_enabled,
     )
+    kwargs: dict[str, object] = {}
+    if native_frame_grabber is not None:
+        kwargs["native_frame_grabber"] = native_frame_grabber
     plane = DeepStreamMediaPlane(
         config,
         metadata_slot=LatestMetadataSlot(),
@@ -147,6 +153,7 @@ def _plane(
         ),
         worker_boot_id="boot",
         child_instance_id="child",
+        **kwargs,
     )
     return plane, pipeline
 
@@ -179,6 +186,19 @@ def _admit_frame(plane: DeepStreamMediaPlane, *, pad_index: int = 0) -> None:
 def test_plane_satisfies_the_vendor_neutral_protocol() -> None:
     plane, _ = _plane()
     assert isinstance(plane, MediaPlane)
+
+
+def test_native_snapshot_uses_roster_uri_without_logging_it(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    uri = "rtsp://user:secret@camera.example/native"
+    captured: list[str] = []
+    plane, _ = _plane(native_frame_grabber=lambda value: captured.append(value) or _JPEG)
+    plane.add_source("camera", uri)
+
+    assert plane.native_snapshot("camera") == _JPEG
+    assert captured == [uri]
+    assert uri not in caplog.text
 
 
 def test_source_failure_rebuilds_the_binding_on_a_new_generation() -> None:

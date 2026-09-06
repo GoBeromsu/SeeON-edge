@@ -17,6 +17,7 @@ import numpy as np
 from worker.adapters.deepstream.metadata import convert_frame
 from worker.adapters.deepstream.sources import SourceTable
 from worker.adapters.deepstream.tensor_rows import rows_from_tensor
+from worker.adapters.media.rtsp_native_frame import grab_native_jpeg
 from worker.interfaces.media_plane import (
     EarlyStopUnsupported,
     MediaPlane,
@@ -134,6 +135,7 @@ class DeepStreamMediaPlane(MediaPlane):
         metadata_slot: MetadataSlot,
         flow_factory: FlowFactory = _default_flow_factory,
         snapshot_encoder: Callable[[str], bytes] | None = None,
+        native_frame_grabber: Callable[[str], bytes] = grab_native_jpeg,
         worker_boot_id: str | None = None,
         child_instance_id: str | None = None,
     ) -> None:
@@ -175,6 +177,7 @@ class DeepStreamMediaPlane(MediaPlane):
         self._flow_finished = threading.Event()
         self._probe = _Probe(self)
         self._snapshot_encoder = snapshot_encoder
+        self._native_frame_grabber = native_frame_grabber
         self._snapshot_lock = threading.Lock()
         self._snapshot_dir = config.record_dir / ".snapshots"
         self._snapshot_dir.mkdir(parents=True, exist_ok=True)
@@ -358,6 +361,12 @@ class DeepStreamMediaPlane(MediaPlane):
                 finally:
                     for snapshot_path in self._snapshot_dir.glob("snapshot-*.jpg"):
                         snapshot_path.unlink(missing_ok=True)
+
+    def native_snapshot(self, camera_id: str) -> bytes:
+        """Capture a native-resolution frame from the registered camera stream."""
+        if camera_id not in self._sources.camera_ids():
+            raise SnapshotUnavailable(f"unknown source has no OSD snapshot: {camera_id}")
+        return self._native_frame_grabber(self._sources.uri(camera_id))
 
     def start_recording(
         self,

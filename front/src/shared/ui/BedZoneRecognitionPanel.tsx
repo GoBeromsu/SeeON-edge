@@ -16,7 +16,7 @@ function ActionButton({ label, disabled, onClick, primary = false }: { label: st
 export function BedZoneRecognitionPanel({ cameraId, bedZone, onSaved, onCancel }: BedZoneRecognitionPanelProps): JSX.Element {
   const [regions, setRegions] = useState<BedRegion[]>([]);
   const [dimensions, setDimensions] = useState<{ width: number; height: number } | null>(null);
-  const [confidence, setConfidence] = useState(0.25);
+  const [confidence, setConfidence] = useState(0.15);
   const [pending, setPending] = useState<'recognize' | 'save' | null>(null);
   const [editorValid, setEditorValid] = useState(true);
   const [status, setStatus] = useState<string | null>(null);
@@ -29,7 +29,7 @@ export function BedZoneRecognitionPanel({ cameraId, bedZone, onSaved, onCancel }
     generationRef.current += 1;
     setRegions(initialBedZone?.regions.map((region) => ({ ...region, polygon: [...region.polygon] })) ?? []);
     setDimensions(initialBedZone ? { width: initialBedZone.image_width, height: initialBedZone.image_height } : null);
-    setConfidence(0.25);
+    setConfidence(0.15);
     setPending(null);
     setEditorValid(true);
     setStatus(null);
