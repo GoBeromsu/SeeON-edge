@@ -43,6 +43,7 @@ from worker.pipeline.output.evidence.manifest_models import (
     ReadyClipManifest,
     UnavailableClipManifest,
 )
+from worker.types.preview import OverlaySelection
 
 EVENT_ONE = EdgeEventId("00000000-0000-4000-8000-000000000001")
 START = datetime(2026, 7, 16, 1, 2, 3, tzinfo=UTC)
@@ -215,26 +216,41 @@ def test_probe_response_round_trips_worker_sanitizer_to_backend_reader() -> None
 
 
 def test_pose_overlay_body_round_trips_both_ways() -> None:
-    for mode in ("none", "bedexit", "fall"):
-        wire = json.dumps(live_view_api.pose_body(mode)).encode("utf-8")
-        assert streams_router._parse_pose_payload(wire).mode == mode  # noqa: SLF001
-        assert live_view_api.parse_pose_body(json.loads(json.dumps({"mode": mode}))) == mode
+    for selection in (
+        OverlaySelection(),
+        OverlaySelection(person=False, bed=True),
+        OverlaySelection(person=True, bed=False),
+        OverlaySelection(person=False, bed=False),
+    ):
+        body = live_view_api.overlay_selection_body(selection)
+        wire = json.dumps(body).encode("utf-8")
+        parsed = streams_router._parse_pose_payload(wire)  # noqa: SLF001
+        assert (parsed.person, parsed.bed) == (selection.person, selection.bed)
+        assert live_view_api.parse_overlay_selection(json.loads(json.dumps(body))) == selection
     with pytest.raises(HTTPException):
-        streams_router._parse_pose_payload(b'{"mode": "sideways"}')  # noqa: SLF001
-    assert live_view_api.parse_pose_body({"mode": "sideways"}) is None
-    assert live_view_api.parse_pose_body({"mode": "fall", "extra": 1}) is None
+        streams_router._parse_pose_payload(b'{"mode": "fall"}')  # noqa: SLF001
+    assert live_view_api.parse_overlay_selection({"mode": "fall"}) is None
+    assert live_view_api.parse_overlay_selection({"person": True, "bed": False, "extra": 1}) is None
 
 
 def test_bed_zone_response_round_trips_to_the_backend_parser() -> None:
     bed = live_view_api.BedZoneRecognizeResponse(
-        polygon=((1, 2), (3, 2), (3, 4)), image_width=16, image_height=9
+        regions=(
+            live_view_api.BedZoneRecognizeRegion(
+                id="bed-left",
+                polygon=((1, 2), (3, 2), (3, 4)),
+            ),
+            live_view_api.BedZoneRecognizeRegion(
+                id="bed-right",
+                polygon=((8, 2), (12, 2), (12, 6), (8, 6)),
+            ),
+        ),
+        image_width=16,
+        image_height=9,
     )
     wire = json.dumps(bed.as_dict()).encode("utf-8")
-    assert bed_zone_router._parse_worker_payload(wire) == (  # noqa: SLF001
-        [[1, 2], [3, 2], [3, 4]],
-        16,
-        9,
-    )
+    parsed = bed_zone_router._parse_worker_payload(wire)  # noqa: SLF001
+    assert parsed.model_dump(mode="json") == bed.as_dict()
     not_found = json.dumps(live_view_api.BED_ZONE_NOT_FOUND_BODY).encode("utf-8")
     assert bed_zone_router._is_bed_not_found(not_found)  # noqa: SLF001
     assert not bed_zone_router._is_bed_not_found(wire)  # noqa: SLF001

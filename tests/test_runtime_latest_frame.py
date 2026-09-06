@@ -4,6 +4,7 @@ import threading
 import time
 
 from worker.pipeline.output.live_view import LatestFrameStore
+from worker.types.preview import OverlaySelection
 
 # worker unified edge's two per-purpose buffers (raw-frame handoff
 # LatestFrameBuffer and dev-view OverlayFrameBuffer) into one camera-keyed
@@ -126,13 +127,48 @@ def test_latest_frame_store_snapshot_demand_is_a_one_shot_flag() -> None:
     assert store.consume_snapshot_demand("camera-b") is False  # untouched camera
 
 
-def test_latest_frame_store_mode_defaults_none_and_is_per_camera() -> None:
+def test_latest_frame_store_selection_defaults_enabled_and_is_per_camera() -> None:
     store = LatestFrameStore()
-    assert store.get_mode("camera-a") == "none"
+    assert store.get_selection("camera-a") == OverlaySelection()
 
-    store.set_mode("camera-a", "fall")
-    assert store.get_mode("camera-a") == "fall"
-    assert store.get_mode("camera-b") == "none"  # untouched camera stays off
+    store.set_selection("camera-a", OverlaySelection(person=False, bed=True))
+    assert store.get_selection("camera-a") == OverlaySelection(person=False, bed=True)
+    assert store.get_selection("camera-b") == OverlaySelection()
 
-    store.set_mode("camera-a", "bedexit")
-    assert store.get_mode("camera-a") == "bedexit"
+    store.set_selection("camera-a", OverlaySelection(person=True, bed=False))
+    assert store.get_selection("camera-a") == OverlaySelection(person=True, bed=False)
+
+
+def test_latest_frame_store_selection_change_fences_stale_publication() -> None:
+    store = LatestFrameStore()
+    original = store.get_selection("camera-a")
+    generation = store.selection_generation("camera-a")
+
+    store.set_selection("camera-a", OverlaySelection(person=False, bed=True))
+
+    assert (
+        store.publish_jpeg(
+            "camera-a",
+            b"stale",
+            frame_index=1,
+            expected_selection=original,
+            expected_generation=generation,
+        )
+        is False
+    )
+    assert store.get_latest("camera-a") is None
+
+
+def test_latest_frame_store_listener_receives_selection() -> None:
+    store = LatestFrameStore()
+    calls: list[tuple[str, int, OverlaySelection, bool]] = []
+    store.set_demand_listener(
+        lambda camera_id, viewers, selection, snapshot_requested: calls.append(
+            (camera_id, viewers, selection, snapshot_requested)
+        )
+    )
+    selection = OverlaySelection(person=False, bed=True)
+
+    store.set_selection("camera-a", selection)
+
+    assert calls == [("camera-a", 0, selection, True)]

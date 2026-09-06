@@ -102,11 +102,18 @@ class AppliedDetectionWindow:
 
 
 @dataclass(frozen=True, slots=True)
+class AppliedBedZoneRegion:
+    id: str
+    polygon: tuple[tuple[int, int], ...]
+    origin: Literal["manual", "model"]
+
+
+@dataclass(frozen=True, slots=True)
 class AppliedBedZone:
-    authority: Literal["persisted-polygon", "live-segmentation"]
+    authority: Literal["persisted-regions", "none"]
     coordinate_schema_version: int
     coordinate_space: Literal["source-image-pixels"] | None
-    polygon: tuple[tuple[int, int], ...] | None
+    regions: tuple[AppliedBedZoneRegion, ...]
     source_width: int | None
     source_height: int | None
 
@@ -189,6 +196,7 @@ def _reject_unsafe_values(value: object) -> None:
 
 __all__ = [
     "AppliedBedZone",
+    "AppliedBedZoneRegion",
     "AppliedCameraState",
     "AppliedDetectionWindow",
     "AppliedRuntimeManifest",

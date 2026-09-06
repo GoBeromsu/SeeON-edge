@@ -51,7 +51,7 @@ from worker.domains.fall.pose_bbox56 import (
     POSE_BBOX56_CONFIDENCE_GATE,
 )
 from worker.domains.tracker import GreedyIouTracker
-from worker.interfaces.decision import Decider
+from worker.interfaces.decision import Decider, TraceSnapshotProvider
 from worker.interfaces.fall_model import FallV2ModelProtocol
 from worker.interfaces.serving import ServingClient
 from worker.pipeline.analytics.merge import result_merger_names
@@ -77,6 +77,7 @@ from worker.pipeline.output.mjpeg_server import (
     dev_mjpeg_config,
     start_optional_mjpeg_server,
 )
+from worker.pipeline.output.preview_renderer import PreviewRenderer
 from worker.pipeline.perception import SceneState
 from worker.pipeline.trace.replay_trace_writer import ReplayTraceWriter
 from worker.runtime import bootstrap
@@ -141,8 +142,10 @@ from worker.types import (
     CURRENT_TEMPORAL_PROFILE,
     BusinessEvent,
     DecisionInput,
+    DecisionTraceSnapshot,
     TemporalProfile,
 )
+from worker.types.preview import FallPreviewState
 
 LOGGER: Final = logging.getLogger(__name__)
 HEARTBEAT_TIMEOUT_SEC: Final = 0.5
@@ -212,25 +215,17 @@ class EvidenceDeliveryError(RuntimeError):
 
 
 def _persisted_bed_regions(camera: CameraRuntimeConfig) -> tuple[BoundingBox, ...]:
-    """Convert a pulled ``bed_zone_polygon`` into the one persisted bed region.
-
-    Empty when the camera has no persisted polygon. Runtime bed-exit decisions
-    use only persisted regions; segmentation is on-demand recognition only.
-    """
-    polygon = camera.bed_zone_polygon
-    if not polygon:
-        return ()
-    xs = tuple(point[0] for point in polygon)
-    ys = tuple(point[1] for point in polygon)
-    return (
+    """Convert every persisted region into the bed-exit domain envelope."""
+    return tuple(
         BoundingBox(
-            x1=min(xs),
-            y1=min(ys),
-            x2=max(xs),
-            y2=max(ys),
+            x1=min(x for x, _ in region.polygon),
+            y1=min(y for _, y in region.polygon),
+            x2=max(x for x, _ in region.polygon),
+            y2=max(y for _, y in region.polygon),
             confidence=1.0,
-            polygon=polygon,
-        ),
+            polygon=region.polygon,
+        )
+        for region in camera.bed_zone_regions
     )
 
 
@@ -372,14 +367,10 @@ class _WindowGatedDecider:
     decider: Decider
     window: DetectionWindow
     clock: Callable[[], datetime]
-    last_trace_snapshots: object = ()
+    last_trace_snapshots: tuple[DecisionTraceSnapshot, ...] = ()
 
     def update(self, input_value: DecisionInput) -> tuple[BusinessEvent, ...]:
         if not self.window.contains(self.clock()):
-            # Local import keeps this shared composition-root file's change
-            # confined to the window-gate hunk owned by this remediation lane.
-            from worker.types.trace import DecisionTraceSnapshot
-
             object.__setattr__(
                 self,
                 "last_trace_snapshots",
@@ -397,11 +388,12 @@ class _WindowGatedDecider:
             )
             return ()
         events = self.decider.update(input_value)
-        object.__setattr__(
-            self,
-            "last_trace_snapshots",
-            getattr(self.decider, "last_trace_snapshots", ()),
-        )
+        if isinstance(self.decider, TraceSnapshotProvider):
+            object.__setattr__(
+                self,
+                "last_trace_snapshots",
+                self.decider.last_trace_snapshots,
+            )
         return events
 
 
@@ -711,6 +703,7 @@ class WorkerRuntime:
         self._flow_media_plane: FlowMediaPlane | None = flow_media_plane
         self._flow_lifecycle_supervisor: FlowLifecycleSupervisor | None = None
         self._native_policy_pumps: tuple[NativePolicyPump, ...] = ()
+        self._native_policy_pumps_by_camera: dict[str, NativePolicyPump] = {}
         self._policy_pump_threads: tuple[threading.Thread, ...] = ()
         self._selected_bundle_admission: ModelBundleProof | None = None
 
@@ -994,15 +987,17 @@ class WorkerRuntime:
                 ),
                 bed_zone_geometry={
                     camera.camera_id: BedZoneGeometry(
-                        polygon=camera.bed_zone_polygon,
+                        polygons=tuple(region.polygon for region in camera.bed_zone_regions),
                         image_width=camera.bed_zone_image_width,
                         image_height=camera.bed_zone_image_height,
                     )
                     for camera in self.config.cameras
-                    if camera.bed_zone_polygon is not None
+                    if camera.bed_zone_regions
                     and camera.bed_zone_image_width is not None
                     and camera.bed_zone_image_height is not None
                 },
+                renderer=PreviewRenderer(),
+                fall_states=self._fall_preview_states,
                 worker_boot_id=str(self._worker_boot_uuid),
             )
         self._flow_media_plane.bind_live_frames(self._live_frames)
@@ -1161,6 +1156,7 @@ class WorkerRuntime:
         }
         self._apply_runtime_manifest(boot, plans)
         pumps: list[NativePolicyPump] = []
+        self._native_policy_pumps_by_camera.clear()
         sealed_bindings: list[FlowEvidenceBinding] = []
         outcomes = tuple(
             bootstrap.run_camera_stage(
@@ -1439,10 +1435,15 @@ class WorkerRuntime:
                 track_id_switch_absorbed_total=_absorbed_track_id_switch_total,
             ),
         )
+        self._native_policy_pumps_by_camera[camera.camera_id] = pump
         pumps.append(pump)
         self.diagnostics.register_native_detection(camera.camera_id)
         # Readiness is announced by the warmup once this camera's own accepted
         # frame arrives, not here: the plane has not even started yet.
+
+    def _fall_preview_states(self, camera_id: str) -> Mapping[int, FallPreviewState]:
+        pump = self._native_policy_pumps_by_camera.get(camera_id)
+        return {} if pump is None else pump.preview_states()
 
     def _apply_runtime_manifest(
         self,
@@ -1491,7 +1492,7 @@ class WorkerRuntime:
                             for definition in plans[camera.camera_id].definitions.values()
                         }
                     ),
-                    bed_zone_polygon=camera.bed_zone_polygon,
+                    bed_zone_regions=camera.bed_zone_regions,
                     bed_zone_image_width=camera.bed_zone_image_width,
                     bed_zone_image_height=camera.bed_zone_image_height,
                 )

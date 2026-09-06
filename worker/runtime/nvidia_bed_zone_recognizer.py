@@ -7,11 +7,16 @@ from collections.abc import Sequence
 from concurrent.futures import Future, ThreadPoolExecutor, TimeoutError
 from numbers import Real
 from threading import Lock
-from typing import cast
+from uuid import uuid4
 
 from contracts.runner import BedRunnerResult, Image, RunnerProtocol
 from worker.interfaces.serving import ServingClient
-from worker.pipeline.output.live_view_api import BedZoneRecognizeResponse
+from worker.pipeline.output.live_view_api import (
+    MAX_BED_ZONE_CONFIDENCE,
+    MIN_BED_ZONE_CONFIDENCE,
+    BedZoneRecognizeRegion,
+    BedZoneRecognizeResponse,
+)
 from worker.pipeline.output.mjpeg_server import BedZoneNotFoundError
 
 DEFAULT_BED_ZONE_RECOGNITION_TIMEOUT_S = 5.0
@@ -37,44 +42,55 @@ class NvidiaBedZoneRecognizer:
         self._runner_lock = Lock()
         self._executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="bed-zone-http")
 
-    def __call__(self, image: Image) -> BedZoneRecognizeResponse:
-        future: Future[BedZoneRecognizeResponse] = self._executor.submit(self._recognize, image)
+    def __call__(self, image: Image, confidence: float = 0.25) -> BedZoneRecognizeResponse:
+        if (
+            isinstance(confidence, bool)
+            or not isinstance(confidence, Real)
+            or not math.isfinite(float(confidence))
+            or not MIN_BED_ZONE_CONFIDENCE <= float(confidence) <= MAX_BED_ZONE_CONFIDENCE
+        ):
+            raise ValueError("bed-zone confidence must be between 0.05 and 0.95")
+        future: Future[BedZoneRecognizeResponse] = self._executor.submit(
+            self._recognize, image, float(confidence)
+        )
         try:
             return future.result(timeout=self._timeout_s)
         except TimeoutError as exc:
             raise BedZoneRecognitionTimeoutError("bed-zone recognition timed out") from exc
 
-    def _recognize(self, image: Image) -> BedZoneRecognizeResponse:
+    def _recognize(self, image: Image, confidence: float) -> BedZoneRecognizeResponse:
         runner = self._get_runner()
         call = runner if callable(runner) else runner.run
         result = call(image)
         if not isinstance(result, BedRunnerResult):
             raise BedZoneNotFoundError("bed runner returned an unexpected result")
-        return bed_zone_response(image, result)
+        return bed_zone_response(image, result, confidence=confidence)
 
     def _get_runner(self) -> RunnerProtocol:
         with self._runner_lock:
             if self._runner is not None:
                 return self._runner
             try:
-                runner = self._serving_client.create("bed", device="cpu")
+                runner = self._serving_client.create(
+                    "bed", device="cpu", confidence=0.05, max_points=16
+                )
             except Exception as exc:  # noqa: BLE001 - HTTP seam exposes a typed failure
                 raise BedZoneRecognizerUnavailableError(
                     "CPU bed-zone recognizer could not be constructed"
                 ) from exc
-            if not callable(runner) and not callable(getattr(runner, "run", None)):
-                raise BedZoneRecognizerUnavailableError(
-                    "CPU bed-zone recognizer did not provide a runnable model"
-                )
-            self._runner = cast("RunnerProtocol", runner)
+            self._runner = runner
             return self._runner
 
 
-def bed_zone_response(image: Image, result: BedRunnerResult) -> BedZoneRecognizeResponse:
-    """Build a response from the highest-confidence valid bed segmentation."""
+def bed_zone_response(
+    image: Image,
+    result: BedRunnerResult,
+    *,
+    confidence: float = 0.25,
+) -> BedZoneRecognizeResponse:
+    """Build a response from all qualifying, valid bed segmentations."""
     height, width = int(image.shape[0]), int(image.shape[1])
-    best_polygon: tuple[tuple[int, int], ...] | None = None
-    best_score = -math.inf
+    candidates: list[tuple[float, tuple[tuple[int, int], ...]]] = []
     for box in result.boxes:
         if not isinstance(box, Sequence) or len(box) < 6:
             continue
@@ -85,17 +101,21 @@ def bed_zone_response(image: Image, result: BedRunnerResult) -> BedZoneRecognize
             or not math.isfinite(float(score_field))
         ):
             continue
+        score = float(score_field)
+        if score < confidence:
+            continue
         polygon = _valid_polygon(box[5], width=width, height=height)
         if polygon is None:
             continue
-        score = float(score_field)
-        if score > best_score:
-            best_score = score
-            best_polygon = polygon
-    if best_polygon is None:
+        candidates.append((score, polygon))
+    candidates.sort(key=lambda candidate: candidate[0], reverse=True)
+    if not candidates:
         raise BedZoneNotFoundError("no bed detected in the current frame")
     return BedZoneRecognizeResponse(
-        polygon=best_polygon,
+        regions=tuple(
+            BedZoneRecognizeRegion(id=str(uuid4()), polygon=polygon)
+            for _, polygon in candidates[:8]
+        ),
         image_width=width,
         image_height=height,
     )
@@ -107,7 +127,7 @@ def _valid_polygon(
     width: int,
     height: int,
 ) -> tuple[tuple[int, int], ...] | None:
-    if not isinstance(polygon_field, Sequence):
+    if not isinstance(polygon_field, Sequence) or len(polygon_field) > 16:
         return None
 
     polygon: list[tuple[int, int]] = []

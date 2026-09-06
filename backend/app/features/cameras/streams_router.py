@@ -7,12 +7,12 @@ import urllib.parse
 import urllib.request
 from collections.abc import AsyncIterator
 from contextlib import AbstractAsyncContextManager
-from typing import Literal, Protocol, get_args
+from typing import Protocol
 
 import httpx
 from fastapi import APIRouter, HTTPException, Request, status
 from fastapi.responses import Response, StreamingResponse
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field, StrictBool
 from starlette.background import BackgroundTask
 
 from backend.app.core.config import get_settings
@@ -45,21 +45,18 @@ class _ReadableResponse(Protocol):
     def close(self) -> None: ...
 
 
-OverlayMode = Literal["none", "bedexit", "fall"]
-
-_OVERLAY_MODES: frozenset[str] = frozenset(get_args(OverlayMode))
-
-
 class PoseOverlayRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    mode: OverlayMode
+    person: StrictBool = Field(...)
+    bed: StrictBool = Field(...)
 
 
 class PoseOverlayResponse(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    mode: OverlayMode
+    person: StrictBool = Field(...)
+    bed: StrictBool = Field(...)
 
 
 @router.get("/streams/{camera_id}")
@@ -198,7 +195,7 @@ def camera_pose_set(
     _authorize(request)
     settings = get_settings()
     upstream_url = _pose_url(settings.worker_stream_origin, _worker_camera_id(request, camera_id))
-    body = json.dumps({"mode": payload.mode}).encode("utf-8")
+    body = json.dumps({"person": payload.person, "bed": payload.bed}).encode("utf-8")
     return _pose_request(
         upstream_url,
         settings.worker_stream_timeout_s,
@@ -284,15 +281,18 @@ def _pose_request(
 
 
 def _parse_pose_payload(raw: bytes) -> PoseOverlayResponse:
-    """The worker's ``{"mode": ...}`` body; anything else is an upstream failure."""
+    """Parse the worker's exact overlay-selection body."""
     try:
         parsed = json.loads(raw)
-        mode = parsed["mode"]
-    except (json.JSONDecodeError, KeyError, TypeError) as exc:
+    except (json.JSONDecodeError, TypeError) as exc:
         raise _upstream_unavailable(status.HTTP_503_SERVICE_UNAVAILABLE) from exc
-    if not isinstance(mode, str) or mode not in _OVERLAY_MODES:
+    if not isinstance(parsed, dict) or set(parsed) != {"person", "bed"}:
         raise _upstream_unavailable(status.HTTP_503_SERVICE_UNAVAILABLE)
-    return PoseOverlayResponse(mode=mode)  # type: ignore[arg-type]
+    person = parsed["person"]
+    bed = parsed["bed"]
+    if not isinstance(person, bool) or not isinstance(bed, bool):
+        raise _upstream_unavailable(status.HTTP_503_SERVICE_UNAVAILABLE)
+    return PoseOverlayResponse(person=person, bed=bed)
 
 
 class _UpstreamCloser:

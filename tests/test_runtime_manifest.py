@@ -29,7 +29,7 @@ from worker.runtime.provenance.manifest import (
     build_applied_camera_state,
     build_applied_runtime_manifest,
 )
-from worker.runtime.provenance.models import AppliedBedZone
+from worker.runtime.provenance.models import AppliedBedZone, AppliedBedZoneRegion
 from worker.runtime.provenance.store import AppliedRuntimeManifestStore
 from worker.tools.fetch_models.manifest import load_manifest
 
@@ -130,7 +130,7 @@ def _cameras(*, threshold: float = 0.5) -> tuple[AppliedCameraState, ...]:
                     "fall": fall,
                     "bed_exit": bundle.resolve(camera_id, "bed_exit", 1),
                 },
-                bed_zone_polygon=None,
+                bed_zone_regions=(),
                 bed_zone_image_width=None,
                 bed_zone_image_height=None,
             )
@@ -147,7 +147,18 @@ def _persisted_bed_camera() -> AppliedCameraState:
         schedule={"pose": 2, "bed": 30},
         detection_windows={"fall": None, "bed_exit": None},
         policies=_cameras()[0].policies,
-        bed_zone_polygon=((1, 2), (9, 2), (9, 8), (1, 8)),
+        bed_zone_regions=(
+            AppliedBedZoneRegion(
+                id="bed-a",
+                polygon=((1, 2), (9, 2), (9, 8), (1, 8)),
+                origin="manual",
+            ),
+            AppliedBedZoneRegion(
+                id="bed-b",
+                polygon=((20, 12), (30, 12), (30, 20), (20, 20)),
+                origin="model",
+            ),
+        ),
         bed_zone_image_width=640,
         bed_zone_image_height=480,
     )
@@ -229,7 +240,18 @@ def test_camera_projection_records_canonical_effective_applied_semantics() -> No
             "bed_exit": AppliedDetectionWindow(start="22:15", end="05:45", timezone="Asia/Seoul"),
         },
         policies=_cameras()[0].policies,
-        bed_zone_polygon=((1, 2), (9, 2), (9, 8), (1, 8)),
+        bed_zone_regions=(
+            AppliedBedZoneRegion(
+                id="bed-a",
+                polygon=((1, 2), (9, 2), (9, 8), (1, 8)),
+                origin="manual",
+            ),
+            AppliedBedZoneRegion(
+                id="bed-b",
+                polygon=((20, 12), (30, 12), (30, 20), (20, 20)),
+                origin="model",
+            ),
+        ),
         bed_zone_image_width=640,
         bed_zone_image_height=480,
     )
@@ -249,26 +271,58 @@ def test_camera_projection_records_canonical_effective_applied_semantics() -> No
             "fall": {"end": "06:00", "start": "21:00", "timezone": "UTC"},
         },
         "bed_zone": {
-            "authority": "persisted-polygon",
+            "authority": "persisted-regions",
             "coordinate_schema_version": 1,
             "coordinate_space": "source-image-pixels",
-            "polygon": [[1, 2], [1, 8], [9, 8], [9, 2]],
+            "regions": [
+                {
+                    "id": "bed-a",
+                    "origin": "manual",
+                    "polygon": [[1, 2], [1, 8], [9, 8], [9, 2]],
+                },
+                {
+                    "id": "bed-b",
+                    "origin": "model",
+                    "polygon": [[20, 12], [20, 20], [30, 20], [30, 12]],
+                },
+            ],
             "source_dimensions": {"height": 480, "width": 640},
         },
         "policies": content["policies"],
     }
 
 
-def test_absent_bed_zone_explicitly_records_live_segmentation_semantics() -> None:
+def test_absent_bed_zone_explicitly_records_no_persisted_region_semantics() -> None:
     content = json.loads(_manifest().canonical_json)["cameras"][0]
 
     assert content["bed_zone"] == {
-        "authority": "live-segmentation",
+        "authority": "none",
         "coordinate_schema_version": 1,
         "coordinate_space": None,
-        "polygon": None,
+        "regions": [],
         "source_dimensions": None,
     }
+
+
+def test_none_bed_zone_regions_records_no_persisted_region_semantics() -> None:
+    camera = _cameras()[0]
+    rebuilt = build_applied_camera_state(
+        camera_id=camera.camera_id,
+        effective_decode_backend=camera.effective_decode_backend,
+        ingest_target_fps=camera.ingest_target_fps,
+        module_qualified_ids=camera.module_qualified_ids,
+        schedule=camera.schedule,
+        detection_windows=camera.detection_windows,
+        policies=camera.policies,
+        bed_zone_regions=None,
+        bed_zone_image_width=640,
+        bed_zone_image_height=480,
+    )
+
+    assert rebuilt.bed_zone.authority == "none"
+    assert rebuilt.bed_zone.regions == ()
+    assert rebuilt.bed_zone.source_width is None
+    assert rebuilt.bed_zone.source_height is None
 
 
 @pytest.mark.parametrize(
@@ -308,7 +362,37 @@ def test_each_effective_camera_semantic_changes_manifest_hash(
     (
         replace(
             _persisted_bed_camera().bed_zone,
-            polygon=((1, 2), (10, 2), (9, 8), (1, 8)),
+            regions=(
+                replace(
+                    _persisted_bed_camera().bed_zone.regions[0],
+                    polygon=((1, 2), (10, 2), (9, 8), (1, 8)),
+                ),
+                _persisted_bed_camera().bed_zone.regions[1],
+            ),
+        ),
+        replace(
+            _persisted_bed_camera().bed_zone,
+            regions=(
+                _persisted_bed_camera().bed_zone.regions[0],
+                replace(
+                    _persisted_bed_camera().bed_zone.regions[1],
+                    polygon=((20, 12), (31, 12), (30, 20), (20, 20)),
+                ),
+            ),
+        ),
+        replace(
+            _persisted_bed_camera().bed_zone,
+            regions=(
+                _persisted_bed_camera().bed_zone.regions[0],
+                replace(_persisted_bed_camera().bed_zone.regions[1], id="bed-c"),
+            ),
+        ),
+        replace(
+            _persisted_bed_camera().bed_zone,
+            regions=(
+                _persisted_bed_camera().bed_zone.regions[0],
+                replace(_persisted_bed_camera().bed_zone.regions[1], origin="manual"),
+            ),
         ),
         replace(_persisted_bed_camera().bed_zone, source_width=1280),
         replace(_persisted_bed_camera().bed_zone, source_height=960),
@@ -334,19 +418,46 @@ def test_equivalent_polygon_start_and_winding_order_do_not_change_hash() -> None
         schedule=baseline.schedule,
         detection_windows=baseline.detection_windows,
         policies=baseline.policies,
-        bed_zone_polygon=((9, 8), (1, 8), (1, 2), (9, 2)),
+        bed_zone_regions=(
+            AppliedBedZoneRegion(
+                id="bed-a",
+                polygon=((9, 8), (1, 8), (1, 2), (9, 2)),
+                origin="manual",
+            ),
+            AppliedBedZoneRegion(
+                id="bed-b",
+                polygon=((30, 20), (20, 20), (20, 12), (30, 12)),
+                origin="model",
+            ),
+        ),
         bed_zone_image_width=640,
         bed_zone_image_height=480,
     )
     reversed_winding = replace(
         rotated,
-        bed_zone=replace(rotated.bed_zone, polygon=tuple(reversed(rotated.bed_zone.polygon or ()))),
+        bed_zone=replace(
+            rotated.bed_zone,
+            regions=tuple(
+                replace(region, polygon=tuple(reversed(region.polygon)))
+                for region in rotated.bed_zone.regions
+            ),
+        ),
     )
     closed_ring = replace(
         baseline,
         bed_zone=replace(
             baseline.bed_zone,
-            polygon=(*tuple(baseline.bed_zone.polygon or ()), (1, 2)),
+            regions=tuple(
+                replace(region, polygon=(*region.polygon, region.polygon[0]))
+                for region in baseline.bed_zone.regions
+            ),
+        ),
+    )
+    reordered_regions = replace(
+        baseline,
+        bed_zone=replace(
+            baseline.bed_zone,
+            regions=tuple(reversed(baseline.bed_zone.regions)),
         ),
     )
 
@@ -354,6 +465,7 @@ def test_equivalent_polygon_start_and_winding_order_do_not_change_hash() -> None
     assert _manifest(cameras=(rotated,)).sha256 == expected
     assert _manifest(cameras=(reversed_winding,)).sha256 == expected
     assert _manifest(cameras=(closed_ring,)).sha256 == expected
+    assert _manifest(cameras=(reordered_regions,)).sha256 == expected
 
 
 def test_camera_semantic_mapping_and_selection_order_do_not_change_hash() -> None:
@@ -379,7 +491,13 @@ def test_persisted_bed_zone_requires_source_dimensions() -> None:
             schedule={"pose": 2, "bed": 30},
             detection_windows={"fall": None, "bed_exit": None},
             policies=_cameras()[0].policies,
-            bed_zone_polygon=((1, 2), (9, 2), (9, 8), (1, 8)),
+            bed_zone_regions=(
+                AppliedBedZoneRegion(
+                    id="bed-a",
+                    polygon=((1, 2), (9, 2), (9, 8), (1, 8)),
+                    origin="manual",
+                ),
+            ),
             bed_zone_image_width=None,
             bed_zone_image_height=None,
         )

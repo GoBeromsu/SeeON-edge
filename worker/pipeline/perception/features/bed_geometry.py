@@ -3,10 +3,10 @@
 Numpy is allowed here. The result is a ``BedPoseFeatures`` of plain Python
 scalars so ``worker.domains`` never has to import this module or numpy.
 
-Coordinate frames: a persisted ``bed_zone_polygon`` lives in
+Coordinate frames: polygons from persisted ``bed_zone_regions`` live in
 ``bed_zone_image_width`` x ``bed_zone_image_height`` space, while keypoints
 arrive in ``frame_width`` x ``frame_height``. Those sizes are not guaranteed
-to match. This producer always scales the polygon into frame space before
+to match. This producer always scales every polygon into frame space before
 any inside/distance measurement. Live-segmentation polygons (no source size)
 are already in frame space and are left unscaled.
 """

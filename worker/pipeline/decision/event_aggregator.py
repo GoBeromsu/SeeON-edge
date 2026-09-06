@@ -5,9 +5,9 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Final
 
-from worker.interfaces.decision import Decider
+from worker.interfaces.decision import Decider, TraceSnapshotProvider
 from worker.pipeline.decision.incident_manager import IncidentManager
-from worker.types import BusinessEvent, DecisionInput
+from worker.types import BusinessEvent, DecisionInput, DecisionTraceSnapshot
 
 #: Producers retained for late releases. Bounded so memory cannot grow.
 _MAX_TRACKED_PRODUCERS: Final = 64
@@ -19,6 +19,15 @@ class EventAggregator:
     incidents: IncidentManager
     monotonic: Callable[[], float] = time.monotonic
     _producers: dict[str, tuple[Decider, BusinessEvent]] = field(default_factory=dict, init=False)
+
+    @property
+    def last_trace_snapshots(self) -> tuple[DecisionTraceSnapshot, ...]:
+        return tuple(
+            snapshot
+            for decider in self.deciders
+            if isinstance(decider, TraceSnapshotProvider)
+            for snapshot in decider.last_trace_snapshots
+        )
 
     def update(self, input_value: DecisionInput) -> tuple[BusinessEvent, ...]:
         produced: list[tuple[BusinessEvent, Decider]] = [

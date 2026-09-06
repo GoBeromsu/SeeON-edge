@@ -14,7 +14,10 @@ import numpy as np
 import pytest
 
 from worker.pipeline.output.live_view import LatestFrameStore
-from worker.pipeline.output.live_view_api import BedZoneRecognizeResponse
+from worker.pipeline.output.live_view_api import (
+    BedZoneRecognizeRegion,
+    BedZoneRecognizeResponse,
+)
 from worker.pipeline.output.mjpeg_server import (
     BedZoneNotFoundError,
     MjpegProbeError,
@@ -23,12 +26,23 @@ from worker.pipeline.output.mjpeg_server import (
     dev_mjpeg_enabled,
     dev_mjpeg_host,
 )
+from worker.types.preview import OverlaySelection
 
 # A real, cv2-decodable JPEG for the clean snapshot provider used by
 # bed-zone recognition.
 _REAL_JPEG = cv2.imencode(".jpg", np.zeros((16, 16, 3), dtype=np.uint8))[1].tobytes()
 _RELAY_TOKEN = "relay-token"
 _AUTH_HEADERS = {"X-Edge-Relay-Token": _RELAY_TOKEN}
+
+
+def _bed_zone_response(
+    polygon: tuple[tuple[int, int], ...] = ((0, 0), (1, 0), (1, 1)),
+) -> BedZoneRecognizeResponse:
+    return BedZoneRecognizeResponse(
+        regions=(BedZoneRecognizeRegion(id="region-1", polygon=polygon),),
+        image_width=16,
+        image_height=16,
+    )
 
 
 def _authed_get(url: str, *, timeout: float = 1) -> urllib.request.Request:
@@ -286,7 +300,7 @@ def test_mjpeg_stream_requests_bounded_refreshes_and_emits_new_frames() -> None:
     def publish_on_demand(
         camera_id: str,
         viewers: int,
-        _mode: str,
+        _selection: OverlaySelection,
         snapshot_requested: bool,
     ) -> None:
         if viewers <= 0 and not snapshot_requested:
@@ -363,7 +377,7 @@ def test_stream_connect_and_disconnect_track_the_viewer_counter() -> None:
         server.stop()
 
 
-def test_pose_get_and_set_round_trip_and_defaults_none() -> None:
+def test_pose_get_and_set_round_trip_and_defaults_enabled() -> None:
     store = LatestFrameStore()
     store.register_camera("camera-a")
     server = MjpegServer(store, MjpegServerConfig(port=0))
@@ -371,29 +385,29 @@ def test_pose_get_and_set_round_trip_and_defaults_none() -> None:
     base = f"http://127.0.0.1:{server.port}"
     try:
         with urllib.request.urlopen(f"{base}/overlay/camera-a/pose", timeout=1) as response:
-            assert json.loads(response.read()) == {"mode": "none"}
+            assert json.loads(response.read()) == {"person": True, "bed": True}
 
         request = urllib.request.Request(
             f"{base}/overlay/camera-a/pose",
-            data=json.dumps({"mode": "fall"}).encode(),
+            data=json.dumps({"person": False, "bed": True}).encode(),
             method="POST",
         )
         with urllib.request.urlopen(request, timeout=1) as response:
-            assert json.loads(response.read()) == {"mode": "fall"}
+            assert json.loads(response.read()) == {"person": False, "bed": True}
 
         with urllib.request.urlopen(f"{base}/overlay/camera-a/pose", timeout=1) as response:
-            assert json.loads(response.read()) == {"mode": "fall"}
+            assert json.loads(response.read()) == {"person": False, "bed": True}
 
-        assert store.get_mode("camera-a") == "fall"
+        assert store.get_selection("camera-a") == OverlaySelection(person=False, bed=True)
 
         request = urllib.request.Request(
             f"{base}/overlay/camera-a/pose",
-            data=json.dumps({"mode": "bedexit"}).encode(),
+            data=json.dumps({"person": True, "bed": False}).encode(),
             method="POST",
         )
         with urllib.request.urlopen(request, timeout=1) as response:
-            assert json.loads(response.read()) == {"mode": "bedexit"}
-        assert store.get_mode("camera-a") == "bedexit"
+            assert json.loads(response.read()) == {"person": True, "bed": False}
+        assert store.get_selection("camera-a") == OverlaySelection(person=True, bed=False)
     finally:
         server.stop()
 
@@ -416,12 +430,12 @@ def test_pose_get_and_set_open_when_no_relay_token_configured() -> None:
 
         request = urllib.request.Request(
             f"{base}/overlay/camera-a/pose",
-            data=json.dumps({"mode": "fall"}).encode(),
+            data=json.dumps({"person": False, "bed": False}).encode(),
             method="POST",
         )
         with urllib.request.urlopen(request, timeout=1) as response:
             assert response.status == 200
-        assert store.get_mode("camera-a") == "fall"
+        assert store.get_selection("camera-a") == OverlaySelection(person=False, bed=False)
     finally:
         server.stop()
 
@@ -445,7 +459,7 @@ def test_pose_get_and_set_require_token_when_configured() -> None:
 
         unauthorized_post = urllib.request.Request(
             f"{base}/overlay/camera-a/pose",
-            data=json.dumps({"mode": "fall"}).encode(),
+            data=json.dumps({"person": False, "bed": False}).encode(),
             method="POST",
         )
         try:
@@ -457,7 +471,7 @@ def test_pose_get_and_set_require_token_when_configured() -> None:
 
         wrong_token_post = urllib.request.Request(
             f"{base}/overlay/camera-a/pose",
-            data=json.dumps({"mode": "fall"}).encode(),
+            data=json.dumps({"person": False, "bed": False}).encode(),
             headers={"X-Edge-Relay-Token": "wrong-token"},
             method="POST",
         )
@@ -468,24 +482,24 @@ def test_pose_get_and_set_require_token_when_configured() -> None:
         else:  # pragma: no cover
             raise AssertionError("pose POST with a mismatched token should 403")
 
-        assert store.get_mode("camera-a") == "none"
+        assert store.get_selection("camera-a") == OverlaySelection()
 
         authorized_get = urllib.request.Request(
             f"{base}/overlay/camera-a/pose",
             headers={"X-Edge-Relay-Token": "relay-token"},
         )
         with urllib.request.urlopen(authorized_get, timeout=1) as response:
-            assert json.loads(response.read()) == {"mode": "none"}
+            assert json.loads(response.read()) == {"person": True, "bed": True}
 
         authorized_post = urllib.request.Request(
             f"{base}/overlay/camera-a/pose",
-            data=json.dumps({"mode": "bedexit"}).encode(),
+            data=json.dumps({"person": True, "bed": False}).encode(),
             headers={"X-Edge-Relay-Token": "relay-token"},
             method="POST",
         )
         with urllib.request.urlopen(authorized_post, timeout=1) as response:
-            assert json.loads(response.read()) == {"mode": "bedexit"}
-        assert store.get_mode("camera-a") == "bedexit"
+            assert json.loads(response.read()) == {"person": True, "bed": False}
+        assert store.get_selection("camera-a") == OverlaySelection(person=True, bed=False)
     finally:
         server.stop()
 
@@ -515,18 +529,22 @@ def test_pose_unknown_camera_and_malformed_body_are_rejected() -> None:
             assert exc.code == 400
         else:  # pragma: no cover
             raise AssertionError("malformed body should 400")
-        assert store.get_mode("camera-a") == "none"
+        assert store.get_selection("camera-a") == OverlaySelection()
     finally:
         server.stop()
 
 
 def _post_bed_zone_recognize(
-    base: str, camera_id: str, *, token: str | None = _RELAY_TOKEN
+    base: str,
+    camera_id: str,
+    *,
+    token: str | None = _RELAY_TOKEN,
+    payload: object | None = None,
 ) -> urllib.request.Request:
     headers = {} if token is None else {"X-Edge-Relay-Token": token}
     return urllib.request.Request(
         f"{base}/overlay/{camera_id}/bed-zone/recognize",
-        data=b"",
+        data=b"" if payload is None else json.dumps(payload).encode(),
         method="POST",
         headers=headers,
     )
@@ -537,11 +555,7 @@ def test_bed_zone_recognize_unknown_camera_returns_404() -> None:
     server = MjpegServer(
         store,
         MjpegServerConfig(port=0, probe_token=_RELAY_TOKEN),
-        bed_zone_recognizer=lambda image: {
-            "polygon": [[0, 0]],
-            "image_width": 1,
-            "image_height": 1,
-        },
+        bed_zone_recognizer=lambda image, confidence: _bed_zone_response(),
     )
     server.start()
     base = f"http://127.0.0.1:{server.port}"
@@ -556,7 +570,9 @@ def test_bed_zone_recognize_unknown_camera_returns_404() -> None:
         server.stop()
 
 
-def test_bed_zone_recognize_without_recognizer_configured_returns_503() -> None:
+def test_bed_zone_recognize_without_recognizer_configured_returns_503(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
     store = LatestFrameStore()
     store.register_camera("camera-a")
     server = MjpegServer(
@@ -573,6 +589,9 @@ def test_bed_zone_recognize_without_recognizer_configured_returns_503() -> None:
             assert exc.code == 503
         else:  # pragma: no cover
             raise AssertionError("missing recognizer should 503")
+        assert "stage=mising_wiring" in caplog.text
+        assert "camera_id=camera-a" in caplog.text
+        assert "exception_class=RuntimeError" in caplog.text
     finally:
         server.stop()
 
@@ -582,9 +601,9 @@ def test_bed_zone_recognize_without_clean_snapshot_provider_returns_503() -> Non
     store.register_camera("camera-a")
     recognizer_calls: list[object] = []
 
-    def recognizer(image: np.ndarray) -> BedZoneRecognizeResponse:
+    def recognizer(image: np.ndarray, confidence: float) -> BedZoneRecognizeResponse:
         recognizer_calls.append(image)
-        return BedZoneRecognizeResponse(polygon=((0, 0),), image_width=1, image_height=1)
+        return _bed_zone_response()
 
     server = MjpegServer(
         store,
@@ -606,6 +625,97 @@ def test_bed_zone_recognize_without_clean_snapshot_provider_returns_503() -> Non
 
 
 @pytest.mark.parametrize(
+    "payload",
+    [
+        {"confidence": True},
+        {"confidence": float("nan")},
+        {"confidence": float("inf")},
+        {"confidence": 0.049},
+        {"confidence": 0.951},
+        {"confidence": "0.5"},
+        {"confidence": 0.5, "extra": 1},
+        [],
+    ],
+    ids=(
+        "boolean",
+        "nan",
+        "infinite",
+        "below-range",
+        "above-range",
+        "string",
+        "unknown-key",
+        "non-object",
+    ),
+)
+def test_bed_zone_recognize_rejects_invalid_request_before_snapshot(payload: object) -> None:
+    store = LatestFrameStore()
+    store.register_camera("camera-a")
+    snapshot_calls: list[str] = []
+
+    server = MjpegServer(
+        store,
+        MjpegServerConfig(port=0, probe_token=_RELAY_TOKEN),
+        bed_zone_recognizer=lambda image, confidence: _bed_zone_response(),
+        bed_zone_snapshot=lambda camera_id: snapshot_calls.append(camera_id) or _REAL_JPEG,
+    )
+    server.start()
+    try:
+        with pytest.raises(urllib.error.HTTPError) as raised:
+            urllib.request.urlopen(
+                _post_bed_zone_recognize(
+                    f"http://127.0.0.1:{server.port}",
+                    "camera-a",
+                    payload=payload,
+                ),
+                timeout=1,
+            )
+    finally:
+        server.stop()
+
+    assert raised.value.code == 400
+    assert snapshot_calls == []
+
+
+@pytest.mark.parametrize(
+    ("payload", "expected"),
+    [(None, 0.25), ({}, 0.25), ({"confidence": 0.05}, 0.05), ({"confidence": 0.95}, 0.95)],
+)
+def test_bed_zone_recognize_forwards_valid_confidence(
+    payload: object | None,
+    expected: float,
+) -> None:
+    store = LatestFrameStore()
+    store.register_camera("camera-a")
+    seen_confidences: list[float] = []
+
+    def recognizer(image: np.ndarray, confidence: float) -> BedZoneRecognizeResponse:
+        seen_confidences.append(confidence)
+        return _bed_zone_response()
+
+    server = MjpegServer(
+        store,
+        MjpegServerConfig(port=0, probe_token=_RELAY_TOKEN),
+        bed_zone_recognizer=recognizer,
+        bed_zone_snapshot=lambda _camera_id: _REAL_JPEG,
+    )
+    server.start()
+    try:
+        with urllib.request.urlopen(
+            _post_bed_zone_recognize(
+                f"http://127.0.0.1:{server.port}",
+                "camera-a",
+                payload=payload,
+            ),
+            timeout=1,
+        ) as response:
+            assert response.status == 200
+    finally:
+        server.stop()
+
+    assert seen_confidences == [expected]
+
+
+@pytest.mark.parametrize(
     "provider",
     [
         lambda _camera_id: b"",
@@ -616,14 +726,15 @@ def test_bed_zone_recognize_without_clean_snapshot_provider_returns_503() -> Non
 )
 def test_bed_zone_recognize_snapshot_failure_does_not_call_recognizer(
     provider: Callable[[str], bytes],
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
     store = LatestFrameStore()
     store.publish_jpeg("camera-a", _REAL_JPEG, frame_index=1)
     recognizer_calls: list[object] = []
 
-    def recognizer(image: np.ndarray) -> BedZoneRecognizeResponse:
+    def recognizer(image: np.ndarray, confidence: float) -> BedZoneRecognizeResponse:
         recognizer_calls.append(image)
-        return BedZoneRecognizeResponse(polygon=((0, 0),), image_width=1, image_height=1)
+        return _bed_zone_response()
 
     server = MjpegServer(
         store,
@@ -646,6 +757,10 @@ def test_bed_zone_recognize_snapshot_failure_does_not_call_recognizer(
 
     assert raised.value.code == 503
     assert recognizer_calls == []
+    assert "stage=snapshot_decode" in caplog.text
+    assert "camera_id=camera-a" in caplog.text
+    assert "exception_class=" in caplog.text
+    assert "snapshot unavailable" not in caplog.text
 
 
 @pytest.mark.parametrize(
@@ -669,9 +784,9 @@ def test_bed_zone_recognize_rejects_images_outside_the_image_contract(
     def imdecode(_buffer: np.ndarray, _flags: int) -> np.ndarray:
         return decoded
 
-    def recognizer(image: np.ndarray) -> BedZoneRecognizeResponse:
+    def recognizer(image: np.ndarray, confidence: float) -> BedZoneRecognizeResponse:
         recognizer_calls.append(image)
-        return BedZoneRecognizeResponse(polygon=((0, 0),), image_width=1, image_height=1)
+        return _bed_zone_response()
 
     monkeypatch.setattr(cv2, "imdecode", imdecode)
     server = MjpegServer(
@@ -704,11 +819,9 @@ def test_bed_zone_recognize_uses_clean_snapshot_not_annotated_preview() -> None:
         snapshot_camera_ids.append(camera_id)
         return clean_jpeg
 
-    def recognizer(image: np.ndarray) -> BedZoneRecognizeResponse:
+    def recognizer(image: np.ndarray, confidence: float) -> BedZoneRecognizeResponse:
         seen_images.append(image)
-        return BedZoneRecognizeResponse(
-            polygon=((1, 2), (3, 2), (3, 4), (1, 4)), image_width=16, image_height=16
-        )
+        return _bed_zone_response(((1, 2), (3, 2), (3, 4), (1, 4)))
 
     server = MjpegServer(
         store,
@@ -725,7 +838,13 @@ def test_bed_zone_recognize_uses_clean_snapshot_not_annotated_preview() -> None:
             assert response.status == 200
             payload = json.loads(response.read())
         assert payload == {
-            "polygon": [[1, 2], [3, 2], [3, 4], [1, 4]],
+            "regions": [
+                {
+                    "id": "region-1",
+                    "polygon": [[1, 2], [3, 2], [3, 4], [1, 4]],
+                    "origin": "model",
+                }
+            ],
             "image_width": 16,
             "image_height": 16,
         }
@@ -738,11 +857,49 @@ def test_bed_zone_recognize_uses_clean_snapshot_not_annotated_preview() -> None:
         server.stop()
 
 
+def test_bed_zone_recognize_converts_decoded_bgr_jpeg_to_rgb() -> None:
+    store = LatestFrameStore()
+    store.register_camera("camera-a")
+    bgr_red = np.zeros((16, 16, 3), dtype=np.uint8)
+    bgr_red[:, :] = (0, 0, 255)
+    red_jpeg = cv2.imencode(".jpg", bgr_red)[1].tobytes()
+    seen_images: list[np.ndarray] = []
+
+    def recognizer(image: np.ndarray, confidence: float) -> BedZoneRecognizeResponse:
+        seen_images.append(image)
+        return _bed_zone_response()
+
+    server = MjpegServer(
+        store,
+        MjpegServerConfig(port=0, probe_token=_RELAY_TOKEN),
+        bed_zone_recognizer=recognizer,
+        bed_zone_snapshot=lambda _camera_id: red_jpeg,
+    )
+    server.start()
+    try:
+        with urllib.request.urlopen(
+            _post_bed_zone_recognize(
+                f"http://127.0.0.1:{server.port}",
+                "camera-a",
+            ),
+            timeout=1,
+        ) as response:
+            assert response.status == 200
+    finally:
+        server.stop()
+
+    assert len(seen_images) == 1
+    red, green, blue = (int(channel) for channel in seen_images[0][0, 0])
+    assert red > 250
+    assert green < 5
+    assert blue < 5
+
+
 def test_bed_zone_recognize_not_found_maps_to_structured_404() -> None:
     store = LatestFrameStore()
     store.publish_jpeg("camera-a", _REAL_JPEG, frame_index=1)
 
-    def recognizer(image: np.ndarray) -> BedZoneRecognizeResponse:
+    def recognizer(image: np.ndarray, confidence: float) -> BedZoneRecognizeResponse:
         del image
         raise BedZoneNotFoundError("no bed detected")
 
@@ -767,11 +924,13 @@ def test_bed_zone_recognize_not_found_maps_to_structured_404() -> None:
         server.stop()
 
 
-def test_bed_zone_recognize_runner_failure_returns_503() -> None:
+def test_bed_zone_recognize_runner_failure_returns_503(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
     store = LatestFrameStore()
     store.publish_jpeg("camera-a", _REAL_JPEG, frame_index=1)
 
-    def recognizer(image: np.ndarray) -> BedZoneRecognizeResponse:
+    def recognizer(image: np.ndarray, confidence: float) -> BedZoneRecognizeResponse:
         del image
         raise RuntimeError("model exploded")
 
@@ -790,6 +949,10 @@ def test_bed_zone_recognize_runner_failure_returns_503() -> None:
             assert exc.code == 503
         else:  # pragma: no cover
             raise AssertionError("recognizer runtime error should 503")
+        assert "stage=model" in caplog.text
+        assert "camera_id=camera-a" in caplog.text
+        assert "exception_class=RuntimeError" in caplog.text
+        assert "model exploded" not in caplog.text
     finally:
         server.stop()
 
@@ -812,11 +975,9 @@ def test_media_endpoints_require_relay_token_no_wrong_correct(
     store = LatestFrameStore()
     store.publish_jpeg("camera-a", _REAL_JPEG, frame_index=1)
 
-    def recognizer(image: np.ndarray) -> BedZoneRecognizeResponse:
+    def recognizer(image: np.ndarray, confidence: float) -> BedZoneRecognizeResponse:
         del image
-        return BedZoneRecognizeResponse(
-            polygon=((0, 0), (1, 0), (1, 1)), image_width=16, image_height=16
-        )
+        return _bed_zone_response()
 
     server = MjpegServer(
         store,
@@ -865,11 +1026,7 @@ def test_media_endpoints_fail_closed_when_no_token_configured() -> None:
     server = MjpegServer(
         store,
         MjpegServerConfig(port=0),
-        bed_zone_recognizer=lambda image: {
-            "polygon": [[0, 0], [1, 0], [1, 1]],
-            "image_width": 16,
-            "image_height": 16,
-        },
+        bed_zone_recognizer=lambda image, confidence: _bed_zone_response(),
     )
     server.start()
     base = f"http://127.0.0.1:{server.port}"
@@ -890,49 +1047,36 @@ def test_media_endpoints_fail_closed_when_no_token_configured() -> None:
         server.stop()
 
 
-def test_pose_rejects_unknown_mode_value_and_unknown_keys() -> None:
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {},
+        {"person": True},
+        {"bed": True},
+        {"person": True, "bed": True, "extra": 1},
+        {"person": 1, "bed": True},
+        {"person": True, "bed": "true"},
+    ],
+)
+def test_pose_rejects_missing_extra_and_non_boolean_fields(payload: object) -> None:
     store = LatestFrameStore()
     store.register_camera("camera-a")
     server = MjpegServer(store, MjpegServerConfig(port=0))
     server.start()
     base = f"http://127.0.0.1:{server.port}"
     try:
-        unknown_value = urllib.request.Request(
+        request = urllib.request.Request(
             f"{base}/overlay/camera-a/pose",
-            data=json.dumps({"mode": "show_pose"}).encode(),
+            data=json.dumps(payload).encode(),
             method="POST",
         )
         try:
-            urllib.request.urlopen(unknown_value, timeout=1)
+            urllib.request.urlopen(request, timeout=1)
         except urllib.error.HTTPError as exc:
             assert exc.code == 400
         else:  # pragma: no cover
-            raise AssertionError("unknown mode value should 400")
+            raise AssertionError("invalid overlay selection should 400")
 
-        legacy_key = urllib.request.Request(
-            f"{base}/overlay/camera-a/pose",
-            data=json.dumps({"show_pose": True}).encode(),
-            method="POST",
-        )
-        try:
-            urllib.request.urlopen(legacy_key, timeout=1)
-        except urllib.error.HTTPError as exc:
-            assert exc.code == 400
-        else:  # pragma: no cover
-            raise AssertionError("legacy show_pose key should 400")
-
-        extra_key = urllib.request.Request(
-            f"{base}/overlay/camera-a/pose",
-            data=json.dumps({"mode": "fall", "extra": 1}).encode(),
-            method="POST",
-        )
-        try:
-            urllib.request.urlopen(extra_key, timeout=1)
-        except urllib.error.HTTPError as exc:
-            assert exc.code == 400
-        else:  # pragma: no cover
-            raise AssertionError("unexpected extra key should 400")
-
-        assert store.get_mode("camera-a") == "none"
+        assert store.get_selection("camera-a") == OverlaySelection()
     finally:
         server.stop()

@@ -9,9 +9,6 @@ from pathlib import Path
 from time import monotonic
 from typing import Final
 
-import cv2
-import numpy as np
-
 from worker.adapters.deepstream.service_maker import (
     DeepStreamMediaPlane,
     DeepStreamMediaPlaneConfig,
@@ -19,18 +16,17 @@ from worker.adapters.deepstream.service_maker import (
 )
 from worker.interfaces.media_plane import MediaPlane, RecordingInfo, SnapshotUnavailable
 from worker.pipeline.output.evidence.smart_record_actor import ClipSealed, SmartRecordActor
-from worker.pipeline.output.live_view import LatestFrameStore, OverlayMode
+from worker.pipeline.output.live_view import LatestFrameStore
+from worker.pipeline.output.preview_renderer import (
+    BedZoneGeometry,
+    PreviewRenderer,
+    PreviewTrack,
+)
 from worker.runtime.flow.metadata_slot import LatestMetadataSlot
 from worker.types.metadata import SourceBinding
+from worker.types.preview import FallPreviewState, OverlaySelection
 
 LOGGER = logging.getLogger(__name__)
-
-
-@dataclass(frozen=True, slots=True)
-class BedZoneGeometry:
-    polygon: tuple[tuple[int, int], ...]
-    image_width: int
-    image_height: int
 
 
 @dataclass(frozen=True, slots=True)
@@ -69,6 +65,8 @@ class FlowMediaPlane:
         snapshot_encoder: Callable[[str], bytes] | None = None,
         live_frames: LatestFrameStore | None = None,
         bed_zone_geometry: Mapping[str, BedZoneGeometry] | None = None,
+        renderer: PreviewRenderer | None = None,
+        fall_states: Callable[[str], Mapping[int, FallPreviewState]] | None = None,
         worker_boot_id: str | None = None,
     ) -> None:
         self.config = config
@@ -85,10 +83,14 @@ class FlowMediaPlane:
         self._actors: dict[str, SmartRecordActor] = {}
         self._live_frames = live_frames
         self._bed_zone_geometry = dict(bed_zone_geometry or {})
+        self._renderer = renderer
+        self._fall_states = fall_states
         if live_frames is not None:
             live_frames.set_demand_listener(self._refresh_live_frame)
 
     def start(self) -> None:
+        if self._live_frames is not None and (self._renderer is None or self._fall_states is None):
+            raise RuntimeError("Flow live preview renderer and fall-state provider are required")
         self.plane.start()
 
     def stop(self) -> None:
@@ -110,24 +112,49 @@ class FlowMediaPlane:
         self,
         camera_id: str,
         viewers: int,
-        mode: OverlayMode,
+        selection: OverlaySelection,
         snapshot_requested: bool,
     ) -> None:
         if viewers <= 0 and not snapshot_requested:
             return
         if self._live_frames is None:
             return
-        generation = self._live_frames.mode_generation(camera_id)
+        if self._renderer is None or self._fall_states is None:
+            raise RuntimeError("Flow live preview renderer and fall-state provider are required")
+        generation = self._live_frames.selection_generation(camera_id)
         # This callback runs on an HTTP thread, never on Flow's probe thread.
         try:
-            jpeg = self.plane.snapshot(camera_id, draw_objects=mode != "none")
-            if mode == "bedexit":
-                jpeg = self._draw_bed_zone(camera_id, jpeg)
+            jpeg = self.plane.snapshot(camera_id, draw_objects=False)
+            metadata = self.metadata.peek(camera_id)
+            tracks: tuple[PreviewTrack, ...] = ()
+            if metadata is not None:
+                association = metadata.frame.association
+                track_ids_by_cue = (
+                    dict(zip(association.selected_cue_indexes, association.track_ids, strict=True))
+                    if association is not None
+                    else {}
+                )
+                tracks = tuple(
+                    PreviewTrack(
+                        box=box,
+                        source_width=metadata.source_width,
+                        source_height=metadata.source_height,
+                        track_id=track_ids_by_cue.get(index),
+                    )
+                    for index, box in enumerate(metadata.frame.person_box.boxes)
+                )
+            jpeg = self._renderer.render(
+                jpeg,
+                selection,
+                tracks,
+                self._bed_zone_geometry.get(camera_id),
+                self._fall_states(camera_id),
+            )
             self._live_frames.publish_jpeg(
                 camera_id,
                 jpeg,
                 frame_index=self.plane.published_frames(camera_id),
-                expected_mode=mode,
+                expected_selection=selection,
                 expected_generation=generation,
             )
         except SnapshotUnavailable:
@@ -138,31 +165,6 @@ class FlowMediaPlane:
             # Anything else is a real fault of the preview path and must be
             # visible, but a demand signal must not crash the HTTP server.
             LOGGER.warning("live-frame refresh failed for camera_id=%s: %s", camera_id, error)
-
-    def _draw_bed_zone(self, camera_id: str, jpeg: bytes) -> bytes:
-        geometry = self._bed_zone_geometry.get(camera_id)
-        if geometry is None:
-            return jpeg
-        image = cv2.imdecode(np.frombuffer(jpeg, dtype=np.uint8), cv2.IMREAD_COLOR)
-        if not isinstance(image, np.ndarray) or image.ndim != 3:
-            raise RuntimeError("live-frame snapshot is not a decodable color JPEG")
-        height, width = image.shape[:2]
-        points = np.asarray(geometry.polygon, dtype=np.float64)
-        points[:, 0] *= width / geometry.image_width
-        points[:, 1] *= height / geometry.image_height
-        points = np.rint(points).astype(np.int32)
-        points[:, 0] = np.clip(points[:, 0], 0, width - 1)
-        points[:, 1] = np.clip(points[:, 1], 0, height - 1)
-        polygon = points.reshape((-1, 1, 2))
-        color = (0, 165, 255)
-        filled = image.copy()
-        cv2.fillPoly(filled, [polygon], color)
-        cv2.addWeighted(filled, 0.25, image, 0.75, 0, dst=image)
-        cv2.polylines(image, [polygon], True, color, 2, cv2.LINE_AA)
-        encoded, output = cv2.imencode(".jpg", image)
-        if not encoded:
-            raise RuntimeError("bed-zone live-frame JPEG encoding failed")
-        return output.tobytes()
 
     def add_source(self, camera_id: str, uri: str) -> SourceBinding:
         return self.plane.add_source(camera_id, uri)

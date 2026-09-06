@@ -5,13 +5,12 @@ from __future__ import annotations
 import threading
 from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Literal, Protocol
+from typing import Protocol
 
 from contracts.observation import FrameObservation
 from worker.domains.bed_exit import BedExitDebugSnapshot
 from worker.types import FramePacket
-
-OverlayMode = Literal["none", "bedexit", "fall"]
+from worker.types.preview import OverlaySelection
 
 
 @dataclass(frozen=True, slots=True)
@@ -37,13 +36,13 @@ class LatestFrameStore:
         self._known_camera_ids: set[str] = set()
         self._viewer_counts: dict[str, int] = {}
         self._snapshot_demand: set[str] = set()
-        self._mode: dict[str, OverlayMode] = {}
-        self._mode_generation: dict[str, int] = {}
-        self._demand_listener: Callable[[str, int, OverlayMode, bool], None] | None = None
+        self._selection: dict[str, OverlaySelection] = {}
+        self._selection_generation: dict[str, int] = {}
+        self._demand_listener: Callable[[str, int, OverlaySelection, bool], None] | None = None
 
     def set_demand_listener(
         self,
-        listener: Callable[[str, int, OverlayMode, bool], None] | None,
+        listener: Callable[[str, int, OverlaySelection, bool], None] | None,
     ) -> None:
         with self._condition:
             self._demand_listener = listener
@@ -58,13 +57,13 @@ class LatestFrameStore:
         with self._condition:
             self._viewer_counts[camera_id] = self._viewer_counts.get(camera_id, 0) + 1
             viewers = self._viewer_counts[camera_id]
-            mode = self._mode.get(camera_id, "none")
+            selection = self._selection.get(camera_id, OverlaySelection())
             listener = self._demand_listener
             if listener is not None:
                 _ = self._frames.pop(camera_id, None)
             self._condition.notify_all()
         if listener is not None:
-            listener(camera_id, viewers, mode, False)
+            listener(camera_id, viewers, selection, False)
 
     def mark_viewer_disconnected(self, camera_id: str) -> None:
         """Undo one ``mark_viewer_connected`` (every stream return path calls this)."""
@@ -72,13 +71,13 @@ class LatestFrameStore:
             count = self._viewer_counts.get(camera_id, 0) - 1
             viewers = max(count, 0)
             self._viewer_counts[camera_id] = viewers
-            mode = self._mode.get(camera_id, "none")
+            selection = self._selection.get(camera_id, OverlaySelection())
             listener = self._demand_listener
             if viewers > 0 and listener is not None:
                 _ = self._frames.pop(camera_id, None)
             self._condition.notify_all()
         if listener is not None:
-            listener(camera_id, viewers, mode, False)
+            listener(camera_id, viewers, selection, False)
 
     def has_viewers(self, camera_id: str) -> bool:
         with self._condition:
@@ -95,13 +94,13 @@ class LatestFrameStore:
         with self._condition:
             self._snapshot_demand.add(camera_id)
             viewers = self._viewer_counts.get(camera_id, 0)
-            mode = self._mode.get(camera_id, "none")
+            selection = self._selection.get(camera_id, OverlaySelection())
             listener = self._demand_listener
             if listener is not None:
                 _ = self._frames.pop(camera_id, None)
             self._condition.notify_all()
         if listener is not None:
-            listener(camera_id, viewers, mode, True)
+            listener(camera_id, viewers, selection, True)
 
     def consume_snapshot_demand(self, camera_id: str) -> bool:
         """Atomically check and clear the one-frame snapshot demand flag."""
@@ -111,27 +110,26 @@ class LatestFrameStore:
                 return True
             return False
 
-    def set_mode(self, camera_id: str, mode: OverlayMode) -> None:
+    def set_selection(self, camera_id: str, selection: OverlaySelection) -> None:
         with self._condition:
-            if self._mode.get(camera_id, "none") == mode:
+            if self._selection.get(camera_id, OverlaySelection()) == selection:
                 return
-            self._mode[camera_id] = mode
-            generation = self._mode_generation.get(camera_id, 0) + 1
-            self._mode_generation[camera_id] = generation
+            self._selection[camera_id] = selection
+            self._selection_generation[camera_id] = self._selection_generation.get(camera_id, 0) + 1
             _ = self._frames.pop(camera_id, None)
             viewers = self._viewer_counts.get(camera_id, 0)
             listener = self._demand_listener
             self._condition.notify_all()
         if listener is not None:
-            listener(camera_id, viewers, mode, True)
+            listener(camera_id, viewers, selection, True)
 
-    def get_mode(self, camera_id: str) -> OverlayMode:
+    def get_selection(self, camera_id: str) -> OverlaySelection:
         with self._condition:
-            return self._mode.get(camera_id, "none")
+            return self._selection.get(camera_id, OverlaySelection())
 
-    def mode_generation(self, camera_id: str) -> int:
+    def selection_generation(self, camera_id: str) -> int:
         with self._condition:
-            return self._mode_generation.get(camera_id, 0)
+            return self._selection_generation.get(camera_id, 0)
 
     def publish_jpeg(
         self,
@@ -142,7 +140,7 @@ class LatestFrameStore:
         seq: int | None = None,
         observation_age_sec: float | None = None,
         overlay_stale: bool = False,
-        expected_mode: OverlayMode | None = None,
+        expected_selection: OverlaySelection | None = None,
         expected_generation: int | None = None,
     ) -> bool:
         latest = LatestFrame(
@@ -153,11 +151,14 @@ class LatestFrameStore:
             overlay_stale=overlay_stale,
         )
         with self._condition:
-            if expected_mode is not None and self._mode.get(camera_id, "none") != expected_mode:
+            if (
+                expected_selection is not None
+                and self._selection.get(camera_id, OverlaySelection()) != expected_selection
+            ):
                 return False
             if (
                 expected_generation is not None
-                and self._mode_generation.get(camera_id, 0) != expected_generation
+                and self._selection_generation.get(camera_id, 0) != expected_generation
             ):
                 return False
             self._known_camera_ids.add(camera_id)

@@ -1,45 +1,29 @@
-"""On-demand bed-zone recognition: proxy + persistence.
-
-``POST /api/v1/cameras/{camera_id}/bed-zone/recognize`` proxies to the
-worker's one-shot bed segmentation route (``POST
-/overlay/{camera_id}/bed-zone/recognize``, see
-``worker/pipeline/output/_mjpeg_http.py``) using the same urllib-proxy
-pattern as ``streams_router.py``, then persists a successful result in
-``BedZoneStore`` so it survives restarts and can be pulled back down to the
-worker as the authoritative bed region (see
-``cameras.router.worker_config_snapshot``).
-
-This is a dashboard-only action (an operator manually triggering
-recognition), so it requires the same server-issued dashboard session as the
-camera CRUD routes. Only the server-side proxy forwards the worker relay token
-upstream; browser-supplied relay credentials are never operator authority.
-
-Response contract:
-- worker success -> 200 ``{"bed_zone": {...}}`` (and the polygon is persisted)
-- worker ran but found no usable bed (structured 404,
-  ``{"error_class": "bed_not_found"}``) -> 422
-  ``{"detail": {"error_class": "bed_not_found"}}``
-- anything else (unknown camera, no frame, decode failure, connection
-  failure, malformed upstream payload) -> 503
-"""
+"""Dashboard APIs for proposing and explicitly saving canonical bed zones."""
 
 from __future__ import annotations
 
 import json
+import sqlite3
 import urllib.error
 import urllib.parse
 import urllib.request
-from typing import Protocol
+from collections.abc import Callable
+from typing import Literal, Protocol
 
 from fastapi import APIRouter, FastAPI, HTTPException, Request, status
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, StrictInt
 
 from backend.app.core.config import get_settings
 from backend.app.features.audit.catalog import AuditAction, empty_detail
 from backend.app.features.audit.http import append_transactional
 from backend.app.features.audit.store import AuditEvent
 from backend.app.features.audit.store import utc_now as audit_now
-from backend.app.features.cameras.bed_zone_store import BedZoneStore
+from backend.app.features.cameras.bed_zone_store import (
+    BedZoneRegion,
+    BedZoneStore,
+    validate_bed_zone,
+)
+from backend.app.features.cameras.camera_repository import record_registry_mutation
 from backend.app.features.cameras.store import utc_now_iso
 from backend.app.shared.dashboard_auth import authorize_dashboard
 
@@ -59,37 +43,64 @@ class _ReadableResponse(Protocol):
     def close(self) -> None: ...
 
 
+class BedZoneRegionPayload(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    id: str = Field(min_length=1, max_length=64)
+    polygon: list[tuple[StrictInt, StrictInt]] = Field(min_length=3, max_length=16)
+    origin: Literal["manual", "model"]
+
+
 class BedZonePayload(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    polygon: list[list[int]] = Field(min_length=3)
-    image_width: int = Field(gt=0)
-    image_height: int = Field(gt=0)
+    regions: list[BedZoneRegionPayload] = Field(max_length=8)
+    image_width: StrictInt = Field(gt=0)
+    image_height: StrictInt = Field(gt=0)
     recognized_at: str
 
 
-class BedZoneRecognizeResponse(BaseModel):
+class BedZoneSaveRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    bed_zone: BedZonePayload
+    regions: list[BedZoneRegionPayload] = Field(max_length=8)
+    image_width: StrictInt = Field(gt=0)
+    image_height: StrictInt = Field(gt=0)
 
 
-@router.post("/{camera_id}/bed-zone/recognize")
+class BedZoneRecognizeRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    confidence: float = Field(default=0.25, ge=0.05, le=0.95, allow_inf_nan=False)
+
+
+class BedZoneResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    bed_zone: BedZonePayload | None
+
+
+@router.post("/{camera_id}/bed-zone/recognize", response_model=BedZoneResponse)
 def recognize_bed_zone(
     camera_id: str,
     request: Request,
-) -> BedZoneRecognizeResponse:
-    actor = _authorize(request)
+    payload: BedZoneRecognizeRequest | None = None,
+) -> BedZoneResponse:
+    _authorize(request)
+    store = _store(request.app)
+    _require_camera(store, camera_id)
     settings = get_settings()
-    upstream_url = _bed_zone_url(settings.worker_stream_origin, camera_id)
-    # Worker :8090 gates bed-zone recognition with the same relay token as
-    # /probe (security finding #3). Forward server-side only; the browser
-    # already proved a dashboard session via `_authorize` above.
     upstream_request = urllib.request.Request(
-        upstream_url,
-        data=b"",
+        _bed_zone_url(settings.worker_stream_origin, camera_id),
+        data=json.dumps(
+            {"confidence": 0.25 if payload is None else payload.confidence},
+            separators=(",", ":"),
+        ).encode("utf-8"),
         method="POST",
-        headers=_worker_relay_headers(request),
+        headers={
+            **_worker_relay_headers(request),
+            "Content-Type": "application/json",
+        },
     )
 
     try:
@@ -105,14 +116,7 @@ def recognize_bed_zone(
                 detail={"error_class": "bed_not_found"},
             ) from exc
         raise _upstream_unavailable() from exc
-    except urllib.error.URLError as exc:
-        raise _upstream_unavailable() from exc
-    except (TimeoutError, OSError) as exc:
-        # A read timeout waiting on getresponse() can surface as a bare
-        # TimeoutError instead of being wrapped in URLError (CPython's
-        # urllib.request.AbstractHTTPHandler.do_open does not guarantee the
-        # wrap), so it must be handled alongside HTTPError/URLError to avoid
-        # an unhandled 500.
+    except (urllib.error.URLError, TimeoutError, OSError) as exc:
         raise _upstream_unavailable() from exc
 
     try:
@@ -125,15 +129,90 @@ def recognize_bed_zone(
     if upstream_status != status.HTTP_200_OK:
         raise _upstream_unavailable()
 
-    polygon, image_width, image_height = _parse_worker_payload(raw)
+    candidate = _parse_worker_payload(raw)
+    return BedZoneResponse(
+        bed_zone=BedZonePayload(
+            regions=candidate.regions,
+            image_width=candidate.image_width,
+            image_height=candidate.image_height,
+            recognized_at=utc_now_iso(),
+        )
+    )
+
+
+@router.put("/{camera_id}/bed-zone", response_model=BedZoneResponse)
+def save_bed_zone(
+    camera_id: str,
+    payload: BedZoneSaveRequest,
+    request: Request,
+) -> BedZoneResponse:
+    actor = _authorize(request)
+    store = _store(request.app)
+    _require_camera(store, camera_id)
     recognized_at = utc_now_iso()
-    saved = _store(request.app).put(
-        camera_id,
-        polygon=polygon,
-        image_width=image_width,
-        image_height=image_height,
-        recognized_at=recognized_at,
-        after_write=lambda connection: append_transactional(
+    regions = _region_values(payload.regions)
+    hook = _save_hook(request, actor, camera_id)
+
+    try:
+        if not regions:
+            store.delete(camera_id, after_write=hook)
+            bed_zone = None
+        else:
+            saved = store.put(
+                camera_id,
+                regions=regions,
+                image_width=payload.image_width,
+                image_height=payload.image_height,
+                recognized_at=recognized_at,
+                after_write=hook,
+            )
+            bed_zone = BedZonePayload(**saved.as_dict())
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail=str(exc),
+        ) from exc
+    return BedZoneResponse(bed_zone=bed_zone)
+
+
+def _parse_worker_payload(raw: bytes) -> BedZoneSaveRequest:
+    try:
+        parsed = BedZoneSaveRequest.model_validate_json(raw)
+        # The store owns the full geometric and encoded-size invariant. Run it
+        # without writing so malformed provider output remains a clean 503.
+        validate_bed_zone(
+            _region_values(parsed.regions),
+            image_width=parsed.image_width,
+            image_height=parsed.image_height,
+            recognized_at="candidate",
+        )
+    except (ValueError, TypeError):
+        raise _upstream_unavailable() from None
+    return parsed
+
+
+def _region_values(regions: list[BedZoneRegionPayload]) -> tuple[BedZoneRegion, ...]:
+    return tuple(
+        BedZoneRegion(
+            id=region.id,
+            polygon=tuple(region.polygon),
+            origin=region.origin,
+        )
+        for region in regions
+    )
+
+
+def _require_camera(store: BedZoneStore, camera_id: str) -> None:
+    if not store.camera_exists(camera_id):
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="camera not found")
+
+
+def _save_hook(
+    request: Request, actor: str, camera_id: str
+) -> Callable[[sqlite3.Connection], None]:
+    def after_write(connection: sqlite3.Connection) -> None:
+        record_registry_mutation(connection)
+        append_transactional(
             request,
             connection,
             AuditEvent(
@@ -143,43 +222,9 @@ def recognize_bed_zone(
                 target_id=camera_id,
                 detail=empty_detail(AuditAction.BED_ZONE_UPDATE),
             ),
-        ),
-    )
-    return BedZoneRecognizeResponse(bed_zone=BedZonePayload(**saved.as_dict()))
+        )
 
-
-def _parse_worker_payload(raw: bytes) -> tuple[list[list[int]], int, int]:
-    try:
-        parsed = json.loads(raw)
-    except json.JSONDecodeError as exc:
-        raise _upstream_unavailable() from exc
-    if not isinstance(parsed, dict):
-        raise _upstream_unavailable()
-    polygon = parsed.get("polygon")
-    image_width = parsed.get("image_width")
-    image_height = parsed.get("image_height")
-    if (
-        not _is_valid_polygon(polygon)
-        or not _is_positive_int(image_width)
-        or not _is_positive_int(image_height)
-    ):
-        raise _upstream_unavailable()
-    return polygon, image_width, image_height  # type: ignore[return-value]
-
-
-def _is_valid_polygon(value: object) -> bool:
-    if not isinstance(value, list) or len(value) < 3:
-        return False
-    for point in value:
-        if not isinstance(point, list) or len(point) != 2:
-            return False
-        if not all(isinstance(coordinate, int) for coordinate in point):
-            return False
-    return True
-
-
-def _is_positive_int(value: object) -> bool:
-    return isinstance(value, int) and not isinstance(value, bool) and value > 0
+    return after_write
 
 
 def _is_bed_not_found(raw: bytes) -> bool:
@@ -197,8 +242,7 @@ def _bed_zone_url(origin: str, camera_id: str) -> str:
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="worker stream origin is not configured",
         )
-    encoded_camera_id = urllib.parse.quote(camera_id, safe="")
-    return f"{base}/overlay/{encoded_camera_id}/bed-zone/recognize"
+    return f"{base}/overlay/{urllib.parse.quote(camera_id, safe='')}/bed-zone/recognize"
 
 
 def _authorize(request: Request) -> str:
@@ -208,22 +252,11 @@ def _authorize(request: Request) -> str:
 _RELAY_TOKEN_HEADER = "X-Edge-Relay-Token"
 
 
-def _relay_token(request: Request) -> str | None:
-    """Server-side worker relay token (``app.state.edge_relay_token`` only).
-
-    Mirrors ``streams_router._relay_token`` so bed-zone upstream calls carry
-    the same header as stream/snapshot/pose without importing that module's
-    private helpers.
-    """
-    expected = getattr(request.app.state, "edge_relay_token", None)
-    return expected if isinstance(expected, str) and expected else None
-
-
 def _worker_relay_headers(request: Request) -> dict[str, str]:
-    token = _relay_token(request)
-    if token is None:
+    expected = getattr(request.app.state, "edge_relay_token", None)
+    if not isinstance(expected, str) or not expected:
         return {}
-    return {_RELAY_TOKEN_HEADER: token}
+    return {_RELAY_TOKEN_HEADER: expected}
 
 
 def _upstream_unavailable() -> HTTPException:
@@ -241,4 +274,11 @@ def _store(app: FastAPI) -> BedZoneStore:
     return store
 
 
-__all__ = ["BedZonePayload", "BedZoneRecognizeResponse", "router"]
+__all__ = [
+    "BedZonePayload",
+    "BedZoneRecognizeRequest",
+    "BedZoneRegionPayload",
+    "BedZoneResponse",
+    "BedZoneSaveRequest",
+    "router",
+]

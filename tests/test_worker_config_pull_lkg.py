@@ -48,12 +48,24 @@ def test_to_worker_config_threads_pulled_detection_windows_into_domains_config()
     )
 
 
-def test_to_worker_config_threads_bed_zone_polygon_into_camera_runtime_config() -> None:
-    """The persisted bed-zone polygon (see the bed-zone recognize endpoint)
-    is pulled down as part of the worker config and must survive the
+def test_to_worker_config_threads_bed_zone_regions_into_camera_runtime_config() -> None:
+    """All persisted bed-zone regions are pulled down and must survive the
     ``_CameraPayload`` -> ``CameraRuntimeConfig`` conversion unchanged, so
     ``WorkerRuntime._build_camera`` can seed ``SceneState.persisted_bed_regions``
     from it (issue: on-demand bed-zone recognition)."""
+    regions = [
+        {
+            "id": f"bed-{index}",
+            "polygon": [
+                [index * 20 + 1, 2],
+                [index * 20 + 9, 2],
+                [index * 20 + 9, 8],
+                [index * 20 + 1, 8],
+            ],
+            "origin": "manual" if index % 2 == 0 else "model",
+        }
+        for index in range(1, 5)
+    ]
     payload = BackendWorkerConfigPayload.model_validate(
         {
             "config_version": 5,
@@ -62,7 +74,7 @@ def test_to_worker_config_threads_bed_zone_polygon_into_camera_runtime_config() 
                     "camera_id": "camera-1",
                     "facility_id": "facility-1",
                     "rtsp_url": "rtsp://camera-1/stream",
-                    "bed_zone_polygon": [[1, 2], [9, 2], [9, 8], [1, 8]],
+                    "bed_zone_regions": regions,
                     "bed_zone_image_width": 640,
                     "bed_zone_image_height": 480,
                 },
@@ -78,10 +90,12 @@ def test_to_worker_config_threads_bed_zone_polygon_into_camera_runtime_config() 
     worker_config = payload.to_worker_config("http://relay.test", "relay-token")
 
     cameras = {camera.camera_id: camera for camera in worker_config.cameras}
-    assert cameras["camera-1"].bed_zone_polygon == ((1, 2), (9, 2), (9, 8), (1, 8))
+    assert [
+        region.model_dump(mode="json") for region in cameras["camera-1"].bed_zone_regions
+    ] == regions
     assert cameras["camera-1"].bed_zone_image_width == 640
     assert cameras["camera-1"].bed_zone_image_height == 480
-    assert cameras["camera-2"].bed_zone_polygon is None
+    assert cameras["camera-2"].bed_zone_regions == ()
     assert cameras["camera-2"].bed_zone_image_width is None
     assert cameras["camera-2"].bed_zone_image_height is None
 

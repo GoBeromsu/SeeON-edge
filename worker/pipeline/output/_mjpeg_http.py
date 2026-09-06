@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hmac
 import json
+import logging
 import time
 from collections.abc import Callable
 from http import HTTPStatus
@@ -27,14 +28,14 @@ from worker.pipeline.output.live_view_api import (
     RELAY_TOKEN_HEADER,
     REPLAY_PATH,
     BedZoneRecognizeResponse,
-    OverlayMode,
     ProbeErrorClass,
     ProbeResponse,
     bed_zone_camera_id,
     normalize_probe_error_class,
-    parse_pose_body,
+    overlay_selection_body,
+    parse_bed_zone_recognize_request,
+    parse_overlay_selection,
     parse_probe_request,
-    pose_body,
     pose_camera_id,
     snapshot_camera_id,
     stream_camera_id,
@@ -50,11 +51,13 @@ from worker.pipeline.trace.models import (
     TraceTruncation,
 )
 from worker.replay.engine import ReplayConfigurationError, ReplayRun, replay_recovered
+from worker.types.preview import OverlaySelection
 
 POLL_INTERVAL_SECONDS: Final = 0.05
 HEARTBEAT_INTERVAL_SECONDS: Final = 1.0
 MAX_PROBE_BODY_BYTES: Final = 8192
 MAX_POSE_BODY_BYTES: Final = 256
+MAX_BED_ZONE_BODY_BYTES: Final = 256
 # Derived from the trace retention bound in shared/events/replay_wire.py so a
 # full retained timeline can actually be transferred. A bare constant here
 # refused exactly the long windows replay exists for.
@@ -65,6 +68,7 @@ MAX_REPLAY_BODY_BYTES: Final = _REPLAY_BODY_LIMIT
 # cached the way it always was pre-gating; this must stay comfortably under
 # a client's read timeout while giving the pump a real chance to publish.
 STREAM_FIRST_FRAME_TIMEOUT_SECONDS: Final = 0.5
+LOGGER: Final = logging.getLogger(__name__)
 
 
 class BedZoneNotFoundError(RuntimeError):
@@ -72,11 +76,11 @@ class BedZoneNotFoundError(RuntimeError):
 
 
 # Given the best available (raw-ish) frame, run bed segmentation once and
-# return the highest-confidence bed's polygon, or raise ``BedZoneNotFoundError``
+# return its qualifying segmented beds, or raise ``BedZoneNotFoundError``
 # when the model finds no bed. Injected from ``worker.runtime`` -- the
 # composition root -- so this output-layer module never imports
 # ``worker.adapters`` directly, mirroring the existing ``MjpegProbe`` seam.
-BedZoneRecognizer = Callable[[Image], BedZoneRecognizeResponse]
+BedZoneRecognizer = Callable[[Image, float], BedZoneRecognizeResponse]
 BedZoneSnapshot = Callable[[str], bytes]
 
 
@@ -268,7 +272,7 @@ def build_http_server(
                     now = time.monotonic()
                     heartbeat_due = now - last_send_at >= HEARTBEAT_INTERVAL_SECONDS
                     if frame is None:
-                        # A mode change can deliberately invalidate the cached
+                        # A selection change can deliberately invalidate the cached
                         # frame. Wait against ``None`` next time rather than
                         # repeatedly satisfying ``current is not previous``
                         # with the empty slot and spinning.
@@ -316,7 +320,7 @@ def build_http_server(
             if camera_id == "" or not store.is_known(camera_id):
                 self.send_error(HTTPStatus.NOT_FOUND)
                 return
-            self._write_mode_json(store.get_mode(camera_id))
+            self._write_selection_json(store.get_selection(camera_id))
 
         def _handle_set_pose(self, camera_id: str) -> None:
             if not _authorized_pose(self.headers.get(RELAY_TOKEN_HEADER), probe_token):
@@ -325,12 +329,12 @@ def build_http_server(
             if camera_id == "" or not store.is_known(camera_id):
                 self.send_error(HTTPStatus.NOT_FOUND)
                 return
-            mode = self._read_mode_body()
-            if mode is None:
+            selection = self._read_selection_body()
+            if selection is None:
                 self.send_error(HTTPStatus.BAD_REQUEST)
                 return
-            store.set_mode(camera_id, mode)
-            self._write_mode_json(mode)
+            store.set_selection(camera_id, selection)
+            self._write_selection_json(selection)
 
         def _handle_bed_zone_recognize(self, camera_id: str) -> None:
             if not _authorized_probe(self.headers.get(RELAY_TOKEN_HEADER), probe_token):
@@ -339,34 +343,104 @@ def build_http_server(
             if camera_id == "" or not store.is_known(camera_id):
                 self.send_error(HTTPStatus.NOT_FOUND)
                 return
+            confidence = self._read_bed_zone_confidence()
+            if confidence is None:
+                self.send_error(HTTPStatus.BAD_REQUEST)
+                return
             if bed_zone_recognizer is None or bed_zone_snapshot is None:
+                LOGGER.error(
+                    "bed-zone recognition failed: stage=mising_wiring "
+                    "camera_id=%s exception_class=RuntimeError",
+                    camera_id,
+                )
                 self.send_error(HTTPStatus.SERVICE_UNAVAILABLE)
                 return
             try:
                 jpeg = bed_zone_snapshot(camera_id)
                 if not isinstance(jpeg, bytes) or not jpeg:
+                    LOGGER.warning(
+                        "bed-zone recognition failed: stage=snapshot_decode "
+                        "camera_id=%s exception_class=%s",
+                        camera_id,
+                        "TypeError" if not isinstance(jpeg, bytes) else "ValueError",
+                    )
                     self.send_error(HTTPStatus.SERVICE_UNAVAILABLE)
                     return
                 decoded = cv2.imdecode(np.frombuffer(jpeg, dtype=np.uint8), cv2.IMREAD_COLOR)
-            except (OSError, RuntimeError, TypeError, ValueError, cv2.error):
+            except (OSError, RuntimeError, TypeError, ValueError, cv2.error) as error:
+                LOGGER.warning(
+                    "bed-zone recognition failed: stage=snapshot_decode "
+                    "camera_id=%s exception_class=%s",
+                    camera_id,
+                    type(error).__name__,
+                )
                 self.send_error(HTTPStatus.SERVICE_UNAVAILABLE)
                 return
             if not isinstance(decoded, np.ndarray) or decoded.dtype != np.dtype(np.uint8):
+                LOGGER.warning(
+                    "bed-zone recognition failed: stage=snapshot_decode "
+                    "camera_id=%s exception_class=ValueError",
+                    camera_id,
+                )
                 self.send_error(HTTPStatus.SERVICE_UNAVAILABLE)
                 return
-            image = np.asarray(decoded, dtype=np.uint8)
-            if image.ndim != 3 or image.shape[0] <= 0 or image.shape[1] <= 0 or image.shape[2] != 3:
+            if (
+                decoded.ndim != 3
+                or decoded.shape[0] <= 0
+                or decoded.shape[1] <= 0
+                or decoded.shape[2] != 3
+            ):
+                LOGGER.warning(
+                    "bed-zone recognition failed: stage=snapshot_decode "
+                    "camera_id=%s exception_class=ValueError",
+                    camera_id,
+                )
                 self.send_error(HTTPStatus.SERVICE_UNAVAILABLE)
                 return
             try:
-                payload = bed_zone_recognizer(image)
+                image = cv2.cvtColor(decoded, cv2.COLOR_BGR2RGB)
+            except cv2.error as error:
+                LOGGER.warning(
+                    "bed-zone recognition failed: stage=snapshot_decode "
+                    "camera_id=%s exception_class=%s",
+                    camera_id,
+                    type(error).__name__,
+                )
+                self.send_error(HTTPStatus.SERVICE_UNAVAILABLE)
+                return
+            try:
+                payload = bed_zone_recognizer(image, confidence)
             except BedZoneNotFoundError:
                 self._write_status_json(HTTPStatus.NOT_FOUND, BED_ZONE_NOT_FOUND_BODY)
                 return
-            except (OSError, RuntimeError, TypeError, ValueError, cv2.error):
+            except (OSError, RuntimeError, TypeError, ValueError, cv2.error) as error:
+                LOGGER.warning(
+                    "bed-zone recognition failed: stage=model "
+                    "camera_id=%s exception_class=%s",
+                    camera_id,
+                    type(error).__name__,
+                )
                 self.send_error(HTTPStatus.SERVICE_UNAVAILABLE)
                 return
             self._write_status_json(HTTPStatus.OK, payload.as_dict())
+
+        def _read_bed_zone_confidence(self) -> float | None:
+            raw_length = self.headers.get("Content-Length")
+            if raw_length is None:
+                return parse_bed_zone_recognize_request({})
+            try:
+                length = int(raw_length)
+            except ValueError:
+                return None
+            if length < 0 or length > MAX_BED_ZONE_BODY_BYTES:
+                return None
+            if length == 0:
+                return parse_bed_zone_recognize_request({})
+            try:
+                payload: object = json.loads(self.rfile.read(length).decode("utf-8"))
+            except (UnicodeDecodeError, json.JSONDecodeError):
+                return None
+            return parse_bed_zone_recognize_request(payload)
 
         def _read_json_object(self, limit: int) -> dict[str, object] | None:
             """Bounded JSON object body, or None when absent, oversized, or malformed."""
@@ -393,11 +467,11 @@ def build_http_server(
             self.end_headers()
             self.wfile.write(body)
 
-        def _read_mode_body(self) -> OverlayMode | None:
+        def _read_selection_body(self) -> OverlaySelection | None:
             payload = self._read_json_object(MAX_POSE_BODY_BYTES)
             if payload is None:
                 return None
-            return parse_pose_body(payload)
+            return parse_overlay_selection(payload)
 
         def _read_replay_body(self) -> dict[str, object] | None:
             payload = self._read_json_object(MAX_REPLAY_BODY_BYTES)
@@ -405,8 +479,8 @@ def build_http_server(
                 return None
             return payload
 
-        def _write_mode_json(self, mode: OverlayMode) -> None:
-            self._write_status_json(HTTPStatus.OK, pose_body(mode))
+        def _write_selection_json(self, selection: OverlaySelection) -> None:
+            self._write_status_json(HTTPStatus.OK, overlay_selection_body(selection))
 
         def _read_probe_url(self) -> str | None:
             payload = self._read_json_object(MAX_PROBE_BODY_BYTES)

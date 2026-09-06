@@ -167,7 +167,7 @@ def _manifest(
         schedule=schedule,
         detection_windows=windows,
         policies=policies,
-        bed_zone_polygon=None,
+        bed_zone_regions=(),
         bed_zone_image_width=None,
         bed_zone_image_height=None,
     )

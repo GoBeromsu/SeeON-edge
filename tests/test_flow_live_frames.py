@@ -1,20 +1,17 @@
-"""Flow snapshot failure behaviour."""
+"""Flow live-preview snapshot and overlay behaviour."""
 
 from __future__ import annotations
 
 import threading
 from pathlib import Path
-
-import cv2
-import numpy as np
+from types import SimpleNamespace
 
 from worker.adapters.deepstream.service_maker import _FlowHandle
 from worker.pipeline.output.live_view import LatestFrameStore
-from worker.runtime.flow.media_plane import (
-    BedZoneGeometry,
-    FlowMediaPlane,
-    FlowMediaPlaneConfig,
-)
+from worker.pipeline.output.preview_renderer import BedZoneGeometry, PreviewTrack
+from worker.runtime.flow.media_plane import FlowMediaPlane, FlowMediaPlaneConfig
+from worker.types.perception_frame import PersonBox
+from worker.types.preview import OverlaySelection
 
 
 def _config() -> FlowMediaPlaneConfig:
@@ -65,34 +62,47 @@ def _flow_factory(_: object) -> _FlowHandle:
     )
 
 
-def _jpeg(*, width: int = 200, height: int = 100) -> bytes:
-    encoded, output = cv2.imencode(
-        ".jpg",
-        np.zeros((height, width, 3), dtype=np.uint8),
+class _Renderer:
+    def __init__(self) -> None:
+        self.calls: list[
+            tuple[bytes, OverlaySelection, tuple[PreviewTrack, ...], object, object]
+        ] = []
+
+    def render(
+        self,
+        jpeg: bytes,
+        selection: OverlaySelection,
+        tracks: tuple[PreviewTrack, ...],
+        bed_geometry: object,
+        fall_states: object,
+    ) -> bytes:
+        self.calls.append((jpeg, selection, tuple(tracks), bed_geometry, fall_states))
+        return b"preview-jpeg"
+
+
+def _live_plane(
+    store: LatestFrameStore,
+    renderer: _Renderer,
+    *,
+    snapshot: bytes = b"sdk-jpeg",
+    bed_geometry: dict[str, BedZoneGeometry] | None = None,
+) -> FlowMediaPlane:
+    return FlowMediaPlane(
+        _config(),
+        flow_factory=_flow_factory,
+        snapshot_encoder=lambda _camera_id: snapshot,
+        live_frames=store,
+        renderer=renderer,  # type: ignore[arg-type]
+        fall_states=lambda _camera_id: {},
+        bed_zone_geometry=bed_geometry,
     )
-    assert encoded
-    return output.tobytes()
 
 
-def test_alert_snapshot_uses_the_runtime_snapshot_encoder_seam() -> None:
-    encoded: list[str] = []
+def test_alert_snapshot_uses_runtime_encoder_and_keeps_sdk_object_default() -> None:
     plane = FlowMediaPlane(
         _config(),
         flow_factory=_flow_factory,
-        snapshot_encoder=lambda camera_id: encoded.append(camera_id) or b"burned-jpeg",
-    )
-    plane.add_source("camera", "rtsp://one")
-
-    assert plane.snapshot("camera") == b"burned-jpeg"
-    assert encoded == ["camera"]
-
-
-def test_clean_snapshot_disables_sdk_objects_without_changing_evidence_default() -> None:
-    encoded: list[str] = []
-    plane = FlowMediaPlane(
-        _config(),
-        flow_factory=_flow_factory,
-        snapshot_encoder=lambda camera_id: encoded.append(camera_id) or b"burned-jpeg",
+        snapshot_encoder=lambda _camera_id: b"burned-jpeg",
     )
     plane.add_source("camera", "rtsp://one")
     object_flags: list[bool] = []
@@ -109,55 +119,10 @@ def test_clean_snapshot_disables_sdk_objects_without_changing_evidence_default()
     assert object_flags == [False, True]
 
 
-def test_snapshot_refresh_publishes_the_burned_jpeg_to_the_live_view_store() -> None:
+def test_preview_always_requests_clean_sdk_snapshot() -> None:
     store = LatestFrameStore()
-    plane = FlowMediaPlane(
-        _config(),
-        flow_factory=_flow_factory,
-        snapshot_encoder=lambda _camera_id: b"burned-jpeg",
-        live_frames=store,
-    )
-    plane.add_source("camera", "rtsp://one")
-    store.register_camera("camera")
-
-    store.request_snapshot_refresh("camera")
-
-    frame = store.get_latest("camera")
-    assert frame is not None
-    assert frame.jpeg == b"burned-jpeg"
-    assert frame.content_type == "image/jpeg"
-
-
-def test_store_passes_each_camera_mode_on_connect_refresh_and_disconnect() -> None:
-    store = LatestFrameStore()
-    calls: list[tuple[str, int, str, bool]] = []
-    store.register_camera("camera")
-    store.set_mode("camera", "bedexit")
-    store.set_demand_listener(
-        lambda camera_id, viewers, mode, requested: calls.append(
-            (camera_id, viewers, mode, requested)
-        )
-    )
-
-    store.mark_viewer_connected("camera")
-    store.request_snapshot_refresh("camera")
-    store.mark_viewer_disconnected("camera")
-
-    assert calls == [
-        ("camera", 1, "bedexit", False),
-        ("camera", 1, "bedexit", True),
-        ("camera", 0, "bedexit", False),
-    ]
-
-
-def test_preview_routes_clean_and_sdk_object_modes_without_changing_evidence_default() -> None:
-    store = LatestFrameStore()
-    plane = FlowMediaPlane(
-        _config(),
-        flow_factory=_flow_factory,
-        snapshot_encoder=lambda _camera_id: _jpeg(),
-        live_frames=store,
-    )
+    renderer = _Renderer()
+    plane = _live_plane(store, renderer)
     plane.add_source("camera", "rtsp://one")
     store.register_camera("camera")
     object_flags: list[bool] = []
@@ -168,143 +133,104 @@ def test_preview_routes_clean_and_sdk_object_modes_without_changing_evidence_def
         return adapter_snapshot(camera_id, draw_objects=draw_objects)
 
     plane.plane.snapshot = capture_mode  # type: ignore[method-assign]
-
     store.request_snapshot_refresh("camera")
-    store.set_mode("camera", "fall")
-    assert plane.snapshot("camera") == _jpeg()
 
-    assert object_flags == [False, True, True]
+    assert object_flags == [False]
+    assert store.get_latest("camera") is not None
+    assert store.get_latest("camera").jpeg == b"preview-jpeg"  # type: ignore[union-attr]
 
 
-def test_bedexit_draws_scaled_saved_polygon_and_never_invents_missing_geometry() -> None:
-    source = _jpeg()
+def test_latest_metadata_boxes_and_association_ids_are_passed_to_renderer() -> None:
     store = LatestFrameStore()
-    plane = FlowMediaPlane(
-        _config(),
-        flow_factory=_flow_factory,
-        snapshot_encoder=lambda _camera_id: source,
-        live_frames=store,
-        bed_zone_geometry={
-            "with-bed": BedZoneGeometry(
-                polygon=((10, 10), (40, 10), (40, 30), (10, 30)),
-                image_width=100,
-                image_height=50,
-            )
-        },
-    )
-    plane.add_source("with-bed", "rtsp://one")
-    plane.add_source("without-bed", "rtsp://two")
-    store.register_camera("with-bed")
-    store.register_camera("without-bed")
-
-    store.set_mode("with-bed", "bedexit")
-    with_bed = store.get_latest("with-bed")
-    assert with_bed is not None
-    rendered = cv2.imdecode(np.frombuffer(with_bed.jpeg, dtype=np.uint8), cv2.IMREAD_COLOR)
-    assert rendered is not None
-    # Saved (10, 10) in a 100x50 source scales to (20, 20) in this 200x100 JPEG.
-    assert int(rendered[20, 20, 1]) > 80
-    assert int(rendered[5, 5].max()) < 20
-
-    store.set_mode("without-bed", "bedexit")
-    without_bed = store.get_latest("without-bed")
-    assert without_bed is not None
-    assert without_bed.jpeg == source
-
-
-def test_mode_change_clears_stale_frame_when_selected_refresh_fails() -> None:
-    store = LatestFrameStore()
-    plane = FlowMediaPlane(
-        _config(),
-        flow_factory=_flow_factory,
-        snapshot_encoder=lambda _camera_id: _jpeg(),
-        live_frames=store,
-    )
+    renderer = _Renderer()
+    plane = _live_plane(store, renderer)
     plane.add_source("camera", "rtsp://one")
     store.register_camera("camera")
-    store.publish_jpeg("camera", _jpeg(), frame_index=1)
+    box_a = PersonBox(10, 20, 30, 40, 0.8)
+    box_b = PersonBox(50, 60, 70, 80, 0.7)
+    plane.metadata = SimpleNamespace(  # type: ignore[assignment]
+        peek=lambda _camera_id: SimpleNamespace(
+            source_width=100,
+            source_height=90,
+            frame=SimpleNamespace(
+                person_box=SimpleNamespace(boxes=(box_a, box_b)),
+                association=SimpleNamespace(selected_cue_indexes=(1,), track_ids=(22,)),
+            ),
+        )
+    )
 
-    def fail_snapshot(camera_id: str, *, draw_objects: bool = True) -> bytes:
-        del camera_id, draw_objects
-        raise OSError("capture failed")
+    store.request_snapshot_refresh("camera")
 
-    plane.plane.snapshot = fail_snapshot  # type: ignore[method-assign]
-    store.set_mode("camera", "fall")
+    tracks = renderer.calls[0][2]
+    assert tracks == (
+        PreviewTrack(box_a, 100, 90, None),
+        PreviewTrack(box_b, 100, 90, 22),
+    )
 
-    assert store.get_latest("camera") is None
+
+def test_absent_metadata_passes_only_persisted_bed_geometry() -> None:
+    store = LatestFrameStore()
+    renderer = _Renderer()
+    bed = BedZoneGeometry(((1, 1), (9, 1), (9, 9)), 10, 10)
+    plane = _live_plane(store, renderer, bed_geometry={"camera": bed})
+    plane.add_source("camera", "rtsp://one")
+    store.register_camera("camera")
+
+    store.request_snapshot_refresh("camera")
+
+    assert renderer.calls[0][2] == ()
+    assert renderer.calls[0][3] is bed
 
 
-def test_in_flight_old_mode_cannot_publish_after_mode_change() -> None:
+def test_in_flight_stale_selection_cannot_publish() -> None:
     store = LatestFrameStore()
     capture_started = threading.Event()
     release_capture = threading.Event()
-    plane = FlowMediaPlane(
-        _config(),
-        flow_factory=_flow_factory,
-        snapshot_encoder=lambda _camera_id: _jpeg(),
-        live_frames=store,
-    )
+
+    class _BlockingRenderer(_Renderer):
+        def render(self, *args: object, **kwargs: object) -> bytes:
+            if not capture_started.is_set():
+                capture_started.set()
+                assert release_capture.wait(timeout=1)
+            return super().render(*args, **kwargs)  # type: ignore[arg-type]
+
+    renderer = _BlockingRenderer()
+    plane = _live_plane(store, renderer)
     plane.add_source("camera", "rtsp://one")
     store.register_camera("camera")
-    adapter_snapshot = plane.plane.snapshot
 
-    def blocked_snapshot(camera_id: str, *, draw_objects: bool = True) -> bytes:
-        if draw_objects:
-            capture_started.set()
-            assert release_capture.wait(timeout=1)
-        return adapter_snapshot(camera_id, draw_objects=draw_objects)
-
-    plane.plane.snapshot = blocked_snapshot  # type: ignore[method-assign]
-    refresh = threading.Thread(target=store.set_mode, args=("camera", "fall"))
+    refresh = threading.Thread(
+        target=store.set_selection,
+        args=("camera", OverlaySelection(person=False, bed=True)),
+    )
     refresh.start()
     assert capture_started.wait(timeout=1)
 
-    store.set_mode("camera", "none")
-    none_frame = store.get_latest("camera")
-    assert none_frame is not None
+    store.set_selection("camera", OverlaySelection(person=True, bed=False))
+    current = store.get_latest("camera")
+    assert current is not None
     release_capture.set()
     refresh.join(timeout=1)
 
     assert not refresh.is_alive()
-    assert store.get_latest("camera") is none_frame
+    assert store.get_latest("camera") is current
 
 
-def test_modes_and_refreshes_are_isolated_per_camera() -> None:
-    store = LatestFrameStore()
+def test_missing_preview_dependencies_refuse_start() -> None:
     plane = FlowMediaPlane(
         _config(),
         flow_factory=_flow_factory,
-        snapshot_encoder=lambda camera_id: _jpeg(width=200 if camera_id == "a" else 100),
-        live_frames=store,
+        snapshot_encoder=lambda _camera_id: b"jpeg",
+        live_frames=LatestFrameStore(),
     )
-    for camera_id in ("a", "b"):
-        plane.add_source(camera_id, f"rtsp://{camera_id}")
-        store.register_camera(camera_id)
-    calls: list[tuple[str, bool]] = []
-    adapter_snapshot = plane.plane.snapshot
 
-    def capture_mode(camera_id: str, *, draw_objects: bool = True) -> bytes:
-        calls.append((camera_id, draw_objects))
-        return adapter_snapshot(camera_id, draw_objects=draw_objects)
-
-    plane.plane.snapshot = capture_mode  # type: ignore[method-assign]
-
-    store.set_mode("a", "fall")
-    store.request_snapshot_refresh("b")
-
-    assert store.get_mode("a") == "fall"
-    assert store.get_mode("b") == "none"
-    assert calls == [("a", True), ("b", False)]
-    assert store.get_latest("a") is not None
-    assert store.get_latest("b") is not None
+    try:
+        plane.start()
+    except RuntimeError as error:
+        assert "renderer and fall-state provider" in str(error)
+    else:
+        raise AssertionError("FlowMediaPlane.start() accepted incomplete preview wiring")
 
 
 def test_the_recorder_defaults_to_the_sixty_second_window() -> None:
-    """15 s of cached lookback plus the plane's 45 s forward window.
-
-    Composition takes this default rather than repeating a literal, so the
-    contract has one owner.
-    """
-    from worker.runtime.flow.media_plane import FlowMediaPlane
-
     assert FlowMediaPlane.DEFAULT_LOOKBACK_SEC == 15

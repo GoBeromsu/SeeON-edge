@@ -6,8 +6,9 @@ import logging
 import threading
 import time
 from collections import deque
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, replace
+from types import MappingProxyType
 from typing import Protocol, final, runtime_checkable
 
 from contracts.observation import BoundingBox
@@ -18,11 +19,23 @@ from worker.pipeline.output.evidence_attacher import AlertEvidenceAttacher
 from worker.pipeline.perception import SceneState, build_decision_input, build_frame_observation
 from worker.pipeline.trace.replay_trace_writer import ReplayTraceWriter
 from worker.runtime.flow.metadata_slot import AcceptanceToken, LatestMetadataSlot
+from worker.runtime.flow.observation_coverage import ObservationCoverage
 from worker.types import BusinessEvent, ChannelState, NativeEvidenceTrigger
 from worker.types.metadata import MetadataFrame, SourceBinding
+from worker.types.preview import FallPreviewState
+from worker.types.trace import DecisionTraceState, DecisionTraceValueName
 
 LOGGER = logging.getLogger(__name__)
 _FPS_WINDOW_SEC = 10.0
+_SUSPECTED_FALL_STATES = frozenset(
+    {
+        DecisionTraceState.FALL,
+        DecisionTraceState.TRANSITION_CANDIDATE,
+        DecisionTraceState.TRANSITION_CONFIRMED,
+        DecisionTraceState.FALLEN,
+        DecisionTraceState.TRIGGERED,
+    }
+)
 
 
 @runtime_checkable
@@ -99,6 +112,9 @@ class NativePolicyPump:
         self._trace_last_pts_ns = 0
         self._trace_seq = 0
         self._trace_write_failure_logged = False
+        self._preview_states_lock = threading.Lock()
+        self._preview_states: Mapping[int, FallPreviewState] = MappingProxyType({})
+        self._observation_coverage = ObservationCoverage(binding)
 
     @property
     def camera_id(self) -> str:
@@ -124,11 +140,14 @@ class NativePolicyPump:
             return
         previous = self._binding
         self._binding = current
+        self._observation_coverage.rebind(current)
         if self._recreate_decision is not None:
             # A source rebuild starts a distinct native epoch. Recreate the
             # camera-local V2 window/policy so no partial 30-row state crosses
             # the boundary and every onset identity names the new generation.
             self._decision = self._recreate_decision(current)
+            with self._preview_states_lock:
+                self._preview_states = MappingProxyType({})
         LOGGER.info(
             "native policy pump rebound after source rebuild: camera_id=%s "
             "generation %d->%d epoch %d->%d",
@@ -145,11 +164,13 @@ class NativePolicyPump:
             try:
                 frame = self._metadata.wait_accepted(token, timeout_sec=0.5)
             except TimeoutError:
+                self._record_observation_timeout()
                 self._capture_source_lost()
                 self._rebind_if_source_was_rebuilt()
                 token = AcceptanceToken(self._binding, token.native_publish_sequence)
                 continue
             token = AcceptanceToken(self._binding, frame.native_publish_sequence)
+            self._observation_coverage.observe(frame)
             self._diagnostics.record_native_detection_attempt(self.camera_id)
             try:
                 self._process(frame)
@@ -165,6 +186,39 @@ class NativePolicyPump:
 
     def stop(self) -> None:
         self._stop.set()
+
+    def _record_observation_timeout(self) -> None:
+        self._observation_coverage.detect_gap()
+        with self._preview_states_lock:
+            self._preview_states = MappingProxyType({})
+
+    def preview_states(self) -> Mapping[int, FallPreviewState]:
+        """Return the immutable latest fall-policy state for live preview tracks."""
+        with self._preview_states_lock:
+            return self._preview_states
+
+    def _refresh_preview_states(self) -> None:
+        states: dict[int, FallPreviewState] = {}
+        for snapshot in self._decision.last_trace_snapshots:
+            track_id = snapshot.track_id
+            if track_id is None or (
+                DecisionTraceValueName.FALL_TRANSITION_PROBABILITY not in snapshot.values
+                and DecisionTraceValueName.FALL_TRANSITION_PROBABILITY
+                not in snapshot.missing_values
+            ):
+                continue
+            probability_value = snapshot.values.get(
+                DecisionTraceValueName.FALL_TRANSITION_PROBABILITY
+            )
+            states[track_id] = FallPreviewState(
+                track_id=track_id,
+                status=(
+                    "suspected" if snapshot.current_state in _SUSPECTED_FALL_STATES else "normal"
+                ),
+                probability=(None if probability_value is None else float(probability_value)),
+            )
+        with self._preview_states_lock:
+            self._preview_states = MappingProxyType(states)
 
     def _process(self, metadata: MetadataFrame) -> None:
         frame = metadata.frame
@@ -224,6 +278,7 @@ class NativePolicyPump:
         self._capture_replay_row(metadata, boxes, resolved_track_ids)
         gap_rows_before = _resample_gap_rows_total(self._decision)
         events = self._decision.update(decision_input)
+        self._refresh_preview_states()
         self._diagnostics.record_track_id_switch_absorbed_total(
             self.camera_id, self._track_id_switch_absorbed_total(self._decision)
         )

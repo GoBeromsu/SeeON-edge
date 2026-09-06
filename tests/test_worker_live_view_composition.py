@@ -4,11 +4,13 @@ import json
 import urllib.request
 from pathlib import Path
 from types import SimpleNamespace
+from uuid import UUID
 
 import cv2
 import numpy as np
 import pytest
 
+import worker.runtime.worker as worker_module
 from contracts.runner import Image, bed_result
 from worker.adapters.deepstream.service_maker import DeepStreamFlowStopTimeout
 from worker.pipeline.output.live_view import LatestFrameStore
@@ -16,6 +18,7 @@ from worker.pipeline.output.mjpeg_server import MjpegServer, MjpegServerConfig
 from worker.runtime.config import WorkerConfig
 from worker.runtime.lease import GpuLease
 from worker.runtime.worker import WorkerRuntime
+from worker.types.preview import FallPreviewState
 
 _JPEG = cv2.imencode(".jpg", np.zeros((16, 16, 3), dtype=np.uint8))[1].tobytes()
 
@@ -70,6 +73,60 @@ def _config() -> WorkerConfig:
             ],
         }
     )
+
+
+def test_worker_composes_fall_preview_provider_into_flow_media_plane(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    captured: dict[str, object] = {}
+    renderer = object()
+    graph = object()
+
+    class _ComposedPlane:
+        def __init__(self, _config: object, **kwargs: object) -> None:
+            captured.update(kwargs)
+
+        def bind_live_frames(self, frames: object) -> None:
+            captured["live_frames"] = frames
+
+    monkeypatch.setattr(worker_module, "FlowMediaPlane", _ComposedPlane)
+    monkeypatch.setattr(worker_module, "PreviewRenderer", lambda: renderer)
+    monkeypatch.setattr(
+        worker_module,
+        "verify_flow_boot_inputs",
+        lambda _env, *, deployed_batch: {"engine": deployed_batch},
+    )
+    monkeypatch.setattr(
+        WorkerRuntime,
+        "_initialize_flow_policy_graph",
+        lambda _self, _boot: graph,
+    )
+    runtime = WorkerRuntime(
+        _config(),
+        env={
+            "ML_WORKER_PROFILE": "flow",
+            "ML_WORKER_FLOW_INFER_CONFIG": "infer.txt",
+            "ML_WORKER_FLOW_TRACKER_CONFIG": "tracker.yml",
+            "ML_WORKER_FLOW_TRACKER_LIBRARY": "libtracker.so",
+            "ML_WORKER_FLOW_RECORD_DIR": str(tmp_path / "record"),
+            "ML_WORKER_FLOW_RECORD_CACHE_SECONDS": "5",
+            "ML_WORKER_FLOW_FRAME_WIDTH": "640",
+            "ML_WORKER_FLOW_FRAME_HEIGHT": "360",
+        },
+        serving_client=_ServingClient(),
+        acquire_lease=lambda: GpuLease.acquire(tmp_path),
+        state_dir=tmp_path,
+    )
+
+    assert runtime._initialize_flow_media_plane(object()) is graph  # noqa: SLF001
+    provider = captured["fall_states"]
+    assert callable(provider)
+    assert provider("camera-without-pump") == {}
+    runtime._native_policy_pumps_by_camera["camera-a"] = SimpleNamespace(  # noqa: SLF001
+        preview_states=lambda: {3: FallPreviewState(3, "suspected", 0.88)}
+    )
+    assert provider("camera-a") == {3: FallPreviewState(3, "suspected", 0.88)}
+    assert captured["renderer"] is renderer
 
 
 def test_flow_live_view_injects_bed_recognizer_and_recognize_request_reaches_it(
@@ -133,11 +190,16 @@ def test_flow_live_view_injects_bed_recognizer_and_recognize_request_reaches_it(
         )
         with urllib.request.urlopen(request, timeout=2) as response:
             response_payload = json.loads(response.read().decode("utf-8"))
-        assert response_payload == {
-            "polygon": [[1, 2], [12, 2], [12, 14], [1, 14]],
-            "image_width": 16,
-            "image_height": 16,
-        }
+        assert response_payload["image_width"] == 16
+        assert response_payload["image_height"] == 16
+        assert len(response_payload["regions"]) == 1
+        region = response_payload["regions"][0]
+        assert set(region) == {"id", "polygon", "origin"}
+        assert UUID(region["id"]).version == 4
+        assert region["origin"] == "model"
+        assert region["polygon"] == [[1, 2], [12, 2], [12, 14], [1, 14]]
+        region_ids = [candidate["id"] for candidate in response_payload["regions"]]
+        assert len(region_ids) == len(set(region_ids))
         assert serving.create_calls == [("bed", "cpu")]
         assert plane.snapshot_calls == ["camera-a"]
     finally:

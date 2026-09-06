@@ -34,7 +34,7 @@ from backend.app.features.audit.catalog import (
 from backend.app.features.audit.http import append_transactional
 from backend.app.features.audit.store import AuditEvent
 from backend.app.features.audit.store import utc_now as audit_now
-from backend.app.features.cameras.bed_zone_router import BedZonePayload
+from backend.app.features.cameras.bed_zone_router import BedZonePayload, BedZoneRegionPayload
 from backend.app.features.cameras.bed_zone_store import BedZone, BedZoneStore
 from backend.app.features.cameras.roster_sync import (
     camera_sync_view,
@@ -296,11 +296,7 @@ class WorkerCameraConfig(BaseModel):
     frame_stride: int | None = Field(default=None, gt=0)
     decode_backend: str | None = Field(default=None)
     domains: list[str] | None = None
-    # Persisted bed-zone recognition (see BedZoneStore): threaded through so
-    # the worker's _CameraPayload (worker/runtime/config/pull_models.py) can
-    # seed SceneState.persisted_bed_regions, making it the authoritative bed
-    # region for bed-exit instead of live per-frame segmentation.
-    bed_zone_polygon: list[list[int]] | None = None
+    bed_zone_regions: list[BedZoneRegionPayload] | None = None
     bed_zone_image_width: int | None = Field(default=None, gt=0)
     bed_zone_image_height: int | None = Field(default=None, gt=0)
 
@@ -814,7 +810,7 @@ def worker_config_snapshot(
             camera["decode_backend"] = decode_backend
         bed_zone = _lookup_bed_zone(bed_zones, canonical_id, record.get("id"))
         if bed_zone is not None:
-            camera["bed_zone_polygon"] = [[x, y] for x, y in bed_zone.polygon]
+            camera["bed_zone_regions"] = [region.as_dict() for region in bed_zone.regions]
             camera["bed_zone_image_width"] = bed_zone.image_width
             camera["bed_zone_image_height"] = bed_zone.image_height
         cameras.append(camera)

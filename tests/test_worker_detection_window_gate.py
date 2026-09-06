@@ -30,7 +30,7 @@ from worker.domains.detection_window import DetectionWindow
 from worker.domains.fall import FallPolicyDeciderV2, FallV2DomainDecider, FallV2Probabilities
 from worker.runtime.config import CameraRuntimeConfig, WorkerConfig
 from worker.runtime.worker import WorkerRuntime
-from worker.types import BusinessEvent, DecisionInput
+from worker.types import BusinessEvent, DecisionInput, DecisionTraceSnapshot
 
 
 @final
@@ -43,6 +43,18 @@ class _RecordingDecider:
         del input_value
         self.calls += 1
         return self._events
+
+
+@final
+class _TraceRecordingDecider:
+    def __init__(self, snapshots: tuple[DecisionTraceSnapshot, ...]) -> None:
+        self.calls = 0
+        self.last_trace_snapshots = snapshots
+
+    def update(self, input_value: DecisionInput) -> tuple[BusinessEvent, ...]:
+        del input_value
+        self.calls += 1
+        return ()
 
 
 def _input() -> DecisionInput:
@@ -66,6 +78,9 @@ def test_window_gated_decider_skips_update_and_wrapped_state_outside_window() ->
 
     assert gated.update(_input()) == ()
     assert inner.calls == 0
+    assert len(gated.last_trace_snapshots) == 1
+    assert gated.last_trace_snapshots[0].current_state == "not-evaluated"
+    assert gated.last_trace_snapshots[0].reason == "outside-detection-window"
 
 
 def test_window_gated_decider_passes_through_inside_window() -> None:
@@ -89,6 +104,29 @@ def test_window_gated_decider_passes_through_inside_window() -> None:
 
     assert gated.update(_input()) == expected
     assert inner.calls == 1
+    assert gated.last_trace_snapshots == ()
+
+
+def test_window_gated_decider_forwards_trace_snapshots_inside_window() -> None:
+    snapshot = DecisionTraceSnapshot(
+        reason="below-threshold",
+        previous_state="clear",
+        current_state="clear",
+        triggered=False,
+        track_id=4,
+        bed_id=None,
+        values={"fall_transition_probability": 0.12},
+    )
+    inner = _TraceRecordingDecider((snapshot,))
+    gated = worker_module._WindowGatedDecider(  # noqa: SLF001
+        inner,
+        DetectionWindow(start="21:00", end="06:00", tz="UTC"),
+        clock=lambda: datetime(2026, 1, 1, 23, 0, tzinfo=UTC),
+    )
+
+    assert gated.update(_input()) == ()
+    assert inner.calls == 1
+    assert gated.last_trace_snapshots == (snapshot,)
 
 
 @final

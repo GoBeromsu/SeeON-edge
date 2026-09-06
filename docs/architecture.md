@@ -148,8 +148,8 @@ work, and never duplicate or shadow a vendored type inside `worker/`.
 other (import-linter keeps both directions forbidden). They still meet at two
 runtime seams -- the ml-api proxies calling the worker's live-view server on
 `ml-worker:8090` (stream, snapshot, pose overlay, bed-zone recognize, RTSP
-probe, clip-deletion preflight/command), and the `clips/<clip_id>/manifest.json`
-the worker writes and ml-api reads back.
+probe), and the `clips/<clip_id>/manifest.json` the worker writes and ml-api
+reads back.
 
 The rule for both: **each side owns its own definition of the interface, and
 a test -- not a shared module -- catches drift.** The provider owns the schema
@@ -159,7 +159,7 @@ not an edge-internal interface package, so neither seam is defined there.
 
 | Seam | Provider (worker) | Consumer (backend) |
 | --- | --- | --- |
-| `:8090` HTTP | `worker/pipeline/output/live_view_api.py` -- route matchers, relay-token header, MJPEG media type, request/response bodies | `backend/app/features/cameras/streams_router.py`, `bed_zone_router.py`, `router.py` (probe), `backend/app/features/clips/deletion_control.py` -- path builders and response parsers |
+| `:8090` HTTP | `worker/pipeline/output/live_view_api.py` -- route matchers, relay-token header, MJPEG media type, request/response bodies | `backend/app/features/cameras/streams_router.py`, `bed_zone_router.py`, `router.py` (probe) -- path builders and response parsers |
 | `manifest.json` | `worker/pipeline/output/evidence/manifest_models.py` + `clip_manifest_payload.py` -- the fields the writer emits | `backend/app/features/clips/manifest.py` (lenient serving parser), `catalog.py` `_MANIFEST_FIELDS` (strict migration reader) |
 
 `tests/test_backend_worker_runtime_contracts.py` is the drift guard and the
@@ -171,18 +171,23 @@ the backend parser. A field either side adds must pass there before it ships.
 
 ### Live preview overlays
 
-Preview mode is camera-local: `none` displays the clean image, `fall` displays
-the SDK's detected person boxes and track IDs, and `bedexit` adds the persisted
-bed polygon to those person detections. Bed geometry comes from explicit
-on-demand model recognition and is scaled from its recorded image dimensions;
-the preview does not invent a region or run continuous bed segmentation.
-A camera without a recognized bed region is not ready for bed-exit detection.
+Preview overlay selection is camera-local: person and bed rendering are
+independent toggles over the clean SDK frame. Person boxes and track IDs come
+from SDK metadata; every persisted bed region is scaled from its recorded image
+dimensions. The preview does not invent a region or run continuous bed
+segmentation.
 
 Bed recognition consumes a clean snapshot, never the annotated preview cache.
-The shared snapshot tiler/OSD/file bridge serializes requests across cameras.
+The non-saving recognize request accepts a confidence and returns multiple
+candidate regions. The operator may edit polygons, then explicitly persists
+them with `PUT /cameras/{id}/bed-zone`. The backend stores the canonical
+`{regions, image_width, image_height, recognized_at}` value as compact JSON in
+SQLite and sends all regions to the worker; `regions: []` explicitly clears
+the bed zone. The shared snapshot tiler/OSD/file bridge serializes requests
+across cameras.
 Operator preview selections do not disable overlays on alert-evidence JPEGs
 and do not change the original Smart Record video bytes. Host tests cover
-mode routing and polygon pixels; actual SDK rendering still needs runtime
+toggle routing and polygon pixels; actual SDK rendering still needs runtime
 visual verification.
 
 ## Raw-image vs numeric fan-out

@@ -6,7 +6,7 @@ from uuid import UUID
 
 from contracts.observation import BedRegionCacheState, BedRegionDebugSnapshot, FrameObservation
 from worker.pipeline.decision import EventAggregator, IncidentManager
-from worker.types import BusinessEvent, DecisionInput
+from worker.types import BusinessEvent, DecisionInput, DecisionTraceSnapshot
 
 
 def _event(
@@ -49,6 +49,7 @@ def _input() -> DecisionInput:
 @dataclass(slots=True)  # policy: MUTABLE_OK - test changes scripted events between frames
 class _StaticDecider:
     events: tuple[BusinessEvent, ...]
+    last_trace_snapshots: tuple[DecisionTraceSnapshot, ...] = ()
 
     def update(self, input_value: DecisionInput) -> tuple[BusinessEvent, ...]:
         del input_value
@@ -71,6 +72,36 @@ class _OutputProbe:
 def _dispatch(probe: _OutputProbe, events: tuple[BusinessEvent, ...]) -> None:
     for event in events:
         probe.emit(event)
+
+
+def test_event_aggregator_combines_decider_trace_snapshots() -> None:
+    first = DecisionTraceSnapshot(
+        reason="below-threshold",
+        previous_state="clear",
+        current_state="clear",
+        triggered=False,
+        track_id=4,
+        bed_id=None,
+        values={"fall_transition_probability": 0.12},
+    )
+    second = DecisionTraceSnapshot(
+        reason="contained",
+        previous_state="contained",
+        current_state="contained",
+        triggered=False,
+        track_id=7,
+        bed_id=2,
+        values={"containment_ratio": 0.91},
+    )
+    aggregator = EventAggregator(
+        deciders=(
+            _StaticDecider((), (first,)),
+            _StaticDecider((), (second,)),
+        ),
+        incidents=IncidentManager(),
+    )
+
+    assert aggregator.last_trace_snapshots == (first, second)
 
 
 def test_fall_admission_preserves_enrichment_and_assigns_a_uuid4(tmp_path: Path) -> None:

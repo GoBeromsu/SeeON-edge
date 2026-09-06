@@ -1,16 +1,8 @@
-"""Tests for POST /api/v1/cameras/{camera_id}/bed-zone/recognize -- the
-dashboard-session-authed proxy to the worker's one-shot bed segmentation
-route (see worker/pipeline/output/_mjpeg_http.py's
-POST /overlay/{camera_id}/bed-zone/recognize), and its persistence into
-BedZoneStore (surfaced back out via GET /cameras' bed_zone field and
-GET /cameras/worker-config's bed_zone_polygon/... fields).
-"""
+"""Focused canonical multi-region bed-zone API coverage."""
 
 from __future__ import annotations
 
-import io
 import json
-import urllib.error
 import urllib.request
 from collections.abc import Iterator
 from pathlib import Path
@@ -28,67 +20,26 @@ from backend.app.main import LifespanFactory, create_app, no_lifespan
 
 NO_LIFESPAN: LifespanFactory = no_lifespan
 RECOGNIZE_PATH = "/api/v1/cameras/camera-1/bed-zone/recognize"
+SAVE_PATH = "/api/v1/cameras/camera-1/bed-zone"
 
 
 @pytest.fixture(autouse=True)
-def _migrated_compact_database(tmp_path: Path) -> None:
+def _environment(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     bootstrap_database(tmp_path / "catalog.sqlite3")
-
-
-def _login(client: TestClient) -> None:
-    response = client.post(
-        "/api/v1/auth/session",
-        json={"username": "admin", "password": "admin"},
-    )
-    assert response.status_code == 204
-
-
-class FakeUpstreamResponse:
-    status: int = 200
-    headers: dict[str, str] = {"Content-Type": "application/json"}
-
-    def __init__(self, payload: dict[str, object]) -> None:
-        self._body = json.dumps(payload).encode("utf-8")
-        self.closed = False
-
-    def read(self, size: int = -1) -> bytes:
-        del size
-        return self._body
-
-    def close(self) -> None:
-        self.closed = True
-
-    def __enter__(self) -> Self:
-        return self
-
-    def __exit__(
-        self,
-        exc_type: type[BaseException] | None,
-        exc: BaseException | None,
-        traceback: TracebackType | None,
-    ) -> None:
-        del exc_type, exc, traceback
-        self.close()
-
-
-def _http_error(code: int, payload: dict[str, object] | None = None) -> urllib.error.HTTPError:
-    body = json.dumps(payload).encode("utf-8") if payload is not None else b""
-    return urllib.error.HTTPError(
-        "http://worker.local:8090/overlay/camera-1/bed-zone/recognize",
-        code,
-        "upstream status",
-        {},
-        io.BytesIO(body),
-    )
-
-
-@pytest.fixture(autouse=True)
-def bed_zone_env(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     monkeypatch.setenv("API_EDGE_RELAY_TOKEN", "relay-token")
     monkeypatch.setenv("ML_API_WORKER_STREAM_ORIGIN", "http://worker.local:8090")
     get_settings.cache_clear()
     yield
     get_settings.cache_clear()
+
+
+def _login(client: TestClient) -> None:
+    assert (
+        client.post(
+            "/api/v1/auth/session", json={"username": "admin", "password": "admin"}
+        ).status_code
+        == 204
+    )
 
 
 def _app(tmp_path: Path):
@@ -106,7 +57,54 @@ def _app(tmp_path: Path):
     return app
 
 
-def test_recognize_success_persists_and_returns_the_polygon(
+class FakeUpstreamResponse:
+    status = 200
+    headers: dict[str, str] = {"Content-Type": "application/json"}
+
+    def __init__(self, payload: dict[str, object]) -> None:
+        self.body = json.dumps(payload).encode()
+        self.closed = False
+
+    def read(self, size: int = -1) -> bytes:
+        del size
+        return self.body
+
+    def close(self) -> None:
+        self.closed = True
+
+    def __enter__(self) -> Self:
+        return self
+
+    def __exit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc: BaseException | None,
+        traceback: TracebackType | None,
+    ) -> None:
+        del exc_type, exc, traceback
+        self.close()
+
+
+def _candidate() -> dict[str, object]:
+    return {
+        "regions": [
+            {
+                "id": "bed-a",
+                "polygon": [[1, 2], [9, 2], [9, 8], [1, 8]],
+                "origin": "model",
+            },
+            {
+                "id": "bed-b",
+                "polygon": [[20, 20], [30, 20], [30, 30], [20, 30]],
+                "origin": "model",
+            },
+        ],
+        "image_width": 640,
+        "image_height": 480,
+    }
+
+
+def test_recognition_forwards_threshold_but_does_not_save_or_bump_registry(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     calls: list[dict[str, object]] = []
@@ -114,295 +112,193 @@ def test_recognize_success_persists_and_returns_the_polygon(
     def fake_urlopen(request: urllib.request.Request, timeout: float) -> FakeUpstreamResponse:
         calls.append(
             {
-                "url": request.full_url,
-                "method": request.get_method(),
-                "timeout": timeout,
+                "body": json.loads(request.data or b"null"),
                 "headers": dict(request.headers),
+                "timeout": timeout,
             }
         )
-        return FakeUpstreamResponse(
-            {"polygon": [[1, 2], [9, 2], [9, 8], [1, 8]], "image_width": 640, "image_height": 480}
-        )
+        return FakeUpstreamResponse(_candidate())
 
     monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
-
-    with TestClient(_app(tmp_path)) as client:
+    app = _app(tmp_path)
+    before = app.state.camera_registry.snapshot()["registry_version"]
+    with TestClient(app) as client:
         _login(client)
-        response = client.post(RECOGNIZE_PATH)
-
+        response = client.post(RECOGNIZE_PATH, json={"confidence": 0.4})
     assert response.status_code == 200
-    body = response.json()
-    assert body["bed_zone"]["polygon"] == [[1, 2], [9, 2], [9, 8], [1, 8]]
-    assert body["bed_zone"]["image_width"] == 640
-    assert body["bed_zone"]["image_height"] == 480
-    assert isinstance(body["bed_zone"]["recognized_at"], str) and body["bed_zone"]["recognized_at"]
-    # Relay token stays server-side; browser response must not disclose it.
-    assert "relay-token" not in response.text
-    assert "X-Edge-Relay-Token" not in response.headers
+    assert response.json()["bed_zone"]["regions"] == _candidate()["regions"]
+    assert response.json()["bed_zone"]["recognized_at"]
+    assert app.state.bed_zone_store.get("camera-1") is None
+    assert app.state.camera_registry.snapshot()["registry_version"] == before
     assert calls == [
         {
-            "url": "http://worker.local:8090/overlay/camera-1/bed-zone/recognize",
-            "method": "POST",
+            "body": {"confidence": 0.4},
+            "headers": {
+                "X-edge-relay-token": "relay-token",
+                "Content-type": "application/json",
+            },
             "timeout": 8.0,
-            "headers": {"X-edge-relay-token": "relay-token"},
         }
     ]
 
 
-def test_recognize_persists_across_requests(
+def test_recognition_uses_default_confidence_when_body_is_omitted(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    def fake_urlopen(request: urllib.request.Request, timeout: float) -> FakeUpstreamResponse:
-        del request, timeout
-        return FakeUpstreamResponse(
-            {"polygon": [[1, 2], [9, 2], [9, 8], [1, 8]], "image_width": 640, "image_height": 480}
-        )
-
-    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
-    app = _app(tmp_path)
-
-    with TestClient(app) as client:
-        _login(client)
-        client.post(RECOGNIZE_PATH)
-
-    store: BedZoneStore = app.state.bed_zone_store
-    saved = store.get("camera-1")
-    assert saved is not None
-    assert saved.polygon == ((1, 2), (9, 2), (9, 8), (1, 8))
-
-
-def test_recognize_bed_not_found_maps_to_a_structured_422(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    def fake_urlopen(request: urllib.request.Request, timeout: float) -> NoReturn:
-        del request, timeout
-        raise _http_error(404, {"error_class": "bed_not_found"})
-
-    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
-
-    with TestClient(_app(tmp_path)) as client:
-        _login(client)
-        response = client.post(RECOGNIZE_PATH)
-
-    assert response.status_code == 422
-    assert response.json()["detail"] == {"error_class": "bed_not_found"}
-
-
-def test_recognize_bed_not_found_does_not_persist_anything(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    def fake_urlopen(request: urllib.request.Request, timeout: float) -> NoReturn:
-        del request, timeout
-        raise _http_error(404, {"error_class": "bed_not_found"})
-
-    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
-    app = _app(tmp_path)
-
-    with TestClient(app) as client:
-        _login(client)
-        client.post(RECOGNIZE_PATH)
-
-    store: BedZoneStore = app.state.bed_zone_store
-    assert store.get("camera-1") is None
-
-
-@pytest.mark.parametrize(
-    "raise_error",
-    [
-        lambda: _http_error(404),  # unstructured 404 (e.g. unknown camera at the worker)
-        lambda: _http_error(503),
-        lambda: urllib.error.URLError("connection refused"),
-        lambda: TimeoutError("timed out"),
-        lambda: OSError("connection reset"),
-    ],
-    ids=["plain_404", "worker_503", "connection_refused", "bare_timeout_error", "bare_os_error"],
-)
-def test_recognize_reports_worker_unavailability_as_503(
-    raise_error, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    def fake_urlopen(request: urllib.request.Request, timeout: float) -> NoReturn:
-        del request, timeout
-        raise raise_error()
-
-    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
-
-    with TestClient(_app(tmp_path)) as client:
-        _login(client)
-        response = client.post(RECOGNIZE_PATH)
-
-    assert response.status_code == 503
-
-
-class _ReadFailsUpstreamResponse:
-    status: int = 200
-    headers: dict[str, str] = {"Content-Type": "application/json"}
-
-    def __init__(self, error: BaseException) -> None:
-        self._error = error
-        self.closed = False
-
-    def read(self, size: int = -1) -> bytes:
-        del size
-        raise self._error
-
-    def close(self) -> None:
-        self.closed = True
-
-
-@pytest.mark.parametrize(
-    "make_error",
-    [lambda: TimeoutError("timed out"), lambda: OSError("connection reset")],
-    ids=["timeout_error", "os_error"],
-)
-def test_recognize_reports_a_read_timeout_as_503_not_500(
-    make_error, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """A TimeoutError (or other OSError) raised while reading the response
-    body -- e.g. the connection was accepted but the worker stalled mid
-    response -- must map to the same clean 503 as an upfront connect/read
-    timeout, not surface as an unhandled 500."""
-    upstream = _ReadFailsUpstreamResponse(make_error())
-
-    def fake_urlopen(request: urllib.request.Request, timeout: float) -> _ReadFailsUpstreamResponse:
-        del request, timeout
-        return upstream
-
-    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
-
-    with TestClient(_app(tmp_path)) as client:
-        _login(client)
-        response = client.post(RECOGNIZE_PATH)
-
-    assert response.status_code == 503
-    assert upstream.closed is True
-
-
-def test_recognize_rejects_a_malformed_upstream_payload_as_503(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    def fake_urlopen(request: urllib.request.Request, timeout: float) -> FakeUpstreamResponse:
-        del request, timeout
-        return FakeUpstreamResponse({"polygon": [[1, 2]], "image_width": 640, "image_height": 480})
-
-    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
-
-    with TestClient(_app(tmp_path)) as client:
-        _login(client)
-        response = client.post(RECOGNIZE_PATH)
-
-    assert response.status_code == 503
-
-
-def test_recognize_requires_a_dashboard_session(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    def fake_urlopen(request: urllib.request.Request, timeout: float) -> NoReturn:
-        del request, timeout
-        raise AssertionError("upstream must not be called without a dashboard session")
-
-    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
-
-    with TestClient(_app(tmp_path)) as client:
-        response = client.post(RECOGNIZE_PATH)
-
-    assert response.status_code == 401
-
-
-def test_get_cameras_includes_a_null_bed_zone_before_recognition(tmp_path: Path) -> None:
-    app = _app(tmp_path)
-
-    with TestClient(app) as client:
-        _login(client)
-        response = client.get("/api/v1/cameras")
-
-    assert response.status_code == 200
-    cameras = response.json()["cameras"]
-    assert len(cameras) == 1
-    assert cameras[0]["bed_zone"] is None
-
-
-def test_get_cameras_includes_the_bed_zone_after_recognition(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    app = _app(tmp_path)
+    bodies: list[object] = []
 
     def fake_urlopen(request: urllib.request.Request, timeout: float) -> FakeUpstreamResponse:
-        del request, timeout
-        return FakeUpstreamResponse(
-            {"polygon": [[1, 2], [9, 2], [9, 8], [1, 8]], "image_width": 640, "image_height": 480}
-        )
+        del timeout
+        bodies.append(json.loads(request.data or b"null"))
+        return FakeUpstreamResponse(_candidate())
 
     monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
-
-    with TestClient(app) as client:
+    with TestClient(_app(tmp_path)) as client:
         _login(client)
         assert client.post(RECOGNIZE_PATH).status_code == 200
-
-        response = client.get("/api/v1/cameras")
-
-    cameras = response.json()["cameras"]
-    assert len(cameras) == 1
-    assert cameras[0]["bed_zone"] == {
-        "polygon": [[1, 2], [9, 2], [9, 8], [1, 8]],
-        "image_width": 640,
-        "image_height": 480,
-        "recognized_at": cameras[0]["bed_zone"]["recognized_at"],
-    }
+    assert bodies == [{"confidence": 0.25}]
 
 
-def test_deleting_a_camera_also_deletes_its_bed_zone(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+@pytest.mark.parametrize("confidence", [0.049, 0.951, "NaN", "Infinity"])
+def test_recognition_rejects_invalid_confidence(
+    confidence: object, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    app = _app(tmp_path)
-    bed_zone_store: BedZoneStore = app.state.bed_zone_store
-    bed_zone_store.put(
-        "camera-1",
-        polygon=[[1, 2], [9, 2], [9, 8], [1, 8]],
-        image_width=640,
-        image_height=480,
-        recognized_at="2026-08-01T00:00:00.000Z",
+    monkeypatch.setattr(
+        urllib.request,
+        "urlopen",
+        lambda *args, **kwargs: pytest.fail("invalid request reached worker"),
     )
-    monkeypatch.setenv("API_EDGE_RELAY_TOKEN", "relay-token")
+    with TestClient(_app(tmp_path)) as client:
+        _login(client)
+        assert client.post(RECOGNIZE_PATH, json={"confidence": confidence}).status_code == 422
 
+
+def test_explicit_save_roundtrips_two_regions_and_bumps_once(tmp_path: Path) -> None:
+    app = _app(tmp_path)
+    before = app.state.camera_registry.snapshot()["registry_version"]
     with TestClient(app) as client:
         _login(client)
-        deleted = client.delete("/api/v1/cameras/camera-1")
-
-    assert deleted.status_code == 204
-    assert bed_zone_store.get("camera-1") is None
-
-
-def test_worker_config_snapshot_includes_bed_zone_polygon(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    monkeypatch.setenv("API_EDGE_RELAY_TOKEN", "relay-token")
-    app = _app(tmp_path)
-    registry: CameraRegistryStore = app.state.camera_registry
-    registry.create(
-        camera_id="camera-2",
-        label="Room 2",
-        rtsp_url="rtsp://camera.local/2",
-        space_id=None,
-        status="online",
-    )
-    bed_zone_store: BedZoneStore = app.state.bed_zone_store
-    bed_zone_store.put(
-        "camera-1",
-        polygon=[[1, 2], [9, 2], [9, 8], [1, 8]],
-        image_width=640,
-        image_height=480,
-        recognized_at="2026-08-01T00:00:00.000Z",
-    )
-
-    with TestClient(app) as client:
-        response = client.get(
+        saved = client.put(SAVE_PATH, json=_candidate())
+        listed = client.get("/api/v1/cameras")
+        worker = client.get(
             "/api/v1/cameras/worker-config",
             headers={"X-Edge-Relay-Token": "relay-token"},
         )
+    assert saved.status_code == 200
+    assert listed.json()["cameras"][0]["bed_zone"] == saved.json()["bed_zone"]
+    worker_camera = worker.json()["cameras"][0]
+    assert worker_camera["bed_zone_regions"] == _candidate()["regions"]
+    assert "bed_zone_polygon" not in worker_camera
+    assert app.state.camera_registry.snapshot()["registry_version"] == before + 1
 
-    assert response.status_code == 200
-    cameras_by_id = {camera["camera_id"]: camera for camera in response.json()["cameras"]}
-    assert cameras_by_id["camera-1"]["bed_zone_polygon"] == [[1, 2], [9, 2], [9, 8], [1, 8]]
-    assert cameras_by_id["camera-1"]["bed_zone_image_width"] == 640
-    assert cameras_by_id["camera-1"]["bed_zone_image_height"] == 480
-    assert "bed_zone_polygon" not in cameras_by_id["camera-2"]
+
+def test_empty_regions_explicitly_clear_the_saved_zone(tmp_path: Path) -> None:
+    app = _app(tmp_path)
+    with TestClient(app) as client:
+        _login(client)
+        assert client.put(SAVE_PATH, json=_candidate()).status_code == 200
+        before_clear = app.state.camera_registry.snapshot()["registry_version"]
+        cleared = client.put(
+            SAVE_PATH,
+            json={"regions": [], "image_width": 640, "image_height": 480},
+        )
+        listed = client.get("/api/v1/cameras")
+    assert cleared.status_code == 200
+    assert cleared.json()["bed_zone"] is None
+    assert listed.json()["cameras"][0]["bed_zone"] is None
+    assert app.state.bed_zone_store.get("camera-1") is None
+    assert app.state.camera_registry.snapshot()["registry_version"] == before_clear + 1
+
+
+@pytest.mark.parametrize(
+    "regions",
+    [
+        [
+            {"id": "same", "polygon": [[1, 1], [8, 1], [8, 8]], "origin": "manual"},
+            {"id": "same", "polygon": [[2, 2], [9, 2], [9, 9]], "origin": "model"},
+        ],
+        [{"id": "line", "polygon": [[1, 1], [2, 2], [3, 3]], "origin": "manual"}],
+        [
+            {
+                "id": "cross",
+                "polygon": [[1, 1], [9, 9], [1, 9], [9, 1]],
+                "origin": "manual",
+            }
+        ],
+        [{"id": "outside", "polygon": [[1, 1], [641, 1], [1, 8]], "origin": "manual"}],
+    ],
+    ids=["duplicate_ids", "degenerate", "self_intersecting", "out_of_bounds"],
+)
+def test_save_rejects_invalid_regions(regions: list[dict[str, object]], tmp_path: Path) -> None:
+    app = _app(tmp_path)
+    with TestClient(app) as client:
+        _login(client)
+        response = client.put(
+            SAVE_PATH,
+            json={"regions": regions, "image_width": 640, "image_height": 480},
+        )
+    assert response.status_code == 422
+    assert app.state.bed_zone_store.get("camera-1") is None
+
+
+def test_save_rejects_regions_whose_compact_utf8_encoding_exceeds_4096_bytes(
+    tmp_path: Path,
+) -> None:
+    scale = 10**12
+    quarter = scale // 4
+    polygon = [
+        [1, 1],
+        [quarter, 1],
+        [2 * quarter, 1],
+        [3 * quarter, 1],
+        [scale - 1, 1],
+        [scale - 1, quarter],
+        [scale - 1, 2 * quarter],
+        [scale - 1, 3 * quarter],
+        [scale - 1, scale - 1],
+        [3 * quarter, scale - 1],
+        [2 * quarter, scale - 1],
+        [quarter, scale - 1],
+        [1, scale - 1],
+        [1, 3 * quarter],
+        [1, 2 * quarter],
+        [1, quarter],
+    ]
+    regions = [
+        {"id": f"{index}-" + "😀" * 62, "polygon": polygon, "origin": "manual"}
+        for index in range(8)
+    ]
+    app = _app(tmp_path)
+    with TestClient(app) as client:
+        _login(client)
+        response = client.put(
+            SAVE_PATH,
+            json={"regions": regions, "image_width": scale, "image_height": scale},
+        )
+    assert response.status_code == 422
+    assert "4096" in response.text
+    assert app.state.bed_zone_store.get("camera-1") is None
+
+
+@pytest.mark.parametrize("method,path", [("post", RECOGNIZE_PATH), ("put", SAVE_PATH)])
+def test_bed_zone_routes_require_auth(method: str, path: str, tmp_path: Path) -> None:
+    payload = None if method == "post" else _candidate()
+    with TestClient(_app(tmp_path)) as client:
+        response = getattr(client, method)(path, json=payload)
+    assert response.status_code == 401
+
+
+def test_bed_zone_routes_report_unknown_camera_without_calling_worker(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def fail_urlopen(*args, **kwargs) -> NoReturn:
+        raise AssertionError("unknown camera reached worker")
+
+    monkeypatch.setattr(urllib.request, "urlopen", fail_urlopen)
+    with TestClient(_app(tmp_path)) as client:
+        _login(client)
+        assert client.post(RECOGNIZE_PATH.replace("camera-1", "missing")).status_code == 404
+        assert (
+            client.put(SAVE_PATH.replace("camera-1", "missing"), json=_candidate()).status_code
+            == 404
+        )

@@ -49,8 +49,9 @@ class SceneState:
     scheduled_empty_bed_cycles: int = 0
     bed_region_freshness: BedRegionCacheState = BedRegionCacheState.EMPTY
     bed_region_counters: BedRegionCacheCounters = field(default_factory=BedRegionCacheCounters)
-    # Set once at camera-build time from `CameraRuntimeConfig.bed_zone_polygon`
-    # and never mutated from a per-frame model result.
+    # Set once at camera-build time from every entry in
+    # `CameraRuntimeConfig.bed_zone_regions` and never mutated from a per-frame
+    # model result.
     persisted_bed_regions: tuple[BoundingBox, ...] = field(default_factory=tuple)
     # Source image size of ``persisted_bed_regions`` polygons. Poses arrive in
     # frame_width x frame_height; these are not guaranteed to match. None means
