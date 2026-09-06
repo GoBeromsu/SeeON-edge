@@ -2,15 +2,19 @@
 
 from __future__ import annotations
 
+import hashlib
+import hmac
 import os
 import stat
 from dataclasses import dataclass
 from pathlib import Path
+from threading import Lock
 from typing import final
 
 from backend.app.features.clips.descriptor_files import (
     OpenedRegularFile,
     open_contained_regular_file,
+    read_bounded_regular_file,
 )
 from backend.app.features.clips.manifest import (
     ClipManifest,
@@ -29,6 +33,9 @@ from backend.app.shared.state_dir import resolve_state_dir
 CLIP_STORE_DIR_ENV = "CLIP_STORE_DIR"
 API_LABEL_STORE_ENV = "API_LABEL_STORE"
 DEFAULT_CLIP_STORE_DIR = "/var/lib/clip-store"
+PLAYBACK_H264_FILENAME = "clip.playback-h264.mp4"
+PLAYBACK_H264_SHA256_FILENAME = f"{PLAYBACK_H264_FILENAME}.sha256"
+_PLAYBACK_SHA256_SIDECAR_BYTES = 65
 
 
 @dataclass(frozen=True, slots=True)
@@ -72,6 +79,8 @@ class DuplicateClipIdError(RuntimeError):
 class ClipStore:
     def __init__(self, root: Path | str) -> None:
         self.root = Path(root)
+        self._playback_digest_cache: dict[tuple[Path, int, int], str] = {}
+        self._playback_digest_cache_lock = Lock()
 
     @classmethod
     def from_env(cls) -> ClipStore:
@@ -208,6 +217,68 @@ class ClipStore:
         path = self.resolve_located_video_path(located)
         return open_contained_regular_file(self.root, path)
 
+    def open_located_playback(self, located: LocatedClip) -> OpenedRegularFile:
+        """Open a verified browser-safe rendition, or the immutable original."""
+        original = self.open_located_video(located)
+        playback = self._open_verified_playback(original.path)
+        if playback is None:
+            return original
+        original.handle.close()
+        return playback
+
+    def playback_codec(self, located: LocatedClip) -> str:
+        """Return the codec an operator will receive from the video endpoint."""
+        try:
+            original_path = self.resolve_located_video_path(located)
+        except (ValueError, FileNotFoundError):
+            return located.manifest.codec
+        playback = self._open_verified_playback(original_path)
+        if playback is None:
+            return located.manifest.codec
+        playback.handle.close()
+        return "h264"
+
+    def _open_verified_playback(self, original_path: Path) -> OpenedRegularFile | None:
+        playback_path = original_path.with_name(PLAYBACK_H264_FILENAME)
+        sidecar_path = original_path.with_name(PLAYBACK_H264_SHA256_FILENAME)
+        try:
+            expected_digest = read_bounded_regular_file(
+                self.root,
+                sidecar_path,
+                _PLAYBACK_SHA256_SIDECAR_BYTES,
+            )
+            if len(expected_digest) != _PLAYBACK_SHA256_SIDECAR_BYTES:
+                return None
+            expected_text = expected_digest[:-1]
+            if expected_digest[-1:] != b"\n" or any(
+                byte not in b"0123456789abcdefABCDEF" for byte in expected_text
+            ):
+                return None
+            playback = open_contained_regular_file(self.root, playback_path)
+        except FileNotFoundError:
+            return None
+        try:
+            digest = self._playback_digest(playback)
+            if hmac.compare_digest(digest, expected_text.decode("ascii").lower()):
+                return playback
+        except OSError:
+            pass
+        playback.handle.close()
+        return None
+
+    def _playback_digest(self, opened: OpenedRegularFile) -> str:
+        file_stat = os.fstat(opened.handle.fileno())
+        key = (opened.path, file_stat.st_size, file_stat.st_mtime_ns)
+        with self._playback_digest_cache_lock:
+            cached = self._playback_digest_cache.get(key)
+        if cached is not None:
+            return cached
+        digest = hashlib.file_digest(opened.handle, "sha256").hexdigest()
+        opened.handle.seek(0)
+        with self._playback_digest_cache_lock:
+            self._playback_digest_cache[key] = digest
+        return digest
+
     def _resolve_video_path(self, manifest: ClipManifest, recording_root: Path) -> Path:
         if manifest.path is None:
             raise FileNotFoundError(str(self.root))
@@ -253,6 +324,8 @@ def default_label_store_dir() -> Path:
 __all__ = [
     "API_LABEL_STORE_ENV",
     "CLIP_STORE_DIR_ENV",
+    "PLAYBACK_H264_FILENAME",
+    "PLAYBACK_H264_SHA256_FILENAME",
     "ClipManifest",
     "ClipStore",
     "DuplicateClipIdError",

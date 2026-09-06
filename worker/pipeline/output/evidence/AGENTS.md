@@ -24,3 +24,9 @@ Never use the backend database or a JSON state store for queue state.
 Snapshots are bounded content-addressed evidence. Keep their lifetime,
 retention, and sidecar identity aligned with the published clip. Snapshot work
 must not delay alert admission or relay delivery.
+
+## Playback renditions
+
+`clip.mp4` is immutable primary evidence. `playback_rendition.py` may asynchronously create a
+view-only H.264 rendition and digest sidecar beside a sealed clip; this work never blocks manifest
+publication or relay delivery, and renditions are never relay or export inputs.

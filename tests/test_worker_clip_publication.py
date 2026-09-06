@@ -360,6 +360,12 @@ def test_ready_publication_fsyncs_before_renames_and_staging_cleanup(
     monkeypatch.setattr(clip_publication, "fsync_directory", record_directory)
     monkeypatch.setattr(clip_publication.os, "replace", record_replace)
     monkeypatch.setattr(clip_publication.shutil, "rmtree", record_rmtree)
+    scheduled: list[tuple[Path, str]] = []
+    monkeypatch.setattr(
+        clip_publication,
+        "schedule_playback_rendition",
+        lambda path, clip_id: scheduled.append((path, clip_id)),
+    )
 
     _ = ClipPublisher(tmp_path).publish_ready(reservation, artifact, _metadata())
 
@@ -382,3 +388,4 @@ def test_ready_publication_fsyncs_before_renames_and_staging_cleanup(
         ("rmtree", "durable-clip-id", ""),
         ("fsync-directory", ".staging", ""),
     ]
+    assert scheduled == [(reservation.final_dir / "clip.mp4", "durable-clip-id")]

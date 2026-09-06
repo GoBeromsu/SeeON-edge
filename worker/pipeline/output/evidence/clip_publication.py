@@ -34,6 +34,7 @@ from worker.pipeline.output.evidence.evidence_manifest import (
 )
 from worker.pipeline.output.evidence.evidence_outbox_types import EvidenceReasonCode
 from worker.pipeline.output.evidence.manifest_models import ReadyClipManifest
+from worker.pipeline.output.evidence.playback_rendition import schedule_playback_rendition
 from worker.pipeline.output.evidence.terminal_outcome import (
     TerminalClipOutcome,
     TerminalClipState,
@@ -108,6 +109,7 @@ class ClipPublisher:
         )
         self._enqueue_clip(manifest, metadata)
         self._cleanup_staging(reservation)
+        _ = schedule_playback_rendition(video_path, str(reservation.clip_id))
         return PublishedClip(reservation.clip_id, manifest, manifest_path, video_path)
 
     def publish_adopted_ready(
