@@ -88,6 +88,9 @@ class MediaPlane(Protocol):
         """One bounded JPEG of the latest OSD-composited frame, or raise."""
         ...
 
+    def native_snapshot(self, camera_id: str) -> bytes:
+        """One bounded native-resolution JPEG decoded directly from the camera."""
+
     def start_recording(
         self,
         camera_id: str,

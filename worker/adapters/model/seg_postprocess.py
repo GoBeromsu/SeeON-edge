@@ -9,7 +9,6 @@ import numpy as np
 from numpy.typing import NDArray
 
 COCO_BED_CLASS_ID: Final = 59
-MODEL_SIZE: Final = 640
 PROTOTYPE_CHANNELS: Final = 32
 MASK_THRESHOLD: Final = 0.5
 BedPolygon: TypeAlias = tuple[tuple[int, int], ...]
@@ -27,21 +26,25 @@ class Letterbox:
     pad_left: int
 
 
-def letterbox_rgb(image: NDArray[np.uint8]) -> tuple[NDArray[np.float32], Letterbox]:
+def letterbox_rgb(
+    image: NDArray[np.uint8], model_size: int
+) -> tuple[NDArray[np.float32], Letterbox]:
     """Return YOLO's square RGB tensor and its reversible letterbox metadata."""
     if image.dtype != np.uint8 or image.ndim != 3 or image.shape[2] != 3:
         raise ValueError("bed image must be an HxWx3 uint8 RGB array")
     height, width = image.shape[:2]
     if height <= 0 or width <= 0:
         raise ValueError("bed image geometry must be positive")
-    scale = min(MODEL_SIZE / width, MODEL_SIZE / height)
+    if model_size <= 0:
+        raise ValueError("bed model size must be positive")
+    scale = min(model_size / width, model_size / height)
     resized_width = round(width * scale)
     resized_height = round(height * scale)
-    total_pad_x = MODEL_SIZE - resized_width
-    total_pad_y = MODEL_SIZE - resized_height
+    total_pad_x = model_size - resized_width
+    total_pad_y = model_size - resized_height
     pad_left = round(total_pad_x / 2 - 0.1)
     pad_top = round(total_pad_y / 2 - 0.1)
-    canvas = np.full((MODEL_SIZE, MODEL_SIZE, 3), 114, dtype=np.uint8)
+    canvas = np.full((model_size, model_size, 3), 114, dtype=np.uint8)
     canvas[
         pad_top : pad_top + resized_height,
         pad_left : pad_left + resized_width,
@@ -64,6 +67,7 @@ def decode_end_to_end_segmentation(
     prototypes: object,
     letterbox: Letterbox,
     *,
+    model_size: int,
     confidence: float,
     max_points: int,
     bed_class_id: int = COCO_BED_CLASS_ID,
@@ -77,8 +81,8 @@ def decode_end_to_end_segmentation(
     protos = np.asarray(prototypes, dtype=np.float32)
     if rows.ndim != 3 or rows.shape[0] != 1 or rows.shape[2] != 6 + PROTOTYPE_CHANNELS:
         raise ValueError("YOLO26 segmentation detections must have shape (1, N, 38)")
-    if protos.shape != (1, PROTOTYPE_CHANNELS, 160, 160):
-        raise ValueError("YOLO26 segmentation prototypes must have shape (1, 32, 160, 160)")
+    if protos.ndim != 4 or protos.shape[:2] != (1, PROTOTYPE_CHANNELS):
+        raise ValueError("YOLO26 segmentation prototypes must have shape (1, 32, H, W)")
     if not np.isfinite(rows).all() or not np.isfinite(protos).all():
         raise ValueError("YOLO26 segmentation outputs must be finite")
 
@@ -88,9 +92,9 @@ def decode_end_to_end_segmentation(
         x1, y1, x2, y2, score, class_id = (float(value) for value in row[:6])
         if int(class_id) != bed_class_id or score < confidence or x2 <= x1 or y2 <= y1:
             continue
-        mask = _sigmoid((row[6:] @ flattened_protos).reshape(160, 160))
-        mask = _crop_mask(mask, (x1, y1, x2, y2))
-        mask = _unletterbox_mask(_resize_bilinear(mask, MODEL_SIZE, MODEL_SIZE), letterbox)
+        mask = _sigmoid((row[6:] @ flattened_protos).reshape(protos.shape[2:]))
+        mask = _crop_mask(mask, (x1, y1, x2, y2), model_size)
+        mask = _unletterbox_mask(_resize_bilinear(mask, model_size, model_size), letterbox)
         polygon = simplify_polygon(largest_external_contour(mask > MASK_THRESHOLD), max_points)
         instances.append(
             (
@@ -177,10 +181,10 @@ def simplify_polygon(points: BedPolygon, max_points: int) -> BedPolygon:
 
 
 def _crop_mask(
-    mask: NDArray[np.float32], box: tuple[float, float, float, float]
+    mask: NDArray[np.float32], box: tuple[float, float, float, float], model_size: int
 ) -> NDArray[np.float32]:
     height, width = mask.shape
-    x1, y1, x2, y2 = (value / MODEL_SIZE for value in box)
+    x1, y1, x2, y2 = (value / model_size for value in box)
     x = np.arange(width, dtype=np.float32)[np.newaxis, :]
     y = np.arange(height, dtype=np.float32)[:, np.newaxis]
     return np.where(

@@ -60,7 +60,7 @@ class Settings(BaseSettings):
     # periodic polling): the worker route waits up to ~2s for a fresh frame
     # (see BED_ZONE_FRAME_TIMEOUT_SECONDS) before it even runs inference, so
     # this must stay comfortably above worker_stream_timeout_s.
-    worker_bed_zone_timeout_s: float = 8.0
+    worker_bed_zone_timeout_s: float = 25.0
 
 
 @lru_cache

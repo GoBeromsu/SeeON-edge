@@ -46,14 +46,14 @@ from worker.types import CURRENT_TEMPORAL_PROFILE
 
 AVAILABLE_OBSERVATION_CHANNELS = frozenset({"person_boxes", "poses", "track_ids", "bed_regions"})
 # person/bed identities are the official ultralytics/assets release v8.4.0
-# artifacts `yolo26n.pt` and `yolo26m-seg.pt`; re-derive with sha256sum.
+# artifacts `yolo26n.pt` and `yolo26l-seg.pt`; re-derive with sha256sum.
 # Concrete compiled expectations; runtime provisioning resolves and verifies
 # the applied identity before any camera graph can activate.
 _COMPONENT_ARTIFACT_DIGESTS = MappingProxyType(
     {
         "pose": "eb3bb8268828aeaf515cec23a4bfafd793944a86fe9af94ba7823609c14522a9",
         "person": "9b09cc8bf347f0fc8a5f7657480587f25db09b34bf33b0652110fb03a8ad4fef",
-        "bed": "16b636f04e8fb6a325b3370f22dc5e5535ff473e384f4d041fd28d788f6ee9f5",
+        "bed": "636024306410afa1732692322fba57d22ea2b1c2f07613fcee131a93d7dd380c",
     }
 )
 _COMPONENT_PREPROCESSING = MappingProxyType(

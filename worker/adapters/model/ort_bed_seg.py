@@ -31,9 +31,15 @@ BED_PREPROCESSING_IDENTITY: Final = "rgb24-to-bed-regions.v1"
 
 
 class _OrtSession(Protocol):
+    def get_inputs(self) -> Sequence[_OrtInput]: ...
+
     def run(
         self, output_names: Sequence[str] | None, input_feed: dict[str, np.ndarray]
     ) -> Sequence[object]: ...
+
+
+class _OrtInput(Protocol):
+    shape: Sequence[object]
 
 
 SessionFactory = Callable[[str, list[str]], _OrtSession]
@@ -80,9 +86,10 @@ class OrtBedSegRunner:
             self._session = session_factory(str(self._model_path), list(_CPU_PROVIDER))
         except Exception as exc:
             raise ModelLoadError(f"cannot load bed segmentation ONNX model: {exc}") from exc
+        self._model_size = _model_size(self._session)
 
     def detect_beds(self, frame: Image) -> BedRunnerResult:
-        tensor, letterbox = letterbox_rgb(frame)
+        tensor, letterbox = letterbox_rgb(frame, self._model_size)
         try:
             outputs = self._session.run(None, {"images": tensor})
         except Exception as exc:
@@ -94,6 +101,7 @@ class OrtBedSegRunner:
                 outputs[0],
                 outputs[1],
                 letterbox,
+                model_size=self._model_size,
                 confidence=self._confidence,
                 max_points=self._max_points,
             )
@@ -125,6 +133,19 @@ def _onnxruntime_session_factory(model_path: str, providers: list[str]) -> _OrtS
     except ImportError as exc:
         raise ModelLoadError("onnxruntime is required for bed segmentation ONNX model") from exc
     return onnxruntime.InferenceSession(model_path, providers=providers)
+
+
+def _model_size(session: _OrtSession) -> int:
+    try:
+        shape = session.get_inputs()[0].shape
+        height, width = shape[2], shape[3]
+    except (AttributeError, IndexError, TypeError) as exc:
+        raise ModelLoadError("bed segmentation ONNX input must have a fixed NCHW shape") from exc
+    if not isinstance(height, int) or not isinstance(width, int):
+        raise ModelLoadError("bed segmentation ONNX input size must be fixed, not symbolic")
+    if height <= 0 or width <= 0 or height != width:
+        raise ModelLoadError("bed segmentation ONNX input size must be positive and square")
+    return height
 
 
 __all__ = ["BED_ONNX_MODEL_PATH", "OrtBedSegRunner", "SessionFactory"]

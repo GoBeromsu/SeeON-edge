@@ -137,7 +137,7 @@ def test_recognition_forwards_threshold_but_does_not_save_or_bump_registry(
                 "X-edge-relay-token": "relay-token",
                 "Content-type": "application/json",
             },
-            "timeout": 8.0,
+            "timeout": 25.0,
         }
     ]
 
