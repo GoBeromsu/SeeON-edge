@@ -292,6 +292,11 @@ def test_clip_publisher_rejects_missing_thumbnail_generator(tmp_path: Path) -> N
         ClipPublisher(tmp_path)
 
 
+def test_clip_publisher_rejects_null_thumbnail_generator(tmp_path: Path) -> None:
+    with pytest.raises(TypeError, match="thumbnail_generator"):
+        ClipPublisher(tmp_path, thumbnail_generator=None)
+
+
 def test_thumbnail_failure_does_not_prevent_ready_clip_publication(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

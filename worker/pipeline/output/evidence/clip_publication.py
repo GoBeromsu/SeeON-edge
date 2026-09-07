@@ -59,6 +59,8 @@ class ClipPublisher:
         thumbnail_generator: ThumbnailGenerator,
         delivery_queue_directory: Path | None = None,
     ) -> None:
+        if thumbnail_generator is None:
+            raise TypeError("thumbnail_generator is required")
         self._store_dir = store_dir
         self._barrier = barrier
         self._ffprobe_bin = ffprobe_bin
