@@ -27,6 +27,12 @@ _MAX_INPUT_BYTES: Final = 128 * 1024 * 1024
 _MAX_PIXELS: Final = 3840 * 2160
 _MAX_DURATION_S: Final = 180.0
 _MAX_FRAMES: Final = 5400
+ANALYSIS_PROFILE_VERSION: Final = 1
+_POSE_INPUT_SIZE: Final = 640
+_POSE_LETTERBOX: Final = "right-bottom"
+_PERSON_CLASS_ID: Final = 0
+_POSE_OUTPUT_LAYOUT: Final = "output0[1,300,57]"
+_BED_INPUT_SIZE: Final = 640
 
 
 class ClipAnalysisRejected(ValueError):
@@ -61,6 +67,7 @@ class ClipAnalysisProfile:
 
 @dataclass(frozen=True, slots=True)
 class ClipAnalysisRequest:
+    clip_id: str
     clip_path: Path
     clip_sha256: str
     pose_model_path: Path
@@ -69,7 +76,20 @@ class ClipAnalysisRequest:
 
 
 def profile_sha256(profile: ClipAnalysisProfile) -> str:
-    payload = json.dumps(asdict(profile), sort_keys=True, separators=(",", ":"), allow_nan=False)
+    payload = json.dumps(
+        {
+            "profile": asdict(profile),
+            "analysis_profile_version": ANALYSIS_PROFILE_VERSION,
+            "pose_input_size": _POSE_INPUT_SIZE,
+            "pose_letterbox": _POSE_LETTERBOX,
+            "person_class_id": _PERSON_CLASS_ID,
+            "pose_output_layout": _POSE_OUTPUT_LAYOUT,
+            "bed_input_size": _BED_INPUT_SIZE,
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
+    )
     return hashlib.sha256(payload.encode()).hexdigest()
 
 
@@ -101,7 +121,7 @@ def analyze_clip(request: ClipAnalysisRequest, *, decoder_identity: str) -> Clip
         time_base = _stream_time_base(stream)
         return ClipAnalysisResult(
             source="clip_reanalysis",
-            clip_id=request.clip_path.name,
+            clip_id=request.clip_id,
             clip_sha256=request.clip_sha256,
             pose_model_sha256=pose.artifact_digest,
             bed_model_sha256=bed.artifact_digest,
@@ -128,6 +148,8 @@ def _validate_request(request: ClipAnalysisRequest) -> None:
         raise ClipAnalysisRejected("request")
     if not isinstance(request.analysis_profile, ClipAnalysisProfile):
         raise ClipAnalysisRejected("profile")
+    if not request.clip_id:
+        raise ClipAnalysisRejected("clip_id")
     if len(request.clip_sha256) != 64 or any(
         c not in "0123456789abcdef" for c in request.clip_sha256
     ):
@@ -223,6 +245,7 @@ def _sha256_file(path: Path) -> str:
 
 
 __all__ = [
+    "ANALYSIS_PROFILE_VERSION",
     "ClipAnalysisFailed",
     "ClipAnalysisProfile",
     "ClipAnalysisRejected",

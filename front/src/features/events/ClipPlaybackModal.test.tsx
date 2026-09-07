@@ -67,7 +67,7 @@ describe('ClipPlaybackModal', () => {
     expect(HTMLMediaElement.prototype.play).toHaveBeenCalledOnce();
   });
 
-  it('plays the clean media URL and never requests a retired analysis or derivative route', async () => {
+  it('plays the clean media URL and requests clip analysis status', async () => {
     const fetchMock = vi.fn().mockResolvedValue({
       ok: true, status: 200, json: async () => ({ clip_id: 'clip-1', clean: 'AVAILABLE', snapshot: null }),
     });
@@ -77,7 +77,7 @@ describe('ClipPlaybackModal', () => {
     await act(async () => Promise.resolve());
 
     const requested = fetchMock.mock.calls.map(([input]) => String(input));
-    expect(requested).toEqual(['/api/v1/clips/clip-1/artifacts']);
+    expect(requested).toEqual(expect.arrayContaining(['/api/v1/clips/clip-1/artifacts', '/api/v1/clips/clip-1/analysis']));
     expect(dialog().querySelector('video')?.getAttribute('src')).toBe('/api/v1/clips/clip-1/video');
     vi.unstubAllGlobals();
   });

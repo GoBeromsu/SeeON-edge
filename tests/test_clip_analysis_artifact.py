@@ -55,11 +55,11 @@ def test_publish_once_and_load_identity_bound_artifact(tmp_path: Path) -> None:
     scratch.write_bytes(_payload(identity))
     second = publish_clip_analysis(clip, scratch, identity)
 
-    assert first == second == artifact_path(clip)
+    assert first == second == artifact_path(clip, identity)
     assert load_clip_analysis(clip, identity) is not None
     assert first.read_bytes() == _payload(identity)
     assert (
-        first.with_name("clip.analysis.json.sha256").read_text().strip()
+        first.with_name(f"{first.name}.sha256").read_text().strip()
         == sha256(_payload(identity)).hexdigest()
     )
 

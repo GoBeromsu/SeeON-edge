@@ -98,9 +98,16 @@ def _new_clip_id(camera_id: str) -> str:
     return f"{safe_camera}-{timestamp}-{uuid4().hex[:12]}"
 
 
+def is_clip_id(value: str) -> bool:
+    return bool(value) and all(
+        character.isalnum() or character in {"-", "_"} for character in value
+    )
+
+
 __all__ = [
     "ClipIdAllocator",
     "ClipIdCollisionError",
     "ClipIdFactory",
     "ClipReservation",
+    "is_clip_id",
 ]

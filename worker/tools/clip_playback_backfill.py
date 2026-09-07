@@ -15,6 +15,7 @@ from worker.adapters.media.ffmpeg_thumbnail import (
 )
 from worker.pipeline.output.evidence.playback_rendition import (
     PLAYBACK_NAME,
+    PLAYBACK_TIMING_NAME,
     PlaybackRenditionError,
     probe_video_codec,
     write_playback_rendition,
@@ -37,13 +38,15 @@ def backfill(
         "h264": 0,
         "created": 0,
         "skipped": 0,
+        "pending": 0,
         "failed": 0,
         "dry_run": dry_run,
     }
     for clip_path in sorted((clip_store / "clips").glob("*/clip.mp4")):
         summary["scanned"] += 1
         clip_id = clip_path.parent.name
-        if (clip_path.parent / PLAYBACK_NAME).exists():
+        rendition = clip_path.parent / PLAYBACK_NAME
+        if rendition.exists() and _timing_is_identical(clip_path.parent / PLAYBACK_TIMING_NAME):
             summary["skipped"] += 1
             continue
         try:
@@ -52,7 +55,7 @@ def backfill(
                 summary["h264"] += 1
                 continue
             if dry_run:
-                summary["skipped"] += 1
+                summary["pending"] += 1
                 continue
             if write_playback_rendition(clip_path) is not None:
                 summary["created"] += 1
@@ -64,6 +67,14 @@ def backfill(
                 type(exc).__name__,
             )
     return summary
+
+
+def _timing_is_identical(sidecar: Path) -> bool:
+    try:
+        payload = json.loads(sidecar.read_text(encoding="ascii"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+        return False
+    return isinstance(payload, dict) and payload.get("pts_identical") is True
 
 
 def _backfill_thumbnails(clip_store: Path, *, dry_run: bool) -> dict[str, int | bool]:
@@ -116,8 +127,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("clip_store", type=Path)
     parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument("--renditions", action="store_true")
     parser.add_argument("--thumbnails", action="store_true")
     arguments = parser.parse_args(argv)
+    if arguments.renditions and arguments.thumbnails:
+        parser.error("--renditions and --thumbnails are mutually exclusive")
     print(
         json.dumps(
             backfill(

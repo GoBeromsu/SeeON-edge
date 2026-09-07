@@ -3,11 +3,18 @@ from __future__ import annotations
 import json
 import shutil
 import sqlite3
+from hashlib import sha256
 
 import pytest
 from fastapi.testclient import TestClient
 from receipt_helpers import add_accepted_media_receipts
 
+from backend.app.features.clips.store import (
+    PLAYBACK_H264_FILENAME,
+    PLAYBACK_H264_SHA256_FILENAME,
+    PLAYBACK_H264_TIMING_FILENAME,
+    ClipStore,
+)
 from backend.app.main import create_app as _create_app
 from backend.app.main import no_lifespan
 
@@ -344,6 +351,44 @@ def test_streams_manifest_video_and_appends_audit(clip_env) -> None:
         ("admin", "clip-1"),
         ("admin", "clip-1"),
     ]
+
+
+def test_playback_identity_reports_timing_sidecar_status(clip_env) -> None:
+    clip_store = clip_env / "clip-store"
+    _write_manifest(clip_store, "clip-identity")
+    clip_dir = clip_store / "clips" / "clip-identity"
+    original = clip_dir / "clip.mp4"
+    manifest = clip_dir / "manifest.json"
+    payload = json.loads(manifest.read_text(encoding="utf-8"))
+    payload["sha256"] = sha256(original.read_bytes()).hexdigest()
+    manifest.write_text(json.dumps(payload), encoding="utf-8")
+    rendition = clip_dir / PLAYBACK_H264_FILENAME
+    rendition.write_bytes(b"browser-safe")
+    (clip_dir / PLAYBACK_H264_SHA256_FILENAME).write_text(
+        sha256(rendition.read_bytes()).hexdigest() + "\n",
+        encoding="ascii",
+    )
+    store = ClipStore(clip_store)
+    located = store.locate_manifest("clip-identity")
+    assert located is not None
+
+    identity = store.open_located_playback_identity(located)
+    try:
+        assert identity.opened.path == rendition
+        assert identity.original_sha256 == sha256(original.read_bytes()).hexdigest()
+        assert identity.served_pts_identical is False
+    finally:
+        identity.opened.handle.close()
+
+    (clip_dir / PLAYBACK_H264_TIMING_FILENAME).write_text(
+        '{"pts_identical":true}',
+        encoding="ascii",
+    )
+    identity = store.open_located_playback_identity(located)
+    try:
+        assert identity.served_pts_identical is True
+    finally:
+        identity.opened.handle.close()
 
 
 def test_list_clips_and_audit_view_are_recorded_in_the_audit_log(clip_env) -> None:

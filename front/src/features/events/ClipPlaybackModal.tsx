@@ -7,6 +7,9 @@ import { AutoplayVideo } from '@/shared/ui/AutoplayVideo';
 import { fetchClipArtifacts } from '@/shared/api/client';
 import type { ClipArtifacts, Clip } from '@/shared/api/types';
 import type { ClipMetadataStatus } from '@/features/events/useClipMetadata';
+import { ClipOverlayCanvas } from '@/features/events/ClipOverlayCanvas';
+import { useClipAnalysis } from '@/features/events/useClipAnalysis';
+import { OverlayTargetIcon } from '@/shared/ui/OverlayTargetIcon';
 
 type Props = {
   clip: Clip | null;
@@ -19,6 +22,21 @@ type Props = {
 type VideoMetadata = { duration: number; width: number; height: number };
 
 const artifactCopy = (state: string | null | undefined): string => ({ PENDING: '준비 중', AVAILABLE: '사용 가능', UNAVAILABLE: '사용 불가', CORRUPT: '손상됨', PURGED: '삭제됨' }[state ?? ''] ?? '확인 중');
+const overlayStorageKey = 'clip-overlay-targets';
+
+function loadOverlayTargets(): { person: boolean; bed: boolean } {
+  try {
+    const value = localStorage.getItem(overlayStorageKey);
+    if (!value) return { person: true, bed: true };
+    const parsed: unknown = JSON.parse(value);
+    if (typeof parsed === 'object' && parsed !== null && 'person' in parsed && 'bed' in parsed && typeof parsed.person === 'boolean' && typeof parsed.bed === 'boolean') return parsed as { person: boolean; bed: boolean };
+  } catch { /* invalid persisted UI state is discarded */ }
+  return { person: true, bed: true };
+}
+
+function StatusIcon({ label }: { label: string }): JSX.Element {
+  return <span aria-label={label} title={label} role="img" className="inline-flex h-8 w-8 items-center justify-center">ⓘ</span>;
+}
 
 /** Privacy-bounded evidence detail: only API-projected identities/states are shown, never paths or credentials. */
 export function ClipPlaybackModal({
@@ -26,7 +44,20 @@ export function ClipPlaybackModal({
 }: Props): JSX.Element | null {
   const [metadata, setMetadata] = useState<VideoMetadata | null>(null);
   const [artifacts, setArtifacts] = useState<ClipArtifacts | null>(null);
+  const [video, setVideo] = useState<HTMLVideoElement | null>(null);
+  const [targets, setTargets] = useState(loadOverlayTargets);
   const clipId = clip?.id;
+  const analysis = useClipAnalysis(clipId, open && Boolean(clip?.video_available));
+  const timingUsable = analysis.status.state === 'available' && analysis.status.served_timing_identical === true;
+  const rvfcAvailable = video !== null && 'requestVideoFrameCallback' in video;
+
+  const toggleTarget = (target: keyof typeof targets): void => {
+    setTargets((previous) => {
+      const next = { ...previous, [target]: !previous[target] };
+      localStorage.setItem(overlayStorageKey, JSON.stringify(next));
+      return next;
+    });
+  };
 
   useEffect(() => {
     setMetadata(null);
@@ -52,7 +83,14 @@ export function ClipPlaybackModal({
     {artifacts ? (
       <p className="mt-3 text-sm text-muted-foreground" role="status" data-testid="clip-artifact-status">원본 {artifactCopy(artifacts.clean)}{artifacts.snapshot ? ` · 스냅샷 ${artifactCopy(artifacts.snapshot)}` : ''}</p>
     ) : <p className="mt-3 text-sm text-muted-foreground" data-testid="clip-artifact-status">증거 상태를 확인하지 못했습니다.</p>}
-    <div className="event-media-frame relative mt-4">{clip.video_available ? <AutoplayVideo key={clip.video_path} src={clip.video_path} className="h-full w-full" onLoadedMetadata={(nextVideo) => { setMetadata({ duration: nextVideo.duration, width: nextVideo.videoWidth, height: nextVideo.videoHeight }); }} /> : <div className="event-media-unavailable h-full px-4 text-center text-sm" data-testid="clip-modal-unavailable">{clip.video_error ?? '저장된 영상을 사용할 수 없습니다.'}</div>}</div>
+    <div className="mt-3 flex items-center justify-end gap-1" aria-label="오버레이 분석 제어">
+      {(analysis.status.state === 'idle' || analysis.status.state === 'failed' || analysis.status.state === 'unavailable') && <button type="button" aria-label="오버레이 분석" title="오버레이 분석" onClick={analysis.trigger} className="inline-flex h-8 w-8 items-center justify-center rounded-control border border-border"><span aria-hidden="true">◎</span></button>}
+      {analysis.status.state === 'running' && <><span aria-label="오버레이 분석 중" title="오버레이 분석 중" role="img" className="inline-flex h-8 w-8 animate-spin items-center justify-center">↻</span><button type="button" aria-label="오버레이 분석 취소" title="오버레이 분석 취소" onClick={analysis.cancel} className="inline-flex h-8 w-8 items-center justify-center rounded-control border border-border">×</button></>}
+      {analysis.status.state === 'available' && !timingUsable && <StatusIcon label="프레임 동기화 불가" />}
+      {timingUsable && !rvfcAvailable && <StatusIcon label="프레임 동기화 불가" />}
+      {timingUsable && rvfcAvailable && <>{(['person', 'bed'] as const).map((target) => <button key={target} type="button" aria-label={target === 'person' ? '사람 오버레이' : '침대 오버레이'} title={target === 'person' ? '사람 오버레이' : '침대 오버레이'} aria-pressed={targets[target]} onClick={() => toggleTarget(target)} className={`inline-flex h-8 w-8 items-center justify-center rounded-control border ${targets[target] ? 'border-primary bg-primary text-primary-foreground' : 'border-border'}`}><OverlayTargetIcon target={target} /></button>)}</>}
+    </div>
+    <div className="event-media-frame relative mt-4">{clip.video_available ? <><AutoplayVideo key={clip.video_path} src={clip.video_path} className="h-full w-full" onVideoElement={setVideo} onLoadedMetadata={(nextVideo) => { setMetadata({ duration: nextVideo.duration, width: nextVideo.videoWidth, height: nextVideo.videoHeight }); }} /><ClipOverlayCanvas video={video} result={timingUsable ? analysis.status.result : undefined} personEnabled={targets.person} bedEnabled={targets.bed} /></> : <div className="event-media-unavailable h-full px-4 text-center text-sm" data-testid="clip-modal-unavailable">{clip.video_error ?? '저장된 영상을 사용할 수 없습니다.'}</div>}</div>
     <dl className="mt-4 grid grid-cols-2 gap-x-4 gap-y-2 text-sm"><dt className="text-muted-foreground">카메라</dt><dd className="text-right">{cameraLabel}</dd><dt className="text-muted-foreground">시간</dt><dd className="text-right tabular-nums">{formatClipTimestamp(clip.detected_at ?? clip.created_at)}</dd><dt className="text-muted-foreground">길이</dt><dd className="text-right tabular-nums">{durationSeconds !== null ? formatDuration(durationSeconds) : '-'}</dd><dt className="text-muted-foreground">해상도</dt><dd className="text-right tabular-nums">{clip.video_available ? formatResolution(metadata?.width ?? null, metadata?.height ?? null) : '-'}</dd>{clip.size_bytes !== null && clip.size_bytes !== undefined ? <><dt className="text-muted-foreground">크기</dt><dd className="text-right tabular-nums">{formatBytes(clip.size_bytes)}</dd></> : null}</dl>
   </AccessibleDialog>;
 }

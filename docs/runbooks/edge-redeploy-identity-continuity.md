@@ -117,9 +117,12 @@ print([c['camera_id'] for c in d['cameras']][:3])"
 | 서비스 | 키 |
 | --- | --- |
 | `ml-api` | `API_BACKEND_BASE_URL`, `API_BACKEND_INGEST_TIMEOUT_SEC`, `API_DASHBOARD_USERNAME`, `API_DASHBOARD_PASSWORD`, `ML_RTSP_ALLOW_PRIVATE_DESTINATIONS`, `ML_RTSP_ALLOW_LOCAL_DESTINATIONS` |
-| `ml-worker` | `ML_WORKER_PROFILE`, `ML_RTSP_ALLOW_PRIVATE_DESTINATIONS`, `ML_RTSP_ALLOW_LOCAL_DESTINATIONS` |
+| `ml-worker` | `ML_WORKER_PROFILE`, `ML_WORKER_CLIP_ANALYSIS_CPU`, `ML_RTSP_ALLOW_PRIVATE_DESTINATIONS`, `ML_RTSP_ALLOW_LOCAL_DESTINATIONS` |
 
 정확한 목록은 `edge-env-inventory.json` 을 기준으로 한다.
+
+`ML_WORKER_CLIP_ANALYSIS_CPU`는 저장된 클립 재분석에 전용으로 예약한 호스트 CPU 하나다.
+Flow 라이브 파이프라인이 고정한 CPU를 지정하면 안 된다.
 
 구 배포본에서 env 를 복사하면 **은퇴한 키 때문에 워커가 부팅을 거부**한다
 (`worker configuration refused: retired edge environment key(s)`). 대표적으로

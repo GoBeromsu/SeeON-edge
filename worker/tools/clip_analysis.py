@@ -8,23 +8,28 @@ import os
 from collections.abc import Sequence
 from pathlib import Path
 
-import av
-
-from shared.events.clip_analysis_wire import encode_clip_analysis
-from worker.adapters.model.clip_reanalysis import (
-    ClipAnalysisFailed,
-    ClipAnalysisProfile,
-    ClipAnalysisRejected,
-    ClipAnalysisRequest,
-    analyze_clip,
-)
+from worker.runtime.clip_analysis_subprocess import bootstrap_child
 
 
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--request", required=True, type=Path)
     parser.add_argument("--out", required=True, type=Path)
+    parser.add_argument("--expected-parent", required=True, type=int)
+    parser.add_argument("--cpu", required=True, type=int)
+    parser.add_argument("--control-fd", required=True, type=int)
     args = parser.parse_args(argv)
+    bootstrap_child(
+        expected_parent=args.expected_parent, cpu_index=args.cpu, control_fd=args.control_fd
+    )
+    # Imports below this line may initialize native decoder/ML thread pools.
+    from shared.events.clip_analysis_wire import encode_clip_analysis
+    from worker.adapters.model.clip_reanalysis import (
+        ClipAnalysisFailed,
+        ClipAnalysisRejected,
+        analyze_clip,
+    )
+
     try:
         request = _load_request(args.request)
         decoder_identity = _decoder_identity(request.clip_path)
@@ -36,15 +41,19 @@ def main(argv: Sequence[str] | None = None) -> int:
     except ClipAnalysisFailed as exc:
         _error("ClipAnalysisFailed", str(exc))
         return 3
-    except Exception:  # noqa: BLE001 - the tool boundary must map every failure to exit 3
+    except Exception:  # noqa: BLE001 - tool boundary maps every failure to exit 3
         _error("ClipAnalysisFailed", "tool_failed")
         return 3
     return 0
 
 
-def _load_request(path: Path) -> ClipAnalysisRequest:
+def _load_request(path: Path):
+    """Decode the shared supervisor/tool request schema without native imports."""
+    from worker.adapters.model.clip_reanalysis import ClipAnalysisProfile, ClipAnalysisRequest
+
     payload = json.loads(path.read_text(encoding="utf-8"))
     if not isinstance(payload, dict) or set(payload) != {
+        "clip_id",
         "clip_path",
         "clip_sha256",
         "pose_model_path",
@@ -63,6 +72,7 @@ def _load_request(path: Path) -> ClipAnalysisRequest:
     }:
         raise ValueError("profile_shape")
     return ClipAnalysisRequest(
+        clip_id=_string(payload["clip_id"], "clip_id"),
         clip_path=Path(_string(payload["clip_path"], "clip_path")),
         clip_sha256=_string(payload["clip_sha256"], "clip_sha256"),
         pose_model_path=Path(_string(payload["pose_model_path"], "pose_model_path")),
@@ -78,12 +88,18 @@ def _string(value: object, name: str) -> str:
 
 
 def _decoder_identity(path: Path) -> str:
+    import av
+
     try:
         with av.open(str(path)) as container:
             codec_name = container.streams.video[0].codec_context.name
     except Exception as exc:
+        from worker.adapters.model.clip_reanalysis import ClipAnalysisRejected
+
         raise ClipAnalysisRejected("container_open") from exc
     if not codec_name:
+        from worker.adapters.model.clip_reanalysis import ClipAnalysisFailed
+
         raise ClipAnalysisFailed("codec_name")
     return f"pyav-{av.__version__}/{codec_name}"
 

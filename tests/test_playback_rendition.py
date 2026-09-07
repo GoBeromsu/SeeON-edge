@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import subprocess
 from pathlib import Path
 
@@ -9,7 +10,9 @@ import pytest
 from worker.pipeline.output.evidence.playback_rendition import (
     PLAYBACK_DIGEST_NAME,
     PLAYBACK_NAME,
+    PLAYBACK_TIMING_NAME,
     PlaybackRenditionError,
+    VideoTiming,
     write_playback_rendition,
 )
 from worker.tools import clip_playback_backfill
@@ -26,11 +29,15 @@ def _runner(codec: str):
     return run
 
 
+def _timing(_path: Path) -> VideoTiming:
+    return VideoTiming(1, 12_000, (0, 400, 800))
+
+
 def test_h264_original_does_not_create_playback_rendition(tmp_path: Path) -> None:
     clip = tmp_path / "clip.mp4"
     clip.write_bytes(b"h264-original")
 
-    result = write_playback_rendition(clip, run=_runner("h264"))
+    result = write_playback_rendition(clip, run=_runner("h264"), read_timing=_timing)
 
     assert result is None
     assert not (tmp_path / PLAYBACK_NAME).exists()
@@ -41,12 +48,37 @@ def test_hevc_original_creates_rendition_and_matching_digest(tmp_path: Path) -> 
     clip = tmp_path / "clip.mp4"
     clip.write_bytes(b"hevc-original")
 
-    result = write_playback_rendition(clip, run=_runner("hevc"))
+    result = write_playback_rendition(clip, run=_runner("hevc"), read_timing=_timing)
 
     assert result == tmp_path / PLAYBACK_NAME
     assert result.read_bytes() == b"browser-safe-rendition"
     assert (tmp_path / PLAYBACK_DIGEST_NAME).read_text(encoding="ascii") == (
         hashlib.sha256(result.read_bytes()).hexdigest() + "\n"
+    )
+    assert json.loads((tmp_path / PLAYBACK_TIMING_NAME).read_text(encoding="ascii")) == {
+        "frames": 3,
+        "pts_identical": True,
+        "source_frames": 3,
+        "time_base": "1/12000",
+    }
+
+
+def test_hevc_rendition_records_non_identical_timing(tmp_path: Path) -> None:
+    clip = tmp_path / "clip.mp4"
+    clip.write_bytes(b"hevc-original")
+
+    def non_identical(path: Path) -> VideoTiming:
+        return (
+            VideoTiming(1, 12_000, (0, 400, 800))
+            if path.name == "clip.mp4"
+            else VideoTiming(1, 12_000, (0, 401, 800))
+        )
+
+    write_playback_rendition(clip, run=_runner("hevc"), read_timing=non_identical)
+
+    assert (
+        json.loads((tmp_path / PLAYBACK_TIMING_NAME).read_text(encoding="ascii"))["pts_identical"]
+        is False
     )
 
 
@@ -63,7 +95,7 @@ def test_ffmpeg_failure_leaves_no_partial_file_or_sidecar(
         return subprocess.CompletedProcess(arguments, 1, stdout="", stderr="failed")
 
     with pytest.raises(PlaybackRenditionError):
-        write_playback_rendition(clip, run=failing_run)
+        write_playback_rendition(clip, run=failing_run, read_timing=_timing)
 
     assert not (tmp_path / PLAYBACK_NAME).exists()
     assert not (tmp_path / PLAYBACK_DIGEST_NAME).exists()
@@ -82,14 +114,14 @@ def test_ffmpeg_timeout_leaves_no_partial_file_or_sidecar(tmp_path: Path) -> Non
         raise subprocess.TimeoutExpired(arguments, 120)
 
     with pytest.raises(PlaybackRenditionError):
-        write_playback_rendition(clip, run=timeout_run)
+        write_playback_rendition(clip, run=timeout_run, read_timing=_timing)
 
     assert not (tmp_path / PLAYBACK_NAME).exists()
     assert not (tmp_path / PLAYBACK_DIGEST_NAME).exists()
     assert not list(tmp_path.glob(".*.mp4"))
 
 
-def test_backfill_skips_existing_renditions_and_dry_run_writes_nothing(
+def test_backfill_dry_run_reports_missing_timing_sidecars_as_pending(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     clips = tmp_path / "clips"
@@ -97,6 +129,7 @@ def test_backfill_skips_existing_renditions_and_dry_run_writes_nothing(
     existing.mkdir(parents=True)
     (existing / "clip.mp4").write_bytes(b"hevc")
     (existing / PLAYBACK_NAME).write_bytes(b"already-rendered")
+    (existing / PLAYBACK_TIMING_NAME).write_text('{"pts_identical":true}', encoding="ascii")
     pending = clips / "pending"
     pending.mkdir()
     (pending / "clip.mp4").write_bytes(b"hevc")
@@ -114,7 +147,8 @@ def test_backfill_skips_existing_renditions_and_dry_run_writes_nothing(
         "scanned": 2,
         "h264": 0,
         "created": 0,
-        "skipped": 2,
+        "skipped": 1,
+        "pending": 1,
         "failed": 0,
         "dry_run": True,
     }
@@ -122,21 +156,31 @@ def test_backfill_skips_existing_renditions_and_dry_run_writes_nothing(
     assert not (pending / PLAYBACK_NAME).exists()
 
 
-def test_backfill_skips_existing_rendition(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_backfill_regenerates_non_identical_existing_rendition(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     clip = tmp_path / "clips" / "existing" / "clip.mp4"
     clip.parent.mkdir(parents=True)
     clip.write_bytes(b"hevc")
     (clip.parent / PLAYBACK_NAME).write_bytes(b"already-rendered")
+    (clip.parent / PLAYBACK_TIMING_NAME).write_text('{"pts_identical":false}', encoding="ascii")
+    calls: list[Path] = []
     monkeypatch.setattr(
         clip_playback_backfill,
         "probe_video_codec",
-        lambda _path: pytest.fail("existing rendition should not be probed"),
+        lambda _path: "hevc",
+    )
+    monkeypatch.setattr(
+        clip_playback_backfill,
+        "write_playback_rendition",
+        lambda path: calls.append(path) or path.with_name(PLAYBACK_NAME),
     )
 
     summary = clip_playback_backfill.backfill(tmp_path)
 
-    assert summary["skipped"] == 1
-    assert summary["created"] == 0
+    assert summary["skipped"] == 0
+    assert summary["created"] == 1
+    assert calls == [clip]
 
 
 def test_thumbnail_backfill_uses_manifest_duration_and_skips_existing(

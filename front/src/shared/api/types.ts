@@ -71,6 +71,42 @@ export type OverlaySelection = {
   bed: boolean;
 };
 
+export type ClipAnalysisBox = {
+  x1: number;
+  y1: number;
+  x2: number;
+  y2: number;
+  confidence: number;
+};
+
+export type ClipAnalysisFrame = {
+  pts: number;
+  status: 'available' | 'no_evidence' | 'ambiguous_timestamp';
+  boxes: ClipAnalysisBox[];
+};
+
+export type ClipAnalysisBedGeometry = {
+  points: [number, number][];
+  provenance_pts: number;
+};
+
+export type ClipAnalysisResult = {
+  time_base: { numerator: number; denominator: number };
+  frames: ClipAnalysisFrame[];
+  bed_geometries: ClipAnalysisBedGeometry[];
+  image_width: number;
+  image_height: number;
+};
+
+export type ClipAnalysisState = 'idle' | 'running' | 'available' | 'failed' | 'unavailable';
+
+export type ClipAnalysisStatus = {
+  state: ClipAnalysisState;
+  reason?: string;
+  served_timing_identical?: boolean;
+  result?: ClipAnalysisResult;
+};
+
 /** A single [x, y] vertex of a bed-zone polygon, in the coordinate space of image_width x image_height. */
 export type BedZonePoint = [number, number];
 

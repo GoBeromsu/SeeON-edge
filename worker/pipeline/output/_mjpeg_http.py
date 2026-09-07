@@ -7,6 +7,7 @@ import time
 from collections.abc import Callable
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, HTTPServer
+from pathlib import Path
 from socketserver import ThreadingMixIn
 from typing import Final, TypeAlias
 from urllib.parse import urlsplit
@@ -18,7 +19,17 @@ from contracts.runner import Image
 from shared.detection_policies import parse_effective_policy
 from shared.events.replay_wire import MAX_REPLAY_BODY_BYTES as _REPLAY_BODY_LIMIT
 from shared.events.replay_wire import ReplayWireError, decode_replay_trace
+from worker.interfaces.clip_analysis import ClipAnalysisSupervisor
 from worker.interfaces.fall_model import FallV2ModelProtocol
+from worker.pipeline.output._clip_analysis_http import (
+    clip_analysis_path,
+)
+from worker.pipeline.output._clip_analysis_http import (
+    handle_get as handle_clip_analysis_get,
+)
+from worker.pipeline.output._clip_analysis_http import (
+    handle_post as handle_clip_analysis_post,
+)
 from worker.pipeline.output.live_view import LatestFrame, LatestFrameStore
 from worker.pipeline.output.live_view_api import (
     BED_ZONE_NOT_FOUND_BODY,
@@ -115,6 +126,8 @@ def build_http_server(
     port: int,
     probe_token: str | None,
     probe: MjpegProbe,
+    clip_store_dir: Path,
+    clip_analysis_supervisor: ClipAnalysisSupervisor,
     bed_zone_recognizer: BedZoneRecognizer | None = None,
     bed_zone_snapshot: BedZoneSnapshot | None = None,
     replay_fall_model: FallV2ModelProtocol | None = None,
@@ -122,6 +135,15 @@ def build_http_server(
     class Handler(BaseHTTPRequestHandler):
         def do_GET(self) -> None:  # noqa: N802 - stdlib hook name
             path = urlsplit(self.path).path
+            analysis = clip_analysis_path(path)
+            if analysis is not None and analysis[1] == "status":
+                handle_clip_analysis_get(
+                    self,
+                    analysis[0],
+                    supervisor=clip_analysis_supervisor,
+                    authorized=_authorized_probe(self.headers.get(RELAY_TOKEN_HEADER), probe_token),
+                )
+                return
             stream_id = stream_camera_id(path)
             if stream_id is not None:
                 self._handle_stream(stream_id)
@@ -138,6 +160,17 @@ def build_http_server(
 
         def do_POST(self) -> None:  # noqa: N802 - stdlib hook name
             path = urlsplit(self.path).path
+            analysis = clip_analysis_path(path)
+            if analysis is not None:
+                handle_clip_analysis_post(
+                    self,
+                    analysis[0],
+                    analysis[1],
+                    store_dir=clip_store_dir,
+                    supervisor=clip_analysis_supervisor,
+                    authorized=_authorized_probe(self.headers.get(RELAY_TOKEN_HEADER), probe_token),
+                )
+                return
             if path == REPLAY_PATH:
                 self._handle_replay()
                 return
@@ -415,8 +448,7 @@ def build_http_server(
                 return
             except (OSError, RuntimeError, TypeError, ValueError, cv2.error) as error:
                 LOGGER.warning(
-                    "bed-zone recognition failed: stage=model "
-                    "camera_id=%s exception_class=%s",
+                    "bed-zone recognition failed: stage=model camera_id=%s exception_class=%s",
                     camera_id,
                     type(error).__name__,
                 )

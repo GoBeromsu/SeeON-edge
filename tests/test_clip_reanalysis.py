@@ -71,11 +71,12 @@ def _request(tmp_path: Path, digest: str) -> clip_reanalysis.ClipAnalysisRequest
     clip = tmp_path / "clip.mp4"
     clip.write_bytes(b"clip")
     return clip_reanalysis.ClipAnalysisRequest(
-        clip,
-        digest,
-        tmp_path / "pose.onnx",
-        tmp_path / "bed.onnx",
-        clip_reanalysis.ClipAnalysisProfile(),
+        clip_id="event-1",
+        clip_path=clip,
+        clip_sha256=digest,
+        pose_model_path=tmp_path / "pose.onnx",
+        bed_model_path=tmp_path / "bed.onnx",
+        analysis_profile=clip_reanalysis.ClipAnalysisProfile(),
     )
 
 
@@ -90,11 +91,12 @@ def test_input_byte_cap_is_rejected_before_opening(tmp_path: Path) -> None:
     digest = hashlib.sha256(b"clip").hexdigest()
     request = _request(tmp_path, digest)
     constrained = clip_reanalysis.ClipAnalysisRequest(
-        request.clip_path,
-        request.clip_sha256,
-        request.pose_model_path,
-        request.bed_model_path,
-        clip_reanalysis.ClipAnalysisProfile(max_input_bytes=3),
+        clip_id=request.clip_id,
+        clip_path=request.clip_path,
+        clip_sha256=request.clip_sha256,
+        pose_model_path=request.pose_model_path,
+        bed_model_path=request.bed_model_path,
+        analysis_profile=clip_reanalysis.ClipAnalysisProfile(max_input_bytes=3),
     )
     with pytest.raises(clip_reanalysis.ClipAnalysisRejected, match="input_bytes"):
         clip_reanalysis.analyze_clip(constrained, decoder_identity="pyav-test/mpeg4")
@@ -114,4 +116,6 @@ def test_duplicate_pts_is_ambiguous_and_result_roundtrips(tmp_path: Path, monkey
         (1, "ambiguous_timestamp"),
         (20, "available"),
     ]
+    assert result.clip_id == "event-1"
+    assert result.frames[1].boxes == ()
     assert decode_clip_analysis(encode_clip_analysis(result)) == result

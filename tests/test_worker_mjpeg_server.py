@@ -8,6 +8,9 @@ import time
 import urllib.error
 import urllib.request
 from collections.abc import Callable
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Literal
 
 import cv2
 import numpy as np
@@ -33,6 +36,60 @@ from worker.types.preview import OverlaySelection
 _REAL_JPEG = cv2.imencode(".jpg", np.zeros((16, 16, 3), dtype=np.uint8))[1].tobytes()
 _RELAY_TOKEN = "relay-token"
 _AUTH_HEADERS = {"X-Edge-Relay-Token": _RELAY_TOKEN}
+
+
+@dataclass(frozen=True)
+class _ClipAnalysisStatus:
+    state: Literal["idle", "running", "available", "failed"] = "idle"
+    reason: str | None = None
+
+
+class _ClipAnalysisSupervisor:
+    def status(self, clip_id: str) -> _ClipAnalysisStatus:
+        del clip_id
+        return _ClipAnalysisStatus()
+
+    def trigger(
+        self,
+        clip_id: str,
+        clip_path: Path,
+        clip_sha256: str,
+        *,
+        size_bytes: int,
+        duration_ms: int,
+        width: int,
+        height: int,
+    ) -> bool:
+        del clip_id, clip_path, clip_sha256, size_bytes, duration_ms, width, height
+        return True
+
+    def cancel(self, clip_id: str) -> bool:
+        del clip_id
+        return False
+
+
+_RealMjpegServer = MjpegServer
+
+
+def MjpegServer(
+    store: LatestFrameStore,
+    config: MjpegServerConfig,
+    *,
+    clip_analysis_supervisor: _ClipAnalysisSupervisor | None = None,
+    clip_store_dir: Path | None = None,
+    **kwargs: object,
+) -> _RealMjpegServer:
+    return _RealMjpegServer(
+        store,
+        config,
+        clip_analysis_supervisor=(
+            _ClipAnalysisSupervisor()
+            if clip_analysis_supervisor is None
+            else clip_analysis_supervisor
+        ),
+        clip_store_dir=Path(".") if clip_store_dir is None else clip_store_dir,
+        **kwargs,
+    )
 
 
 def _bed_zone_response(

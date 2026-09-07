@@ -1,7 +1,8 @@
-"""Durable, identity-bound clip re-analysis artifacts."""
+"""Durable, immutable identity-bound clip re-analysis artifacts."""
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass
 from hashlib import sha256
 from os import replace
@@ -17,7 +18,7 @@ from shared.events.clip_analysis_wire import (
 
 
 class ClipAnalysisArtifactError(ValueError):
-    """An analysis artifact is malformed or has the wrong immutable identity."""
+    """An analysis artifact is malformed or violates immutable publication."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -29,9 +30,53 @@ class ClipAnalysisArtifactIdentity:
     analysis_profile_sha256: str
     decoder_identity: str
 
+    @property
+    def digest(self) -> str:
+        material = "|".join(
+            (
+                self.clip_sha256,
+                self.pose_model_sha256,
+                self.bed_model_sha256,
+                self.decoder_identity,
+                self.analysis_profile_sha256,
+            )
+        )
+        return sha256(material.encode("utf-8")).hexdigest()[:16]
 
-def artifact_path(clip_path: Path) -> Path:
-    return clip_path.parent / "clip.analysis.json"
+
+@dataclass(frozen=True, slots=True)
+class PublishedAnalysis:
+    path: Path
+    identity: ClipAnalysisArtifactIdentity
+    mtime: float
+
+    @property
+    def clip_id(self) -> str:
+        return self.identity.clip_id
+
+    @property
+    def clip_sha256(self) -> str:
+        return self.identity.clip_sha256
+
+    @property
+    def pose_model_sha256(self) -> str:
+        return self.identity.pose_model_sha256
+
+    @property
+    def bed_model_sha256(self) -> str:
+        return self.identity.bed_model_sha256
+
+    @property
+    def analysis_profile_sha256(self) -> str:
+        return self.identity.analysis_profile_sha256
+
+    @property
+    def decoder_identity(self) -> str:
+        return self.identity.decoder_identity
+
+
+def artifact_path(clip_path: Path, identity: ClipAnalysisArtifactIdentity) -> Path:
+    return clip_path.parent / f"clip.analysis.{identity.digest}.json"
 
 
 def _sidecar_path(path: Path) -> Path:
@@ -46,6 +91,17 @@ def _matches(result: ClipAnalysisResult, identity: ClipAnalysisArtifactIdentity)
         and result.bed_model_sha256 == identity.bed_model_sha256
         and result.analysis_profile_sha256 == identity.analysis_profile_sha256
         and result.decoder_identity == identity.decoder_identity
+    )
+
+
+def _identity(result: ClipAnalysisResult) -> ClipAnalysisArtifactIdentity:
+    return ClipAnalysisArtifactIdentity(
+        result.clip_id,
+        result.clip_sha256,
+        result.pose_model_sha256,
+        result.bed_model_sha256,
+        result.analysis_profile_sha256,
+        result.decoder_identity,
     )
 
 
@@ -68,10 +124,7 @@ def validate_scratch(path: Path, identity: ClipAnalysisArtifactIdentity) -> byte
     return payload
 
 
-def load_clip_analysis(
-    clip_path: Path, identity: ClipAnalysisArtifactIdentity
-) -> ClipAnalysisResult | None:
-    path = artifact_path(clip_path)
+def load_published(path: Path, *, expected_clip_sha256: str) -> ClipAnalysisResult | None:
     sidecar = _sidecar_path(path)
     try:
         payload = path.read_bytes()
@@ -81,9 +134,39 @@ def load_clip_analysis(
     if expected_digest != sha256(payload).hexdigest():
         return None
     try:
-        return _decode_checked(payload, identity)
-    except ClipAnalysisArtifactError:
+        result = decode_clip_analysis(payload)
+    except ClipAnalysisWireError:
         return None
+    return result if result.clip_sha256 == expected_clip_sha256 else None
+
+
+def load_clip_analysis(
+    clip_path: Path, identity: ClipAnalysisArtifactIdentity
+) -> ClipAnalysisResult | None:
+    result = load_published(
+        artifact_path(clip_path, identity), expected_clip_sha256=identity.clip_sha256
+    )
+    return result if result is not None and _matches(result, identity) else None
+
+
+def list_published(clip_dir: Path) -> tuple[PublishedAnalysis, ...]:
+    published: list[PublishedAnalysis] = []
+    for path in clip_dir.glob("clip.analysis.*.json"):
+        try:
+            payload = path.read_bytes()
+            if (
+                _sidecar_path(path).read_text(encoding="ascii").strip()
+                != sha256(payload).hexdigest()
+            ):
+                continue
+            result = decode_clip_analysis(payload)
+        except (OSError, ClipAnalysisWireError):
+            continue
+        try:
+            published.append(PublishedAnalysis(path, _identity(result), path.stat().st_mtime))
+        except OSError:
+            continue
+    return tuple(sorted(published, key=lambda entry: entry.mtime, reverse=True))
 
 
 def _atomic_write(path: Path, payload: bytes) -> None:
@@ -92,7 +175,10 @@ def _atomic_write(path: Path, payload: bytes) -> None:
         temporary = Path(file.name)
         file.write(payload)
         file.flush()
+        os.fsync(file.fileno())
     try:
+        # Readable like manifest.json: the backend reads the store as another user.
+        temporary.chmod(0o644)
         replace(temporary, path)
     finally:
         if temporary.exists():
@@ -102,25 +188,33 @@ def _atomic_write(path: Path, payload: bytes) -> None:
 def publish_clip_analysis(
     clip_path: Path, scratch_path: Path, identity: ClipAnalysisArtifactIdentity
 ) -> Path:
-    """Validate then atomically publish the one artifact valid for *identity*."""
     payload = validate_scratch(scratch_path, identity)
-    existing = load_clip_analysis(clip_path, identity)
-    target = artifact_path(clip_path)
-    if existing is not None:
-        return target
-    # Re-encode to require canonical wire bytes even when the child wrote valid JSON.
     result = _decode_checked(payload, identity)
     canonical = encode_clip_analysis(result)
+    target = artifact_path(clip_path, identity)
+    sidecar = _sidecar_path(target)
+    if target.exists() or sidecar.exists():
+        existing = load_published(target, expected_clip_sha256=identity.clip_sha256)
+        if (
+            existing is not None
+            and _matches(existing, identity)
+            and target.read_bytes() == canonical
+        ):
+            return target
+        raise ClipAnalysisArtifactError("identity_collision")
     _atomic_write(target, canonical)
-    _atomic_write(_sidecar_path(target), f"{sha256(canonical).hexdigest()}\n".encode("ascii"))
+    _atomic_write(sidecar, f"{sha256(canonical).hexdigest()}\n".encode("ascii"))
     return target
 
 
 __all__ = [
     "ClipAnalysisArtifactError",
     "ClipAnalysisArtifactIdentity",
+    "PublishedAnalysis",
     "artifact_path",
+    "list_published",
     "load_clip_analysis",
+    "load_published",
     "publish_clip_analysis",
     "validate_scratch",
 ]

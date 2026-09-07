@@ -4,6 +4,7 @@ type AutoplayVideoProps = {
   src: string;
   className: string;
   onLoadedMetadata: (video: HTMLVideoElement) => void;
+  onVideoElement?: (video: HTMLVideoElement | null) => void;
 };
 
 type PlaybackFailure = 'autoplay-blocked' | 'media-failed' | null;
@@ -14,8 +15,8 @@ function classifyPlaybackFailure(error: unknown): Exclude<PlaybackFailure, null>
     : 'media-failed';
 }
 
-export function AutoplayVideo({ src, className, onLoadedMetadata }: AutoplayVideoProps): JSX.Element {
-  const videoRef = useRef<HTMLVideoElement>(null);
+export function AutoplayVideo({ src, className, onLoadedMetadata, onVideoElement }: AutoplayVideoProps): JSX.Element {
+  const videoRef = useRef<HTMLVideoElement | null>(null);
   const [failure, setFailure] = useState<PlaybackFailure>(null);
 
   useEffect(() => {
@@ -52,7 +53,10 @@ export function AutoplayVideo({ src, className, onLoadedMetadata }: AutoplayVide
   return (
     <>
       <video
-        ref={videoRef}
+        ref={(video) => {
+          videoRef.current = video;
+          onVideoElement?.(video);
+        }}
         className={className}
         src={src}
         controls

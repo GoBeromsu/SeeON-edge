@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import hashlib
 import hmac
+import json
 import os
+import re
 import stat
 from dataclasses import dataclass
 from pathlib import Path
@@ -35,7 +37,16 @@ API_LABEL_STORE_ENV = "API_LABEL_STORE"
 DEFAULT_CLIP_STORE_DIR = "/var/lib/clip-store"
 PLAYBACK_H264_FILENAME = "clip.playback-h264.mp4"
 PLAYBACK_H264_SHA256_FILENAME = f"{PLAYBACK_H264_FILENAME}.sha256"
+PLAYBACK_H264_TIMING_FILENAME = "clip.playback-h264.timing.json"
 _PLAYBACK_SHA256_SIDECAR_BYTES = 65
+# Immutable, identity-named artifacts published by the worker
+# (worker/pipeline/output/evidence/clip_analysis_artifact.py); the newest
+# digest-verified one for the clip is served.
+CLIP_ANALYSIS_GLOB = "clip.analysis.*.json"
+_CLIP_ANALYSIS_NAME_RE = re.compile(r"^clip\.analysis\.[0-9a-f]{16}\.json$")
+_SHA256_SIDECAR_BYTES = 65
+_SHA256_RE = re.compile(r"[0-9a-f]{64}\Z")
+_PLAYBACK_TIMING_SIDECAR_BYTES = 256
 
 
 @dataclass(frozen=True, slots=True)
@@ -46,6 +57,15 @@ class LocatedClip:
     @property
     def recording_root(self) -> Path:
         return self.manifest_path.parent.parent.parent
+
+
+@dataclass(frozen=True, slots=True)
+class OpenedPlaybackIdentity:
+    """Opened served media with immutable-source and rendition timing identity."""
+
+    opened: OpenedRegularFile
+    original_sha256: str | None
+    served_pts_identical: bool | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -219,12 +239,18 @@ class ClipStore:
 
     def open_located_playback(self, located: LocatedClip) -> OpenedRegularFile:
         """Open a verified browser-safe rendition, or the immutable original."""
+        return self.open_located_playback_identity(located).opened
+
+    def open_located_playback_identity(self, located: LocatedClip) -> OpenedPlaybackIdentity:
+        """Open served media and expose its immutable-source and timing identity."""
         original = self.open_located_video(located)
+        original_sha256 = self.manifest_video_sha256(located)
         playback = self._open_verified_playback(original.path)
         if playback is None:
-            return original
+            return OpenedPlaybackIdentity(original, original_sha256, None)
+        timing_identical = self._playback_timing_identical(original.path)
         original.handle.close()
-        return playback
+        return OpenedPlaybackIdentity(playback, original_sha256, timing_identical)
 
     def playback_codec(self, located: LocatedClip) -> str:
         """Return the codec an operator will receive from the video endpoint."""
@@ -237,6 +263,57 @@ class ClipStore:
             return located.manifest.codec
         playback.handle.close()
         return "h264"
+
+    def manifest_video_sha256(self, located: LocatedClip) -> str | None:
+        """Return the immutable original-media identity declared by the manifest."""
+        try:
+            payload = json.loads(
+                read_bounded_regular_file(self.root, located.manifest_path, 1024 * 1024)
+            )
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+            return None
+        if not isinstance(payload, dict):
+            return None
+        digest = payload.get("sha256")
+        if not isinstance(digest, str) or _SHA256_RE.fullmatch(digest) is None:
+            return None
+        return digest
+
+    def read_clip_analysis(self, located: LocatedClip) -> bytes | None:
+        """Read the newest digest-verified analysis artifact beside the clip."""
+        clip_dir = located.manifest_path.parent
+        candidates = [
+            path
+            for path in clip_dir.glob(CLIP_ANALYSIS_GLOB)
+            if _CLIP_ANALYSIS_NAME_RE.fullmatch(path.name) is not None
+        ]
+        if not candidates:
+            return None
+        artifact = max(candidates, key=lambda path: (path.stat().st_mtime_ns, path.name))
+        sidecar = artifact.with_name(f"{artifact.name}.sha256")
+        try:
+            expected = read_bounded_regular_file(self.root, sidecar, _SHA256_SIDECAR_BYTES)
+            payload = read_bounded_regular_file(
+                self.root,
+                artifact,
+                32 * 1024 * 1024,
+            )
+        except FileNotFoundError:
+            return None
+        try:
+            expected_digest = expected[:-1].decode("ascii")
+        except UnicodeDecodeError as exc:
+            raise ValueError("clip analysis digest is not ASCII") from exc
+        if len(expected) != _SHA256_SIDECAR_BYTES or expected[-1:] != b"\n":
+            raise ValueError("clip analysis digest is invalid")
+        if _SHA256_RE.fullmatch(expected_digest) is None:
+            raise ValueError("clip analysis digest is invalid")
+        if not hmac.compare_digest(
+            hashlib.sha256(payload).hexdigest(),
+            expected_digest,
+        ):
+            raise ValueError("clip analysis digest does not match")
+        return payload
 
     def _open_verified_playback(self, original_path: Path) -> OpenedRegularFile | None:
         playback_path = original_path.with_name(PLAYBACK_H264_FILENAME)
@@ -265,6 +342,18 @@ class ClipStore:
             pass
         playback.handle.close()
         return None
+
+    def _playback_timing_identical(self, original_path: Path) -> bool:
+        try:
+            raw = read_bounded_regular_file(
+                self.root,
+                original_path.with_name(PLAYBACK_H264_TIMING_FILENAME),
+                _PLAYBACK_TIMING_SIDECAR_BYTES,
+            )
+            payload = json.loads(raw.decode("ascii"))
+        except (FileNotFoundError, OSError, UnicodeDecodeError, json.JSONDecodeError):
+            return False
+        return isinstance(payload, dict) and payload.get("pts_identical") is True
 
     def _playback_digest(self, opened: OpenedRegularFile) -> str:
         file_stat = os.fstat(opened.handle.fileno())
@@ -323,9 +412,11 @@ def default_label_store_dir() -> Path:
 
 __all__ = [
     "API_LABEL_STORE_ENV",
+    "CLIP_ANALYSIS_GLOB",
     "CLIP_STORE_DIR_ENV",
     "PLAYBACK_H264_FILENAME",
     "PLAYBACK_H264_SHA256_FILENAME",
+    "PLAYBACK_H264_TIMING_FILENAME",
     "ClipManifest",
     "ClipStore",
     "DuplicateClipIdError",

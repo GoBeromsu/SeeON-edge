@@ -105,3 +105,33 @@ class AuditResponse(BaseModel):
     model_config: ClassVar[ConfigDict] = ConfigDict(extra="forbid")
 
     entries: list[dict[str, object]]
+
+
+ClipAnalysisState: TypeAlias = Literal[
+    "idle",
+    "running",
+    "available",
+    "failed",
+    "unavailable",
+]
+
+
+class ClipAnalysisResponse(BaseModel):
+    model_config: ClassVar[ConfigDict] = ConfigDict(extra="forbid")
+
+    state: ClipAnalysisState = Field(...)
+    reason: str | None = Field(default=None, min_length=1)
+    served_timing_identical: bool | None = Field(default=None)
+    result: dict[str, object] | None = Field(default=None)
+
+
+class ClipAnalysisTriggerResponse(BaseModel):
+    model_config: ClassVar[ConfigDict] = ConfigDict(extra="forbid")
+
+    state: Literal["running"] = Field(...)
+
+
+class ClipAnalysisCancelResponse(BaseModel):
+    model_config: ClassVar[ConfigDict] = ConfigDict(extra="forbid")
+
+    cancelled: bool = Field(...)

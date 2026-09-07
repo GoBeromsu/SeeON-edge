@@ -138,13 +138,31 @@ def test_flow_live_view_injects_bed_recognizer_and_recognize_request_reaches_it(
     tmp_path: Path, monkeypatch: object
 ) -> None:
     serving = _ServingClient()
+
+    class _ClipAnalysisSupervisor:
+        def __init__(self, _store_dir: Path, **kwargs: object) -> None:
+            captured["clip_analysis_cpu"] = kwargs["cpu_index"]
+
+        def status(self, _clip_id: str) -> object:
+            return SimpleNamespace(state="idle", reason=None)
+
+        def trigger(self, *_args: object, **_kwargs: object) -> bool:
+            return True
+
+        def cancel(self, _clip_id: str) -> bool:
+            return False
+
+        def shutdown(self) -> None:
+            return None
+
     runtime = WorkerRuntime(
         _config(),
-        env={"ML_WORKER_PROFILE": "flow"},
+        env={"ML_WORKER_PROFILE": "flow", "ML_WORKER_CLIP_ANALYSIS_CPU": "3"},
         serving_client=serving,
         acquire_lease=lambda: GpuLease.acquire(tmp_path),
         state_dir=tmp_path,
     )
+    monkeypatch.setattr(worker_module, "ClipAnalysisSupervisor", _ClipAnalysisSupervisor)
     runtime._boot = SimpleNamespace(profile=SimpleNamespace(name="flow"))  # noqa: SLF001
     runtime._mjpeg_config = MjpegServerConfig(  # noqa: SLF001
         enabled=True, host="127.0.0.1", port=0, probe_token="relay-token"
@@ -161,6 +179,8 @@ def test_flow_live_view_injects_bed_recognizer_and_recognize_request_reaches_it(
         store: LatestFrameStore,
         config: MjpegServerConfig,
         *,
+        clip_analysis_supervisor: object,
+        clip_store_dir: Path,
         probe: object = None,
         bed_zone_recognizer: object = None,
         replay_fall_model: object = None,
@@ -169,9 +189,13 @@ def test_flow_live_view_injects_bed_recognizer_and_recognize_request_reaches_it(
         captured["bed_zone_recognizer"] = bed_zone_recognizer
         captured["replay_fall_model"] = replay_fall_model
         captured["bed_zone_snapshot"] = bed_zone_snapshot
+        captured["clip_analysis_supervisor"] = clip_analysis_supervisor
+        captured["clip_store_dir"] = clip_store_dir
         server = MjpegServer(
             store,
             config,
+            clip_analysis_supervisor=clip_analysis_supervisor,
+            clip_store_dir=clip_store_dir,
             probe=probe,
             bed_zone_recognizer=bed_zone_recognizer,
             replay_fall_model=replay_fall_model,
@@ -186,6 +210,8 @@ def test_flow_live_view_injects_bed_recognizer_and_recognize_request_reaches_it(
     assert captured["bed_zone_recognizer"] is not None
     assert captured["replay_fall_model"] is fall_model
     assert captured["bed_zone_snapshot"] == plane.native_snapshot
+    assert captured["clip_analysis_supervisor"] is not None
+    assert captured["clip_analysis_cpu"] == 3
     server = runtime._mjpeg_server  # noqa: SLF001
     assert server is not None
     try:
@@ -212,6 +238,23 @@ def test_flow_live_view_injects_bed_recognizer_and_recognize_request_reaches_it(
         assert plane.clean_snapshot_calls == []
     finally:
         runtime.stop()
+
+
+def test_flow_live_view_refuses_to_start_without_clip_analysis_cpu(
+    tmp_path: Path,
+) -> None:
+    runtime = WorkerRuntime(
+        _config(),
+        env={"ML_WORKER_PROFILE": "flow"},
+        serving_client=_ServingClient(),
+        state_dir=tmp_path,
+    )
+    runtime._boot = SimpleNamespace(profile=SimpleNamespace(name="flow"))  # noqa: SLF001
+    runtime._mjpeg_config = MjpegServerConfig(  # noqa: SLF001
+        enabled=True, host="127.0.0.1", port=0, probe_token="relay-token"
+    )
+    with pytest.raises(RuntimeError, match="ML_WORKER_CLIP_ANALYSIS_CPU is required"):
+        runtime._start_live_view_server()  # noqa: SLF001
 
 
 @pytest.mark.parametrize(
