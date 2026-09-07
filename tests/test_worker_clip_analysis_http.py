@@ -7,7 +7,10 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Literal
 
+import pytest
+
 from worker.adapters.model.clip_reanalysis import ClipAnalysisRejected
+from worker.interfaces.clip_analysis import ClipAnalysisDisabledError
 from worker.pipeline.output.live_view import LatestFrameStore
 from worker.pipeline.output.mjpeg_server import MjpegServer, MjpegServerConfig
 
@@ -52,6 +55,19 @@ class _Supervisor:
     def cancel(self, clip_id: str) -> bool:
         self.cancelled.append(clip_id)
         return True
+
+
+class _DisabledSupervisor:
+    def status(self, clip_id: str) -> _Status:
+        del clip_id
+        raise ClipAnalysisDisabledError("clip_analysis_disabled")
+
+    def trigger(self, *_args: object, **_kwargs: object) -> bool:
+        raise ClipAnalysisDisabledError("clip_analysis_disabled")
+
+    def cancel(self, clip_id: str) -> bool:
+        del clip_id
+        raise ClipAnalysisDisabledError("clip_analysis_disabled")
 
 
 def _request(base: str, path: str, body: object | None = None) -> urllib.request.Request:
@@ -133,6 +149,32 @@ def test_clip_analysis_trigger_status_and_cancel(tmp_path: Path) -> None:
             assert response.status == 204
             assert response.read() == b""
         assert supervisor.cancelled == ["camera-20260101-abc"]
+    finally:
+        server.stop()
+
+
+def test_clip_analysis_disabled_returns_503_for_status_and_trigger(tmp_path: Path) -> None:
+    clip = tmp_path / "clips" / "camera-1" / "clip.mp4"
+    clip.parent.mkdir(parents=True)
+    clip.write_bytes(b"clip")
+    _write_ready_manifest(clip)
+    server = MjpegServer(
+        LatestFrameStore(),
+        MjpegServerConfig(port=0, probe_token=_TOKEN),
+        clip_analysis_supervisor=_DisabledSupervisor(),
+        clip_store_dir=tmp_path,
+    )
+    server.start()
+    base = f"http://127.0.0.1:{server.port}"
+    try:
+        for request in (
+            _request(base, "/clips/camera-1/analysis"),
+            _request(base, "/clips/camera-1/analysis", {"clip_sha256": _SHA256}),
+        ):
+            with pytest.raises(urllib.error.HTTPError) as error:
+                urllib.request.urlopen(request, timeout=1)
+            assert error.value.code == 503
+            assert json.loads(error.value.read()) == {"error": "clip_analysis_disabled"}
     finally:
         server.stop()
 

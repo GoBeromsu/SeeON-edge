@@ -69,7 +69,7 @@ def assemble_clip_analysis_status(
             clip_id,
             "analysis",
             body=None,
-            accepted=frozenset({HTTPStatus.OK}),
+            accepted=frozenset({HTTPStatus.OK, HTTPStatus.SERVICE_UNAVAILABLE}),
             method="GET",
         )
     except HTTPException as exc:
@@ -81,6 +81,10 @@ def assemble_clip_analysis_status(
     except (TypeError, json.JSONDecodeError):
         return _unavailable(served_media_sha256, "worker_unreachable")
     if not isinstance(body, dict):
+        return _unavailable(served_media_sha256, "worker_unreachable")
+    if upstream.status_code == HTTPStatus.SERVICE_UNAVAILABLE:
+        if body == {"error": "clip_analysis_disabled"}:
+            return _unavailable(served_media_sha256, "analysis_disabled")
         return _unavailable(served_media_sha256, "worker_unreachable")
     state_value = body.get("state")
     reason = body.get("reason")

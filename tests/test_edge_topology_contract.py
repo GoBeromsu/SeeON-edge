@@ -139,6 +139,7 @@ def test_edge_worker_runtime_status_environment_contract() -> None:
         "${ML_RTSP_ALLOW_LOCAL_DESTINATIONS:-0}"
     )
     assert worker_environment["ML_WORKER_PROFILE"] == "flow"
+    assert worker_environment["ML_WORKER_CLIP_ANALYSIS_CPU"] == ("${ML_WORKER_CLIP_ANALYSIS_CPU:-}")
     assert not any("EVENT_CLIP_EXPORT" in key for key in worker_environment)
     assert "API_FACILITY_ID" not in worker_environment
 

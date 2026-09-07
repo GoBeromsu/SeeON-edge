@@ -6,6 +6,10 @@ from pathlib import Path
 from typing import Literal, Protocol
 
 
+class ClipAnalysisDisabledError(RuntimeError):
+    """Stored-clip analysis is deliberately disabled for this deployment."""
+
+
 class ClipAnalysisStatus(Protocol):
     state: Literal["idle", "running", "available", "failed"]
     reason: str | None
@@ -29,4 +33,4 @@ class ClipAnalysisSupervisor(Protocol):
     def cancel(self, clip_id: str) -> bool: ...
 
 
-__all__ = ["ClipAnalysisStatus", "ClipAnalysisSupervisor"]
+__all__ = ["ClipAnalysisDisabledError", "ClipAnalysisStatus", "ClipAnalysisSupervisor"]

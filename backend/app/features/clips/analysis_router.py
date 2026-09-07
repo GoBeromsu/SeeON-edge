@@ -38,7 +38,14 @@ def trigger_clip_analysis(
         clip_id,
         "analysis",
         body={"clip_sha256": digest},
-        accepted=frozenset({HTTPStatus.ACCEPTED, HTTPStatus.CONFLICT, HTTPStatus.NOT_FOUND}),
+        accepted=frozenset(
+            {
+                HTTPStatus.ACCEPTED,
+                HTTPStatus.CONFLICT,
+                HTTPStatus.NOT_FOUND,
+                HTTPStatus.SERVICE_UNAVAILABLE,
+            }
+        ),
     )
     response.status_code = relay_response.status_code
     return assemble_clip_analysis_status(request, clip_id, located, store)

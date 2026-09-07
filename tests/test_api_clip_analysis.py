@@ -319,6 +319,22 @@ def test_worker_unreachable_is_an_honest_available_status(
     assert response.json()["reason"] == "worker_unreachable"
 
 
+def test_worker_analysis_disabled_is_an_honest_unavailable_status(
+    _environment: Path, worker_server: _WorkerServer, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _write_clip(_environment)
+    worker_server.response_status = 503
+    worker_server.response_body = {"error": "clip_analysis_disabled"}
+    monkeypatch.setenv("ML_API_WORKER_STREAM_ORIGIN", worker_server.origin)
+    get_settings.cache_clear()
+    with TestClient(create_app(lifespan=no_lifespan)) as client:
+        _login(client)
+        response = client.get(f"/api/v1/clips/{CLIP_ID}/analysis")
+    assert response.status_code == 200
+    assert response.json()["state"] == "unavailable"
+    assert response.json()["reason"] == "analysis_disabled"
+
+
 @pytest.mark.parametrize(
     ("source_sha256", "rendition_sha256"),
     [("e" * 64, None), (CLIP_SHA256, "e" * 64)],

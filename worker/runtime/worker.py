@@ -55,6 +55,7 @@ from worker.domains.fall.pose_bbox56 import (
     POSE_BBOX56_CONFIDENCE_GATE,
 )
 from worker.domains.tracker import GreedyIouTracker
+from worker.interfaces.clip_analysis import ClipAnalysisDisabledError
 from worker.interfaces.decision import Decider, TraceSnapshotProvider
 from worker.interfaces.fall_model import FallV2ModelProtocol
 from worker.interfaces.serving import ServingClient
@@ -421,10 +422,26 @@ def _delivery_queue_dir(state_dir: Path) -> Path:
     return state_dir / "delivery-queue"
 
 
-def _clip_analysis_cpu_index(environ: Mapping[str, str]) -> int:
+class ClipAnalysisDisabled:
+    """Fail-closed analysis control seam for deployments without an assigned CPU."""
+
+    def status(self, clip_id: str) -> object:
+        del clip_id
+        raise ClipAnalysisDisabledError("clip_analysis_disabled")
+
+    def trigger(self, *args: object, **kwargs: object) -> bool:
+        del args, kwargs
+        raise ClipAnalysisDisabledError("clip_analysis_disabled")
+
+    def cancel(self, clip_id: str) -> bool:
+        del clip_id
+        raise ClipAnalysisDisabledError("clip_analysis_disabled")
+
+
+def _clip_analysis_cpu_index(environ: Mapping[str, str]) -> int | None:
     raw_value = environ.get(CLIP_ANALYSIS_CPU_ENV)
     if raw_value is None or raw_value.strip() == "":
-        raise RuntimeError(f"{CLIP_ANALYSIS_CPU_ENV} is required")
+        return None
     try:
         cpu_index = int(raw_value)
     except ValueError as exc:
@@ -867,21 +884,26 @@ class WorkerRuntime:
         # Analysis lookup spans the stable mount, including historical active
         # subdirectories. New recordings still use `_resolved_clip_store_dir`.
         clip_store_dir = self._clip_store_dir
-        supervisor = ClipAnalysisSupervisor(
-            python_executable=sys.executable,
-            # The same digest-verified pose ONNX the Flow engine was built from.
-            pose_model_path=Path(self._env["ML_WORKER_FLOW_ONNX_PATH"]),
-            bed_model_path=Path(BED_ONNX_MODEL_PATH),
-            profile=ClipAnalysisProfile(
-                person_threshold=0.25,
-                bed_confidence=BED_MODEL_CONFIDENCE,
-                max_frames=5400,
-                max_duration_s=180.0,
-                max_pixels=3840 * 2160,
-                max_input_bytes=128 * 1024 * 1024,
-            ),
-            cpu_index=_clip_analysis_cpu_index(self._env),
-            deadline_s=600.0,
+        cpu_index = _clip_analysis_cpu_index(self._env)
+        supervisor = (
+            ClipAnalysisDisabled()
+            if cpu_index is None
+            else ClipAnalysisSupervisor(
+                python_executable=sys.executable,
+                # The same digest-verified pose ONNX the Flow engine was built from.
+                pose_model_path=Path(self._env["ML_WORKER_FLOW_ONNX_PATH"]),
+                bed_model_path=Path(BED_ONNX_MODEL_PATH),
+                profile=ClipAnalysisProfile(
+                    person_threshold=0.25,
+                    bed_confidence=BED_MODEL_CONFIDENCE,
+                    max_frames=5400,
+                    max_duration_s=180.0,
+                    max_pixels=3840 * 2160,
+                    max_input_bytes=128 * 1024 * 1024,
+                ),
+                cpu_index=cpu_index,
+                deadline_s=600.0,
+            )
         )
         self._mjpeg_server = start_optional_mjpeg_server(
             self._live_frames,
@@ -900,7 +922,8 @@ class WorkerRuntime:
             replay_fall_model=self.fall_model,
         )
         if self._mjpeg_server is None:
-            supervisor.shutdown()
+            if isinstance(supervisor, ClipAnalysisSupervisor):
+                supervisor.shutdown()
             LOGGER.warning(
                 "live view enabled but its server could not bind: host=%s port=%d",
                 self._mjpeg_config.host,

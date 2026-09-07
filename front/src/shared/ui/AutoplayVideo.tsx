@@ -5,6 +5,7 @@ type AutoplayVideoProps = {
   className: string;
   onLoadedMetadata: (video: HTMLVideoElement) => void;
   onVideoElement?: (video: HTMLVideoElement | null) => void;
+  onPlaybackState?: (state: 'ready' | 'blocked' | 'failed') => void;
 };
 
 type PlaybackFailure = 'blocked' | 'failed' | null;
@@ -15,7 +16,7 @@ function classifyPlaybackFailure(error: unknown): Exclude<PlaybackFailure, null>
     : 'failed';
 }
 
-export function AutoplayVideo({ src, className, onLoadedMetadata, onVideoElement }: AutoplayVideoProps): JSX.Element {
+export function AutoplayVideo({ src, className, onLoadedMetadata, onVideoElement, onPlaybackState }: AutoplayVideoProps): JSX.Element {
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const [failure, setFailure] = useState<PlaybackFailure>(null);
 
@@ -29,12 +30,14 @@ export function AutoplayVideo({ src, className, onLoadedMetadata, onVideoElement
       () => {
         if (mounted) {
           setFailure(null);
+          onPlaybackState?.('ready');
         }
       },
       (error: unknown) => {
         if (mounted) {
           const failure = classifyPlaybackFailure(error);
           setFailure(failure);
+          onPlaybackState?.(failure);
         }
       },
     );
@@ -52,10 +55,12 @@ export function AutoplayVideo({ src, className, onLoadedMetadata, onVideoElement
     void video.play().then(
       () => {
         setFailure(null);
+        onPlaybackState?.('ready');
       },
       (error: unknown) => {
         const failure = classifyPlaybackFailure(error);
         setFailure(failure);
+        onPlaybackState?.(failure);
       },
     );
   };
@@ -75,9 +80,16 @@ export function AutoplayVideo({ src, className, onLoadedMetadata, onVideoElement
         preload="metadata"
         onError={() => {
           setFailure('failed');
+          onPlaybackState?.('failed');
         }}
-        onLoadedData={() => setFailure(null)}
-        onPlay={() => setFailure(null)}
+        onLoadedData={() => {
+          setFailure(null);
+          onPlaybackState?.('ready');
+        }}
+        onPlay={() => {
+          setFailure(null);
+          onPlaybackState?.('ready');
+        }}
         onLoadedMetadata={(event) => onLoadedMetadata(event.currentTarget)}
       />
       {failure === 'blocked' ? (

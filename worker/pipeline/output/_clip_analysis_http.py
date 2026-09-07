@@ -9,7 +9,10 @@ from pathlib import Path
 
 from shared.events.clip_identity import is_clip_id
 from worker.adapters.model.clip_reanalysis import ClipAnalysisRejected
-from worker.interfaces.clip_analysis import ClipAnalysisSupervisor
+from worker.interfaces.clip_analysis import (
+    ClipAnalysisDisabledError,
+    ClipAnalysisSupervisor,
+)
 from worker.pipeline.output.evidence.clip_identity import bounded_clip_roots
 from worker.pipeline.output.evidence.evidence_manifest import (
     ClipEvidenceError,
@@ -42,7 +45,11 @@ def handle_get(
     if not is_clip_id(clip_id):
         handler.send_error(HTTPStatus.BAD_REQUEST)
         return
-    status = supervisor.status(clip_id)
+    try:
+        status = supervisor.status(clip_id)
+    except ClipAnalysisDisabledError:
+        _write_json(handler, HTTPStatus.SERVICE_UNAVAILABLE, {"error": "clip_analysis_disabled"})
+        return
     _write_json(handler, HTTPStatus.OK, {"state": status.state, "reason": status.reason})
 
 
@@ -63,7 +70,13 @@ def handle_post(
         handler.send_error(HTTPStatus.BAD_REQUEST)
         return
     if action == "cancel":
-        supervisor.cancel(clip_id)
+        try:
+            supervisor.cancel(clip_id)
+        except ClipAnalysisDisabledError:
+            _write_json(
+                handler, HTTPStatus.SERVICE_UNAVAILABLE, {"error": "clip_analysis_disabled"}
+            )
+            return
         handler.send_response(HTTPStatus.NO_CONTENT)
         handler.end_headers()
         return
@@ -104,6 +117,9 @@ def handle_post(
             width=width,
             height=height,
         )
+    except ClipAnalysisDisabledError:
+        _write_json(handler, HTTPStatus.SERVICE_UNAVAILABLE, {"error": "clip_analysis_disabled"})
+        return
     except ClipAnalysisRejected as exc:
         _write_json(
             handler,

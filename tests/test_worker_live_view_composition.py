@@ -13,6 +13,7 @@ import pytest
 import worker.runtime.worker as worker_module
 from contracts.runner import Image, bed_result
 from worker.adapters.deepstream.service_maker import DeepStreamFlowStopTimeout
+from worker.interfaces.clip_analysis import ClipAnalysisDisabledError
 from worker.pipeline.output.live_view import LatestFrameStore
 from worker.pipeline.output.mjpeg_server import MjpegServer, MjpegServerConfig
 from worker.runtime.config import WorkerConfig
@@ -244,9 +245,10 @@ def test_flow_live_view_injects_bed_recognizer_and_recognize_request_reaches_it(
         runtime.stop()
 
 
-def test_flow_live_view_refuses_to_start_without_clip_analysis_cpu(
-    tmp_path: Path,
+def test_flow_live_view_composes_disabled_analysis_seam_without_clip_analysis_cpu(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    captured: dict[str, object] = {}
     runtime = WorkerRuntime(
         _config(),
         env={
@@ -260,8 +262,16 @@ def test_flow_live_view_refuses_to_start_without_clip_analysis_cpu(
     runtime._mjpeg_config = MjpegServerConfig(  # noqa: SLF001
         enabled=True, host="127.0.0.1", port=0, probe_token="relay-token"
     )
-    with pytest.raises(RuntimeError, match="ML_WORKER_CLIP_ANALYSIS_CPU is required"):
-        runtime._start_live_view_server()  # noqa: SLF001
+
+    def start_server(*_args: object, clip_analysis_supervisor: object, **_kwargs: object) -> None:
+        captured["supervisor"] = clip_analysis_supervisor
+
+    monkeypatch.setattr(worker_module, "start_optional_mjpeg_server", start_server)
+    runtime._start_live_view_server()  # noqa: SLF001
+    supervisor = captured["supervisor"]
+    assert isinstance(supervisor, worker_module.ClipAnalysisDisabled)
+    with pytest.raises(ClipAnalysisDisabledError, match="clip_analysis_disabled"):
+        supervisor.status("camera-1")
 
 
 def test_live_view_analysis_lookup_uses_mount_root_not_active_subdirectory(

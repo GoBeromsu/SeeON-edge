@@ -332,7 +332,7 @@
       "name": "ML_WORKER_CLIP_ANALYSIS_CPU",
       "category": "deployment artifact",
       "authority": "deployment env",
-      "behavior": "required host CPU index reserved for clip reanalysis child processes (single core; not a live-pipeline core)",
+      "behavior": "optional opt-in host CPU index reserved for clip reanalysis child processes; absent or blank disables clip analysis (enable after the site soak)",
       "compose": true,
       "example": true
     },
