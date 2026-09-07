@@ -238,7 +238,7 @@ def test_malformed_fresh_policy_retains_previous_valid_lkg(
 ) -> None:
     store = WorkerConfigLkgStore(state_dir=tmp_path)
     valid = _payload(policy_wire=default_policy_bundle(("cam/opaque:alpha",)).as_dict())
-    assert store.save(valid, RestartDirective(generation=3, version=17))
+    assert store.save(valid, RestartDirective(generation=3, version=17, registry=1))
     malformed = _payload(policy_wire=default_policy_bundle(("cam/opaque:alpha",)).as_dict())
     malformed["config_version"] = 18
     policy_wire = cast(dict[str, object], malformed["detection_policies"])
@@ -255,5 +255,5 @@ def test_malformed_fresh_policy_retains_previous_valid_lkg(
 
     assert snapshot is not None
     assert snapshot.source is ConfigSource.LKG
-    assert snapshot.directive == RestartDirective(generation=3, version=17)
+    assert snapshot.directive == RestartDirective(generation=3, version=17, registry=1)
     assert "detection policy refused" in capsys.readouterr().err

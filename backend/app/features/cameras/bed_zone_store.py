@@ -15,6 +15,7 @@ from pydantic import ConfigDict, TypeAdapter, ValidationError
 from backend.app.edge_db import EDGE_DATABASE_PATH
 from backend.app.edge_db.configuration import open_configuration_database, utc_now
 from backend.app.edge_db.connection import write_transaction
+from backend.app.features.cameras.camera_repository import record_registry_mutation
 
 BedZoneOrigin = Literal["manual", "model"]
 BedZoneWriteHook = Callable[[sqlite3.Connection], None]
@@ -114,6 +115,7 @@ class BedZoneStore:
             )
             if cursor.rowcount != 1:
                 raise sqlite3.IntegrityError("bed-zone camera does not exist")
+            record_registry_mutation(self._connection)
             if after_write is not None:
                 after_write(self._connection)
         return bed_zone
@@ -132,8 +134,10 @@ class BedZoneStore:
                 (utc_now(), camera_id),
             )
             changed = cursor.rowcount > 0
-            if changed and after_write is not None:
-                after_write(self._connection)
+            if changed:
+                record_registry_mutation(self._connection)
+                if after_write is not None:
+                    after_write(self._connection)
         return changed
 
 

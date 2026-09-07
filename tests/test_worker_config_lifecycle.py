@@ -70,7 +70,7 @@ def test_fresh_pull_uses_auth_and_replaces_lkg_atomically(tmp_path: Path) -> Non
     assert snapshot.source is ConfigSource.PULLED
     assert snapshot.stale is False
     assert snapshot.registry_version == 9
-    assert snapshot.directive == RestartDirective(generation=4, version=12)
+    assert snapshot.directive == RestartDirective(generation=4, version=12, registry=9)
     assert snapshot.config.cameras[0].inference_rtsp_url == "rtsp://user:camera-pass@camera/live"
     assert captured == [
         (
@@ -111,6 +111,7 @@ def test_unreachable_backend_uses_stale_lkg_without_zeroing_cameras(tmp_path: Pa
     assert stale.source is ConfigSource.LKG
     assert stale.stale is True
     assert stale.registry_version == 3
+    assert stale.directive == RestartDirective(generation=2, version=7, registry=3)
     assert tuple(camera.camera_id for camera in stale.config.cameras) == ("camera-1",)
 
 
@@ -147,7 +148,7 @@ def test_malformed_pull_keeps_prior_lkg_and_redacts_secrets(
 
     assert stale is not None
     assert stale.source is ConfigSource.LKG
-    assert stale.directive == RestartDirective(generation=2, version=7)
+    assert stale.directive == RestartDirective(generation=2, version=7, registry=3)
     error = capsys.readouterr().err
     assert "leaked-camera-password" not in error
     assert "leaked-relay-token" not in error
@@ -162,7 +163,7 @@ def test_concurrent_lkg_writes_preserve_newest_directive(tmp_path: Path) -> None
         _ = barrier.wait()
         return store.save(
             _payload(registry_version=version, config_version=version, restart_epoch=1),
-            RestartDirective(generation=1, version=version),
+            RestartDirective(generation=1, version=version, registry=version),
         )
 
     with ThreadPoolExecutor(max_workers=2) as executor:
@@ -174,7 +175,7 @@ def test_concurrent_lkg_writes_preserve_newest_directive(tmp_path: Path) -> None
 
     stored = store.load()
     assert stored is not None
-    assert stored.directive == RestartDirective(generation=1, version=9)
+    assert stored.directive == RestartDirective(generation=1, version=9, registry=9)
     assert stored.payload["registry_version"] == 9
     # Re-open the filesystem cache to confirm the write is durable, not cached.
     reopened = WorkerConfigLkgStore(store.database_path).load()
@@ -188,7 +189,7 @@ def test_race_loss_with_healthy_stored_lkg_returns_lkg_snapshot(tmp_path: Path) 
     (issue #34, race-loss branch with a healthy stored LKG)."""
     store = WorkerConfigLkgStore(tmp_path / "worker-config.sqlite3")
     newer_payload = _payload(registry_version=9, config_version=9, restart_epoch=1)
-    assert store.save(newer_payload, RestartDirective(generation=1, version=9))
+    assert store.save(newer_payload, RestartDirective(generation=1, version=9, registry=9))
 
     snapshot = load_worker_config_from_relay(
         "http://ml-api:8000",
@@ -203,7 +204,7 @@ def test_race_loss_with_healthy_stored_lkg_returns_lkg_snapshot(tmp_path: Path) 
     assert snapshot.source is ConfigSource.LKG
     assert snapshot.stale is True
     assert snapshot.registry_version == 9
-    assert snapshot.directive == RestartDirective(generation=1, version=9)
+    assert snapshot.directive == RestartDirective(generation=1, version=9, registry=9)
     # The healthy LKG that won the race is left in place.
     stored = store.load()
     assert stored is not None
@@ -237,7 +238,7 @@ def test_race_loss_with_corrupt_stored_lkg_clears_current_and_returns_fresh(
             "fps": "invalid-fps",
         }
     ]
-    assert store.save(corrupt_payload, RestartDirective(generation=1, version=9))
+    assert store.save(corrupt_payload, RestartDirective(generation=1, version=9, registry=9))
     assert store.load() is not None
 
     fresh_payload = _payload(registry_version=5, config_version=5, restart_epoch=1)
@@ -252,7 +253,7 @@ def test_race_loss_with_corrupt_stored_lkg_clears_current_and_returns_fresh(
     assert snapshot.source is ConfigSource.PULLED
     assert snapshot.stale is False
     assert snapshot.registry_version == 5
-    assert snapshot.directive == RestartDirective(generation=1, version=5)
+    assert snapshot.directive == RestartDirective(generation=1, version=5, registry=5)
     # The corrupt LKG's current pointer must be cleared, not left behind to
     # keep winning the revision race against every future legitimate pull.
     assert store.load() is None
@@ -378,7 +379,7 @@ def test_clear_removes_current_snapshot_but_keeps_bounded_revisions(tmp_path: Pa
     """Clearing a corrupt current snapshot preserves revision cache entries."""
     store = WorkerConfigLkgStore(tmp_path / "worker-state.sqlite3")
     payload = _payload(registry_version=9, config_version=9, restart_epoch=1)
-    assert store.save(payload, RestartDirective(generation=1, version=9))
+    assert store.save(payload, RestartDirective(generation=1, version=9, registry=9))
     assert store.load() is not None
 
     cleared = store.clear()

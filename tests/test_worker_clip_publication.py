@@ -248,6 +248,39 @@ def test_publication_omits_runtime_manifest_when_explicitly_absent(tmp_path: Pat
     assert "runtime_manifest_sha256" not in payload
 
 
+def test_thumbnail_failure_does_not_prevent_ready_clip_publication(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    class FailingThumbnailGenerator:
+        def generate(self, _video: Path, _thumbnail: Path, _duration_s: float) -> Path:
+            raise RuntimeError("unavailable")
+
+    reservation = ClipIdAllocator(
+        tmp_path,
+        id_factory=lambda _camera: "thumbnail-failure-clip",
+    ).reserve("camera-1")
+    artifact = reservation.staging_dir / "clip.mp4"
+    artifact.write_bytes(b"derivative-media")
+    monkeypatch.setattr(
+        "worker.pipeline.output.evidence.evidence_manifest.inspect_finalized_media",
+        lambda _path, **_kwargs: MediaFacts("a" * 64, len(b"derivative-media"), 1000),
+    )
+
+    published = ClipPublisher(
+        tmp_path,
+        thumbnail_generator=FailingThumbnailGenerator(),
+    ).publish_ready(reservation, artifact, _metadata())
+
+    assert published.manifest_path.is_file()
+    assert published.video_path == reservation.final_dir / "clip.mp4"
+    assert not (reservation.final_dir / "thumbnail.jpg").exists()
+    assert (
+        "stage=thumbnail clip_id=thumbnail-failure-clip exception_class=RuntimeError" in caplog.text
+    )
+
+
 def test_publication_records_deterministic_event_pts_to_media_time_mapping(
     tmp_path: Path,
 ) -> None:

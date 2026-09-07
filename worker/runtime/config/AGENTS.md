@@ -49,10 +49,12 @@ Retired env: `RELAY_URL`, both legacy Edge camera-config keys, `CLIP_STORE_DIR`,
 `ML_WORKER_FALL_MODEL_*`, `ML_WORKER_CLIP_*`, `ML_WORKER_DEV_MJPEG*`, `ML_WORKER_EVENT_CLIP_EXPORT_ENABLED`.
 Present keys refuse boot.
 
-`RestartDirective(generation, version)` is `restart_epoch` then `config_version`.
-Newer generation wins even at version 0. Tracker is monotonic. Equal or older is ignored.
+`RestartDirective(generation, version, registry)` is `(restart_epoch, config_version,
+registry_version)`. Newer generation wins even at version 0; within an equal
+generation and config version, a higher registry version restarts. Tracker is
+monotonic. Equal or older is ignored.
 `make_restart_check` polls every 60s. Pull fail or `None` keeps the process up.
-LKG save refuses a lower `(directive, registry_version)`. Corrupt LKG that would win the race is cleared.
+LKG save refuses a lower directive. Corrupt LKG that would win the race is cleared.
 `LiveClipExportPolicy` can apply from a poll without process restart.
 Roster, domain, and numeric-policy changes take effect on the next process start after the directive advances.
 

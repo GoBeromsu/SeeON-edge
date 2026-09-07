@@ -50,7 +50,7 @@ class WorkerConfigLkgStore:
         record = {
             "generation": directive.generation,
             "config_version": directive.version,
-            "registry_version": _registry_version(payload),
+            "registry_version": directive.registry,
             "payload": payload,
         }
         try:
@@ -62,13 +62,9 @@ class WorkerConfigLkgStore:
             try:
                 with self._locked():
                     current = self._load_current()
-                    candidate = (directive, record["registry_version"])
-                    if current is not None and candidate < (
-                        current.directive,
-                        current.registry_version,
-                    ):
+                    if current is not None and directive < current.directive:
                         return False
-                    revision = self._revision_path(directive, record["registry_version"])
+                    revision = self._revision_path(directive)
                     _write_atomic(revision, encoded)
                     _write_atomic(self._current_path, encoded)
                     self._prune_revisions()
@@ -136,9 +132,9 @@ class WorkerConfigLkgStore:
             return None
         return _decode_record(contents)
 
-    def _revision_path(self, directive: RestartDirective, registry_version: int) -> Path:
+    def _revision_path(self, directive: RestartDirective) -> Path:
         return self._revision_directory / (
-            f"{directive.generation:020d}-{directive.version:020d}-{registry_version:020d}.json"
+            f"{directive.generation:020d}-{directive.version:020d}-{directive.registry:020d}.json"
         )
 
     def _prune_revisions(self) -> None:
@@ -168,7 +164,11 @@ def _decode_record(contents: bytes) -> StoredConfigPayload:
         raise TypeError("cached config record has invalid fields")
     return StoredConfigPayload(
         payload=payload,
-        directive=RestartDirective(generation=generation, version=version),
+        directive=RestartDirective(
+            generation=generation,
+            version=version,
+            registry=registry_version,
+        ),
         registry_version=registry_version,
     )
 
@@ -207,11 +207,6 @@ def _blocked_parent(path: Path) -> bool:
     while not candidate.exists() and candidate != candidate.parent:
         candidate = candidate.parent
     return candidate.exists() and not candidate.is_dir()
-
-
-def _registry_version(payload: JsonObject) -> int:
-    value = payload.get("registry_version", 0)
-    return value if isinstance(value, int) and not isinstance(value, bool) else 0
 
 
 __all__ = [

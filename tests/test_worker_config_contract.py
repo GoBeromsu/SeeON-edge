@@ -94,6 +94,20 @@ def test_from_dict_with_neither_field_has_no_windows() -> None:
 
     assert config.detection_windows == {}
     assert config.night_window is None
+    assert config.registry_version == 0
+
+
+@pytest.mark.parametrize("value", [True, "1", -1])
+def test_from_dict_rejects_invalid_registry_version(value: object) -> None:
+    with pytest.raises((TypeError, ValueError), match="registry_version"):
+        PulledWorkerConfig.from_dict(
+            {
+                "config_version": 1,
+                "restart_epoch": 0,
+                "registry_version": value,
+                "cameras": [_camera_payload()],
+            }
+        )
 
 
 def test_as_dict_round_trips_detection_windows_and_legacy_night_window() -> None:

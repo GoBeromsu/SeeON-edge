@@ -13,14 +13,19 @@ PullWorkerConfig: TypeAlias = Callable[[str, str | None], PulledWorkerConfig | N
 
 @dataclass(frozen=True, order=True, slots=True)
 class RestartDirective:
-    """Monotonic restart identity ordered by generation, then config version."""
+    """Monotonic restart identity ordered by generation, config, then registry."""
 
     generation: int
     version: int
+    registry: int = 0
 
     @classmethod
     def from_pulled(cls, config: PulledWorkerConfig) -> RestartDirective:
-        return cls(generation=config.restart_epoch, version=config.config_version)
+        return cls(
+            generation=config.restart_epoch,
+            version=config.config_version,
+            registry=config.registry_version,
+        )
 
 
 class RestartDirectiveTracker:

@@ -68,6 +68,7 @@ export function BedZoneRecognitionPanel({ cameraId, bedZone, onSaved, onCancel }
         image_height: dimensions.height,
       });
       if (generation !== generationRef.current) return;
+      setStatus('저장됨 · 실시간 화면과 탐지에 반영되기까지 최대 1분');
       onSaved(saved);
     } catch {
       if (generation === generationRef.current) setStatus('침대 영역 저장 실패');

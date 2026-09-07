@@ -198,7 +198,7 @@ def resolve_startup_config(
     return ConfigSnapshot(
         config=yaml_config,
         registry_version=0,
-        directive=RestartDirective(generation=0, version=0),
+        directive=RestartDirective(generation=0, version=0, registry=0),
         source=ConfigSource.YAML,
         stale=True,
     )
@@ -281,12 +281,12 @@ def _snapshot_from_stored(
     return snapshot
 
 
-def _snapshot_key(snapshot: ConfigSnapshot) -> tuple[RestartDirective, int]:
-    return snapshot.directive, snapshot.registry_version
+def _snapshot_key(snapshot: ConfigSnapshot) -> RestartDirective:
+    return snapshot.directive
 
 
-def _stored_key(stored: StoredConfigPayload) -> tuple[RestartDirective, int]:
-    return stored.directive, stored.registry_version
+def _stored_key(stored: StoredConfigPayload) -> RestartDirective:
+    return stored.directive
 
 
 __all__ = [

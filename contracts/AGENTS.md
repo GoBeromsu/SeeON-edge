@@ -38,3 +38,5 @@ Forbidden: `features`, `sources`, `runners`, `perception`, `domains`, `runtime`,
 ## Gotchas
 
 Contracts are consumed across every layer. Prefer additive fields or new dataclasses over changing existing constructor semantics.
+`PulledWorkerConfig` gained optional `registry_version` for restart identity; mirroring this
+contract to `eldercare-dataset-ops` is follow-up work.

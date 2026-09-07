@@ -32,6 +32,7 @@ from worker.adapters.deepstream.service_maker import DeepStreamFlowStopTimeout
 from worker.adapters.device.cuda.probe import probe_cuda_capability
 from worker.adapters.device.mps.probe import probe_mps_capability
 from worker.adapters.device.nvml.probe import probe_nvml_gpu_status
+from worker.adapters.media.ffmpeg_thumbnail import FfmpegThumbnailGenerator
 from worker.adapters.model import ort_pose_bbox56, warmup_to_ready
 from worker.adapters.model.errors import FatalAcceleratorError, ModelLoadError
 from worker.domains import (
@@ -1397,6 +1398,7 @@ class WorkerRuntime:
                 ClipPublisher(
                     self._resolved_clip_store_dir(),
                     delivery_queue_directory=_delivery_queue_dir(self._state_dir),
+                    thumbnail_generator=FfmpegThumbnailGenerator(),
                 ),
             ),
             sidecars=FlowSealedSidecars(self._state_dir / "flow-sealed"),

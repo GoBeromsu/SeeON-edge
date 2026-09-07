@@ -12,12 +12,15 @@ from worker.runtime.config.restart import (
 )
 
 
-def _pulled(*, config_version: int, restart_epoch: int) -> PulledWorkerConfig:
+def _pulled(
+    *, config_version: int, restart_epoch: int, registry_version: int = 0
+) -> PulledWorkerConfig:
     return PulledWorkerConfig(
         config_version=config_version,
         restart_epoch=restart_epoch,
         night_window=None,
         cameras=(),
+        registry_version=registry_version,
     )
 
 
@@ -62,10 +65,12 @@ def _raising_puller(error: BaseException) -> Callable[[str, str | None], PulledW
 # --- RestartDirective: identity and ordering ---
 
 
-def test_from_pulled_maps_restart_epoch_to_generation_and_config_version_to_version() -> None:
-    pulled = _pulled(config_version=12, restart_epoch=4)
+def test_from_pulled_maps_restart_epoch_config_version_and_registry_version() -> None:
+    pulled = _pulled(config_version=12, restart_epoch=4, registry_version=8)
 
-    assert RestartDirective.from_pulled(pulled) == RestartDirective(generation=4, version=12)
+    assert RestartDirective.from_pulled(pulled) == RestartDirective(
+        generation=4, version=12, registry=8
+    )
 
 
 def test_directive_ordering_prioritizes_generation_over_version() -> None:
@@ -79,10 +84,19 @@ def test_directive_ordering_breaks_ties_on_version_within_same_generation() -> N
     assert RestartDirective(generation=1, version=5) > RestartDirective(generation=1, version=4)
 
 
-def test_directive_equality_requires_matching_generation_and_version() -> None:
+def test_directive_ordering_breaks_ties_on_registry_within_same_revision() -> None:
+    assert RestartDirective(generation=1, version=5, registry=2) > RestartDirective(
+        generation=1, version=5, registry=1
+    )
+
+
+def test_directive_equality_requires_matching_generation_version_and_registry() -> None:
     assert RestartDirective(generation=1, version=5) == RestartDirective(generation=1, version=5)
     assert RestartDirective(generation=1, version=5) != RestartDirective(generation=1, version=6)
     assert RestartDirective(generation=1, version=5) != RestartDirective(generation=2, version=5)
+    assert RestartDirective(generation=1, version=5) != RestartDirective(
+        generation=1, version=5, registry=1
+    )
 
 
 # --- RestartDirectiveTracker: monotonic acceptance ---
@@ -120,6 +134,20 @@ def test_tracker_observe_rejects_stale_lower_candidate_monotonically() -> None:
 
     assert advanced is False
     assert tracker.current == RestartDirective(generation=2, version=5)
+
+
+def test_tracker_restarts_on_registry_bump_with_same_generation_and_version() -> None:
+    tracker = RestartDirectiveTracker(RestartDirective(generation=2, version=5, registry=4))
+
+    assert tracker.observe(RestartDirective(generation=2, version=5, registry=5)) is True
+    assert tracker.current == RestartDirective(generation=2, version=5, registry=5)
+
+
+def test_tracker_ignores_lower_registry_with_same_generation_and_version() -> None:
+    tracker = RestartDirectiveTracker(RestartDirective(generation=2, version=5, registry=5))
+
+    assert tracker.observe(RestartDirective(generation=2, version=5, registry=4)) is False
+    assert tracker.current == RestartDirective(generation=2, version=5, registry=5)
 
 
 def test_tracker_observe_advances_on_new_epoch_even_with_lower_version() -> None:
