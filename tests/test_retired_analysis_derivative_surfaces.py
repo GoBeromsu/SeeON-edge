@@ -16,10 +16,17 @@ from backend.app.main import create_app, no_lifespan
 ROOT = Path(__file__).resolve().parents[1]
 RETIRED_ROUTE_PATHS = frozenset(
     {
-        "/api/v1/clips/{clip_id}/analysis",
         "/api/v1/clips/{clip_id}/derivatives/{kind}",
         "/api/v1/clips/{clip_id}/label",
         "/api/v1/relay/analysis-traces",
+    }
+)
+# These worker-backed routes inject a real supervisor, preserve original clip
+# bytes, and serve an identity-bound artifact; they are not sidecar derivatives.
+CLIP_REANALYSIS_ROUTE_PATHS = frozenset(
+    {
+        "/api/v1/clips/{clip_id}/analysis",
+        "/api/v1/clips/{clip_id}/analysis/cancel",
     }
 )
 RETIRED_PRODUCTION_MODULES = (
@@ -57,6 +64,20 @@ RETIRED_PRODUCTION_NAMES = frozenset(
         "derivative_state",
     }
 )
+# The real supervisor writes an identity-bound artifact without changing the
+# original bytes, so these clip-reanalysis symbols are not retired sidecar APIs.
+CLIP_REANALYSIS_PRODUCTION_NAMES = frozenset(
+    {
+        "ClipAnalysisResponse",
+        "analysis_router",
+        "clip_analysis_supervisor",
+        "_clip_analysis_http",
+        "clip_reanalysis",
+        "ort_clip_pose",
+        "clip_analysis_artifact",
+        "clip_analysis_wire",
+    }
+)
 PRODUCTION_ROOTS = (ROOT / "backend" / "app", ROOT / "worker")
 
 
@@ -73,6 +94,7 @@ def _login(client: TestClient) -> None:
 def test_retired_routes_are_absent_from_the_app_table() -> None:
     registered = _registered_paths()
     assert registered.isdisjoint(RETIRED_ROUTE_PATHS)
+    assert registered >= CLIP_REANALYSIS_ROUTE_PATHS
 
 
 def test_retired_http_surfaces_are_404_by_absence(
@@ -103,7 +125,6 @@ def test_retired_http_surfaces_are_404_by_absence(
     with TestClient(app) as client:
         _login(client)
         probes = (
-            client.get("/api/v1/clips/clip-a/analysis"),
             client.post("/api/v1/clips/clip-a/derivatives/still"),
             client.get("/api/v1/clips/clip-a/derivatives/video"),
             client.delete("/api/v1/clips/clip-a/derivatives/still"),
@@ -149,7 +170,9 @@ def test_app_and_worker_import_graphs_have_no_retired_production_symbol() -> Non
     offenders: list[str] = []
     for root in PRODUCTION_ROOTS:
         for path in sorted(root.rglob("*.py")):
-            found = _imported_or_defined_names(path) & RETIRED_PRODUCTION_NAMES
+            found = _imported_or_defined_names(path) & (
+                RETIRED_PRODUCTION_NAMES - CLIP_REANALYSIS_PRODUCTION_NAMES
+            )
             if found:
                 offenders.append(f"{path.relative_to(ROOT)}:{sorted(found)}")
     assert offenders == []

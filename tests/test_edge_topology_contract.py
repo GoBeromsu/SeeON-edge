@@ -123,6 +123,7 @@ def test_edge_worker_runtime_status_environment_contract() -> None:
         "ML_WORKER_FLOW_FRAME_WIDTH",
         "ML_WORKER_FLOW_FRAME_HEIGHT",
         "ML_WORKER_FLOW_BATCH_SIZE",
+        "ML_WORKER_CLIP_ANALYSIS_CPU",
         "ML_WORKER_FLOW_ENGINE_PATH",
         "ML_WORKER_FLOW_ENGINE_IDENTITY_PATH",
         "ML_WORKER_FLOW_ONNX_PATH",

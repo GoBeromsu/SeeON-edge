@@ -60,6 +60,11 @@ ACTIVE_CLIP_PATHS = frozenset(
         "/api/v1/clips/{clip_id}/metadata",
         "/api/v1/clips/{clip_id}/thumbnail",
         "/api/v1/clips/{clip_id}/video",
+        # Clip reanalysis (#500) is worker-backed through the relay: the route
+        # is active because a real supervisor is injected, unlike the retired
+        # sidecar-era analysis surfaces below.
+        "/api/v1/clips/{clip_id}/analysis",
+        "/api/v1/clips/{clip_id}/analysis/cancel",
         "/api/v1/audit",
     }
 )
@@ -133,7 +138,6 @@ def test_active_clip_and_audit_routes_remain_registered() -> None:
     registered = {route.path for route in app.routes if isinstance(route, APIRoute)}
     assert registered >= ACTIVE_CLIP_PATHS
     assert "/api/v1/clips/{clip_id}" not in registered
-    assert "/api/v1/clips/{clip_id}/analysis" not in registered
     assert "/api/v1/relay/analysis-traces" not in registered
 
 
