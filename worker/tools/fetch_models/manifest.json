@@ -96,6 +96,13 @@
       "sha256": "724ae1b1b4420cea85f98ac7c5ccabf3d56229f7c25390475e09b7056e3b9526"
     },
     {
+      "path": "pose/yolo26n-pose.onnx.sha256",
+      "source": "seeon-edge-onnx",
+      "remote_path": "yolo26n-pose.onnx.sha256",
+      "size": 65,
+      "sha256": "45d28edc062146bc232e56be7b8afa8d73bddad9f4a640373761957f1722ae96"
+    },
+    {
       "path": "person/yolo26n.pt",
       "source": "ultralytics-assets",
       "remote_path": "yolo26n.pt",
