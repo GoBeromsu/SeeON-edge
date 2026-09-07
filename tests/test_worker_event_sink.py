@@ -11,6 +11,7 @@ import pytest
 
 from contracts.event import EventEvidence
 from contracts.frame import Frame
+from tests_support.thumbnail import DeterministicThumbnailGenerator
 from worker.interfaces.output import EventSink
 from worker.pipeline.output.event_sink import EvidenceEventSink
 from worker.pipeline.output.evidence.clip_identity import ClipIdAllocator
@@ -159,7 +160,12 @@ def test_relay_detected_at_matches_the_published_manifest_byte_for_byte(tmp_path
     reservation = ClipIdAllocator(tmp_path, id_factory=lambda _camera: "clip-123").reserve(
         "camera-1"
     )
-    published = ClipPublisher(tmp_path).publish_unavailable(
+    published = ClipPublisher(
+        tmp_path,
+        thumbnail_generator=DeterministicThumbnailGenerator(
+            error=AssertionError("publish_unavailable must not generate a thumbnail")
+        ),
+    ).publish_unavailable(
         reservation,
         ClipPublicationMetadata(
             camera_id="camera-1",
