@@ -12,7 +12,11 @@ from receipt_helpers import MediaReceiptStore, add_accepted_media_receipts
 
 import backend.app.features.clips.router as clips_router
 from backend.app.features.clips.descriptor_files import OpenedRegularFile
-from backend.app.features.clips.store import ClipStore, LocatedClip
+from backend.app.features.clips.store import (
+    PLAYBACK_H264_MANIFEST_FILENAME,
+    ClipStore,
+    LocatedClip,
+)
 from backend.app.features.evidence.receipt_store import ArtifactReceipt
 from backend.app.main import create_app as _create_app
 from backend.app.main import no_lifespan
@@ -62,6 +66,7 @@ def _write_clip(
             {
                 "clip_id": clip_id,
                 "camera_id": "camera-1",
+                "sha256": hashlib.sha256(VIDEO).hexdigest(),
                 "event_ref": f"event-{clip_id}",
                 "event_type": "fall",
                 "started_at": "2026-08-10T00:00:00Z",
@@ -78,12 +83,26 @@ def _write_clip(
 
 
 def _write_playback(video_path: Path, content: bytes, *, valid_sidecar: bool = True) -> None:
-    playback = video_path.with_name("clip.playback-h264.mp4")
-    playback.write_bytes(content)
+    """Write a rendition bundle: versioned file + the single attestation manifest."""
     digest = hashlib.sha256(content).hexdigest()
+    playback = video_path.with_name(f"clip.playback-h264.{digest[:16]}.mp4")
+    playback.write_bytes(content)
     if not valid_sidecar:
         digest = hashlib.sha256(b"different rendition").hexdigest()
-    playback.with_name(f"{playback.name}.sha256").write_text(f"{digest}\n", encoding="ascii")
+    video_path.with_name(PLAYBACK_H264_MANIFEST_FILENAME).write_text(
+        json.dumps(
+            {
+                "rendition": playback.name,
+                "rendition_sha256": digest,
+                "source_sha256": hashlib.sha256(video_path.read_bytes()).hexdigest(),
+                "pts_identical": True,
+                "time_base": "1/12000",
+                "frames": 1,
+                "source_frames": 1,
+            }
+        ),
+        encoding="utf-8",
+    )
 
 
 def test_video_serves_verified_playback_rendition_without_receipt_verification(

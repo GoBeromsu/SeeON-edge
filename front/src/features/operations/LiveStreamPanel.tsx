@@ -1,6 +1,6 @@
 import { getCameraStreamUrl, type Camera, type OverlaySelection, type RuntimeCameraDiagnostics } from '@/shared/api/client';
 import { useMjpegStream } from '@/shared/api/useMjpegStream';
-import { OverlayTargetIcon } from '@/features/operations/OverlayModeControl';
+import { OverlayTargetIcon } from '@/shared/ui/OverlayTargetIcon';
 
 type LiveStreamPanelProps = {
   camera: Camera;

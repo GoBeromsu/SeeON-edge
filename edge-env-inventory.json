@@ -329,6 +329,14 @@
       "behavior": "retired profile selector; compose pins ML_WORKER_PROFILE=flow"
     },
     {
+      "name": "ML_WORKER_CLIP_ANALYSIS_CPU",
+      "category": "deployment artifact",
+      "authority": "deployment env",
+      "behavior": "optional opt-in host CPU index reserved for clip reanalysis child processes; absent or blank disables clip analysis (enable after the site soak)",
+      "compose": true,
+      "example": true
+    },
+    {
       "name": "ML_WORKER_FLOW_BATCH_SIZE",
       "category": "deployment artifact",
       "authority": "deployment env",

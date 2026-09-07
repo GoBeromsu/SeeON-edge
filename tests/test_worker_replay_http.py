@@ -3,8 +3,10 @@ from __future__ import annotations
 import json
 import sqlite3
 import sys
+from dataclasses import dataclass
 from importlib.util import module_from_spec, spec_from_file_location
 from pathlib import Path
+from typing import Literal
 from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 
@@ -16,6 +18,35 @@ from worker.pipeline.output.live_view import LatestFrameStore
 from worker.pipeline.output.mjpeg_server import MjpegServer, MjpegServerConfig
 
 _TOKEN = "relay-token"
+
+
+@dataclass(frozen=True)
+class _IdleClipAnalysisStatus:
+    state: Literal["idle"] = "idle"
+    reason: None = None
+
+
+class _IdleClipAnalysisSupervisor:
+    def status(self, clip_id: str) -> _IdleClipAnalysisStatus:
+        del clip_id
+        return _IdleClipAnalysisStatus()
+
+    def trigger(self, *args: object, **kwargs: object) -> bool:
+        del args, kwargs
+        return False
+
+    def cancel(self, clip_id: str) -> bool:
+        del clip_id
+        return False
+
+
+def _server(tmp_path: Path) -> MjpegServer:
+    return MjpegServer(
+        LatestFrameStore(),
+        MjpegServerConfig(port=0, probe_token=_TOKEN),
+        clip_analysis_supervisor=_IdleClipAnalysisSupervisor(),
+        clip_store_dir=tmp_path,
+    )
 
 
 def _trace() -> dict[str, object]:
@@ -74,8 +105,8 @@ def _request(base: str, payload: object, token: str | None = _TOKEN) -> Request:
     )
 
 
-def test_replay_requires_relay_token_and_rejects_malformed_body() -> None:
-    server = MjpegServer(LatestFrameStore(), MjpegServerConfig(port=0, probe_token=_TOKEN))
+def test_replay_requires_relay_token_and_rejects_malformed_body(tmp_path: Path) -> None:
+    server = _server(tmp_path)
     server.start()
     base = f"http://127.0.0.1:{server.port}"
     try:
@@ -92,8 +123,8 @@ def test_replay_requires_relay_token_and_rejects_malformed_body() -> None:
         server.stop()
 
 
-def test_legacy_replay_surfaces_tracker_liveness_non_reproducibility() -> None:
-    server = MjpegServer(LatestFrameStore(), MjpegServerConfig(port=0, probe_token=_TOKEN))
+def test_legacy_replay_surfaces_tracker_liveness_non_reproducibility(tmp_path: Path) -> None:
+    server = _server(tmp_path)
     server.start()
     base = f"http://127.0.0.1:{server.port}"
     try:
@@ -107,7 +138,7 @@ def test_legacy_replay_surfaces_tracker_liveness_non_reproducibility() -> None:
     assert result["frames"][0]["analysis_trace_id"] == "a" * 64
 
 
-def test_fall_replay_without_the_running_model_is_a_typed_refusal() -> None:
+def test_fall_replay_without_the_running_model_is_a_typed_refusal(tmp_path: Path) -> None:
     payload = _payload()
     payload["module_id"] = "fall"
     policy = make_effective_policy(
@@ -119,7 +150,7 @@ def test_fall_replay_without_the_running_model_is_a_typed_refusal() -> None:
         camera_revision_id=None,
     )
     payload["policy"] = policy.as_dict()
-    server = MjpegServer(LatestFrameStore(), MjpegServerConfig(port=0, probe_token=_TOKEN))
+    server = _server(tmp_path)
     server.start()
     try:
         with pytest.raises(HTTPError) as refused:
@@ -133,14 +164,14 @@ def test_fall_replay_without_the_running_model_is_a_typed_refusal() -> None:
         server.stop()
 
 
-def test_replay_reports_truncated_input_without_silently_completing_it() -> None:
+def test_replay_reports_truncated_input_without_silently_completing_it(tmp_path: Path) -> None:
     payload = _payload()
     trace = payload["trace"]
     assert isinstance(trace, dict)
     truncation = trace["truncation"]
     assert isinstance(truncation, dict)
     truncation["pruned_frames"] = 1
-    server = MjpegServer(LatestFrameStore(), MjpegServerConfig(port=0, probe_token=_TOKEN))
+    server = _server(tmp_path)
     server.start()
     try:
         with urlopen(_request(f"http://127.0.0.1:{server.port}", payload), timeout=1) as response:
@@ -184,7 +215,7 @@ def test_packaged_replay_command_posts_without_persisting(
     bootstrap_database(database)
     trace_path = tmp_path / "trace.json"
     _ = trace_path.write_text(json.dumps(_trace()), encoding="utf-8")
-    server = MjpegServer(LatestFrameStore(), MjpegServerConfig(port=0, probe_token=_TOKEN))
+    server = _server(tmp_path)
     server.start()
     try:
         status = _replay_command().main(  # type: ignore[attr-defined]
@@ -254,7 +285,7 @@ def test_packaged_replay_command_refuses_truncated_input_without_persisting(
     truncation["handoff_dropped_frames"] = 1
     trace_path = tmp_path / "trace.json"
     _ = trace_path.write_text(json.dumps(trace), encoding="utf-8")
-    server = MjpegServer(LatestFrameStore(), MjpegServerConfig(port=0, probe_token=_TOKEN))
+    server = _server(tmp_path)
     server.start()
     try:
         status = _replay_command().main(  # type: ignore[attr-defined]

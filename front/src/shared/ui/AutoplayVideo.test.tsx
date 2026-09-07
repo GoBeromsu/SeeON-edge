@@ -5,7 +5,7 @@ import { AutoplayVideo } from '@/shared/ui/AutoplayVideo';
 
 const activeRoots = new Set<ReturnType<typeof createRoot>>();
 
-function renderVideo(src = '/api/v1/clips/clip-1/video') {
+function renderVideo(src = '/api/v1/clips/clip-1/video', onPlaybackState = vi.fn()) {
   const host = document.createElement('div');
   document.body.append(host);
   const root = createRoot(host);
@@ -13,12 +13,12 @@ function renderVideo(src = '/api/v1/clips/clip-1/video') {
 
   const rerender = (nextSrc: string): void => {
     act(() => root.render(
-      <AutoplayVideo src={nextSrc} className="h-full w-full" onLoadedMetadata={vi.fn()} />,
+      <AutoplayVideo src={nextSrc} className="h-full w-full" onLoadedMetadata={vi.fn()} onPlaybackState={onPlaybackState} />,
     ));
   };
 
   rerender(src);
-  return { host, rerender };
+  return { host, rerender, onPlaybackState };
 }
 
 async function flushPlayback(): Promise<void> {
@@ -122,5 +122,27 @@ describe('AutoplayVideo', () => {
     expect(host.querySelector('[role="alert"]')).toBeNull();
     expect(host.querySelector('video')?.getAttribute('src')).toBe('/api/v1/clips/clip-2/video');
     expect(HTMLMediaElement.prototype.play).toHaveBeenCalledTimes(2);
+  });
+
+  it('reports ready, blocked, and failed playback boundaries', async () => {
+    const ready = vi.fn();
+    renderVideo('/api/v1/clips/ready', ready);
+    await flushPlayback();
+    expect(ready).toHaveBeenCalledWith('ready');
+
+    vi.mocked(HTMLMediaElement.prototype.play).mockRejectedValueOnce(new DOMException('blocked', 'NotAllowedError'));
+    const blocked = vi.fn();
+    const blockedRender = renderVideo('/api/v1/clips/blocked', blocked);
+    await flushPlayback();
+    expect(blocked).toHaveBeenCalledWith('blocked');
+    // Decoded data arriving after autoplay was refused is not playback permission.
+    act(() => blockedRender.host.querySelector('video')?.dispatchEvent(new Event('loadeddata')));
+    expect(blocked).not.toHaveBeenCalledWith('ready');
+
+    const failed = vi.fn();
+    const { host } = renderVideo('/api/v1/clips/failed', failed);
+    await flushPlayback();
+    act(() => host.querySelector('video')?.dispatchEvent(new Event('error')));
+    expect(failed).toHaveBeenCalledWith('failed');
   });
 });

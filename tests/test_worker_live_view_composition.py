@@ -13,6 +13,7 @@ import pytest
 import worker.runtime.worker as worker_module
 from contracts.runner import Image, bed_result
 from worker.adapters.deepstream.service_maker import DeepStreamFlowStopTimeout
+from worker.interfaces.clip_analysis import ClipAnalysisDisabledError
 from worker.pipeline.output.live_view import LatestFrameStore
 from worker.pipeline.output.mjpeg_server import MjpegServer, MjpegServerConfig
 from worker.runtime.config import WorkerConfig
@@ -138,13 +139,35 @@ def test_flow_live_view_injects_bed_recognizer_and_recognize_request_reaches_it(
     tmp_path: Path, monkeypatch: object
 ) -> None:
     serving = _ServingClient()
+
+    class _ClipAnalysisSupervisor:
+        def __init__(self, **kwargs: object) -> None:
+            captured["clip_analysis_cpu"] = kwargs["cpu_index"]
+
+        def status(self, _clip_id: str) -> object:
+            return SimpleNamespace(state="idle", reason=None)
+
+        def trigger(self, *_args: object, **_kwargs: object) -> bool:
+            return True
+
+        def cancel(self, _clip_id: str) -> bool:
+            return False
+
+        def shutdown(self) -> None:
+            return None
+
     runtime = WorkerRuntime(
         _config(),
-        env={"ML_WORKER_PROFILE": "flow"},
+        env={
+            "ML_WORKER_PROFILE": "flow",
+            "ML_WORKER_CLIP_ANALYSIS_CPU": "3",
+            "ML_WORKER_FLOW_ONNX_PATH": "/app/models/pose/yolo26n-pose.onnx",
+        },
         serving_client=serving,
         acquire_lease=lambda: GpuLease.acquire(tmp_path),
         state_dir=tmp_path,
     )
+    monkeypatch.setattr(worker_module, "ClipAnalysisSupervisor", _ClipAnalysisSupervisor)
     runtime._boot = SimpleNamespace(profile=SimpleNamespace(name="flow"))  # noqa: SLF001
     runtime._mjpeg_config = MjpegServerConfig(  # noqa: SLF001
         enabled=True, host="127.0.0.1", port=0, probe_token="relay-token"
@@ -161,6 +184,8 @@ def test_flow_live_view_injects_bed_recognizer_and_recognize_request_reaches_it(
         store: LatestFrameStore,
         config: MjpegServerConfig,
         *,
+        clip_analysis_supervisor: object,
+        clip_store_dir: Path,
         probe: object = None,
         bed_zone_recognizer: object = None,
         replay_fall_model: object = None,
@@ -169,9 +194,13 @@ def test_flow_live_view_injects_bed_recognizer_and_recognize_request_reaches_it(
         captured["bed_zone_recognizer"] = bed_zone_recognizer
         captured["replay_fall_model"] = replay_fall_model
         captured["bed_zone_snapshot"] = bed_zone_snapshot
+        captured["clip_analysis_supervisor"] = clip_analysis_supervisor
+        captured["clip_store_dir"] = clip_store_dir
         server = MjpegServer(
             store,
             config,
+            clip_analysis_supervisor=clip_analysis_supervisor,
+            clip_store_dir=clip_store_dir,
             probe=probe,
             bed_zone_recognizer=bed_zone_recognizer,
             replay_fall_model=replay_fall_model,
@@ -186,6 +215,8 @@ def test_flow_live_view_injects_bed_recognizer_and_recognize_request_reaches_it(
     assert captured["bed_zone_recognizer"] is not None
     assert captured["replay_fall_model"] is fall_model
     assert captured["bed_zone_snapshot"] == plane.native_snapshot
+    assert captured["clip_analysis_supervisor"] is not None
+    assert captured["clip_analysis_cpu"] == 3
     server = runtime._mjpeg_server  # noqa: SLF001
     assert server is not None
     try:
@@ -214,6 +245,136 @@ def test_flow_live_view_injects_bed_recognizer_and_recognize_request_reaches_it(
         runtime.stop()
 
 
+def test_flow_live_view_composes_disabled_analysis_seam_without_clip_analysis_cpu(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    captured: dict[str, object] = {}
+    runtime = WorkerRuntime(
+        _config(),
+        env={
+            "ML_WORKER_PROFILE": "flow",
+            "ML_WORKER_FLOW_ONNX_PATH": "/app/models/pose/yolo26n-pose.onnx",
+        },
+        serving_client=_ServingClient(),
+        state_dir=tmp_path,
+    )
+    runtime._boot = SimpleNamespace(profile=SimpleNamespace(name="flow"))  # noqa: SLF001
+    runtime._mjpeg_config = MjpegServerConfig(  # noqa: SLF001
+        enabled=True, host="127.0.0.1", port=0, probe_token="relay-token"
+    )
+
+    def start_server(*_args: object, clip_analysis_supervisor: object, **_kwargs: object) -> None:
+        captured["supervisor"] = clip_analysis_supervisor
+
+    monkeypatch.setattr(worker_module, "start_optional_mjpeg_server", start_server)
+    runtime._start_live_view_server()  # noqa: SLF001
+    supervisor = captured["supervisor"]
+    assert isinstance(supervisor, worker_module.ClipAnalysisDisabled)
+    with pytest.raises(ClipAnalysisDisabledError, match="clip_analysis_disabled"):
+        supervisor.status("camera-1")
+    # The disabled seam owns the same lifecycle as a real supervisor: a bound
+    # server stores it and normal shutdown must not crash on it.
+    runtime._mjpeg_server = SimpleNamespace(stop=lambda: None)  # noqa: SLF001
+    runtime._clip_analysis_supervisor = supervisor  # noqa: SLF001
+    runtime._context = SimpleNamespace(release_lease=lambda: None)  # noqa: SLF001
+    runtime.stop()
+    assert runtime._clip_analysis_supervisor is None  # noqa: SLF001
+
+
+def test_live_view_analysis_lookup_uses_mount_root_not_active_subdirectory(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    captured: dict[str, object] = {}
+    clip = tmp_path / "clips" / "camera-20260101-abc" / "clip.mp4"
+    clip.parent.mkdir(parents=True)
+    clip.write_bytes(b"clip")
+    clip.with_name("manifest.json").write_text(
+        json.dumps(
+            {
+                "manifest_schema_version": 2,
+                "state": "READY",
+                "clip_id": clip.parent.name,
+                "camera_id": "camera-a",
+                "event_refs": ["11111111-1111-4111-8111-111111111111"],
+                "clip_start_at": "2026-01-01T00:00:00Z",
+                "clip_end_at": "2026-01-01T00:00:01Z",
+                "finalized_at": "2026-01-01T00:00:02Z",
+                "sha256": "a" * 64,
+                "size_bytes": 4,
+                "duration_ms": 1000,
+                "state_version": 2,
+                "source_media": {
+                    "timestamp_translation_seconds": "0",
+                    "streams": [
+                        {
+                            "index": 0,
+                            "media_type": "video",
+                            "time_base": "1/90000",
+                            "width": 640,
+                            "height": 360,
+                            "packet_count": 1,
+                        }
+                    ],
+                },
+            }
+        )
+    )
+
+    class _Supervisor:
+        def __init__(self, **_kwargs: object) -> None:
+            pass
+
+        def trigger(
+            self, _clip_id: str, clip_path: Path, *_args: object, **_kwargs: object
+        ) -> bool:
+            captured["clip_path"] = clip_path
+            return True
+
+        def status(self, _clip_id: str) -> object:
+            return SimpleNamespace(state="idle", reason=None)
+
+        def cancel(self, _clip_id: str) -> bool:
+            return False
+
+        def shutdown(self) -> None:
+            return None
+
+    monkeypatch.setattr(worker_module, "ClipAnalysisSupervisor", _Supervisor)
+    config = _config().model_copy(
+        update={"clip": _config().clip.model_copy(update={"store_subdir": "active"})}
+    )
+    runtime = WorkerRuntime(
+        config,
+        env={
+            "ML_WORKER_PROFILE": "flow",
+            "ML_WORKER_CLIP_ANALYSIS_CPU": "3",
+            "ML_WORKER_FLOW_ONNX_PATH": "/app/models/pose/yolo26n-pose.onnx",
+        },
+        serving_client=_ServingClient(),
+        state_dir=tmp_path,
+        clip_store_dir=tmp_path,
+    )
+    runtime._boot = SimpleNamespace(profile=SimpleNamespace(name="flow"))  # noqa: SLF001
+    runtime._mjpeg_config = MjpegServerConfig(  # noqa: SLF001
+        enabled=True, host="127.0.0.1", port=0, probe_token="relay-token"
+    )
+    runtime._start_live_view_server()  # noqa: SLF001
+    server = runtime._mjpeg_server  # noqa: SLF001
+    assert server is not None
+    try:
+        request = urllib.request.Request(
+            f"http://127.0.0.1:{server.port}/clips/camera-20260101-abc/analysis",
+            data=json.dumps({"clip_sha256": "a" * 64}).encode(),
+            headers={"X-Edge-Relay-Token": "relay-token"},
+            method="POST",
+        )
+        with urllib.request.urlopen(request, timeout=2) as response:
+            assert response.status == 202
+        assert captured == {"clip_path": clip}
+    finally:
+        runtime.stop()
+
+
 @pytest.mark.parametrize(
     ("stop_error", "exit_codes"),
     [
@@ -228,7 +389,10 @@ def test_only_flow_stop_deadline_uses_terminal_exit(
     actual_exits: list[int] = []
     runtime = WorkerRuntime(
         _config(),
-        env={"ML_WORKER_PROFILE": "flow"},
+        env={
+            "ML_WORKER_PROFILE": "flow",
+            "ML_WORKER_FLOW_ONNX_PATH": "/app/models/pose/yolo26n-pose.onnx",
+        },
         serving_client=_ServingClient(),
         state_dir=tmp_path,
         hard_exit=actual_exits.append,

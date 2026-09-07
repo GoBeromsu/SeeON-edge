@@ -20,6 +20,20 @@ const baseClip: Clip = {
   thumbnail_available: true,
   video_error: null,
 };
+const analysisResult = {
+  source: 'clip_reanalysis',
+  clip_id: 'clip-1',
+  clip_sha256: 'a'.repeat(64),
+  pose_model_sha256: 'b'.repeat(64),
+  bed_model_sha256: 'c'.repeat(64),
+  decoder_identity: 'decoder',
+  analysis_profile_sha256: 'd'.repeat(64),
+  time_base: { numerator: 1, denominator: 1000 },
+  frames: [],
+  bed_geometries: [],
+  image_width: 640,
+  image_height: 360,
+};
 
 function render(clip: Clip | null, open = true, onClose = vi.fn()) {
   const host = document.createElement('div');
@@ -67,7 +81,7 @@ describe('ClipPlaybackModal', () => {
     expect(HTMLMediaElement.prototype.play).toHaveBeenCalledOnce();
   });
 
-  it('plays the clean media URL and never requests a retired analysis or derivative route', async () => {
+  it('plays the clean media URL and requests clip analysis status', async () => {
     const fetchMock = vi.fn().mockResolvedValue({
       ok: true, status: 200, json: async () => ({ clip_id: 'clip-1', clean: 'AVAILABLE', snapshot: null }),
     });
@@ -77,7 +91,7 @@ describe('ClipPlaybackModal', () => {
     await act(async () => Promise.resolve());
 
     const requested = fetchMock.mock.calls.map(([input]) => String(input));
-    expect(requested).toEqual(['/api/v1/clips/clip-1/artifacts']);
+    expect(requested).toEqual(expect.arrayContaining(['/api/v1/clips/clip-1/artifacts', '/api/v1/clips/clip-1/analysis']));
     expect(dialog().querySelector('video')?.getAttribute('src')).toBe('/api/v1/clips/clip-1/video');
     vi.unstubAllGlobals();
   });
@@ -102,6 +116,73 @@ describe('ClipPlaybackModal', () => {
     const video = dialog().querySelector('video');
     expect(video?.controls).toBe(true);
     expect(dialog().querySelector('[role="status"]')?.textContent).toContain('재생 버튼');
+  });
+
+  it('unmounts a ready overlay after the video reports a media error', async () => {
+    vi.stubGlobal('ResizeObserver', class {
+      observe(): void {}
+      disconnect(): void {}
+    });
+    vi.spyOn(HTMLCanvasElement.prototype, 'getContext').mockImplementation(() => null);
+    Object.defineProperty(HTMLVideoElement.prototype, 'requestVideoFrameCallback', {
+      configurable: true,
+      value: vi.fn(() => 1),
+    });
+    Object.defineProperty(HTMLVideoElement.prototype, 'cancelVideoFrameCallback', {
+      configurable: true,
+      value: vi.fn(),
+    });
+    vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.endsWith('/artifacts')) {
+        return Promise.resolve({ ok: true, status: 200, json: async () => ({ clip_id: 'clip-1', clean: 'AVAILABLE', snapshot: null }) });
+      }
+      return Promise.resolve({
+        ok: true,
+        status: 200,
+        json: async () => ({
+          state: 'available',
+          served_media_sha256: 'a'.repeat(64),
+          served_timing_identical: true,
+          result: analysisResult,
+        }),
+      });
+    }));
+
+    render(baseClip);
+    await act(async () => Promise.resolve());
+    await act(async () => Promise.resolve());
+
+    const video = dialog().querySelector('video') as HTMLVideoElement;
+    act(() => video.dispatchEvent(new Event('loadeddata')));
+    expect(dialog().querySelector('canvas')).not.toBeNull();
+    act(() => video.dispatchEvent(new Event('error')));
+    expect(dialog().querySelector('canvas')).toBeNull();
+    vi.unstubAllGlobals();
+    delete (HTMLVideoElement.prototype as Partial<HTMLVideoElement>).requestVideoFrameCallback;
+    delete (HTMLVideoElement.prototype as Partial<HTMLVideoElement>).cancelVideoFrameCallback;
+  });
+
+  it('shows the disabled analysis icon without an analysis trigger', async () => {
+    vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.endsWith('/artifacts')) {
+        return Promise.resolve({ ok: true, status: 200, json: async () => ({ clip_id: 'clip-1', clean: 'AVAILABLE', snapshot: null }) });
+      }
+      return Promise.resolve({
+        ok: true,
+        status: 200,
+        json: async () => ({ state: 'unavailable', reason: 'analysis_disabled', served_media_sha256: 'a'.repeat(64) }),
+      });
+    }));
+
+    render(baseClip);
+    await act(async () => Promise.resolve());
+    await act(async () => Promise.resolve());
+
+    expect(dialog().querySelector('[title="오버레이 분석 비활성"]')).not.toBeNull();
+    expect(dialog().querySelector('[aria-label="오버레이 분석"]')).toBeNull();
+    vi.unstubAllGlobals();
   });
 
   it('renders at the 720px design-spec width', () => {

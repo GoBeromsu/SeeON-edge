@@ -26,7 +26,8 @@ from uuid import UUID
 from backend.app.edge_db import EDGE_DATABASE_PATH
 from backend.app.edge_db.connection import RuntimeActor, open_runtime_database
 from backend.app.features.clips.manifest import ClipExtension, ExtensionContributor
-from backend.app.features.clips.store import ClipManifest, is_valid_clip_id
+from backend.app.features.clips.store import ClipManifest
+from shared.events.clip_identity import is_clip_id
 
 if TYPE_CHECKING:
     from fastapi import FastAPI
@@ -479,7 +480,7 @@ def _manifest_identity(payload: dict[str, Any], path: Path) -> tuple[str, str, s
     event_ref = payload.get("event_ref")
     if (
         not isinstance(clip_id, str)
-        or not is_valid_clip_id(clip_id)
+        or not is_clip_id(clip_id)
         or not isinstance(camera_id, str)
         or not camera_id.strip()
         or not isinstance(event_ref, str)

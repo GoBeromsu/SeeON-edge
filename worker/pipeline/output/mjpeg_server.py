@@ -4,11 +4,13 @@ from __future__ import annotations
 
 import os
 import threading
-from collections.abc import Callable, Mapping
+from collections.abc import Mapping
 from dataclasses import dataclass
 from http.server import HTTPServer
+from pathlib import Path
 from typing import Final
 
+from worker.interfaces.clip_analysis import ClipAnalysisSupervisor
 from worker.interfaces.fall_model import FallV2ModelProtocol
 from worker.pipeline.output._mjpeg_http import (
     BedZoneNotFoundError,
@@ -41,25 +43,25 @@ class MjpegServer:
         self,
         store: LatestFrameStore,
         config: MjpegServerConfig,
+        *,
+        clip_analysis_supervisor: ClipAnalysisSupervisor,
+        clip_store_dir: Path,
         probe: MjpegProbe | None = None,
         bed_zone_recognizer: BedZoneRecognizer | None = None,
         bed_zone_snapshot: BedZoneSnapshot | None = None,
         replay_fall_model: FallV2ModelProtocol | None = None,
     ) -> None:
-        self.store = store
         self.host = config.host
-        self.probe_token = config.probe_token
-        self.probe = probe if probe is not None else _unavailable_probe
-        self.bed_zone_recognizer = bed_zone_recognizer
-        self.bed_zone_snapshot = bed_zone_snapshot
         self._server: HTTPServer = build_http_server(
             store,
             host=self.host,
             port=config.port,
-            probe_token=self.probe_token,
-            probe=self.probe,
-            bed_zone_recognizer=self.bed_zone_recognizer,
-            bed_zone_snapshot=self.bed_zone_snapshot,
+            probe_token=config.probe_token,
+            probe=probe if probe is not None else _unavailable_probe,
+            clip_store_dir=clip_store_dir,
+            clip_analysis_supervisor=clip_analysis_supervisor,
+            bed_zone_recognizer=bed_zone_recognizer,
+            bed_zone_snapshot=bed_zone_snapshot,
             replay_fall_model=replay_fall_model,
         )
         self.port = int(self._server.server_port)
@@ -92,19 +94,6 @@ class MjpegServer:
                 self._thread = None
         if is_open:
             self._server.server_close()
-
-
-MjpegServerFactory = Callable[
-    [
-        LatestFrameStore,
-        MjpegServerConfig,
-        MjpegProbe | None,
-        BedZoneRecognizer | None,
-        BedZoneSnapshot | None,
-        FallV2ModelProtocol | None,
-    ],
-    MjpegServer,
-]
 
 
 def dev_mjpeg_enabled(environ: Mapping[str, str] | None = None) -> bool:
@@ -142,23 +131,26 @@ def start_optional_mjpeg_server(
     store: LatestFrameStore,
     config: MjpegServerConfig | None = None,
     *,
+    clip_analysis_supervisor: ClipAnalysisSupervisor,
+    clip_store_dir: Path,
     probe: MjpegProbe | None = None,
     bed_zone_recognizer: BedZoneRecognizer | None = None,
     bed_zone_snapshot: BedZoneSnapshot | None = None,
     replay_fall_model: FallV2ModelProtocol | None = None,
-    factory: MjpegServerFactory = MjpegServer,
 ) -> MjpegServer | None:
     resolved = dev_mjpeg_config() if config is None else config
     if not resolved.enabled:
         return None
     try:
-        server = factory(
+        server = MjpegServer(
             store,
             resolved,
-            probe,
-            bed_zone_recognizer,
-            bed_zone_snapshot,
-            replay_fall_model,
+            clip_analysis_supervisor=clip_analysis_supervisor,
+            clip_store_dir=clip_store_dir,
+            probe=probe,
+            bed_zone_recognizer=bed_zone_recognizer,
+            bed_zone_snapshot=bed_zone_snapshot,
+            replay_fall_model=replay_fall_model,
         )
     except OSError:
         return None

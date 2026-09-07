@@ -215,6 +215,8 @@ services:
       ML_WORKER_FLOW_RECORD_CACHE_SECONDS: "30"
       ML_WORKER_FLOW_FRAME_WIDTH: "640"
       ML_WORKER_FLOW_FRAME_HEIGHT: "360"
+      # Enable after the site soak.
+      ML_WORKER_CLIP_ANALYSIS_CPU: ${ML_WORKER_CLIP_ANALYSIS_CPU:-}
       ML_WORKER_FLOW_BATCH_SIZE: ${ML_WORKER_FLOW_BATCH_SIZE:?ML_WORKER_FLOW_BATCH_SIZE is required}
       ML_WORKER_FLOW_ENGINE_PATH: /var/cache/seeon/tensorrt/yolo26n-pose-fp16.engine
       ML_WORKER_FLOW_ENGINE_IDENTITY_PATH: /var/cache/seeon/tensorrt/engine-identity.json

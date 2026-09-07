@@ -2,21 +2,20 @@
 
 from __future__ import annotations
 
-import hashlib
 import logging
-import os
 import subprocess
-import tempfile
 from collections.abc import Callable
 from concurrent.futures import Future, ThreadPoolExecutor
+from dataclasses import dataclass
+from fractions import Fraction
 from pathlib import Path
 from typing import Final
 
-from worker.pipeline.output.evidence.durability import fsync_directory
+import av
 
 LOGGER: Final = logging.getLogger(__name__)
-PLAYBACK_NAME: Final = "clip.playback-h264.mp4"
-PLAYBACK_DIGEST_NAME: Final = "clip.playback-h264.mp4.sha256"
+PLAYBACK_MANIFEST_NAME: Final = "clip.playback-h264.json"
+PLAYBACK_RENDITION_PREFIX: Final = "clip.playback-h264."
 _PLAYBACK_EXECUTOR: Final = ThreadPoolExecutor(
     max_workers=1,
     thread_name_prefix="evidence-playback-rendition",
@@ -25,6 +24,15 @@ _PLAYBACK_EXECUTOR: Final = ThreadPoolExecutor(
 
 class PlaybackRenditionError(RuntimeError):
     """A browser playback rendition could not be created."""
+
+
+@dataclass(frozen=True, slots=True)
+class VideoTiming:
+    """Decoded video timing needed to bind a rendition to its source."""
+
+    time_base_numerator: int
+    time_base_denominator: int
+    pts: tuple[int, ...]
 
 
 def probe_video_codec(
@@ -58,76 +66,28 @@ def probe_video_codec(
     return codec
 
 
-def write_playback_rendition(
-    clip_path: Path,
-    *,
-    run: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run,
-    timeout_s: float = 120.0,
-) -> Path | None:
-    """Write an atomically-published H.264 rendition unless input is already H.264."""
-    codec = probe_video_codec(clip_path, run)
-    if codec in {"avc1", "h264"}:
-        return None
-
-    rendition = clip_path.with_name(PLAYBACK_NAME)
-    sidecar = clip_path.with_name(PLAYBACK_DIGEST_NAME)
-    temporary = _temporary_path(rendition)
+def read_video_timing(path: Path) -> VideoTiming:
+    """Decode one video stream single-threaded and return its complete PTS sequence."""
     try:
-        try:
-            result = run(
-                [
-                    "ffmpeg",
-                    "-nostdin",
-                    "-loglevel",
-                    "error",
-                    "-y",
-                    "-i",
-                    str(clip_path),
-                    "-map",
-                    "0:v:0",
-                    "-an",
-                    "-c:v",
-                    "libx264",
-                    "-preset",
-                    "veryfast",
-                    "-crf",
-                    "23",
-                    "-pix_fmt",
-                    "yuv420p",
-                    "-fps_mode",
-                    "passthrough",
-                    "-movflags",
-                    "+faststart",
-                    str(temporary),
-                ],
-                check=False,
-                capture_output=True,
-                text=True,
-                timeout=timeout_s,
-            )
-        except (OSError, subprocess.SubprocessError) as exc:
-            raise PlaybackRenditionError("ffmpeg failed") from exc
-        _require_rendition_output(result.returncode, temporary)
-        _fsync_file(temporary)
-        os.replace(temporary, rendition)
-        fsync_directory(rendition.parent)
-        _write_digest_sidecar(sidecar, _sha256(rendition))
+        with av.open(str(path)) as container:
+            stream = container.streams.video[0]
+            time_base = _require_time_base(stream.time_base)
+            stream.thread_type = "NONE"
+            stream.thread_count = 1
+            pts = [_require_pts(frame.pts) for frame in container.decode(stream)]
     except PlaybackRenditionError:
-        temporary.unlink(missing_ok=True)
         raise
-    except OSError as exc:
-        temporary.unlink(missing_ok=True)
-        raise PlaybackRenditionError("could not publish playback rendition") from exc
-    return rendition
-
-
-def _require_rendition_output(returncode: int, temporary: Path) -> None:
-    if returncode != 0 or not temporary.is_file() or temporary.stat().st_size == 0:
-        raise PlaybackRenditionError("ffmpeg did not create a rendition")
+    except Exception as exc:
+        raise PlaybackRenditionError("could not decode video timing") from exc
+    return VideoTiming(time_base.numerator, time_base.denominator, tuple(pts))
 
 
 def schedule_playback_rendition(clip_path: Path, clip_id: str) -> Future[Path | None]:
     """Queue view-only transcode work outside evidence publication and relay delivery."""
+    from worker.pipeline.output.evidence.playback_rendition_publish import (
+        write_playback_rendition,
+    )
+
     future = _PLAYBACK_EXECUTOR.submit(write_playback_rendition, clip_path)
     future.add_done_callback(lambda completed: _log_failure(completed, clip_id))
     return future
@@ -143,49 +103,24 @@ def _log_failure(future: Future[Path | None], clip_id: str) -> None:
         )
 
 
-def _temporary_path(rendition: Path) -> Path:
-    descriptor, name = tempfile.mkstemp(
-        prefix=f".{rendition.stem}.",
-        suffix=".mp4",
-        dir=rendition.parent,
-    )
-    os.close(descriptor)
-    temporary = Path(name)
-    temporary.unlink()
-    return temporary
+def _require_time_base(time_base: Fraction | None) -> Fraction:
+    if time_base is None or time_base.numerator <= 0 or time_base.denominator <= 0:
+        raise PlaybackRenditionError("video stream has no valid time base")
+    return time_base
 
 
-def _write_digest_sidecar(sidecar: Path, digest: str) -> None:
-    temporary = _temporary_path(sidecar.with_suffix(".mp4"))
-    try:
-        with temporary.open("x", encoding="ascii") as output:
-            _ = output.write(f"{digest}\n")
-            output.flush()
-            os.fsync(output.fileno())
-        os.replace(temporary, sidecar)
-        fsync_directory(sidecar.parent)
-    finally:
-        temporary.unlink(missing_ok=True)
-
-
-def _fsync_file(path: Path) -> None:
-    with path.open("rb") as source:
-        os.fsync(source.fileno())
-
-
-def _sha256(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as source:
-        for chunk in iter(lambda: source.read(1024 * 1024), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
+def _require_pts(pts: int | None) -> int:
+    if pts is None:
+        raise PlaybackRenditionError("decoded frame has no PTS")
+    return pts
 
 
 __all__ = [
-    "PLAYBACK_DIGEST_NAME",
-    "PLAYBACK_NAME",
+    "PLAYBACK_MANIFEST_NAME",
+    "PLAYBACK_RENDITION_PREFIX",
     "PlaybackRenditionError",
+    "VideoTiming",
     "probe_video_codec",
+    "read_video_timing",
     "schedule_playback_rendition",
-    "write_playback_rendition",
 ]

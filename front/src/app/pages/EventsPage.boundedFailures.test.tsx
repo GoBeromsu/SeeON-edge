@@ -12,7 +12,7 @@ import {
 } from '@/app/pages/EventsPage.testSupport';
 
 const RETIRED_CONTROLS = ['증거 보기 선택', '파생 증거 제어', '적용 실행 증명'] as const;
-const RETIRED_ROUTE_FRAGMENTS = ['/analysis', '/derivatives/', '/label', '/relay/analysis-traces'] as const;
+const RETIRED_ROUTE_FRAGMENTS = ['/derivatives/', '/label', '/relay/analysis-traces'] as const;
 
 function jsonResponse(body: unknown, status = 200) {
   return { ok: status >= 200 && status < 300, status, json: async () => body };

@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Protocol, final
 from uuid import uuid4
 
+from shared.events.clip_identity import is_clip_id
 from worker.pipeline.output.evidence.durability import fsync_directory
 from worker.pipeline.output.evidence.evidence_outbox_types import ClipId
 
@@ -58,8 +59,8 @@ class ClipIdAllocator:
 
     def reserve_existing(self, camera_id: str, clip_id: str) -> ClipReservation:
         """Reserve the identity assigned by an external recorder exactly once."""
-        if not clip_id:
-            raise ValueError("clip id must not be empty")
+        if not is_clip_id(clip_id):
+            raise ValueError("clip id is invalid")
         self._staging_root.mkdir(parents=True, exist_ok=True)
         reservation = self._reserve(camera_id, ClipId(clip_id))
         if reservation is None:
@@ -98,9 +99,36 @@ def _new_clip_id(camera_id: str) -> str:
     return f"{safe_camera}-{timestamp}-{uuid4().hex[:12]}"
 
 
+def bounded_clip_roots(store_dir: Path) -> tuple[Path, ...]:
+    roots = [store_dir / "clips"]
+    try:
+        first_level = tuple(store_dir.iterdir())
+    except OSError:
+        return tuple(roots)
+    for first in first_level:
+        if first.name == "clips" or not first.is_dir():
+            continue
+        first_clips = first / "clips"
+        if first_clips.is_dir():
+            roots.append(first_clips)
+        try:
+            second_level = tuple(first.iterdir())
+        except OSError:
+            continue
+        for second in second_level:
+            if second.name == "clips" or not second.is_dir():
+                continue
+            second_clips = second / "clips"
+            if second_clips.is_dir():
+                roots.append(second_clips)
+    return tuple(roots)
+
+
 __all__ = [
     "ClipIdAllocator",
     "ClipIdCollisionError",
     "ClipIdFactory",
     "ClipReservation",
+    "bounded_clip_roots",
+    "is_clip_id",
 ]

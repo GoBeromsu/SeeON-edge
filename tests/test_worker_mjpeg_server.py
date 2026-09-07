@@ -8,6 +8,9 @@ import time
 import urllib.error
 import urllib.request
 from collections.abc import Callable
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Literal
 
 import cv2
 import numpy as np
@@ -35,6 +38,60 @@ _RELAY_TOKEN = "relay-token"
 _AUTH_HEADERS = {"X-Edge-Relay-Token": _RELAY_TOKEN}
 
 
+@dataclass(frozen=True)
+class _ClipAnalysisStatus:
+    state: Literal["idle", "running", "available", "failed"] = "idle"
+    reason: str | None = None
+
+
+class _ClipAnalysisSupervisor:
+    def status(self, clip_id: str) -> _ClipAnalysisStatus:
+        del clip_id
+        return _ClipAnalysisStatus()
+
+    def trigger(
+        self,
+        clip_id: str,
+        clip_path: Path,
+        clip_sha256: str,
+        *,
+        size_bytes: int,
+        duration_ms: int,
+        width: int,
+        height: int,
+    ) -> bool:
+        del clip_id, clip_path, clip_sha256, size_bytes, duration_ms, width, height
+        return True
+
+    def cancel(self, clip_id: str) -> bool:
+        del clip_id
+        return False
+
+
+_RealMjpegServer = MjpegServer
+
+
+def MjpegServer(
+    store: LatestFrameStore,
+    config: MjpegServerConfig,
+    *,
+    clip_analysis_supervisor: _ClipAnalysisSupervisor | None = None,
+    clip_store_dir: Path | None = None,
+    **kwargs: object,
+) -> _RealMjpegServer:
+    return _RealMjpegServer(
+        store,
+        config,
+        clip_analysis_supervisor=(
+            _ClipAnalysisSupervisor()
+            if clip_analysis_supervisor is None
+            else clip_analysis_supervisor
+        ),
+        clip_store_dir=Path(".") if clip_store_dir is None else clip_store_dir,
+        **kwargs,
+    )
+
+
 def _bed_zone_response(
     polygon: tuple[tuple[int, int], ...] = ((0, 0), (1, 0), (1, 1)),
 ) -> BedZoneRecognizeResponse:
@@ -60,24 +117,6 @@ def _assert_forbidden(request: urllib.request.Request) -> bytes:
         assert b"relay-token" not in body
         return body
     raise AssertionError("expected 403 Forbidden")  # pragma: no cover
-
-
-# worker's MjpegServer takes an injected `probe` callable (worker/pipeline/
-# output/mjpeg_server.py:36-52) instead of owning an internal RTSP-probing
-# helper wired to the legacy sources/probe module's probe_first_frame. The legacy
-# test_mjpeg_probe_response_keeps_selected_backend monkeypatched that internal
-# helper (edge/runtime/mjpeg_server.py:268-275); there is no worker-side
-# equivalent to monkeypatch because backend-selection is now the injected
-# probe's responsibility, decoupled from this module entirely (see
-# start_optional_mjpeg_server's `probe` parameter). That assertion is
-# impossible-with-reason here; RTSP-backend-selection coverage belongs to the
-# camera-probe/ingest layer, not this HTTP-server module.
-#
-# The buffer-level "camera-keyed, non-consuming" assertion
-# (test_mjpeg_buffer_is_camera_keyed_non_consuming) is superseded by
-# tests/test_runtime_latest_frame.py::test_latest_frame_store_is_camera_keyed_and_non_consuming
-# since worker unified OverlayFrameBuffer and LatestFrameBuffer into the same
-# LatestFrameStore class — it is not re-asserted here.
 
 
 def test_mjpeg_server_defaults_loopback_and_disabled() -> None:

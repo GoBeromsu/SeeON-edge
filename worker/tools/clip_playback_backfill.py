@@ -6,21 +6,26 @@ import argparse
 import json
 import logging
 import math
+import re
 from collections.abc import Sequence
 from pathlib import Path
 
+from shared.events.clip_identity import is_clip_id
 from worker.adapters.media.ffmpeg_thumbnail import (
     FfmpegThumbnailGenerator,
     ThumbnailUnavailable,
 )
+from worker.pipeline.output.evidence.clip_identity import bounded_clip_roots
 from worker.pipeline.output.evidence.playback_rendition import (
-    PLAYBACK_NAME,
+    PLAYBACK_MANIFEST_NAME,
+    PLAYBACK_RENDITION_PREFIX,
     PlaybackRenditionError,
     probe_video_codec,
-    write_playback_rendition,
 )
+from worker.pipeline.output.evidence.playback_rendition_publish import write_playback_rendition
 
 LOGGER = logging.getLogger(__name__)
+_SHA256_RE = re.compile(r"[0-9a-f]{64}\Z")
 
 
 def backfill(
@@ -37,13 +42,14 @@ def backfill(
         "h264": 0,
         "created": 0,
         "skipped": 0,
+        "pending": 0,
         "failed": 0,
         "dry_run": dry_run,
     }
-    for clip_path in sorted((clip_store / "clips").glob("*/clip.mp4")):
+    for clip_path in _clip_paths(clip_store):
         summary["scanned"] += 1
         clip_id = clip_path.parent.name
-        if (clip_path.parent / PLAYBACK_NAME).exists():
+        if _rendition_is_identical(clip_path):
             summary["skipped"] += 1
             continue
         try:
@@ -52,7 +58,7 @@ def backfill(
                 summary["h264"] += 1
                 continue
             if dry_run:
-                summary["skipped"] += 1
+                summary["pending"] += 1
                 continue
             if write_playback_rendition(clip_path) is not None:
                 summary["created"] += 1
@@ -66,6 +72,95 @@ def backfill(
     return summary
 
 
+def _rendition_is_identical(clip_path: Path) -> bool:
+    try:
+        payload = json.loads(
+            (clip_path.parent / PLAYBACK_MANIFEST_NAME).read_text(encoding="ascii")
+        )
+        source_digest = _manifest_source_sha256(clip_path)
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+        return False
+    if not isinstance(payload, dict):
+        return False
+    rendition_name = payload.get("rendition")
+    rendition_digest = payload.get("rendition_sha256")
+    if not _valid_attestation(payload, source_digest, rendition_name, rendition_digest):
+        return False
+    try:
+        actual_digest = _sha256(clip_path.parent / rendition_name)
+    except OSError:
+        return False
+    return (
+        payload.get("pts_identical") is True
+        and payload.get("source_sha256") == source_digest
+        and rendition_digest == actual_digest
+    )
+
+
+def _manifest_source_sha256(clip_path: Path) -> str | None:
+    payload = json.loads(clip_path.with_name("manifest.json").read_text(encoding="utf-8"))
+    if not isinstance(payload, dict):
+        return None
+    digest = payload.get("sha256")
+    return digest if isinstance(digest, str) and _SHA256_RE.fullmatch(digest) else None
+
+
+def _valid_attestation(
+    payload: dict[object, object],
+    source_digest: str | None,
+    rendition_name: object,
+    rendition_digest: object,
+) -> bool:
+    frames = payload.get("frames")
+    source_frames = payload.get("source_frames")
+    time_base = payload.get("time_base")
+    return (
+        isinstance(rendition_name, str)
+        and isinstance(rendition_digest, str)
+        and _SHA256_RE.fullmatch(rendition_digest) is not None
+        and rendition_name == f"{PLAYBACK_RENDITION_PREFIX}{rendition_digest[:16]}.mp4"
+        and payload.get("source_sha256") == source_digest
+        and payload.get("pts_identical") is True
+        and isinstance(time_base, str)
+        and re.fullmatch(r"[1-9][0-9]*/[1-9][0-9]*", time_base) is not None
+        and isinstance(frames, int)
+        and not isinstance(frames, bool)
+        and frames >= 0
+        and isinstance(source_frames, int)
+        and not isinstance(source_frames, bool)
+        and source_frames >= 0
+    )
+
+
+def _clip_paths(clip_store: Path) -> tuple[Path, ...]:
+    paths: dict[str, Path] = {}
+    for clips_root in bounded_clip_roots(clip_store):
+        try:
+            candidates = tuple(clips_root.iterdir())
+        except OSError:
+            continue
+        for candidate in candidates:
+            clip_path = candidate / "clip.mp4"
+            if (
+                is_clip_id(candidate.name)
+                and candidate.is_dir()
+                and clip_path.is_file()
+                and candidate.name not in paths
+            ):
+                paths[candidate.name] = clip_path
+    return tuple(sorted(paths.values()))
+
+
+def _sha256(path: Path) -> str:
+    import hashlib
+
+    digest = hashlib.sha256()
+    with path.open("rb") as source:
+        for chunk in iter(lambda: source.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
 def _backfill_thumbnails(clip_store: Path, *, dry_run: bool) -> dict[str, int | bool]:
     summary: dict[str, int | bool] = {
         "scanned": 0,
@@ -76,7 +171,7 @@ def _backfill_thumbnails(clip_store: Path, *, dry_run: bool) -> dict[str, int | 
         "dry_run": dry_run,
     }
     generator = FfmpegThumbnailGenerator()
-    for clip_path in sorted((clip_store / "clips").glob("*/clip.mp4")):
+    for clip_path in _clip_paths(clip_store):
         summary["scanned"] += 1
         clip_id = clip_path.parent.name
         thumbnail_path = clip_path.parent / "thumbnail.jpg"
@@ -116,8 +211,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("clip_store", type=Path)
     parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument("--renditions", action="store_true")
     parser.add_argument("--thumbnails", action="store_true")
     arguments = parser.parse_args(argv)
+    if arguments.renditions and arguments.thumbnails:
+        parser.error("--renditions and --thumbnails are mutually exclusive")
     print(
         json.dumps(
             backfill(

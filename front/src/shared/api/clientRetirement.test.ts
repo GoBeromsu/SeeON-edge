@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import * as clientModule from '@/shared/api/client';
 
 /**
- * Retirement guard for the analysis/derivative/legacy-label clients removed in Task 12/13.
+ * Retirement guard for derivative/legacy-label clients removed in Task 12/13.
  *
  * This lives in its own file so that the namespace is reached through exactly one top-level
  * request. `client.test.ts` already imports the module for its named exports; adding a second
@@ -13,7 +13,6 @@ import * as clientModule from '@/shared/api/client';
 describe('api client retirement', () => {
 
   it.each([
-    ['fetchClipAnalysis'],
     ['controlClipDerivative'],
     ['requestClipDerivative'],
     ['setClipLabel'],
