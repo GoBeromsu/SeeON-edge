@@ -109,6 +109,11 @@ describe('BedZoneRecognitionPanel', () => {
       image_height: 1080,
     });
     expect(onSaved).toHaveBeenCalledWith(savedZone);
+    expect(
+      host.querySelector(
+        '[role="status"][aria-label="저장됨 · 실시간 화면과 탐지에 반영되기까지 최대 1분"]',
+      ),
+    ).not.toBeNull();
   });
 
   it('can delete the last region and explicitly save an empty clear', async () => {

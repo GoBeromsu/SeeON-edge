@@ -137,3 +137,40 @@ def test_backfill_skips_existing_rendition(tmp_path: Path, monkeypatch: pytest.M
 
     assert summary["skipped"] == 1
     assert summary["created"] == 0
+
+
+def test_thumbnail_backfill_uses_manifest_duration_and_skips_existing(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    created = tmp_path / "clips" / "created"
+    created.mkdir(parents=True)
+    (created / "clip.mp4").write_bytes(b"hevc")
+    (created / "manifest.json").write_text('{"duration_s": 22.5}', encoding="utf-8")
+    existing = tmp_path / "clips" / "existing"
+    existing.mkdir()
+    (existing / "clip.mp4").write_bytes(b"hevc")
+    (existing / "manifest.json").write_text('{"duration_s": 10}', encoding="utf-8")
+    (existing / "thumbnail.jpg").write_bytes(b"already-rendered")
+    calls: list[tuple[Path, Path, float]] = []
+
+    class ThumbnailGenerator:
+        def generate(self, video: Path, thumbnail: Path, duration_s: float) -> Path:
+            calls.append((video, thumbnail, duration_s))
+            thumbnail.write_bytes(b"thumbnail")
+            return thumbnail
+
+    monkeypatch.setattr(clip_playback_backfill, "FfmpegThumbnailGenerator", ThumbnailGenerator)
+
+    summary = clip_playback_backfill.backfill(tmp_path, thumbnails=True)
+
+    assert summary == {
+        "scanned": 2,
+        "created": 1,
+        "skipped": 1,
+        "pending": 0,
+        "failed": 0,
+        "dry_run": False,
+    }
+    assert calls == [(created / "clip.mp4", created / "thumbnail.jpg", 22.5)]
+    assert (created / "thumbnail.jpg").read_bytes() == b"thumbnail"

@@ -23,7 +23,6 @@ from backend.app.features.cameras.bed_zone_store import (
     BedZoneStore,
     validate_bed_zone,
 )
-from backend.app.features.cameras.camera_repository import record_registry_mutation
 from backend.app.features.cameras.store import utc_now_iso
 from backend.app.shared.dashboard_auth import authorize_dashboard
 
@@ -211,7 +210,6 @@ def _save_hook(
     request: Request, actor: str, camera_id: str
 ) -> Callable[[sqlite3.Connection], None]:
     def after_write(connection: sqlite3.Connection) -> None:
-        record_registry_mutation(connection)
         append_transactional(
             request,
             connection,

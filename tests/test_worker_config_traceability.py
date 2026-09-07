@@ -60,7 +60,7 @@ def test_config_revision_is_durable_and_contains_the_resolved_payload(
     database = tmp_path / "worker-state.sqlite3"
     config_store = WorkerConfigLkgStore(database)
     assert config_store.save(
-        _config_payload(config_version=7), RestartDirective(generation=1, version=7)
+        _config_payload(config_version=7), RestartDirective(generation=1, version=7, registry=7)
     )
     revisions = tuple((config_store.database_path / "revisions").glob("*.json"))
     assert len(revisions) == 1
@@ -74,13 +74,13 @@ def test_config_revisions_are_bounded_beyond_retention_window(
     database = tmp_path / "worker-state.sqlite3"
     config_store = WorkerConfigLkgStore(database)
     assert config_store.save(
-        _config_payload(config_version=1), RestartDirective(generation=1, version=1)
+        _config_payload(config_version=1), RestartDirective(generation=1, version=1, registry=1)
     )
 
     for version in range(2, CONFIG_HISTORY_RETENTION_COUNT + 5):
         assert config_store.save(
             _config_payload(config_version=version),
-            RestartDirective(generation=1, version=version),
+            RestartDirective(generation=1, version=version, registry=version),
         )
 
     remaining = _revision_versions(config_store)
@@ -94,13 +94,13 @@ def test_config_revisions_keep_the_newest_versions(
     database = tmp_path / "worker-state.sqlite3"
     config_store = WorkerConfigLkgStore(database)
     assert config_store.save(
-        _config_payload(config_version=1), RestartDirective(generation=1, version=1)
+        _config_payload(config_version=1), RestartDirective(generation=1, version=1, registry=1)
     )
 
     for version in range(2, CONFIG_HISTORY_RETENTION_COUNT + 5):
         assert config_store.save(
             _config_payload(config_version=version),
-            RestartDirective(generation=1, version=version),
+            RestartDirective(generation=1, version=version, registry=version),
         )
 
     remaining = _revision_versions(config_store)

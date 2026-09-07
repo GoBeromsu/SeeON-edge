@@ -334,6 +334,7 @@ def test_unavailable_pull_returns_none_and_preserves_existing_lkg(tmp_path) -> N
     )
     assert fresh is not None
     assert fresh.source is ConfigSource.PULLED
+    assert fresh.directive == RestartDirective(generation=1, version=5, registry=5)
 
     stale = load_worker_config_from_relay(
         "http://ml-api:8000",
@@ -346,7 +347,7 @@ def test_unavailable_pull_returns_none_and_preserves_existing_lkg(tmp_path) -> N
     assert stale is not None
     assert stale.source is ConfigSource.LKG
     assert stale.registry_version == 5
-    assert stale.directive == RestartDirective(generation=1, version=5)
+    assert stale.directive == RestartDirective(generation=1, version=5, registry=5)
 
 
 def _raise_503(request: urllib.request.Request, timeout: float) -> object:

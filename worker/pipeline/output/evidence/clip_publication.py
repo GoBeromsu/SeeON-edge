@@ -74,12 +74,20 @@ class ClipPublisher:
         self._validate_reservation(reservation)
         video_path = self._publish_media(reservation, artifact_path)
         if self._thumbnail_generator is not None:
-            thumbnail_path = self._thumbnail_generator.generate(
-                video_path,
-                reservation.final_dir / "thumbnail.jpg",
-                metadata.duration_s,
-            )
-            self._barrier(PublicationStage.THUMBNAIL_RENAMED, thumbnail_path)
+            try:
+                thumbnail_path = self._thumbnail_generator.generate(
+                    video_path,
+                    reservation.final_dir / "thumbnail.jpg",
+                    metadata.duration_s,
+                )
+            except Exception as exc:  # noqa: BLE001 - a thumbnail is optional evidence; the clip is not
+                LOGGER.warning(
+                    "thumbnail generation failed stage=thumbnail clip_id=%s exception_class=%s",
+                    reservation.clip_id,
+                    type(exc).__name__,
+                )
+            else:
+                self._barrier(PublicationStage.THUMBNAIL_RENAMED, thumbnail_path)
         manifest = finalize_ready_manifest(
             video_path=video_path,
             clip_id=reservation.clip_id,

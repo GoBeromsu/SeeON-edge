@@ -183,6 +183,7 @@ class BackendWorkerConfigPayload(BaseModel):
         return RestartDirective(
             generation=self.restart_epoch or 0,
             version=version,
+            registry=self.resolved_registry_version,
         )
 
     @property
@@ -315,6 +316,7 @@ class BackendWorkerConfigPayload(BaseModel):
                 )
                 for camera in self.resolved_cameras
             ),
+            registry_version=self.directive.registry,
             detection_windows=detection_windows,
         )
 

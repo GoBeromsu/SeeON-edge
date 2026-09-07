@@ -86,6 +86,7 @@ class PulledWorkerConfig:
     restart_epoch: int
     night_window: PulledNightWindow | None
     cameras: tuple[PulledCameraConfig, ...]
+    registry_version: int = 0
     # Per-domain detection windows, keyed by domain name (e.g. "bed_exit",
     # "fall"). ``night_window`` above is a deprecated alias kept in sync with
     # ``detection_windows.get("bed_exit")`` for old callers/workers.
@@ -104,10 +105,9 @@ class PulledWorkerConfig:
             restart_epoch=_require_int(data, "restart_epoch"),
             night_window=detection_windows.get("bed_exit"),
             cameras=tuple(
-                PulledCameraConfig.from_dict(item)
-                for item in raw_cameras
-                if isinstance(item, dict)
+                PulledCameraConfig.from_dict(item) for item in raw_cameras if isinstance(item, dict)
             ),
+            registry_version=_optional_nonnegative_int(data, "registry_version", default=0),
             detection_windows=detection_windows,
         )
 
@@ -115,9 +115,8 @@ class PulledWorkerConfig:
         return {
             "config_version": self.config_version,
             "restart_epoch": self.restart_epoch,
-            "night_window": (
-                None if self.night_window is None else self.night_window.as_dict()
-            ),
+            "registry_version": self.registry_version,
+            "night_window": (None if self.night_window is None else self.night_window.as_dict()),
             "cameras": [camera.as_dict() for camera in self.cameras],
             "detection_windows": {
                 domain: window.as_dict() for domain, window in self.detection_windows.items()
@@ -228,6 +227,15 @@ def _require_int(data: dict[str, object], key: str) -> int:
     # bool is an int subclass; reject it explicitly.
     if isinstance(value, bool) or not isinstance(value, int):
         raise TypeError(f"{key} must be an integer")
+    return value
+
+
+def _optional_nonnegative_int(data: dict[str, object], key: str, *, default: int) -> int:
+    value = data.get(key, default)
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise TypeError(f"{key} must be an integer")
+    if value < 0:
+        raise ValueError(f"{key} must be greater than or equal to 0")
     return value
 
 
