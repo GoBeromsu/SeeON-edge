@@ -132,7 +132,10 @@ def _onnxruntime_session_factory(model_path: str, providers: list[str]) -> _OrtS
         import onnxruntime
     except ImportError as exc:
         raise ModelLoadError("onnxruntime is required for bed segmentation ONNX model") from exc
-    return onnxruntime.InferenceSession(model_path, providers=providers)
+    options = onnxruntime.SessionOptions()
+    options.intra_op_num_threads = 1
+    options.inter_op_num_threads = 1
+    return onnxruntime.InferenceSession(model_path, sess_options=options, providers=providers)
 
 
 def _model_size(session: _OrtSession) -> int:
