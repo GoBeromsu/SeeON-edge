@@ -140,7 +140,7 @@ def test_flow_live_view_injects_bed_recognizer_and_recognize_request_reaches_it(
     serving = _ServingClient()
 
     class _ClipAnalysisSupervisor:
-        def __init__(self, _store_dir: Path, **kwargs: object) -> None:
+        def __init__(self, **kwargs: object) -> None:
             captured["clip_analysis_cpu"] = kwargs["cpu_index"]
 
         def status(self, _clip_id: str) -> object:
@@ -304,8 +304,8 @@ def test_live_view_analysis_lookup_uses_mount_root_not_active_subdirectory(
     )
 
     class _Supervisor:
-        def __init__(self, store_dir: Path, **_kwargs: object) -> None:
-            captured["store_dir"] = store_dir
+        def __init__(self, **_kwargs: object) -> None:
+            pass
 
         def trigger(
             self, _clip_id: str, clip_path: Path, *_args: object, **_kwargs: object
@@ -353,7 +353,7 @@ def test_live_view_analysis_lookup_uses_mount_root_not_active_subdirectory(
         )
         with urllib.request.urlopen(request, timeout=2) as response:
             assert response.status == 202
-        assert captured == {"store_dir": tmp_path, "clip_path": clip}
+        assert captured == {"clip_path": clip}
     finally:
         runtime.stop()
 

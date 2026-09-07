@@ -5,12 +5,9 @@ type AutoplayVideoProps = {
   className: string;
   onLoadedMetadata: (video: HTMLVideoElement) => void;
   onVideoElement?: (video: HTMLVideoElement | null) => void;
-  onPlaybackState?: (state: PlaybackState) => void;
 };
 
-export type PlaybackState = 'blocked' | 'failed' | 'ready';
-
-type PlaybackFailure = Exclude<PlaybackState, 'ready'> | null;
+type PlaybackFailure = 'blocked' | 'failed' | null;
 
 function classifyPlaybackFailure(error: unknown): Exclude<PlaybackFailure, null> {
   return error instanceof DOMException && error.name === 'NotAllowedError'
@@ -18,7 +15,7 @@ function classifyPlaybackFailure(error: unknown): Exclude<PlaybackFailure, null>
     : 'failed';
 }
 
-export function AutoplayVideo({ src, className, onLoadedMetadata, onVideoElement, onPlaybackState }: AutoplayVideoProps): JSX.Element {
+export function AutoplayVideo({ src, className, onLoadedMetadata, onVideoElement }: AutoplayVideoProps): JSX.Element {
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const [failure, setFailure] = useState<PlaybackFailure>(null);
 
@@ -32,21 +29,19 @@ export function AutoplayVideo({ src, className, onLoadedMetadata, onVideoElement
       () => {
         if (mounted) {
           setFailure(null);
-          onPlaybackState?.('ready');
         }
       },
       (error: unknown) => {
         if (mounted) {
           const failure = classifyPlaybackFailure(error);
           setFailure(failure);
-          onPlaybackState?.(failure);
         }
       },
     );
     return () => {
       mounted = false;
     };
-  }, [onPlaybackState, src]);
+  }, [src]);
 
   const retryPlayback = (): void => {
     const video = videoRef.current;
@@ -57,12 +52,10 @@ export function AutoplayVideo({ src, className, onLoadedMetadata, onVideoElement
     void video.play().then(
       () => {
         setFailure(null);
-        onPlaybackState?.('ready');
       },
       (error: unknown) => {
         const failure = classifyPlaybackFailure(error);
         setFailure(failure);
-        onPlaybackState?.(failure);
       },
     );
   };
@@ -82,13 +75,9 @@ export function AutoplayVideo({ src, className, onLoadedMetadata, onVideoElement
         preload="metadata"
         onError={() => {
           setFailure('failed');
-          onPlaybackState?.('failed');
         }}
         onLoadedData={() => setFailure(null)}
-        onPlay={() => {
-          setFailure(null);
-          onPlaybackState?.('ready');
-        }}
+        onPlay={() => setFailure(null)}
         onLoadedMetadata={(event) => onLoadedMetadata(event.currentTarget)}
       />
       {failure === 'blocked' ? (

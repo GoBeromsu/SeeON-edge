@@ -19,7 +19,19 @@ _WORKER_STATES = frozenset({"idle", "running", "available", "failed"})
 def assemble_clip_analysis_status(
     request: Request, clip_id: str, located: LocatedClip, store: ClipStore
 ) -> ClipAnalysisResponse:
-    served_media_sha256 = served_media_sha256_for(store, located)
+    try:
+        identity = store.open_located_playback_identity(located)
+    except (ValueError, FileNotFoundError):
+        served_media_sha256 = None
+        served_timing_identical = False
+    else:
+        try:
+            served_media_sha256 = identity.served_media_sha256
+            served_timing_identical = (
+                identity.served_kind == "original" or identity.served_pts_identical
+            )
+        finally:
+            identity.opened.handle.close()
     try:
         payloads = store.read_clip_analysis_candidates(located)
     except ValueError:
@@ -37,7 +49,7 @@ def assemble_clip_analysis_status(
             if digest is None or result.clip_sha256 != digest:
                 identity_mismatch = True
                 continue
-            if not served_timing_identical(store, located):
+            if not served_timing_identical:
                 return _unavailable(
                     served_media_sha256, "timing_unverified", timing_identical=False
                 )
@@ -76,35 +88,13 @@ def assemble_clip_analysis_status(
         reason is not None and (not isinstance(reason, str) or not reason)
     ):
         return _unavailable(served_media_sha256, "worker_unreachable")
-    if state_value == "available" and not served_timing_identical(store, located):
+    if state_value == "available" and not served_timing_identical:
         return _unavailable(served_media_sha256, "timing_unverified", timing_identical=False)
     return ClipAnalysisResponse(
         state=cast(Literal["idle", "running", "available", "failed"], state_value),
         served_media_sha256=served_media_sha256,
         reason=reason,
     )
-
-
-def served_timing_identical(store: ClipStore, located: LocatedClip) -> bool:
-    try:
-        identity = store.open_located_playback_identity(located)
-    except (ValueError, FileNotFoundError):
-        return False
-    try:
-        return identity.served_kind == "original" or identity.served_pts_identical
-    finally:
-        identity.opened.handle.close()
-
-
-def served_media_sha256_for(store: ClipStore, located: LocatedClip) -> str | None:
-    try:
-        identity = store.open_located_playback_identity(located)
-    except (ValueError, FileNotFoundError):
-        return None
-    try:
-        return identity.served_media_sha256
-    finally:
-        identity.opened.handle.close()
 
 
 def _unavailable(

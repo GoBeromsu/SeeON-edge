@@ -148,14 +148,14 @@ describe('api client contracts', () => {
     await expect(triggerClipAnalysis('clip-1')).rejects.toThrow('Invalid served media digest');
   });
 
-  it('returns the cancellation acknowledgement envelope', async () => {
+  it('accepts an empty cancellation response', async () => {
     vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
       ok: true,
-      status: 200,
-      json: async () => ({ cancelled: true }),
+      status: 204,
+      json: vi.fn(),
     }));
 
-    await expect(cancelClipAnalysis('clip-1')).resolves.toEqual({ cancelled: true });
+    await expect(cancelClipAnalysis('clip-1')).resolves.toBeUndefined();
   });
 
   it('surfaces the 409 duplicate_camera body through requestJson so the caller can read it', async () => {

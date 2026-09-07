@@ -124,9 +124,3 @@ class ClipAnalysisResponse(BaseModel):
     reason: str | None = Field(default=None, min_length=1)
     served_timing_identical: bool | None = Field(default=None)
     result: dict[str, object] | None = Field(default=None)
-
-
-class ClipAnalysisCancelResponse(BaseModel):
-    model_config: ClassVar[ConfigDict] = ConfigDict(extra="forbid")
-
-    cancelled: bool = Field(...)

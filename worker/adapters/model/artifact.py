@@ -11,6 +11,17 @@ _DIGEST_LENGTH: Final = 64
 _READ_CHUNK_BYTES: Final = 1024 * 1024
 
 
+def read_artifact_digest_sidecar(path: Path) -> str:
+    sidecar = path.with_name(f"{path.name}.sha256")
+    try:
+        digest = sidecar.read_text(encoding="ascii")
+    except OSError as exc:
+        raise ModelLoadError(f"cannot read model digest sidecar: {sidecar}") from exc
+    if not digest.endswith("\n") or digest.count("\n") != 1:
+        raise ModelLoadError("model digest sidecar must contain one SHA-256 digest")
+    return digest[:-1]
+
+
 def artifact_digest(path: Path) -> str:
     digest = hashlib.sha256()
     try:
@@ -37,4 +48,4 @@ def verify_artifact_digest(path: Path, expected: str | None) -> str:
     return actual
 
 
-__all__ = ["artifact_digest", "verify_artifact_digest"]
+__all__ = ["artifact_digest", "read_artifact_digest_sidecar", "verify_artifact_digest"]

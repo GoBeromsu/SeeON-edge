@@ -21,7 +21,6 @@ from backend.app.features.clips.descriptor_files import (
 from backend.app.features.clips.manifest import (
     ClipManifest,
     discover_manifest_paths,
-    is_valid_clip_id,
     read_manifest_file,
     video_file_from_dir,
 )
@@ -31,6 +30,7 @@ from backend.app.features.clips.thumbnail_files import (
     read_regular_file,
 )
 from backend.app.shared.state_dir import resolve_state_dir
+from shared.events.clip_identity import is_clip_id
 
 CLIP_STORE_DIR_ENV = "CLIP_STORE_DIR"
 API_LABEL_STORE_ENV = "API_LABEL_STORE"
@@ -161,7 +161,7 @@ class ClipStore:
             except OSError:
                 continue
             for entry in entries:
-                if not is_valid_clip_id(entry.name):
+                if not is_clip_id(entry.name):
                     continue
                 manifest_path = clips_root / entry.name / "manifest.json"
                 try:
@@ -194,7 +194,7 @@ class ClipStore:
         return None if located is None else located.manifest
 
     def locate_manifest(self, clip_id: str) -> LocatedClip | None:
-        if not is_valid_clip_id(clip_id):
+        if not is_clip_id(clip_id):
             raise ValueError("invalid clip_id")
         located: list[LocatedClip] = []
         for clips_root in bounded_clip_roots(self.root):
@@ -212,23 +212,8 @@ class ClipStore:
             return None
         return located[0]
 
-    def thumbnail_available(self, clip: str | LocatedClip) -> bool:
-        if isinstance(clip, LocatedClip):
-            return contained_thumbnail_path(self.root, clip.manifest_path) is not None
-        clip_id = clip
-        if not is_valid_clip_id(clip_id):
-            raise ValueError("invalid clip_id")
-        manifest_paths = tuple(
-            clips_root / clip_id / "manifest.json"
-            for clips_root in bounded_clip_roots(self.root)
-            if (clips_root / clip_id / "manifest.json").is_file()
-        )
-        if len(manifest_paths) > 1:
-            raise DuplicateClipIdError(clip_id, manifest_paths)
-        return (
-            bool(manifest_paths)
-            and contained_thumbnail_path(self.root, manifest_paths[0]) is not None
-        )
+    def thumbnail_available(self, located: LocatedClip) -> bool:
+        return contained_thumbnail_path(self.root, located.manifest_path) is not None
 
     def read_thumbnail(self, located: LocatedClip) -> bytes:
         thumbnail_path = located.manifest_path.parent / "thumbnail.jpg"
@@ -245,10 +230,6 @@ class ClipStore:
     def open_located_video(self, located: LocatedClip) -> OpenedRegularFile:
         path = self.resolve_located_video_path(located)
         return open_contained_regular_file(self.root, path)
-
-    def open_located_playback(self, located: LocatedClip) -> OpenedRegularFile:
-        """Open a verified browser-safe rendition, or the immutable original."""
-        return self.open_located_playback_identity(located).opened
 
     def open_located_playback_identity(self, located: LocatedClip) -> OpenedPlaybackIdentity:
         """Open served media and expose its immutable-source and timing identity."""
@@ -272,14 +253,6 @@ class ClipStore:
             attestation.rendition_sha256,
             attestation.pts_identical,
         )
-
-    def served_media_sha256(self, located: LocatedClip) -> str | None:
-        """Return the digest of the bytes the video route would serve now."""
-        identity = self.open_located_playback_identity(located)
-        try:
-            return identity.served_media_sha256
-        finally:
-            identity.opened.handle.close()
 
     def playback_codec(self, located: LocatedClip) -> str:
         """Return the codec an operator will receive from the video endpoint."""
@@ -483,5 +456,4 @@ __all__ = [
     "LocatedClip",
     "ScannedManifest",
     "default_label_store_dir",
-    "is_valid_clip_id",
 ]

@@ -15,8 +15,6 @@ from worker.pipeline.output.evidence.clip_analysis_artifact import (
     ClipAnalysisArtifactError,
     ClipAnalysisArtifactIdentity,
     artifact_path,
-    list_published,
-    load_clip_analysis,
     publish_clip_analysis,
 )
 
@@ -57,7 +55,6 @@ def test_publish_once_and_load_identity_bound_artifact(tmp_path: Path) -> None:
     second = publish_clip_analysis(clip, scratch, identity)
 
     assert first == second == artifact_path(clip, identity)
-    assert load_clip_analysis(clip, identity) is not None
     assert first.read_bytes() == _payload(identity)
     assert (
         first.with_name(f"{first.name}.sha256").read_text().strip()
@@ -72,7 +69,6 @@ def test_identity_mismatch_is_rejected_and_never_served(tmp_path: Path) -> None:
     scratch.write_bytes(_payload(identity))
     publish_clip_analysis(clip, scratch, identity)
 
-    assert load_clip_analysis(clip, _identity("pyav-16/hevc")) is None
     with pytest.raises(ClipAnalysisArtifactError, match="identity_mismatch"):
         publish_clip_analysis(clip, scratch, _identity("pyav-16/hevc"))
 
@@ -100,7 +96,6 @@ def test_sidecarless_matching_target_is_repaired_without_rewrite(
 
     assert publish_clip_analysis(clip, scratch, identity) == target
     assert writes == [target.with_name(f"{target.name}.sha256")]
-    assert list_published(tmp_path)[0].path == target
 
 
 def test_corrupt_target_is_quarantined_before_republish(tmp_path: Path) -> None:
@@ -114,7 +109,6 @@ def test_corrupt_target_is_quarantined_before_republish(tmp_path: Path) -> None:
     publish_clip_analysis(clip, scratch, identity)
 
     assert target.read_bytes() == _payload(identity)
-    assert load_clip_analysis(clip, identity) is not None
     quarantined = tuple(tmp_path.glob(f"{target.name}.corrupt-*"))
     assert len(quarantined) == 1
     assert quarantined[0].read_bytes() == b"corrupt"
@@ -136,10 +130,3 @@ def test_verified_different_target_is_identity_collision_and_never_overwritten(
         publish_clip_analysis(clip, scratch, identity)
 
     assert target.read_bytes() == foreign
-
-
-def test_list_published_ignores_sidecarless_target(tmp_path: Path) -> None:
-    identity = _identity()
-    artifact_path(tmp_path / "clip.mp4", identity).write_bytes(_payload(identity))
-
-    assert list_published(tmp_path) == ()

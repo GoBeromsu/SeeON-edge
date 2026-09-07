@@ -868,7 +868,6 @@ class WorkerRuntime:
         # subdirectories. New recordings still use `_resolved_clip_store_dir`.
         clip_store_dir = self._clip_store_dir
         supervisor = ClipAnalysisSupervisor(
-            clip_store_dir,
             python_executable=sys.executable,
             # The same digest-verified pose ONNX the Flow engine was built from.
             pose_model_path=Path(self._env["ML_WORKER_FLOW_ONNX_PATH"]),

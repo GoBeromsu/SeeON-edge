@@ -108,9 +108,6 @@ export type ClipAnalysisStatus = {
   result?: ClipAnalysisResult;
 };
 
-export type ClipAnalysisCancelResult = {
-  cancelled: boolean;
-};
 
 /** A single [x, y] vertex of a bed-zone polygon, in the coordinate space of image_width x image_height. */
 export type BedZonePoint = [number, number];

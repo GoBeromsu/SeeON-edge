@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import logging
 import os
-import re
 import sqlite3
 import stat
 from dataclasses import dataclass
@@ -39,6 +38,7 @@ from backend.app.features.relay.auth import authorize_relay as _authorize
 from backend.app.features.relay.router import RELAY_TOKEN_HEADER, _camera_binding
 from backend.app.features.runtime_settings.store import get_runtime_settings_store
 from backend.app.shared.backend_client_bundle import backend_client_bundle
+from shared.events.clip_identity import is_clip_id
 from shared.events.evidence_export_client import ReadyClipRequest, UnavailableClipRequest
 from shared.events.evidence_export_contract import (
     BackendCapabilities,
@@ -51,7 +51,6 @@ from shared.events.evidence_export_contract import (
 _LOGGER = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/relay", tags=["relay"])
-CLIP_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 
 
 class CapabilityResponse(BaseModel):
@@ -199,7 +198,7 @@ def export_clip(
     relay_token: Annotated[str | None, Header(alias=RELAY_TOKEN_HEADER)] = None,
 ) -> ClipReceiptResponse:
     _authorize(request, relay_token)
-    if not _enabled(request) or CLIP_ID_PATTERN.fullmatch(clip_id) is None:
+    if not _enabled(request) or not is_clip_id(clip_id):
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="clip export unavailable")
     binding = _camera_binding(request, payload.camera_id, payload.facility_id)
     bound_camera_id = binding.get("backend_camera_id")

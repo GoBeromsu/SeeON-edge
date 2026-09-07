@@ -84,6 +84,10 @@ def read_video_timing(path: Path) -> VideoTiming:
 
 def schedule_playback_rendition(clip_path: Path, clip_id: str) -> Future[Path | None]:
     """Queue view-only transcode work outside evidence publication and relay delivery."""
+    from worker.pipeline.output.evidence.playback_rendition_publish import (
+        write_playback_rendition,
+    )
+
     future = _PLAYBACK_EXECUTOR.submit(write_playback_rendition, clip_path)
     future.add_done_callback(lambda completed: _log_failure(completed, clip_id))
     return future
@@ -111,21 +115,6 @@ def _require_pts(pts: int | None) -> int:
     return pts
 
 
-def write_playback_rendition(
-    clip_path: Path,
-    *,
-    run: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run,
-    timeout_s: float = 120.0,
-    read_timing: Callable[[Path], VideoTiming] | None = None,
-) -> Path | None:
-    """Publish a digest-addressed rendition bundle beside a sealed clip."""
-    from worker.pipeline.output.evidence.playback_rendition_publish import (
-        write_playback_rendition as publish,
-    )
-
-    return publish(clip_path, run=run, timeout_s=timeout_s, read_timing=read_timing)
-
-
 __all__ = [
     "PLAYBACK_MANIFEST_NAME",
     "PLAYBACK_RENDITION_PREFIX",
@@ -134,5 +123,4 @@ __all__ = [
     "probe_video_codec",
     "read_video_timing",
     "schedule_playback_rendition",
-    "write_playback_rendition",
 ]

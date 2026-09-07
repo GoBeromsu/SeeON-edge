@@ -10,9 +10,8 @@ import numpy as np
 from numpy.typing import NDArray
 
 from contracts.runner import Image
-from worker.adapters.model.artifact import verify_artifact_digest
+from worker.adapters.model.artifact import read_artifact_digest_sidecar, verify_artifact_digest
 from worker.adapters.model.errors import ModelLoadError
-from worker.adapters.model.ort_bed_seg import _read_digest_sidecar
 
 _CPU_PROVIDER = ("CPUExecutionProvider",)
 _NET_SIZE = 640
@@ -45,7 +44,7 @@ class OrtClipPoseRunner:
         if not self._model_path.is_file():
             raise ModelLoadError("clip pose ONNX model does not exist")
         self.artifact_digest = verify_artifact_digest(
-            self._model_path, _read_digest_sidecar(self._model_path)
+            self._model_path, read_artifact_digest_sidecar(self._model_path)
         )
         if session_factory is None:
             session_factory = _onnxruntime_session_factory

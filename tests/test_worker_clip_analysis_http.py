@@ -130,7 +130,8 @@ def test_clip_analysis_trigger_status_and_cancel(tmp_path: Path) -> None:
         with urllib.request.urlopen(
             _request(base, "/clips/camera-20260101-abc/analysis/cancel", {}), timeout=1
         ) as response:
-            assert json.loads(response.read()) == {"cancelled": True}
+            assert response.status == 204
+            assert response.read() == b""
         assert supervisor.cancelled == ["camera-20260101-abc"]
     finally:
         server.stop()

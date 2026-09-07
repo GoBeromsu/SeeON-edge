@@ -13,8 +13,8 @@ from worker.pipeline.output.evidence.playback_rendition import (
     PLAYBACK_RENDITION_PREFIX,
     PlaybackRenditionError,
     VideoTiming,
-    write_playback_rendition,
 )
+from worker.pipeline.output.evidence.playback_rendition_publish import write_playback_rendition
 from worker.tools import clip_playback_backfill
 
 

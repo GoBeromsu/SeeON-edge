@@ -10,18 +10,19 @@ import re
 from collections.abc import Sequence
 from pathlib import Path
 
+from shared.events.clip_identity import is_clip_id
 from worker.adapters.media.ffmpeg_thumbnail import (
     FfmpegThumbnailGenerator,
     ThumbnailUnavailable,
 )
-from worker.pipeline.output.evidence.clip_identity import is_clip_id
+from worker.pipeline.output.evidence.clip_identity import bounded_clip_roots
 from worker.pipeline.output.evidence.playback_rendition import (
     PLAYBACK_MANIFEST_NAME,
     PLAYBACK_RENDITION_PREFIX,
     PlaybackRenditionError,
     probe_video_codec,
-    write_playback_rendition,
 )
+from worker.pipeline.output.evidence.playback_rendition_publish import write_playback_rendition
 
 LOGGER = logging.getLogger(__name__)
 _SHA256_RE = re.compile(r"[0-9a-f]{64}\Z")
@@ -133,7 +134,7 @@ def _valid_attestation(
 
 def _clip_paths(clip_store: Path) -> tuple[Path, ...]:
     paths: dict[str, Path] = {}
-    for clips_root in _bounded_clip_roots(clip_store):
+    for clips_root in bounded_clip_roots(clip_store):
         try:
             candidates = tuple(clips_root.iterdir())
         except OSError:
@@ -148,31 +149,6 @@ def _clip_paths(clip_store: Path) -> tuple[Path, ...]:
             ):
                 paths[candidate.name] = clip_path
     return tuple(sorted(paths.values()))
-
-
-def _bounded_clip_roots(clip_store: Path) -> tuple[Path, ...]:
-    roots = [clip_store / "clips"]
-    try:
-        first_level = tuple(clip_store.iterdir())
-    except OSError:
-        return tuple(roots)
-    for first in first_level:
-        if first.name == "clips" or not first.is_dir():
-            continue
-        first_clips = first / "clips"
-        if first_clips.is_dir():
-            roots.append(first_clips)
-        try:
-            second_level = tuple(first.iterdir())
-        except OSError:
-            continue
-        for second in second_level:
-            if second.name == "clips" or not second.is_dir():
-                continue
-            second_clips = second / "clips"
-            if second_clips.is_dir():
-                roots.append(second_clips)
-    return tuple(roots)
 
 
 def _sha256(path: Path) -> str:

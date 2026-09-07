@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { normalizeClipAnalysisCancelResult, normalizeClipAnalysisStatus } from '@/shared/api/clipAnalysisNormalizer';
+import { normalizeClipAnalysisStatus } from '@/shared/api/clipAnalysisNormalizer';
 
 const available = {
   state: 'available',
@@ -32,11 +32,6 @@ describe('normalizeClipAnalysisStatus', () => {
       reason: 'timing_unverified',
       served_media_sha256: 'e'.repeat(64),
     })).toEqual({ state: 'unavailable', reason: 'timing_unverified', served_media_sha256: 'e'.repeat(64) });
-  });
-
-  it('normalizes the cancellation envelope separately from analysis status', () => {
-    expect(normalizeClipAnalysisCancelResult({ cancelled: false })).toEqual({ cancelled: false });
-    expect(() => normalizeClipAnalysisCancelResult({ state: 'running' })).toThrow();
   });
 
   it.each([

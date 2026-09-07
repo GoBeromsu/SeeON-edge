@@ -67,6 +67,10 @@ class _WorkerHandler(BaseHTTPRequestHandler):
         self._respond(self.server.response_status, self.server.response_body)
 
     def _respond(self, response_status: int, response_body: dict[str, object]) -> None:
+        if response_status == 204:
+            self.send_response(response_status)
+            self.end_headers()
+            return
         body = json.dumps(response_body).encode()
         self.send_response(response_status)
         self.send_header("Content-Type", "application/json")
@@ -359,7 +363,7 @@ def test_worker_states_include_served_media_identity(
     assert response.json()["served_media_sha256"] == CLIP_SHA256
 
 
-def test_cancel_relays_cancelled_envelope_and_worker_auth_is_unreachable(
+def test_cancel_relays_empty_response_and_worker_auth_is_unreachable(
     _environment: Path, worker_server: _WorkerServer, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     _write_clip(_environment)
@@ -367,12 +371,13 @@ def test_cancel_relays_cancelled_envelope_and_worker_auth_is_unreachable(
     get_settings.cache_clear()
     with TestClient(create_app(lifespan=no_lifespan)) as client:
         _login(client)
-        worker_server.response_status = 200
-        worker_server.response_body = {"cancelled": True}
+        worker_server.response_status = 204
+        worker_server.response_body = {}
         cancelled = client.post(f"/api/v1/clips/{CLIP_ID}/analysis/cancel")
         worker_server.response_status = 403
         unreachable = client.get(f"/api/v1/clips/{CLIP_ID}/analysis")
-    assert cancelled.json() == {"cancelled": True}
+    assert cancelled.status_code == 204
+    assert cancelled.content == b""
     assert unreachable.status_code == 200
     assert unreachable.json()["reason"] == "worker_unreachable"
 

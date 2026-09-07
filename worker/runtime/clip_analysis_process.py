@@ -151,7 +151,9 @@ def validate_sha(value: str) -> None:
 
 
 def model_digest(path: Path) -> str:
-    return path.with_name(f"{path.name}.sha256").read_text(encoding="ascii").strip()
+    from worker.adapters.model.artifact import read_artifact_digest_sidecar
+
+    return read_artifact_digest_sidecar(path)
 
 
 def identity_matches(job: ClipAnalysisJob, result: ClipAnalysisResult) -> bool:

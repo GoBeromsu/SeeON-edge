@@ -28,10 +28,6 @@ class ClipAnalysisSupervisorError(RuntimeError):
     """A supervisor operation could not safely start."""
 
 
-class ClipAnalysisLaunchError(ClipAnalysisSupervisorError):
-    """The child cannot be protected from orphaning."""
-
-
 @dataclass(frozen=True, slots=True)
 class ClipAnalysisStatus:
     state: str
@@ -41,7 +37,6 @@ class ClipAnalysisStatus:
 class ClipAnalysisSupervisor:
     def __init__(
         self,
-        store_dir: Path,
         *,
         python_executable: str,
         pose_model_path: Path,
@@ -54,17 +49,16 @@ class ClipAnalysisSupervisor:
         if deadline_s <= 0:
             raise ValueError("deadline_s must be positive")
         if cpu_index is None:
-            raise ClipAnalysisLaunchError("clip_analysis_cpu_required")
+            raise ClipAnalysisSupervisorError("clip_analysis_cpu_required")
         available = os.sched_getaffinity(0)
         if len(available) <= 1:
-            raise ClipAnalysisLaunchError("clip_analysis_cpu_unavailable")
+            raise ClipAnalysisSupervisorError("clip_analysis_cpu_unavailable")
         if cpu_index not in available:
-            raise ClipAnalysisLaunchError("clip_analysis_cpu_invalid")
+            raise ClipAnalysisSupervisorError("clip_analysis_cpu_invalid")
         try:
             require_pdeathsig()
         except ClipAnalysisPdeathsigUnavailable as exc:
-            raise ClipAnalysisLaunchError("pdeathsig_unavailable") from exc
-        self._store_dir = store_dir
+            raise ClipAnalysisSupervisorError("pdeathsig_unavailable") from exc
         self._python = python_executable
         self._pose_model = pose_model_path
         self._bed_model = bed_model_path
@@ -262,7 +256,6 @@ def _pre_admission(
 
 
 __all__ = [
-    "ClipAnalysisLaunchError",
     "ClipAnalysisStatus",
     "ClipAnalysisSupervisor",
     "ClipAnalysisSupervisorError",

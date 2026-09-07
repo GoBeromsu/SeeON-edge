@@ -118,7 +118,6 @@ def test_real_request_round_trip_preserves_canonical_clip_id(tmp_path: Path) -> 
         return subprocess.Popen([sys.executable, "-c", "import time; time.sleep(10)"], **kwargs)
 
     supervisor = ClipAnalysisSupervisor(
-        tmp_path,
         python_executable=sys.executable,
         pose_model_path=tmp_path / "pose.onnx",
         bed_model_path=tmp_path / "bed.onnx",
@@ -146,7 +145,6 @@ def test_second_trigger_is_refused_and_slot_releases_after_publish(tmp_path: Pat
     bed_sha = _model(tmp_path / "bed.onnx", b"bed")
     pids: list[int] = []
     supervisor = ClipAnalysisSupervisor(
-        tmp_path,
         python_executable=sys.executable,
         pose_model_path=tmp_path / "pose.onnx",
         bed_model_path=tmp_path / "bed.onnx",
@@ -171,7 +169,6 @@ def test_timeout_kills_and_reaps_child(tmp_path: Path) -> None:
     _model(tmp_path / "bed.onnx", b"bed")
     pids: list[int] = []
     supervisor = ClipAnalysisSupervisor(
-        tmp_path,
         python_executable=sys.executable,
         pose_model_path=tmp_path / "pose.onnx",
         bed_model_path=tmp_path / "bed.onnx",
@@ -208,7 +205,6 @@ def test_timeout_kills_group_and_grandchild_with_zero_survivors(tmp_path: Path) 
         return subprocess.Popen([sys.executable, "-c", code], **kwargs)
 
     supervisor = ClipAnalysisSupervisor(
-        tmp_path,
         python_executable=sys.executable,
         pose_model_path=tmp_path / "pose.onnx",
         bed_model_path=tmp_path / "bed.onnx",
@@ -237,7 +233,6 @@ def test_cancel_kills_group_reaps_and_releases_slot_with_zero_survivors(tmp_path
     _model(tmp_path / "bed.onnx", b"bed")
     pids: list[int] = []
     supervisor = ClipAnalysisSupervisor(
-        tmp_path,
         python_executable=sys.executable,
         pose_model_path=tmp_path / "pose.onnx",
         bed_model_path=tmp_path / "bed.onnx",
@@ -271,7 +266,6 @@ def test_completion_after_deadline_is_timeout_and_never_publishes(
     times = iter((0.0, 0.0, 2.0))
     monkeypatch.setattr("worker.runtime.clip_analysis_supervisor.monotonic", lambda: next(times))
     supervisor = ClipAnalysisSupervisor(
-        tmp_path,
         python_executable=sys.executable,
         pose_model_path=tmp_path / "pose.onnx",
         bed_model_path=tmp_path / "bed.onnx",
@@ -302,7 +296,6 @@ def test_launch_failure_keeps_supervisor_alive_and_releases_slot(tmp_path: Path)
         raise OSError("launch_failed")
 
     supervisor = ClipAnalysisSupervisor(
-        tmp_path,
         python_executable=sys.executable,
         pose_model_path=tmp_path / "pose.onnx",
         bed_model_path=tmp_path / "bed.onnx",
@@ -327,7 +320,6 @@ def test_teardown_failure_closes_admission(tmp_path: Path, monkeypatch: pytest.M
     bed_sha = _model(tmp_path / "bed.onnx", b"bed")
     pids: list[int] = []
     supervisor = ClipAnalysisSupervisor(
-        tmp_path,
         python_executable=sys.executable,
         pose_model_path=tmp_path / "pose.onnx",
         bed_model_path=tmp_path / "bed.onnx",
@@ -355,7 +347,6 @@ def test_no_job_state_marker_while_active_or_after_teardown(tmp_path: Path) -> N
     _model(tmp_path / "bed.onnx", b"bed")
     pids: list[int] = []
     supervisor = ClipAnalysisSupervisor(
-        tmp_path,
         python_executable=sys.executable,
         pose_model_path=tmp_path / "pose.onnx",
         bed_model_path=tmp_path / "bed.onnx",

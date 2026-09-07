@@ -1,4 +1,4 @@
-import type { ClipAnalysisBedGeometry, ClipAnalysisBox, ClipAnalysisCancelResult, ClipAnalysisFrame, ClipAnalysisResult, ClipAnalysisStatus } from '@/shared/api/types';
+import type { ClipAnalysisBedGeometry, ClipAnalysisBox, ClipAnalysisFrame, ClipAnalysisResult, ClipAnalysisStatus } from '@/shared/api/types';
 import { isRecord } from '@/shared/api/normalizerFields';
 
 function rejectUnknown(record: Record<string, unknown>, allowed: readonly string[]): void {
@@ -88,11 +88,4 @@ export function normalizeClipAnalysisStatus(value: unknown): ClipAnalysisStatus 
   if ('served_timing_identical' in value || 'result' in value) throw new Error('Unexpected nonavailable clip analysis detail');
   if (typeof value.reason === 'string') return { state: value.state, reason: value.reason, served_media_sha256: value.served_media_sha256 };
   return { state: value.state, served_media_sha256: value.served_media_sha256 };
-}
-
-export function normalizeClipAnalysisCancelResult(value: unknown): ClipAnalysisCancelResult {
-  if (!isRecord(value)) throw new Error('Invalid clip analysis cancellation');
-  rejectUnknown(value, ['cancelled']);
-  if (typeof value.cancelled !== 'boolean') throw new Error('Invalid clip analysis cancellation');
-  return { cancelled: value.cancelled };
 }

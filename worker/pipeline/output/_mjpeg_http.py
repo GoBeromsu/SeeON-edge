@@ -22,6 +22,7 @@ from shared.events.replay_wire import ReplayWireError, decode_replay_trace
 from worker.interfaces.clip_analysis import ClipAnalysisSupervisor
 from worker.interfaces.fall_model import FallV2ModelProtocol
 from worker.pipeline.output._clip_analysis_http import (
+    MAX_ANALYSIS_BODY_BYTES,
     clip_analysis_path,
 )
 from worker.pipeline.output._clip_analysis_http import (
@@ -162,13 +163,20 @@ def build_http_server(
             path = urlsplit(self.path).path
             analysis = clip_analysis_path(path)
             if analysis is not None:
+                authorized = _authorized_probe(self.headers.get(RELAY_TOKEN_HEADER), probe_token)
+                body = (
+                    self._read_json_object(MAX_ANALYSIS_BODY_BYTES)
+                    if authorized and analysis[1] != "cancel"
+                    else None
+                )
                 handle_clip_analysis_post(
                     self,
                     analysis[0],
                     analysis[1],
                     store_dir=clip_store_dir,
                     supervisor=clip_analysis_supervisor,
-                    authorized=_authorized_probe(self.headers.get(RELAY_TOKEN_HEADER), probe_token),
+                    authorized=authorized,
+                    body=body,
                 )
                 return
             if path == REPLAY_PATH:

@@ -7,9 +7,10 @@ from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler
 from pathlib import Path
 
+from shared.events.clip_identity import is_clip_id
 from worker.adapters.model.clip_reanalysis import ClipAnalysisRejected
 from worker.interfaces.clip_analysis import ClipAnalysisSupervisor
-from worker.pipeline.output.evidence.clip_identity import is_clip_id
+from worker.pipeline.output.evidence.clip_identity import bounded_clip_roots
 from worker.pipeline.output.evidence.evidence_manifest import (
     ClipEvidenceError,
     parse_manifest_content,
@@ -53,6 +54,7 @@ def handle_post(
     store_dir: Path,
     supervisor: ClipAnalysisSupervisor,
     authorized: bool,
+    body: dict[str, object] | None,
 ) -> None:
     if not authorized:
         handler.send_error(HTTPStatus.FORBIDDEN)
@@ -61,10 +63,19 @@ def handle_post(
         handler.send_error(HTTPStatus.BAD_REQUEST)
         return
     if action == "cancel":
-        _write_json(handler, HTTPStatus.OK, {"cancelled": supervisor.cancel(clip_id)})
+        supervisor.cancel(clip_id)
+        handler.send_response(HTTPStatus.NO_CONTENT)
+        handler.end_headers()
         return
-    clip_sha256 = _read_clip_sha256(handler)
-    if clip_sha256 is None:
+    if body is None or set(body) != {"clip_sha256"}:
+        handler.send_error(HTTPStatus.BAD_REQUEST)
+        return
+    clip_sha256 = body["clip_sha256"]
+    if (
+        not isinstance(clip_sha256, str)
+        or len(clip_sha256) != 64
+        or any(character not in "0123456789abcdef" for character in clip_sha256)
+    ):
         handler.send_error(HTTPStatus.BAD_REQUEST)
         return
     try:
@@ -106,40 +117,14 @@ def handle_post(
     _write_json(handler, HTTPStatus.ACCEPTED, {"state": "running"})
 
 
-def _read_clip_sha256(handler: BaseHTTPRequestHandler) -> str | None:
-    raw_length = handler.headers.get("Content-Length")
-    if raw_length is None:
-        return None
-    try:
-        length = int(raw_length)
-    except ValueError:
-        return None
-    if length <= 0 or length > MAX_ANALYSIS_BODY_BYTES:
-        return None
-    try:
-        payload: object = json.loads(handler.rfile.read(length).decode("utf-8"))
-    except (UnicodeDecodeError, json.JSONDecodeError):
-        return None
-    if not isinstance(payload, dict) or set(payload) != {"clip_sha256"}:
-        return None
-    sha256 = payload["clip_sha256"]
-    if (
-        not isinstance(sha256, str)
-        or len(sha256) != 64
-        or any(character not in "0123456789abcdef" for character in sha256)
-    ):
-        return None
-    return sha256
-
-
 def _manifest_facts(clip_path: Path) -> tuple[str, int, int, int, int] | None:
     try:
-        manifest, _, payload = parse_manifest_content(clip_path.with_name("manifest.json"))
+        manifest, _, _ = parse_manifest_content(clip_path.with_name("manifest.json"))
     except ClipEvidenceError:
         return None
     if not isinstance(manifest, ReadyClipManifest) or manifest.clip_id != clip_path.parent.name:
         return None
-    dimensions = _manifest_dimensions(manifest, payload)
+    dimensions = _manifest_dimensions(manifest)
     if dimensions is None:
         dimensions = _probe_dimensions(clip_path)
     if dimensions is None:
@@ -150,7 +135,7 @@ def _manifest_facts(clip_path: Path) -> tuple[str, int, int, int, int] | None:
 
 def _locate_clip(store_dir: Path, clip_id: str) -> Path | None:
     candidates: list[Path] = []
-    for clips_root in _bounded_clip_roots(store_dir):
+    for clips_root in bounded_clip_roots(store_dir):
         clip_path = clips_root / clip_id / "clip.mp4"
         if not clip_path.is_file() or _manifest_facts(clip_path) is None:
             continue
@@ -160,45 +145,7 @@ def _locate_clip(store_dir: Path, clip_id: str) -> Path | None:
     return candidates[0] if candidates else None
 
 
-def _bounded_clip_roots(store_dir: Path) -> tuple[Path, ...]:
-    roots = [store_dir / "clips"]
-    try:
-        first_level = tuple(store_dir.iterdir())
-    except OSError:
-        return tuple(roots)
-    for first in first_level:
-        if first.name == "clips" or not first.is_dir():
-            continue
-        first_clips = first / "clips"
-        if first_clips.is_dir():
-            roots.append(first_clips)
-        try:
-            second_level = tuple(first.iterdir())
-        except OSError:
-            continue
-        for second in second_level:
-            if second.name == "clips" or not second.is_dir():
-                continue
-            second_clips = second / "clips"
-            if second_clips.is_dir():
-                roots.append(second_clips)
-    return tuple(roots)
-
-
-def _manifest_dimensions(
-    manifest: ReadyClipManifest, payload: dict[str, object]
-) -> tuple[int, int] | None:
-    width = payload.get("width")
-    height = payload.get("height")
-    if (
-        isinstance(width, int)
-        and not isinstance(width, bool)
-        and width > 0
-        and isinstance(height, int)
-        and not isinstance(height, bool)
-        and height > 0
-    ):
-        return width, height
+def _manifest_dimensions(manifest: ReadyClipManifest) -> tuple[int, int] | None:
     if manifest.source_media is None:
         return None
     for stream in manifest.source_media.streams:

@@ -133,10 +133,6 @@ def read_manifest_file(path: Path) -> ClipManifest | None:
     return _manifest_from_mapping(parsed)
 
 
-def is_valid_clip_id(value: str) -> bool:
-    return is_clip_id(value)
-
-
 def video_file_from_dir(directory: Path, clip_id: str) -> Path:
     preferred = [
         directory / f"{clip_id}.mp4",
@@ -170,7 +166,7 @@ def _manifest_from_mapping(data: Mapping[str, JsonValue]) -> ClipManifest | None
     duration_s_raw = data.get("duration_s")
     if (
         not all((clip_id, camera_id, event_ref, started_at))
-        or not is_valid_clip_id(clip_id)
+        or not is_clip_id(clip_id)
         or (data.get("detected_at") is not None and detected_at is None)
     ):
         return None
@@ -288,7 +284,6 @@ __all__ = [
     "ClipManifest",
     "ExtensionContributor",
     "discover_manifest_paths",
-    "is_valid_clip_id",
     "read_manifest_file",
     "video_file_from_dir",
 ]

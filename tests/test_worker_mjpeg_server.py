@@ -119,24 +119,6 @@ def _assert_forbidden(request: urllib.request.Request) -> bytes:
     raise AssertionError("expected 403 Forbidden")  # pragma: no cover
 
 
-# worker's MjpegServer takes an injected `probe` callable (worker/pipeline/
-# output/mjpeg_server.py:36-52) instead of owning an internal RTSP-probing
-# helper wired to the legacy sources/probe module's probe_first_frame. The legacy
-# test_mjpeg_probe_response_keeps_selected_backend monkeypatched that internal
-# helper (edge/runtime/mjpeg_server.py:268-275); there is no worker-side
-# equivalent to monkeypatch because backend-selection is now the injected
-# probe's responsibility, decoupled from this module entirely (see
-# start_optional_mjpeg_server's `probe` parameter). That assertion is
-# impossible-with-reason here; RTSP-backend-selection coverage belongs to the
-# camera-probe/ingest layer, not this HTTP-server module.
-#
-# The buffer-level "camera-keyed, non-consuming" assertion
-# (test_mjpeg_buffer_is_camera_keyed_non_consuming) is superseded by
-# tests/test_runtime_latest_frame.py::test_latest_frame_store_is_camera_keyed_and_non_consuming
-# since worker unified OverlayFrameBuffer and LatestFrameBuffer into the same
-# LatestFrameStore class — it is not re-asserted here.
-
-
 def test_mjpeg_server_defaults_loopback_and_disabled() -> None:
     assert dev_mjpeg_enabled({}) is False
     assert dev_mjpeg_host({}) == "127.0.0.1"
