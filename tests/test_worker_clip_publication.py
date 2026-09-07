@@ -14,6 +14,7 @@ import pytest
 
 from backend.app.features.clips.catalog import strict_manifest_records
 from backend.app.features.clips.store import ClipStore
+from tests_support.thumbnail import DeterministicThumbnailGenerator
 from worker.pipeline.output.evidence import clip_publication
 from worker.pipeline.output.evidence.clip_identity import ClipIdAllocator, ClipReservation
 from worker.pipeline.output.evidence.clip_publication import (
@@ -57,7 +58,8 @@ def test_process_kill_after_manifest_reconstructs_exact_event_outcomes(tmp_path:
         import os
         from datetime import UTC, datetime, timedelta
         from pathlib import Path
-        from worker.pipeline.output.evidence.clip_identity import ClipIdAllocator
+        from tests_support.thumbnail import DeterministicThumbnailGenerator
+        from worker.pipeline.output.evidence.clip_identity import ClipIdAllocator, ClipReservation
         from worker.pipeline.output.evidence.clip_publication import (
             ClipPublicationMetadata, ClipPublisher, PublicationStage,
         )
@@ -78,7 +80,11 @@ def test_process_kill_after_manifest_reconstructs_exact_event_outcomes(tmp_path:
         def barrier(stage, _path):
             if stage is PublicationStage.MANIFEST_RENAMED:
                 os._exit(91)
-        ClipPublisher(root, barrier=barrier).publish_unavailable(
+        ClipPublisher(
+            root,
+            barrier=barrier,
+            thumbnail_generator=DeterministicThumbnailGenerator(),
+        ).publish_unavailable(
             reservation, metadata, EvidenceReasonCode.ENCODER_FAILED,
         )
         """
@@ -92,7 +98,10 @@ def test_process_kill_after_manifest_reconstructs_exact_event_outcomes(tmp_path:
         tmp_path / "clips/killed-clip",
     )
 
-    publisher = ClipPublisher(tmp_path)
+    publisher = ClipPublisher(
+        tmp_path,
+        thumbnail_generator=DeterministicThumbnailGenerator(),
+    )
     _ = publisher.publish_unavailable(reservation, _metadata(), EvidenceReasonCode.ENCODER_FAILED)
     _ = publisher.publish_unavailable(reservation, _metadata(), EvidenceReasonCode.ENCODER_FAILED)
 
@@ -152,17 +161,16 @@ def test_publication_retry_recovers_each_durability_boundary_with_same_clip_id(
             raise OSError(f"interrupted after {stage}")
 
     with pytest.raises(OSError, match="interrupted"):
-        ClipPublisher(tmp_path, barrier=interrupt).publish_ready(
-            reservation,
-            artifact,
-            _metadata(),
-        )
+        ClipPublisher(
+            tmp_path,
+            barrier=interrupt,
+            thumbnail_generator=DeterministicThumbnailGenerator(),
+        ).publish_ready(reservation, artifact, _metadata())
 
-    published = ClipPublisher(tmp_path).publish_ready(
-        reservation,
-        artifact,
-        _metadata(),
-    )
+    published = ClipPublisher(
+        tmp_path,
+        thumbnail_generator=DeterministicThumbnailGenerator(),
+    ).publish_ready(reservation, artifact, _metadata())
     payload = json.loads(published.manifest_path.read_text(encoding="utf-8"))
     records = strict_manifest_records(ClipStore(tmp_path))
 
@@ -212,7 +220,10 @@ def test_strict_manifest_accepts_exact_remux_translation_and_rejects_nonuniform_
             ],
         },
     )
-    published = ClipPublisher(tmp_path).publish_ready(reservation, artifact, metadata)
+    published = ClipPublisher(
+        tmp_path,
+        thumbnail_generator=DeterministicThumbnailGenerator(),
+    ).publish_ready(reservation, artifact, metadata)
 
     records = strict_manifest_records(ClipStore(tmp_path))
     assert records[0].payload["source_media"] == metadata.source_media
@@ -238,7 +249,10 @@ def test_publication_omits_runtime_manifest_when_explicitly_absent(tmp_path: Pat
         id_factory=lambda _camera: "legacy-no-runtime-manifest",
     ).reserve("camera-1")
 
-    published = ClipPublisher(tmp_path).publish_unavailable(
+    published = ClipPublisher(
+        tmp_path,
+        thumbnail_generator=DeterministicThumbnailGenerator(),
+    ).publish_unavailable(
         reservation,
         replace(_metadata(), runtime_manifest_sha256=None),
         EvidenceReasonCode.ENCODER_FAILED,
@@ -248,15 +262,46 @@ def test_publication_omits_runtime_manifest_when_explicitly_absent(tmp_path: Pat
     assert "runtime_manifest_sha256" not in payload
 
 
+def test_successful_thumbnail_is_published_with_ready_clip(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    reservation = ClipIdAllocator(
+        tmp_path,
+        id_factory=lambda _camera: "thumbnail-success-clip",
+    ).reserve("camera-1")
+    artifact = reservation.staging_dir / "clip.mp4"
+    artifact.write_bytes(b"derivative-media")
+    monkeypatch.setattr(
+        "worker.pipeline.output.evidence.evidence_manifest.inspect_finalized_media",
+        lambda _path, **_kwargs: MediaFacts("a" * 64, len(b"derivative-media"), 1000),
+    )
+
+    published = ClipPublisher(
+        tmp_path,
+        thumbnail_generator=DeterministicThumbnailGenerator(),
+    ).publish_ready(reservation, artifact, _metadata())
+
+    thumbnail = reservation.final_dir / "thumbnail.jpg"
+    assert published.video_path == reservation.final_dir / "clip.mp4"
+    assert thumbnail.read_bytes() == b"thumbnail:clip.mp4:1"
+
+
+def test_clip_publisher_rejects_missing_thumbnail_generator(tmp_path: Path) -> None:
+    with pytest.raises(TypeError, match="thumbnail_generator"):
+        ClipPublisher(tmp_path)
+
+
+def test_clip_publisher_rejects_null_thumbnail_generator(tmp_path: Path) -> None:
+    with pytest.raises(TypeError, match="thumbnail_generator"):
+        ClipPublisher(tmp_path, thumbnail_generator=None)
+
+
 def test_thumbnail_failure_does_not_prevent_ready_clip_publication(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    class FailingThumbnailGenerator:
-        def generate(self, _video: Path, _thumbnail: Path, _duration_s: float) -> Path:
-            raise RuntimeError("unavailable")
-
     reservation = ClipIdAllocator(
         tmp_path,
         id_factory=lambda _camera: "thumbnail-failure-clip",
@@ -270,7 +315,9 @@ def test_thumbnail_failure_does_not_prevent_ready_clip_publication(
 
     published = ClipPublisher(
         tmp_path,
-        thumbnail_generator=FailingThumbnailGenerator(),
+        thumbnail_generator=DeterministicThumbnailGenerator(
+            error=RuntimeError("unavailable"),
+        ),
     ).publish_ready(reservation, artifact, _metadata())
 
     assert published.manifest_path.is_file()
@@ -313,7 +360,10 @@ def test_publication_records_deterministic_event_pts_to_media_time_mapping(
         ),
     )
 
-    published = ClipPublisher(tmp_path).publish_unavailable(
+    published = ClipPublisher(
+        tmp_path,
+        thumbnail_generator=DeterministicThumbnailGenerator(),
+    ).publish_unavailable(
         reservation,
         metadata,
         EvidenceReasonCode.ENCODER_FAILED,
@@ -339,7 +389,10 @@ def test_unavailable_publication_persists_reason_without_video(tmp_path: Path) -
         id_factory=lambda _camera: "unavailable-clip-id",
     ).reserve("camera-1")
 
-    published = ClipPublisher(tmp_path).publish_unavailable(
+    published = ClipPublisher(
+        tmp_path,
+        thumbnail_generator=DeterministicThumbnailGenerator(),
+    ).publish_unavailable(
         reservation,
         _metadata(),
         EvidenceReasonCode.ENCODER_FAILED,
@@ -400,7 +453,10 @@ def test_ready_publication_fsyncs_before_renames_and_staging_cleanup(
         lambda path, clip_id: scheduled.append((path, clip_id)),
     )
 
-    _ = ClipPublisher(tmp_path).publish_ready(reservation, artifact, _metadata())
+    _ = ClipPublisher(
+        tmp_path,
+        thumbnail_generator=DeterministicThumbnailGenerator(),
+    ).publish_ready(reservation, artifact, _metadata())
 
     assert operations[:8] == [
         ("fsync-directory", "clips", ""),

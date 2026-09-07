@@ -10,6 +10,7 @@ from shared.events.evidence_export_contract import (
     DeliveryFailure,
     EventReceipt,
 )
+from tests_support.thumbnail import DeterministicThumbnailGenerator
 from worker.pipeline.output.evidence.clip_identity import ClipIdAllocator
 from worker.pipeline.output.evidence.clip_publication import ClipPublicationMetadata, ClipPublisher
 from worker.pipeline.output.evidence.evidence_outbox_types import EdgeEventId, EvidenceReasonCode
@@ -77,7 +78,13 @@ def test_published_clip_enqueues_all_contributors_and_delivers_receipt(tmp_path:
     queue_directory = tmp_path / "queue"
     reservation = ClipIdAllocator(store).reserve("camera-1")
     start = datetime(2026, 1, 1, tzinfo=UTC)
-    published = ClipPublisher(store, delivery_queue_directory=queue_directory).publish_unavailable(
+    published = ClipPublisher(
+        store,
+        thumbnail_generator=DeterministicThumbnailGenerator(
+            error=AssertionError("publish_unavailable must not generate a thumbnail")
+        ),
+        delivery_queue_directory=queue_directory,
+    ).publish_unavailable(
         reservation,
         ClipPublicationMetadata(
             camera_id="camera-1",

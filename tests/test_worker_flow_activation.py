@@ -13,6 +13,8 @@ from types import SimpleNamespace
 import pytest
 
 from worker.adapters.deepstream.service_maker import DeepStreamFlowStopTimeout
+from worker.adapters.media.ffmpeg_thumbnail import FfmpegThumbnailGenerator
+from worker.runtime.config import CameraRuntimeConfig
 from worker.runtime.flow.cold_start import FlowWarmupTimeout
 from worker.runtime.telemetry.runtime_diagnostics import WorkerDiagnostics
 from worker.runtime.worker import WorkerRuntime
@@ -198,6 +200,91 @@ def test_flow_composes_and_starts_the_evidence_sender(
     assert composition["store_dir"] == tmp_path / "clips"
     assert composition["probe_camera_id"] == "camera-a"
     assert calls[-1] == "started"
+
+
+def test_build_flow_camera_composes_ffmpeg_thumbnail_generator(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    thumbnail_generators: list[object] = []
+
+    class _ClipPublisher:
+        def __init__(self, *_args: object, **kwargs: object) -> None:
+            thumbnail_generators.append(kwargs["thumbnail_generator"])
+
+    class _NativePolicyPump:
+        def __init__(self, _binding: object, _context: object) -> None:
+            pass
+
+    class _MediaPlane:
+        metadata = object()
+
+        def add_source(self, camera_id: str, uri: str) -> SimpleNamespace:
+            assert camera_id == "camera-a"
+            assert uri == "rtsp://camera-a/live"
+            return SimpleNamespace(
+                camera_id=camera_id,
+                source_generation=3,
+                stream_epoch=7,
+            )
+
+        def smart_recorder(self, _camera_id: str, *, sink: object) -> object:
+            assert callable(sink)
+            return object()
+
+    class _LiveFrames:
+        def register_camera(self, camera_id: str) -> None:
+            assert camera_id == "camera-a"
+
+    class _Diagnostics:
+        def register_decode(self, camera_id: str, backend: str) -> None:
+            assert camera_id == "camera-a"
+            assert backend == "auto"
+
+        def register_native_detection(self, camera_id: str) -> None:
+            assert camera_id == "camera-a"
+
+    monkeypatch.setattr(
+        "shared.rtsp_url_policy.assert_rtsp_endpoint_allowed",
+        lambda url: SimpleNamespace(pinned_url=url),
+    )
+    monkeypatch.setattr("worker.runtime.worker.ClipPublisher", _ClipPublisher)
+    monkeypatch.setattr("worker.runtime.worker.NativePolicyPump", _NativePolicyPump)
+    plan = SimpleNamespace(
+        decision=SimpleNamespace(incidents=()),
+        definitions={},
+        detection_windows={},
+        domain_audit={},
+        domain_deciders={},
+        schedule={},
+    )
+    runtime = WorkerRuntime.__new__(WorkerRuntime)
+    runtime.config = SimpleNamespace(version=1)
+    runtime._state_dir = tmp_path / "state"  # noqa: SLF001
+    runtime._flow_media_plane = _MediaPlane()  # noqa: SLF001
+    runtime._live_frames = _LiveFrames()  # noqa: SLF001
+    runtime.diagnostics = _Diagnostics()
+    runtime._worker_boot_uuid = "boot-1"  # noqa: SLF001
+    runtime._runtime_manifest = None  # noqa: SLF001
+    runtime._camera_evidence_attachers = {}  # noqa: SLF001
+    runtime._native_policy_pumps_by_camera = {}  # noqa: SLF001
+    runtime._resolved_clip_store_dir = lambda: tmp_path / "clips"  # noqa: SLF001
+    runtime._preflight_camera_graph = lambda _camera, **_kwargs: plan  # noqa: SLF001
+    runtime.temporal_profile = SimpleNamespace(
+        decision_interval_frames=lambda _module_id: 1,
+    )
+    camera = CameraRuntimeConfig(
+        camera_id="camera-a",
+        facility_id="facility-a",
+        rtsp_url="rtsp://camera-a/live",
+    )
+    pumps: list[object] = []
+    sealed_bindings: list[object] = []
+
+    runtime._build_flow_camera(camera, pumps, sealed_bindings)  # noqa: SLF001
+
+    assert len(thumbnail_generators) == 1
+    assert isinstance(thumbnail_generators[0], FfmpegThumbnailGenerator)
 
 
 def test_shutdown_stops_the_flow_without_removing_its_sources() -> None:
