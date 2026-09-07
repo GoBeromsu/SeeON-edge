@@ -24,6 +24,10 @@ from worker.pipeline.output.evidence.playback_rendition import (
 LOGGER = logging.getLogger(__name__)
 
 
+class _ManifestPublicationUncertain(OSError):
+    """The manifest replacement may already be visible on durable storage."""
+
+
 def write_playback_rendition(
     clip_path: Path,
     *,
@@ -36,7 +40,7 @@ def write_playback_rendition(
         return None
     timing_reader = read_video_timing if read_timing is None else read_timing
     source_timing = timing_reader(clip_path)
-    source_digest = _manifest_source_sha256(clip_path)
+    source_digest = _verified_source_sha256(clip_path)
     temporary = _temporary_path(clip_path.parent)
     rendition: Path | None = None
     published_new = False
@@ -58,6 +62,9 @@ def write_playback_rendition(
                 source_timing, rendition_timing, source_digest, rendition_digest, rendition.name
             ),
         )
+    except _ManifestPublicationUncertain as exc:
+        temporary.unlink(missing_ok=True)
+        raise PlaybackRenditionError("playback rendition manifest durability is uncertain") from exc
     except PlaybackRenditionError:
         temporary.unlink(missing_ok=True)
         _remove_unpublished_rendition(rendition if published_new else None)
@@ -119,7 +126,7 @@ def _transcode(
         raise PlaybackRenditionError("ffmpeg did not create a rendition")
 
 
-def _manifest_source_sha256(clip_path: Path) -> str:
+def _verified_source_sha256(clip_path: Path) -> str:
     try:
         payload = json.loads(clip_path.with_name("manifest.json").read_text(encoding="utf-8"))
     except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
@@ -131,7 +138,13 @@ def _manifest_source_sha256(clip_path: Path) -> str:
         or any(character not in "0123456789abcdef" for character in digest)
     ):
         raise PlaybackRenditionError("clip manifest has no valid source digest")
-    return digest
+    try:
+        actual_digest = _sha256(clip_path)
+    except OSError as exc:
+        raise PlaybackRenditionError("could not hash clip source") from exc
+    if actual_digest != digest:
+        raise PlaybackRenditionError("clip source digest does not match manifest")
+    return actual_digest
 
 
 def _attestation(
@@ -160,7 +173,10 @@ def _write_manifest(path: Path, payload: dict[str, bool | int | str]) -> None:
             output.flush()
             os.fsync(output.fileno())
         os.replace(temporary, path)
-        fsync_directory(path.parent)
+        try:
+            fsync_directory(path.parent)
+        except OSError as exc:
+            raise _ManifestPublicationUncertain from exc
     finally:
         temporary.unlink(missing_ok=True)
 

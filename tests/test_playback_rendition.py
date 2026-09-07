@@ -7,6 +7,7 @@ from pathlib import Path
 
 import pytest
 
+from worker.pipeline.output.evidence import playback_rendition_publish
 from worker.pipeline.output.evidence.playback_rendition import (
     PLAYBACK_MANIFEST_NAME,
     PLAYBACK_RENDITION_PREFIX,
@@ -68,6 +69,17 @@ def test_hevc_original_publishes_attested_immutable_bundle(tmp_path: Path) -> No
     }
 
 
+def test_manifest_source_digest_mismatch_does_not_publish_rendition(tmp_path: Path) -> None:
+    clip = _clip(tmp_path)
+    (tmp_path / "manifest.json").write_text(json.dumps({"sha256": "a" * 64}), encoding="utf-8")
+
+    with pytest.raises(PlaybackRenditionError, match="does not match"):
+        write_playback_rendition(clip, run=_runner("hevc"), read_timing=_timing)
+
+    assert not (tmp_path / PLAYBACK_MANIFEST_NAME).exists()
+    assert not list(tmp_path.glob(f"{PLAYBACK_RENDITION_PREFIX}*.mp4"))
+
+
 def test_failure_before_rendition_rename_leaves_old_bundle_untouched(tmp_path: Path) -> None:
     clip = _clip(tmp_path)
     old_digest = hashlib.sha256(b"old").hexdigest()
@@ -117,6 +129,28 @@ def test_manifest_rename_failure_preserves_old_bundle_and_removes_orphan(
         json.loads((tmp_path / PLAYBACK_MANIFEST_NAME).read_text(encoding="ascii")) == old_manifest
     )
     assert list(tmp_path.glob(f"{PLAYBACK_RENDITION_PREFIX}*.mp4")) == [old]
+
+
+def test_manifest_directory_fsync_failure_retains_pointer_target(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    clip = _clip(tmp_path)
+    calls = 0
+    original_fsync_directory = playback_rendition_publish.fsync_directory
+
+    def fail_manifest_fsync(path: Path) -> None:
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            raise OSError("directory sync failed")
+        original_fsync_directory(path)
+
+    monkeypatch.setattr(playback_rendition_publish, "fsync_directory", fail_manifest_fsync)
+    with pytest.raises(PlaybackRenditionError, match="durability is uncertain"):
+        write_playback_rendition(clip, run=_runner("hevc"), read_timing=_timing)
+
+    manifest = json.loads((tmp_path / PLAYBACK_MANIFEST_NAME).read_text(encoding="ascii"))
+    assert (tmp_path / manifest["rendition"]).is_file()
 
 
 def test_successful_switch_removes_older_versioned_renditions(tmp_path: Path) -> None:

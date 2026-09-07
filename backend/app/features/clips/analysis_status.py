@@ -21,25 +21,36 @@ def assemble_clip_analysis_status(
 ) -> ClipAnalysisResponse:
     served_media_sha256 = served_media_sha256_for(store, located)
     try:
-        payload = store.read_clip_analysis(located)
+        payloads = store.read_clip_analysis_candidates(located)
     except ValueError:
         return _unavailable(served_media_sha256, "artifact_invalid")
-    if payload is not None:
-        try:
-            result = decode_clip_analysis(payload)
-        except ClipAnalysisWireError:
-            return _unavailable(served_media_sha256, "artifact_invalid")
+    if payloads:
         digest = store.manifest_video_sha256(located)
-        if digest is None or result.clip_sha256 != digest:
+        identity_mismatch = False
+        artifact_invalid = False
+        for payload in payloads:
+            try:
+                result = decode_clip_analysis(payload)
+            except ClipAnalysisWireError:
+                artifact_invalid = True
+                continue
+            if digest is None or result.clip_sha256 != digest:
+                identity_mismatch = True
+                continue
+            if not served_timing_identical(store, located):
+                return _unavailable(
+                    served_media_sha256, "timing_unverified", timing_identical=False
+                )
+            return ClipAnalysisResponse(
+                state="available",
+                served_media_sha256=served_media_sha256,
+                served_timing_identical=True,
+                result=result.as_dict(),
+            )
+        if identity_mismatch:
             return _unavailable(served_media_sha256, "identity_mismatch")
-        if not served_timing_identical(store, located):
-            return _unavailable(served_media_sha256, "timing_unverified", timing_identical=False)
-        return ClipAnalysisResponse(
-            state="available",
-            served_media_sha256=served_media_sha256,
-            served_timing_identical=True,
-            result=result.as_dict(),
-        )
+        if artifact_invalid:
+            return _unavailable(served_media_sha256, "artifact_invalid")
     try:
         upstream = relay(
             request,
@@ -80,7 +91,7 @@ def served_timing_identical(store: ClipStore, located: LocatedClip) -> bool:
     except (ValueError, FileNotFoundError):
         return False
     try:
-        return identity.served_pts_identical is True
+        return identity.served_kind == "original" or identity.served_pts_identical
     finally:
         identity.opened.handle.close()
 

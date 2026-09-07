@@ -11,7 +11,7 @@ import stat
 from dataclasses import dataclass
 from pathlib import Path
 from threading import Lock
-from typing import final
+from typing import Literal, final
 
 from backend.app.features.clips.descriptor_files import (
     OpenedRegularFile,
@@ -62,9 +62,10 @@ class OpenedPlaybackIdentity:
     """Opened served media with immutable-source and rendition timing identity."""
 
     opened: OpenedRegularFile
+    served_kind: Literal["original", "rendition"]
     original_sha256: str | None
     served_media_sha256: str | None
-    served_pts_identical: bool | None
+    served_pts_identical: bool
 
 
 @dataclass(frozen=True, slots=True)
@@ -255,11 +256,18 @@ class ClipStore:
         original_sha256 = self.manifest_video_sha256(located)
         playback = self._open_verified_playback(original.path, original_sha256)
         if playback is None:
-            return OpenedPlaybackIdentity(original, original_sha256, original_sha256, None)
+            return OpenedPlaybackIdentity(
+                original,
+                "original",
+                original_sha256,
+                original_sha256,
+                True,
+            )
         opened, attestation = playback
         original.handle.close()
         return OpenedPlaybackIdentity(
             opened,
+            "rendition",
             original_sha256,
             attestation.rendition_sha256,
             attestation.pts_identical,
@@ -303,8 +311,8 @@ class ClipStore:
             return None
         return digest
 
-    def read_clip_analysis(self, located: LocatedClip) -> bytes | None:
-        """Read the newest digest-verified analysis artifact beside the clip."""
+    def read_clip_analysis_candidates(self, located: LocatedClip) -> tuple[bytes, ...]:
+        """Read sidecar-verified analysis candidates newest-first."""
         clip_dir = located.manifest_path.parent
         candidates = [
             path
@@ -312,32 +320,34 @@ class ClipStore:
             if _CLIP_ANALYSIS_NAME_RE.fullmatch(path.name) is not None
         ]
         if not candidates:
-            return None
-        artifact = max(candidates, key=lambda path: (path.stat().st_mtime_ns, path.name))
-        sidecar = artifact.with_name(f"{artifact.name}.sha256")
-        try:
-            expected = read_bounded_regular_file(self.root, sidecar, _SHA256_SIDECAR_BYTES)
-            payload = read_bounded_regular_file(
-                self.root,
-                artifact,
-                32 * 1024 * 1024,
-            )
-        except FileNotFoundError:
-            return None
-        try:
-            expected_digest = expected[:-1].decode("ascii")
-        except UnicodeDecodeError as exc:
-            raise ValueError("clip analysis digest is not ASCII") from exc
-        if len(expected) != _SHA256_SIDECAR_BYTES or expected[-1:] != b"\n":
-            raise ValueError("clip analysis digest is invalid")
-        if _SHA256_RE.fullmatch(expected_digest) is None:
-            raise ValueError("clip analysis digest is invalid")
-        if not hmac.compare_digest(
-            hashlib.sha256(payload).hexdigest(),
-            expected_digest,
+            return ()
+        payloads: list[bytes] = []
+        invalid = False
+        for artifact in sorted(
+            candidates, key=lambda path: (path.stat().st_mtime_ns, path.name), reverse=True
         ):
-            raise ValueError("clip analysis digest does not match")
-        return payload
+            sidecar = artifact.with_name(f"{artifact.name}.sha256")
+            try:
+                expected = read_bounded_regular_file(self.root, sidecar, _SHA256_SIDECAR_BYTES)
+                payload = read_bounded_regular_file(self.root, artifact, 32 * 1024 * 1024)
+                expected_digest = expected[:-1].decode("ascii")
+            except (FileNotFoundError, UnicodeDecodeError):
+                invalid = True
+                continue
+            if (
+                len(expected) != _SHA256_SIDECAR_BYTES
+                or expected[-1:] != b"\n"
+                or _SHA256_RE.fullmatch(expected_digest) is None
+                or not hmac.compare_digest(hashlib.sha256(payload).hexdigest(), expected_digest)
+            ):
+                invalid = True
+                continue
+            payloads.append(payload)
+        if payloads:
+            return tuple(payloads)
+        if invalid:
+            raise ValueError("no clip analysis artifact has a valid digest")
+        return ()
 
     def _open_verified_playback(
         self,

@@ -392,6 +392,7 @@ def test_playback_identity_reports_manifest_timing_status(clip_env) -> None:
     try:
         assert identity.opened.path == rendition
         assert identity.original_sha256 == sha256(original.read_bytes()).hexdigest()
+        assert identity.served_kind == "rendition"
         assert identity.served_pts_identical is False
     finally:
         identity.opened.handle.close()
@@ -399,6 +400,7 @@ def test_playback_identity_reports_manifest_timing_status(clip_env) -> None:
     _write_playback_bundle(clip_dir, pts_identical=True)
     identity = store.open_located_playback_identity(located)
     try:
+        assert identity.served_kind == "rendition"
         assert identity.served_pts_identical is True
     finally:
         identity.opened.handle.close()
@@ -429,7 +431,8 @@ def test_playback_manifest_with_unbound_media_falls_back_to_original(clip_env, t
         assert identity.opened.path == original
         assert identity.served_media_sha256 == original_digest
         assert identity.served_media_sha256 != rendition_digest
-        assert identity.served_pts_identical is None
+        assert identity.served_kind == "original"
+        assert identity.served_pts_identical is True
     finally:
         identity.opened.handle.close()
 

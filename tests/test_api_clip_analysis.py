@@ -134,7 +134,12 @@ def _write_clip(clip_store: Path) -> Path:
     return clip_dir
 
 
-def _write_analysis(clip_dir: Path, *, clip_sha256: str = CLIP_SHA256) -> None:
+def _write_analysis(
+    clip_dir: Path,
+    *,
+    clip_sha256: str = CLIP_SHA256,
+    artifact_id: str = "0123456789abcdef",
+) -> None:
     result = ClipAnalysisResult(
         source="clip_reanalysis",
         clip_id=CLIP_ID,
@@ -155,8 +160,9 @@ def _write_analysis(clip_dir: Path, *, clip_sha256: str = CLIP_SHA256) -> None:
         ),
     )
     payload = encode_clip_analysis(result)
-    (clip_dir / "clip.analysis.0123456789abcdef.json").write_bytes(payload)
-    (clip_dir / "clip.analysis.0123456789abcdef.json.sha256").write_text(
+    artifact = clip_dir / f"clip.analysis.{artifact_id}.json"
+    artifact.write_bytes(payload)
+    artifact.with_name(f"{artifact.name}.sha256").write_text(
         hashlib.sha256(payload).hexdigest() + "\n", encoding="ascii"
     )
 
@@ -233,6 +239,20 @@ def test_available_analysis_reports_identical_served_timing(_environment: Path) 
     assert response.json()["result"]["clip_sha256"] == CLIP_SHA256
 
 
+def test_available_analysis_on_original_reports_identical_served_timing(
+    _environment: Path,
+) -> None:
+    clip_dir = _write_clip(_environment)
+    _write_analysis(clip_dir)
+    with TestClient(create_app(lifespan=no_lifespan)) as client:
+        _login(client)
+        response = client.get(f"/api/v1/clips/{CLIP_ID}/analysis")
+    assert response.status_code == 200
+    assert response.json()["state"] == "available"
+    assert response.json()["served_timing_identical"] is True
+    assert response.json()["result"]["clip_sha256"] == CLIP_SHA256
+
+
 def test_available_analysis_reports_nonidentical_served_timing(_environment: Path) -> None:
     clip_dir = _write_clip(_environment)
     _write_analysis(clip_dir)
@@ -263,6 +283,24 @@ def test_analysis_identity_mismatch_is_unavailable(_environment: Path) -> None:
     }
 
 
+def test_corrupt_newest_analysis_does_not_mask_older_valid_analysis(
+    _environment: Path,
+) -> None:
+    clip_dir = _write_clip(_environment)
+    _write_analysis(clip_dir, artifact_id="0123456789abcdef")
+    newest = clip_dir / "clip.analysis.fedcba9876543210.json"
+    newest.write_bytes(b"corrupt")
+    newest.with_name(f"{newest.name}.sha256").write_text(
+        hashlib.sha256(b"different").hexdigest() + "\n", encoding="ascii"
+    )
+    with TestClient(create_app(lifespan=no_lifespan)) as client:
+        _login(client)
+        response = client.get(f"/api/v1/clips/{CLIP_ID}/analysis")
+    assert response.status_code == 200
+    assert response.json()["state"] == "available"
+    assert response.json()["result"]["clip_sha256"] == CLIP_SHA256
+
+
 def test_worker_unreachable_is_an_honest_available_status(
     _environment: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -281,7 +319,7 @@ def test_worker_unreachable_is_an_honest_available_status(
     ("source_sha256", "rendition_sha256"),
     [("e" * 64, None), (CLIP_SHA256, "e" * 64)],
 )
-def test_analysis_rejects_timing_attestation_bound_to_other_media(
+def test_analysis_uses_original_when_rendition_attestation_is_unbound(
     _environment: Path,
     source_sha256: str,
     rendition_sha256: str | None,
@@ -297,9 +335,9 @@ def test_analysis_rejects_timing_attestation_bound_to_other_media(
     with TestClient(create_app(lifespan=no_lifespan)) as client:
         _login(client)
         response = client.get(f"/api/v1/clips/{CLIP_ID}/analysis")
-    assert response.json()["state"] == "unavailable"
-    assert response.json()["reason"] == "timing_unverified"
-    assert "result" not in response.json()
+    assert response.json()["state"] == "available"
+    assert response.json()["served_timing_identical"] is True
+    assert response.json()["result"]["clip_sha256"] == CLIP_SHA256
 
 
 @pytest.mark.parametrize("worker_state", ["idle", "running", "failed"])
