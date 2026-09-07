@@ -214,3 +214,31 @@ def test_clip_analysis_rejects_sha_mismatch_and_over_cap_facts(tmp_path: Path) -
         assert supervisor.calls == [("camera-1", clip, _SHA256, 4, 1000, 640, 360)]
     finally:
         server.stop()
+
+
+def test_clip_analysis_resolves_nested_historical_layout(tmp_path: Path) -> None:
+    clip = tmp_path / "old" / "archive" / "clips" / "camera-1" / "clip.mp4"
+    clip.parent.mkdir(parents=True)
+    clip.write_bytes(b"clip")
+    _write_ready_manifest(clip)
+    supervisor = _Supervisor()
+    server = MjpegServer(
+        LatestFrameStore(),
+        MjpegServerConfig(port=0, probe_token=_TOKEN),
+        clip_analysis_supervisor=supervisor,
+        clip_store_dir=tmp_path,
+    )
+    server.start()
+    try:
+        with urllib.request.urlopen(
+            _request(
+                f"http://127.0.0.1:{server.port}",
+                "/clips/camera-1/analysis",
+                {"clip_sha256": _SHA256},
+            ),
+            timeout=1,
+        ):
+            pass
+        assert supervisor.calls[0][1] == clip
+    finally:
+        server.stop()

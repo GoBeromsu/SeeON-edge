@@ -2,16 +2,18 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { cancelClipAnalysis, fetchClipAnalysis, triggerClipAnalysis } from '@/shared/api/client';
 import type { ClipAnalysisStatus } from '@/shared/api/types';
 
-type State = { status: ClipAnalysisStatus; pending: boolean };
+type State = { status: ClipAnalysisStatus; pending: boolean; received: boolean; settled: boolean };
 
-const initial: ClipAnalysisStatus = { state: 'idle' };
+const initial: ClipAnalysisStatus = { state: 'idle', served_media_sha256: '' };
 
 export function useClipAnalysis(clipId: string | undefined, enabled: boolean): {
   status: ClipAnalysisStatus;
+  received: boolean;
+  settled: boolean;
   trigger: () => void;
   cancel: () => void;
 } {
-  const [state, setState] = useState<State>({ status: initial, pending: false });
+  const [state, setState] = useState<State>({ status: initial, pending: false, received: false, settled: false });
   const controller = useRef<AbortController | null>(null);
   const request = useCallback((operation: (id: string, signal: AbortSignal) => Promise<ClipAnalysisStatus>) => {
     if (!clipId) return;
@@ -20,15 +22,15 @@ export function useClipAnalysis(clipId: string | undefined, enabled: boolean): {
     controller.current = next;
     setState((previous) => ({ ...previous, pending: true }));
     void operation(clipId, next.signal).then(
-      (status) => { if (!next.signal.aborted) setState({ status, pending: false }); },
-      () => { if (!next.signal.aborted) setState({ status: { state: 'unavailable' }, pending: false }); },
+      (status) => { if (!next.signal.aborted) setState({ status, pending: false, received: true, settled: true }); },
+      () => { if (!next.signal.aborted) setState({ status: { state: 'unavailable', served_media_sha256: '' }, pending: false, received: false, settled: true }); },
     );
   }, [clipId]);
 
   useEffect(() => {
     controller.current?.abort();
     if (!clipId || !enabled) {
-      setState({ status: initial, pending: false });
+      setState({ status: initial, pending: false, received: false, settled: false });
       return undefined;
     }
     request(fetchClipAnalysis);
@@ -42,8 +44,27 @@ export function useClipAnalysis(clipId: string | undefined, enabled: boolean): {
   }, [enabled, request, state.status.state]);
 
   return {
-    status: state.pending ? { state: 'running' } : state.status,
+    status: state.pending ? { state: 'running', served_media_sha256: state.status.served_media_sha256 } : state.status,
+    received: state.received,
+    settled: state.settled,
     trigger: () => request(triggerClipAnalysis),
-    cancel: () => request(cancelClipAnalysis),
+    cancel: () => {
+      if (!clipId) return;
+      controller.current?.abort();
+      const next = new AbortController();
+      controller.current = next;
+      setState((previous) => ({ ...previous, pending: true }));
+      void cancelClipAnalysis(clipId, next.signal).then(
+        () => {
+          if (!next.signal.aborted) {
+            controller.current = null;
+            request(fetchClipAnalysis);
+          }
+        },
+        () => {
+          if (!next.signal.aborted) setState({ status: { state: 'unavailable', served_media_sha256: '' }, pending: false, received: false, settled: true });
+        },
+      );
+    },
   };
 }

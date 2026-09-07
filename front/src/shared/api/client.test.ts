@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { bedZoneRecognitionFailureDetail, browseClipStorage, cameraDuplicateDetail, cameraProbeFailureDetail, createCamera, fetchCameraOverlay, fetchCameras, fetchClipArtifacts, fetchClips, fetchClipStorage, fetchDetectionSettings, fetchRuntimeSettings, fetchStatus, fetchSystem, getApiBase, getCameraSnapshotUrl, getCameraStreamUrl, loginDashboard, logoutDashboard, recognizeBedZone, saveBedZone, saveClipStorageLocation, saveConnection, saveDetectionSettings, saveRuntimeSettings, setCameraOverlay, testCamera, testConnection, updateCamera, triggerClipAnalysis, updateCameraDecodeBackend } from '@/shared/api/client';
+import { bedZoneRecognitionFailureDetail, browseClipStorage, cancelClipAnalysis, cameraDuplicateDetail, cameraProbeFailureDetail, createCamera, fetchCameraOverlay, fetchCameras, fetchClipArtifacts, fetchClips, fetchClipStorage, fetchDetectionSettings, fetchRuntimeSettings, fetchStatus, fetchSystem, getApiBase, getCameraSnapshotUrl, getCameraStreamUrl, loginDashboard, logoutDashboard, recognizeBedZone, saveBedZone, saveClipStorageLocation, saveConnection, saveDetectionSettings, saveRuntimeSettings, setCameraOverlay, testCamera, testConnection, updateCamera, triggerClipAnalysis, updateCameraDecodeBackend } from '@/shared/api/client';
 import { HttpError } from '@/shared/api/http';
 import type { DetectionSettings } from '@/shared/api/client';
 
@@ -133,6 +133,16 @@ describe('api client contracts', () => {
     }));
 
     await expect(triggerClipAnalysis('clip-1')).resolves.toEqual({ state: 'running' });
+  });
+
+  it('returns the cancellation acknowledgement envelope', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => ({ cancelled: true }),
+    }));
+
+    await expect(cancelClipAnalysis('clip-1')).resolves.toEqual({ cancelled: true });
   });
 
   it('surfaces the 409 duplicate_camera body through requestJson so the caller can read it', async () => {

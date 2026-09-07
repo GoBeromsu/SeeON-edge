@@ -67,8 +67,12 @@ def handle_post(
     if clip_sha256 is None:
         handler.send_error(HTTPStatus.BAD_REQUEST)
         return
-    clip_path = store_dir / "clips" / clip_id / "clip.mp4"
-    if not clip_path.is_file():
+    try:
+        clip_path = _locate_clip(store_dir, clip_id)
+    except ClipEvidenceError:
+        handler.send_error(HTTPStatus.CONFLICT)
+        return
+    if clip_path is None:
         handler.send_error(HTTPStatus.NOT_FOUND)
         return
     facts = _manifest_facts(clip_path)
@@ -142,6 +146,43 @@ def _manifest_facts(clip_path: Path) -> tuple[str, int, int, int, int] | None:
         return None
     width, height = dimensions
     return manifest.sha256, manifest.size_bytes, manifest.duration_ms, width, height
+
+
+def _locate_clip(store_dir: Path, clip_id: str) -> Path | None:
+    candidates: list[Path] = []
+    for clips_root in _bounded_clip_roots(store_dir):
+        clip_path = clips_root / clip_id / "clip.mp4"
+        if not clip_path.is_file() or _manifest_facts(clip_path) is None:
+            continue
+        candidates.append(clip_path)
+    if len(candidates) > 1:
+        raise ClipEvidenceError("duplicate clip_id")
+    return candidates[0] if candidates else None
+
+
+def _bounded_clip_roots(store_dir: Path) -> tuple[Path, ...]:
+    roots = [store_dir / "clips"]
+    try:
+        first_level = tuple(store_dir.iterdir())
+    except OSError:
+        return tuple(roots)
+    for first in first_level:
+        if first.name == "clips" or not first.is_dir():
+            continue
+        first_clips = first / "clips"
+        if first_clips.is_dir():
+            roots.append(first_clips)
+        try:
+            second_level = tuple(first.iterdir())
+        except OSError:
+            continue
+        for second in second_level:
+            if second.name == "clips" or not second.is_dir():
+                continue
+            second_clips = second / "clips"
+            if second_clips.is_dir():
+                roots.append(second_clips)
+    return tuple(roots)
 
 
 def _manifest_dimensions(

@@ -87,10 +87,12 @@ def write_playback_rendition(
 
     timing_reader = read_video_timing if read_timing is None else read_timing
     source_timing = timing_reader(clip_path)
+    source_digest = _sha256(clip_path)
     rendition = clip_path.with_name(PLAYBACK_NAME)
     sidecar = clip_path.with_name(PLAYBACK_DIGEST_NAME)
     timing_sidecar = clip_path.with_name(PLAYBACK_TIMING_NAME)
     temporary = _temporary_path(rendition)
+    renamed = False
     try:
         try:
             result = run(
@@ -132,17 +134,25 @@ def write_playback_rendition(
             raise PlaybackRenditionError("ffmpeg failed") from exc
         _require_rendition_output(result.returncode, temporary)
         rendition_timing = timing_reader(temporary)
-        timing_payload = _timing_payload(source_timing, rendition_timing)
+        rendition_digest = _sha256(temporary)
+        timing_payload = _timing_payload(
+            source_timing, rendition_timing, source_digest, rendition_digest
+        )
         _fsync_file(temporary)
-        os.replace(temporary, rendition)
-        fsync_directory(rendition.parent)
-        _write_digest_sidecar(sidecar, _sha256(rendition))
         _write_timing_sidecar(timing_sidecar, timing_payload)
+        os.replace(temporary, rendition)
+        renamed = True
+        fsync_directory(rendition.parent)
+        _write_digest_sidecar(sidecar, rendition_digest)
     except PlaybackRenditionError:
         temporary.unlink(missing_ok=True)
+        if renamed:
+            rendition.unlink(missing_ok=True)
         raise
     except OSError as exc:
         temporary.unlink(missing_ok=True)
+        if renamed:
+            rendition.unlink(missing_ok=True)
         raise PlaybackRenditionError("could not publish playback rendition") from exc
     return rendition
 
@@ -163,8 +173,12 @@ def read_video_timing(path: Path) -> VideoTiming:
     return VideoTiming(time_base.numerator, time_base.denominator, tuple(pts))
 
 
-def _timing_payload(source: VideoTiming, rendition: VideoTiming) -> dict[str, bool | int | str]:
+def _timing_payload(
+    source: VideoTiming, rendition: VideoTiming, source_digest: str, rendition_digest: str
+) -> dict[str, bool | int | str]:
     return {
+        "source_sha256": source_digest,
+        "rendition_sha256": rendition_digest,
         "pts_identical": source == rendition,
         "time_base": f"{source.time_base_numerator}/{source.time_base_denominator}",
         "frames": len(rendition.pts),

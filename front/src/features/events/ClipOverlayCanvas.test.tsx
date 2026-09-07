@@ -19,7 +19,7 @@ describe('findMatchingFrame', () => {
     expect(findMatchingFrame(result, 1.001)).toBeNull();
   });
 
-  it('retains ambiguous frames for the renderer to suppress', () => {
-    expect(findMatchingFrame(result, 2)?.status).toBe('ambiguous_timestamp');
+  it('rejects ambiguous frame matches', () => {
+    expect(findMatchingFrame(result, 2)).toBeNull();
   });
 });

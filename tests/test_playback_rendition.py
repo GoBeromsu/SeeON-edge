@@ -58,6 +58,8 @@ def test_hevc_original_creates_rendition_and_matching_digest(tmp_path: Path) -> 
     assert json.loads((tmp_path / PLAYBACK_TIMING_NAME).read_text(encoding="ascii")) == {
         "frames": 3,
         "pts_identical": True,
+        "rendition_sha256": hashlib.sha256(b"browser-safe-rendition").hexdigest(),
+        "source_sha256": hashlib.sha256(b"hevc-original").hexdigest(),
         "source_frames": 3,
         "time_base": "1/12000",
     }
@@ -121,6 +123,30 @@ def test_ffmpeg_timeout_leaves_no_partial_file_or_sidecar(tmp_path: Path) -> Non
     assert not list(tmp_path.glob(".*.mp4"))
 
 
+def test_digest_write_failure_removes_new_rendition(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    clip = tmp_path / "clip.mp4"
+    clip.write_bytes(b"hevc-original")
+    old = tmp_path / PLAYBACK_NAME
+    old.write_bytes(b"old-rendition")
+
+    def fail_digest(_sidecar: Path, _digest: str) -> None:
+        raise OSError("disk full")
+
+    monkeypatch.setattr(
+        "worker.pipeline.output.evidence.playback_rendition._write_digest_sidecar",
+        fail_digest,
+    )
+
+    with pytest.raises(PlaybackRenditionError):
+        write_playback_rendition(clip, run=_runner("hevc"), read_timing=_timing)
+
+    assert not old.exists()
+    timing = json.loads((tmp_path / PLAYBACK_TIMING_NAME).read_text(encoding="ascii"))
+    assert timing["rendition_sha256"] == hashlib.sha256(b"browser-safe-rendition").hexdigest()
+
+
 def test_backfill_dry_run_reports_missing_timing_sidecars_as_pending(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -129,7 +155,16 @@ def test_backfill_dry_run_reports_missing_timing_sidecars_as_pending(
     existing.mkdir(parents=True)
     (existing / "clip.mp4").write_bytes(b"hevc")
     (existing / PLAYBACK_NAME).write_bytes(b"already-rendered")
-    (existing / PLAYBACK_TIMING_NAME).write_text('{"pts_identical":true}', encoding="ascii")
+    (existing / PLAYBACK_TIMING_NAME).write_text(
+        json.dumps(
+            {
+                "pts_identical": True,
+                "source_sha256": hashlib.sha256(b"hevc").hexdigest(),
+                "rendition_sha256": hashlib.sha256(b"already-rendered").hexdigest(),
+            }
+        ),
+        encoding="ascii",
+    )
     pending = clips / "pending"
     pending.mkdir()
     (pending / "clip.mp4").write_bytes(b"hevc")
@@ -218,3 +253,22 @@ def test_thumbnail_backfill_uses_manifest_duration_and_skips_existing(
     }
     assert calls == [(created / "clip.mp4", created / "thumbnail.jpg", 22.5)]
     assert (created / "thumbnail.jpg").read_bytes() == b"thumbnail"
+
+
+def test_backfill_scans_bounded_historical_layouts(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    clip = tmp_path / "old" / "archive" / "clips" / "camera-1" / "clip.mp4"
+    clip.parent.mkdir(parents=True)
+    clip.write_bytes(b"hevc")
+    monkeypatch.setattr(clip_playback_backfill, "probe_video_codec", lambda _path: "hevc")
+    monkeypatch.setattr(
+        clip_playback_backfill,
+        "write_playback_rendition",
+        lambda path: path.with_name(PLAYBACK_NAME),
+    )
+
+    summary = clip_playback_backfill.backfill(tmp_path)
+
+    assert summary["scanned"] == 1
+    assert summary["created"] == 1

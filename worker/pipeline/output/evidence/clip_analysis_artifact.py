@@ -194,17 +194,31 @@ def publish_clip_analysis(
     target = artifact_path(clip_path, identity)
     sidecar = _sidecar_path(target)
     if target.exists() or sidecar.exists():
-        existing = load_published(target, expected_clip_sha256=identity.clip_sha256)
-        if (
-            existing is not None
-            and _matches(existing, identity)
-            and target.read_bytes() == canonical
-        ):
+        existing_payload = _verified_payload(target, sidecar)
+        if existing_payload is not None:
+            existing = load_published(target, expected_clip_sha256=identity.clip_sha256)
+            if (
+                existing is not None
+                and _matches(existing, identity)
+                and existing_payload == canonical
+            ):
+                return target
+            raise ClipAnalysisArtifactError("identity_collision")
+        if target.exists() and target.read_bytes() == canonical:
+            _atomic_write(sidecar, f"{sha256(canonical).hexdigest()}\n".encode("ascii"))
             return target
-        raise ClipAnalysisArtifactError("identity_collision")
-    _atomic_write(target, canonical)
     _atomic_write(sidecar, f"{sha256(canonical).hexdigest()}\n".encode("ascii"))
+    _atomic_write(target, canonical)
     return target
+
+
+def _verified_payload(target: Path, sidecar: Path) -> bytes | None:
+    try:
+        payload = target.read_bytes()
+        expected_digest = sidecar.read_text(encoding="ascii").strip()
+    except OSError:
+        return None
+    return payload if expected_digest == sha256(payload).hexdigest() else None
 
 
 __all__ = [

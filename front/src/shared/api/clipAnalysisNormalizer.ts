@@ -1,4 +1,4 @@
-import type { ClipAnalysisBedGeometry, ClipAnalysisBox, ClipAnalysisFrame, ClipAnalysisResult, ClipAnalysisStatus } from '@/shared/api/types';
+import type { ClipAnalysisBedGeometry, ClipAnalysisBox, ClipAnalysisCancelResult, ClipAnalysisFrame, ClipAnalysisResult, ClipAnalysisStatus } from '@/shared/api/types';
 import { isRecord } from '@/shared/api/normalizerFields';
 
 function rejectUnknown(record: Record<string, unknown>, allowed: readonly string[]): void {
@@ -77,14 +77,22 @@ function result(value: unknown): ClipAnalysisResult {
 
 export function normalizeClipAnalysisStatus(value: unknown): ClipAnalysisStatus {
   if (!isRecord(value)) throw new Error('Invalid clip analysis status');
-  rejectUnknown(value, ['state', 'reason', 'served_timing_identical', 'result']);
+  rejectUnknown(value, ['state', 'reason', 'served_media_sha256', 'served_timing_identical', 'result']);
   if (value.state !== 'idle' && value.state !== 'running' && value.state !== 'available' && value.state !== 'failed' && value.state !== 'unavailable') throw new Error('Invalid clip analysis state');
   if ('reason' in value && typeof value.reason !== 'string') throw new Error('Invalid clip analysis reason');
+  if (typeof value.served_media_sha256 !== 'string' || !/^[0-9a-f]{64}$/.test(value.served_media_sha256)) throw new Error('Invalid served media digest');
   if (value.state === 'available') {
-    if (typeof value.served_timing_identical !== 'boolean' || !('result' in value)) throw new Error('Incomplete available clip analysis');
-    return { state: value.state, served_timing_identical: value.served_timing_identical, result: result(value.result) };
+    if (value.served_timing_identical !== true || !('result' in value)) throw new Error('Incomplete available clip analysis');
+    return { state: value.state, served_media_sha256: value.served_media_sha256, served_timing_identical: value.served_timing_identical, result: result(value.result) };
   }
   if ('served_timing_identical' in value || 'result' in value) throw new Error('Unexpected nonavailable clip analysis detail');
-  if (typeof value.reason === 'string') return { state: value.state, reason: value.reason };
-  return { state: value.state };
+  if (typeof value.reason === 'string') return { state: value.state, reason: value.reason, served_media_sha256: value.served_media_sha256 };
+  return { state: value.state, served_media_sha256: value.served_media_sha256 };
+}
+
+export function normalizeClipAnalysisCancelResult(value: unknown): ClipAnalysisCancelResult {
+  if (!isRecord(value)) throw new Error('Invalid clip analysis cancellation');
+  rejectUnknown(value, ['cancelled']);
+  if (typeof value.cancelled !== 'boolean') throw new Error('Invalid clip analysis cancellation');
+  return { cancelled: value.cancelled };
 }

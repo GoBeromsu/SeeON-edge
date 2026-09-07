@@ -65,6 +65,7 @@ class OpenedPlaybackIdentity:
 
     opened: OpenedRegularFile
     original_sha256: str | None
+    served_media_sha256: str | None
     served_pts_identical: bool | None
 
 
@@ -247,10 +248,23 @@ class ClipStore:
         original_sha256 = self.manifest_video_sha256(located)
         playback = self._open_verified_playback(original.path)
         if playback is None:
-            return OpenedPlaybackIdentity(original, original_sha256, None)
-        timing_identical = self._playback_timing_identical(original.path)
+            return OpenedPlaybackIdentity(original, original_sha256, original_sha256, None)
+        rendition_sha256 = self._playback_digest(playback)
+        timing_identical = self._playback_timing_identical(
+            original.path,
+            source_sha256=original_sha256,
+            rendition_sha256=rendition_sha256,
+        )
         original.handle.close()
-        return OpenedPlaybackIdentity(playback, original_sha256, timing_identical)
+        return OpenedPlaybackIdentity(playback, original_sha256, rendition_sha256, timing_identical)
+
+    def served_media_sha256(self, located: LocatedClip) -> str | None:
+        """Return the digest of the bytes the video route would serve now."""
+        identity = self.open_located_playback_identity(located)
+        try:
+            return identity.served_media_sha256
+        finally:
+            identity.opened.handle.close()
 
     def playback_codec(self, located: LocatedClip) -> str:
         """Return the codec an operator will receive from the video endpoint."""
@@ -343,7 +357,13 @@ class ClipStore:
         playback.handle.close()
         return None
 
-    def _playback_timing_identical(self, original_path: Path) -> bool:
+    def _playback_timing_identical(
+        self,
+        original_path: Path,
+        *,
+        source_sha256: str | None,
+        rendition_sha256: str,
+    ) -> bool:
         try:
             raw = read_bounded_regular_file(
                 self.root,
@@ -353,7 +373,12 @@ class ClipStore:
             payload = json.loads(raw.decode("ascii"))
         except (FileNotFoundError, OSError, UnicodeDecodeError, json.JSONDecodeError):
             return False
-        return isinstance(payload, dict) and payload.get("pts_identical") is True
+        return (
+            isinstance(payload, dict)
+            and payload.get("pts_identical") is True
+            and payload.get("source_sha256") == source_sha256
+            and payload.get("rendition_sha256") == rendition_sha256
+        )
 
     def _playback_digest(self, opened: OpenedRegularFile) -> str:
         file_stat = os.fstat(opened.handle.fileno())

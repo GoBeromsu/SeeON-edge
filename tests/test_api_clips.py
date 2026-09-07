@@ -368,6 +368,8 @@ def test_playback_identity_reports_timing_sidecar_status(clip_env) -> None:
         sha256(rendition.read_bytes()).hexdigest() + "\n",
         encoding="ascii",
     )
+    original_digest = sha256(original.read_bytes()).hexdigest()
+    rendition_digest = sha256(rendition.read_bytes()).hexdigest()
     store = ClipStore(clip_store)
     located = store.locate_manifest("clip-identity")
     assert located is not None
@@ -381,7 +383,16 @@ def test_playback_identity_reports_timing_sidecar_status(clip_env) -> None:
         identity.opened.handle.close()
 
     (clip_dir / PLAYBACK_H264_TIMING_FILENAME).write_text(
-        '{"pts_identical":true}',
+        json.dumps(
+            {
+                "source_sha256": original_digest,
+                "rendition_sha256": rendition_digest,
+                "pts_identical": True,
+                "time_base": "1/1000",
+                "frames": 1,
+                "source_frames": 1,
+            }
+        ),
         encoding="ascii",
     )
     identity = store.open_located_playback_identity(located)
@@ -389,6 +400,49 @@ def test_playback_identity_reports_timing_sidecar_status(clip_env) -> None:
         assert identity.served_pts_identical is True
     finally:
         identity.opened.handle.close()
+
+
+@pytest.mark.parametrize("with_rendition", [False, True])
+def test_video_media_parameter_binds_range_request_to_served_bytes(
+    clip_env, with_rendition: bool
+) -> None:
+    clip_store = clip_env / "clip-store"
+    clip_id = "clip-rendition" if with_rendition else "clip-original"
+    _write_manifest(clip_store, clip_id)
+    clip_dir = clip_store / "clips" / clip_id
+    original = clip_dir / "clip.mp4"
+    manifest_path = clip_dir / "manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["sha256"] = sha256(original.read_bytes()).hexdigest()
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    served_digest = manifest["sha256"]
+    if with_rendition:
+        rendition = clip_dir / PLAYBACK_H264_FILENAME
+        rendition.write_bytes(b"browser-safe")
+        served_digest = sha256(rendition.read_bytes()).hexdigest()
+        (clip_dir / PLAYBACK_H264_SHA256_FILENAME).write_text(
+            served_digest + "\n", encoding="ascii"
+        )
+
+    with TestClient(create_app(lifespan=no_lifespan)) as client:
+        _login(client)
+        matched = client.get(
+            f"/api/v1/clips/{clip_id}/video",
+            params={"media": served_digest},
+            headers={"Range": "bytes=0-1"},
+        )
+        mismatched = client.get(
+            f"/api/v1/clips/{clip_id}/video",
+            params={"media": "e" * 64},
+        )
+        head_mismatched = client.head(
+            f"/api/v1/clips/{clip_id}/video",
+            params={"media": "e" * 64},
+        )
+
+    assert matched.status_code == 206
+    assert mismatched.status_code == head_mismatched.status_code == 409
+    assert mismatched.json() == {"detail": "media_mismatch"}
 
 
 def test_list_clips_and_audit_view_are_recorded_in_the_audit_log(clip_env) -> None:

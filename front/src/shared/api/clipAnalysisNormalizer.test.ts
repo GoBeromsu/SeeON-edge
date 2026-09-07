@@ -1,8 +1,9 @@
 import { describe, expect, it } from 'vitest';
-import { normalizeClipAnalysisStatus } from '@/shared/api/clipAnalysisNormalizer';
+import { normalizeClipAnalysisCancelResult, normalizeClipAnalysisStatus } from '@/shared/api/clipAnalysisNormalizer';
 
 const available = {
   state: 'available',
+  served_media_sha256: 'e'.repeat(64),
   served_timing_identical: true,
   result: {
     source: 'clip_reanalysis',
@@ -25,9 +26,23 @@ describe('normalizeClipAnalysisStatus', () => {
     expect(normalizeClipAnalysisStatus(available).state).toBe('available');
   });
 
+  it('accepts a served digest and timing-unverified reason without a result', () => {
+    expect(normalizeClipAnalysisStatus({
+      state: 'unavailable',
+      reason: 'timing_unverified',
+      served_media_sha256: 'e'.repeat(64),
+    })).toEqual({ state: 'unavailable', reason: 'timing_unverified', served_media_sha256: 'e'.repeat(64) });
+  });
+
+  it('normalizes the cancellation envelope separately from analysis status', () => {
+    expect(normalizeClipAnalysisCancelResult({ cancelled: false })).toEqual({ cancelled: false });
+    expect(() => normalizeClipAnalysisCancelResult({ state: 'running' })).toThrow();
+  });
+
   it.each([
     { ...available, unexpected: true },
     { ...available, served_timing_identical: undefined },
+    { ...available, served_timing_identical: false },
     { ...available, result: { ...available.result, frames: [{ ...available.result.frames[0], status: 'unknown' }] } },
   ])('rejects unknown or incomplete fields', (payload) => {
     expect(() => normalizeClipAnalysisStatus(payload)).toThrow();

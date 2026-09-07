@@ -152,15 +152,31 @@ def _write_analysis(clip_dir: Path, *, clip_sha256: str = CLIP_SHA256) -> None:
     )
 
 
-def _write_playback(clip_dir: Path, *, pts_identical: bool) -> None:
+def _write_playback(
+    clip_dir: Path,
+    *,
+    pts_identical: bool,
+    source_sha256: str = CLIP_SHA256,
+    rendition_sha256: str | None = None,
+) -> str:
     playback = clip_dir / "clip.playback-h264.mp4"
     playback.write_bytes(b"playback")
-    (clip_dir / "clip.playback-h264.mp4.sha256").write_text(
-        hashlib.sha256(b"playback").hexdigest() + "\n", encoding="ascii"
-    )
+    digest = hashlib.sha256(b"playback").hexdigest()
+    (clip_dir / "clip.playback-h264.mp4.sha256").write_text(digest + "\n", encoding="ascii")
     (clip_dir / "clip.playback-h264.timing.json").write_text(
-        json.dumps({"pts_identical": pts_identical}), encoding="utf-8"
+        json.dumps(
+            {
+                "source_sha256": source_sha256,
+                "rendition_sha256": digest if rendition_sha256 is None else rendition_sha256,
+                "pts_identical": pts_identical,
+                "time_base": "1/1000",
+                "frames": 1,
+                "source_frames": 1,
+            }
+        ),
+        encoding="utf-8",
     )
+    return digest
 
 
 @pytest.mark.parametrize("worker_status", [202, 409, 404])
@@ -209,7 +225,12 @@ def test_available_analysis_reports_nonidentical_served_timing(_environment: Pat
         _login(client)
         response = client.get(f"/api/v1/clips/{CLIP_ID}/analysis")
     assert response.status_code == 200
-    assert response.json()["served_timing_identical"] is False
+    assert response.json() == {
+        "state": "unavailable",
+        "served_media_sha256": hashlib.sha256(b"playback").hexdigest(),
+        "reason": "timing_unverified",
+        "served_timing_identical": False,
+    }
 
 
 def test_analysis_identity_mismatch_is_unavailable(_environment: Path) -> None:
@@ -221,6 +242,7 @@ def test_analysis_identity_mismatch_is_unavailable(_environment: Path) -> None:
     assert response.status_code == 200
     assert response.json() == {
         "state": "unavailable",
+        "served_media_sha256": CLIP_SHA256,
         "reason": "identity_mismatch",
     }
 
@@ -237,3 +259,73 @@ def test_worker_unreachable_is_an_honest_available_status(
     assert response.status_code == 200
     assert response.json()["state"] == "unavailable"
     assert response.json()["reason"] == "worker_unreachable"
+
+
+@pytest.mark.parametrize(
+    ("source_sha256", "rendition_sha256"),
+    [("e" * 64, None), (CLIP_SHA256, "e" * 64)],
+)
+def test_analysis_rejects_timing_attestation_bound_to_other_media(
+    _environment: Path,
+    source_sha256: str,
+    rendition_sha256: str | None,
+) -> None:
+    clip_dir = _write_clip(_environment)
+    _write_analysis(clip_dir)
+    _write_playback(
+        clip_dir,
+        pts_identical=True,
+        source_sha256=source_sha256,
+        rendition_sha256=rendition_sha256,
+    )
+    with TestClient(create_app(lifespan=no_lifespan)) as client:
+        _login(client)
+        response = client.get(f"/api/v1/clips/{CLIP_ID}/analysis")
+    assert response.json()["state"] == "unavailable"
+    assert response.json()["reason"] == "timing_unverified"
+    assert "result" not in response.json()
+
+
+@pytest.mark.parametrize("worker_state", ["idle", "running", "failed"])
+def test_worker_states_include_served_media_identity(
+    _environment: Path,
+    worker_server: _WorkerServer,
+    monkeypatch: pytest.MonkeyPatch,
+    worker_state: str,
+) -> None:
+    _write_clip(_environment)
+    worker_server.response_status = 200
+    worker_server.response_body = {"state": worker_state}
+    monkeypatch.setenv("ML_API_WORKER_STREAM_ORIGIN", worker_server.origin)
+    get_settings.cache_clear()
+    with TestClient(create_app(lifespan=no_lifespan)) as client:
+        _login(client)
+        response = client.get(f"/api/v1/clips/{CLIP_ID}/analysis")
+    assert response.json()["state"] == worker_state
+    assert response.json()["served_media_sha256"] == CLIP_SHA256
+
+
+def test_cancel_relays_cancelled_envelope_and_worker_auth_is_unreachable(
+    _environment: Path, worker_server: _WorkerServer, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _write_clip(_environment)
+    monkeypatch.setenv("ML_API_WORKER_STREAM_ORIGIN", worker_server.origin)
+    get_settings.cache_clear()
+    with TestClient(create_app(lifespan=no_lifespan)) as client:
+        _login(client)
+        worker_server.response_status = 200
+        worker_server.response_body = {"cancelled": True}
+        cancelled = client.post(f"/api/v1/clips/{CLIP_ID}/analysis/cancel")
+        worker_server.response_status = 403
+        unreachable = client.get(f"/api/v1/clips/{CLIP_ID}/analysis")
+    assert cancelled.json() == {"cancelled": True}
+    assert unreachable.status_code == 200
+    assert unreachable.json()["reason"] == "worker_unreachable"
+
+
+def test_analysis_rejects_clip_id_outside_worker_grammar(_environment: Path) -> None:
+    _write_clip(_environment)
+    with TestClient(create_app(lifespan=no_lifespan)) as client:
+        _login(client)
+        response = client.get("/api/v1/clips/clip%3Alegacy/analysis")
+    assert response.status_code == 400

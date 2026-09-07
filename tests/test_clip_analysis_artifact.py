@@ -15,6 +15,7 @@ from worker.pipeline.output.evidence.clip_analysis_artifact import (
     ClipAnalysisArtifactError,
     ClipAnalysisArtifactIdentity,
     artifact_path,
+    list_published,
     load_clip_analysis,
     publish_clip_analysis,
 )
@@ -74,3 +75,50 @@ def test_identity_mismatch_is_rejected_and_never_served(tmp_path: Path) -> None:
     assert load_clip_analysis(clip, _identity("pyav-16/hevc")) is None
     with pytest.raises(ClipAnalysisArtifactError, match="identity_mismatch"):
         publish_clip_analysis(clip, scratch, _identity("pyav-16/hevc"))
+
+
+def test_sidecarless_matching_target_is_repaired_without_rewrite(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    clip = tmp_path / "clip.mp4"
+    scratch = tmp_path / "out.json"
+    identity = _identity()
+    payload = _payload(identity)
+    scratch.write_bytes(payload)
+    target = artifact_path(clip, identity)
+    target.write_bytes(payload)
+    writes: list[Path] = []
+    from worker.pipeline.output.evidence import clip_analysis_artifact
+
+    original = clip_analysis_artifact._atomic_write
+
+    def record(path: Path, content: bytes) -> None:
+        writes.append(path)
+        original(path, content)
+
+    monkeypatch.setattr(clip_analysis_artifact, "_atomic_write", record)
+
+    assert publish_clip_analysis(clip, scratch, identity) == target
+    assert writes == [target.with_name(f"{target.name}.sha256")]
+    assert list_published(tmp_path)[0].path == target
+
+
+def test_sidecarless_target_with_wrong_bytes_is_republished(tmp_path: Path) -> None:
+    clip = tmp_path / "clip.mp4"
+    scratch = tmp_path / "out.json"
+    identity = _identity()
+    scratch.write_bytes(_payload(identity))
+    target = artifact_path(clip, identity)
+    target.write_bytes(b"corrupt")
+
+    publish_clip_analysis(clip, scratch, identity)
+
+    assert target.read_bytes() == _payload(identity)
+    assert load_clip_analysis(clip, identity) is not None
+
+
+def test_list_published_ignores_sidecarless_target(tmp_path: Path) -> None:
+    identity = _identity()
+    artifact_path(tmp_path / "clip.mp4", identity).write_bytes(_payload(identity))
+
+    assert list_published(tmp_path) == ()

@@ -23,8 +23,8 @@ describe('useClipAnalysis', () => {
   it('polls a running analysis every two seconds and stops at available', async () => {
     vi.useFakeTimers();
     const fetchMock = vi.fn()
-      .mockResolvedValueOnce({ ok: true, status: 200, json: async () => ({ state: 'running' }) })
-      .mockResolvedValueOnce({ ok: true, status: 200, json: async () => ({ state: 'available', served_timing_identical: true, result: { source: 'clip_reanalysis', clip_id: 'clip-1', clip_sha256: 'a'.repeat(64), pose_model_sha256: 'b'.repeat(64), bed_model_sha256: 'c'.repeat(64), decoder_identity: 'pyav-16.1.0/hevc', analysis_profile_sha256: 'd'.repeat(64), time_base: { numerator: 1, denominator: 1 }, frames: [], bed_geometries: [], image_width: 1, image_height: 1 } }) });
+      .mockResolvedValueOnce({ ok: true, status: 200, json: async () => ({ state: 'running', served_media_sha256: 'e'.repeat(64) }) })
+      .mockResolvedValueOnce({ ok: true, status: 200, json: async () => ({ state: 'available', served_media_sha256: 'e'.repeat(64), served_timing_identical: true, result: { source: 'clip_reanalysis', clip_id: 'clip-1', clip_sha256: 'a'.repeat(64), pose_model_sha256: 'b'.repeat(64), bed_model_sha256: 'c'.repeat(64), decoder_identity: 'pyav-16.1.0/hevc', analysis_profile_sha256: 'd'.repeat(64), time_base: { numerator: 1, denominator: 1 }, frames: [], bed_geometries: [], image_width: 1, image_height: 1 } }) });
     vi.stubGlobal('fetch', fetchMock);
     const host = document.createElement('div');
     document.body.append(host);

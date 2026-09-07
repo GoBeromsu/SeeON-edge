@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import math
-import re
 from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import datetime
@@ -12,7 +11,8 @@ from typing import TypedDict
 
 from pydantic import JsonValue, TypeAdapter, ValidationError
 
-_CLIP_ID_RE = re.compile(r"^[A-Za-z0-9:_-]{1,128}$")
+from shared.events.clip_identity import is_clip_id
+
 _MEDIA_SUFFIXES = {".mp4", ".mov", ".m4v", ".webm", ".mkv"}
 _MANIFEST_PAYLOAD = TypeAdapter(dict[str, JsonValue])
 _EXTENSION_BOUNDARIES = {"none", "extension_bounded", "extension_raced"}
@@ -134,7 +134,7 @@ def read_manifest_file(path: Path) -> ClipManifest | None:
 
 
 def is_valid_clip_id(value: str) -> bool:
-    return bool(_CLIP_ID_RE.fullmatch(value))
+    return is_clip_id(value)
 
 
 def video_file_from_dir(directory: Path, clip_id: str) -> Path:

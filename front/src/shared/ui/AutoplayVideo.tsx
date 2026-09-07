@@ -5,17 +5,20 @@ type AutoplayVideoProps = {
   className: string;
   onLoadedMetadata: (video: HTMLVideoElement) => void;
   onVideoElement?: (video: HTMLVideoElement | null) => void;
+  onPlaybackState?: (state: PlaybackState) => void;
 };
 
-type PlaybackFailure = 'autoplay-blocked' | 'media-failed' | null;
+export type PlaybackState = 'blocked' | 'failed' | 'ready';
+
+type PlaybackFailure = Exclude<PlaybackState, 'ready'> | null;
 
 function classifyPlaybackFailure(error: unknown): Exclude<PlaybackFailure, null> {
   return error instanceof DOMException && error.name === 'NotAllowedError'
-    ? 'autoplay-blocked'
-    : 'media-failed';
+    ? 'blocked'
+    : 'failed';
 }
 
-export function AutoplayVideo({ src, className, onLoadedMetadata, onVideoElement }: AutoplayVideoProps): JSX.Element {
+export function AutoplayVideo({ src, className, onLoadedMetadata, onVideoElement, onPlaybackState }: AutoplayVideoProps): JSX.Element {
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const [failure, setFailure] = useState<PlaybackFailure>(null);
 
@@ -27,16 +30,23 @@ export function AutoplayVideo({ src, className, onLoadedMetadata, onVideoElement
     setFailure(null);
     void video.play().then(
       () => {
-        if (mounted) setFailure(null);
+        if (mounted) {
+          setFailure(null);
+          onPlaybackState?.('ready');
+        }
       },
       (error: unknown) => {
-        if (mounted) setFailure(classifyPlaybackFailure(error));
+        if (mounted) {
+          const failure = classifyPlaybackFailure(error);
+          setFailure(failure);
+          onPlaybackState?.(failure);
+        }
       },
     );
     return () => {
       mounted = false;
     };
-  }, [src]);
+  }, [onPlaybackState, src]);
 
   const retryPlayback = (): void => {
     const video = videoRef.current;
@@ -45,8 +55,15 @@ export function AutoplayVideo({ src, className, onLoadedMetadata, onVideoElement
     setFailure(null);
     video.load();
     void video.play().then(
-      () => setFailure(null),
-      (error: unknown) => setFailure(classifyPlaybackFailure(error)),
+      () => {
+        setFailure(null);
+        onPlaybackState?.('ready');
+      },
+      (error: unknown) => {
+        const failure = classifyPlaybackFailure(error);
+        setFailure(failure);
+        onPlaybackState?.(failure);
+      },
     );
   };
 
@@ -63,17 +80,23 @@ export function AutoplayVideo({ src, className, onLoadedMetadata, onVideoElement
         autoPlay
         playsInline
         preload="metadata"
-        onError={() => setFailure('media-failed')}
+        onError={() => {
+          setFailure('failed');
+          onPlaybackState?.('failed');
+        }}
         onLoadedData={() => setFailure(null)}
-        onPlay={() => setFailure(null)}
+        onPlay={() => {
+          setFailure(null);
+          onPlaybackState?.('ready');
+        }}
         onLoadedMetadata={(event) => onLoadedMetadata(event.currentTarget)}
       />
-      {failure === 'autoplay-blocked' ? (
+      {failure === 'blocked' ? (
         <p className="media-status-overlay pointer-events-none absolute inset-x-2 top-2 rounded-control px-3 py-2 text-sm" role="status">
           자동 재생이 차단되었습니다. 재생 버튼을 눌러 영상을 확인하세요.
         </p>
       ) : null}
-      {failure === 'media-failed' ? (
+      {failure === 'failed' ? (
         <div className="media-status-overlay absolute inset-x-2 top-2 flex flex-col items-start gap-3 rounded-control px-3 py-2 text-sm sm:flex-row sm:items-center sm:justify-between" role="alert">
           <span>영상을 재생하지 못했습니다.</span>
           <button

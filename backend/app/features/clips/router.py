@@ -157,6 +157,7 @@ def clip_artifacts(
 def clip_video(
     clip_id: str,
     request: Request,
+    media: Annotated[str | None, Query()] = None,
 ) -> Response:
     actor = _authorize(request)
     located = _get_located_clip_or_404(request, clip_id)
@@ -188,7 +189,8 @@ def clip_video(
         )
     try:
         store = _clip_store(request)
-        opened = store.open_located_playback(located)
+        playback_identity = store.open_located_playback_identity(located)
+        opened = playback_identity.opened
     except ValueError as exc:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
     except FileNotFoundError as exc:
@@ -196,6 +198,9 @@ def clip_video(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="clip video not found",
         ) from exc
+    if media is not None and media != playback_identity.served_media_sha256:
+        opened.handle.close()
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="media_mismatch")
     rendition = "playback-h264" if opened.path.name == PLAYBACK_H264_FILENAME else "original"
     try:
         if receipt is not None and rendition == "original":

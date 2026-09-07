@@ -13,6 +13,7 @@ from worker.adapters.media.ffmpeg_thumbnail import (
     FfmpegThumbnailGenerator,
     ThumbnailUnavailable,
 )
+from worker.pipeline.output.evidence.clip_identity import is_clip_id
 from worker.pipeline.output.evidence.playback_rendition import (
     PLAYBACK_NAME,
     PLAYBACK_TIMING_NAME,
@@ -42,11 +43,11 @@ def backfill(
         "failed": 0,
         "dry_run": dry_run,
     }
-    for clip_path in sorted((clip_store / "clips").glob("*/clip.mp4")):
+    for clip_path in _clip_paths(clip_store):
         summary["scanned"] += 1
         clip_id = clip_path.parent.name
         rendition = clip_path.parent / PLAYBACK_NAME
-        if rendition.exists() and _timing_is_identical(clip_path.parent / PLAYBACK_TIMING_NAME):
+        if rendition.exists() and _timing_is_identical(clip_path):
             summary["skipped"] += 1
             continue
         try:
@@ -69,12 +70,73 @@ def backfill(
     return summary
 
 
-def _timing_is_identical(sidecar: Path) -> bool:
+def _timing_is_identical(clip_path: Path) -> bool:
     try:
-        payload = json.loads(sidecar.read_text(encoding="ascii"))
+        payload = json.loads((clip_path.parent / PLAYBACK_TIMING_NAME).read_text(encoding="ascii"))
+        source_digest = _sha256(clip_path)
+        rendition_digest = _sha256(clip_path.parent / PLAYBACK_NAME)
     except (OSError, UnicodeDecodeError, json.JSONDecodeError):
         return False
-    return isinstance(payload, dict) and payload.get("pts_identical") is True
+    return (
+        isinstance(payload, dict)
+        and payload.get("pts_identical") is True
+        and payload.get("source_sha256") == source_digest
+        and payload.get("rendition_sha256") == rendition_digest
+    )
+
+
+def _clip_paths(clip_store: Path) -> tuple[Path, ...]:
+    paths: dict[str, Path] = {}
+    for clips_root in _bounded_clip_roots(clip_store):
+        try:
+            candidates = tuple(clips_root.iterdir())
+        except OSError:
+            continue
+        for candidate in candidates:
+            clip_path = candidate / "clip.mp4"
+            if (
+                is_clip_id(candidate.name)
+                and candidate.is_dir()
+                and clip_path.is_file()
+                and candidate.name not in paths
+            ):
+                paths[candidate.name] = clip_path
+    return tuple(sorted(paths.values()))
+
+
+def _bounded_clip_roots(clip_store: Path) -> tuple[Path, ...]:
+    roots = [clip_store / "clips"]
+    try:
+        first_level = tuple(clip_store.iterdir())
+    except OSError:
+        return tuple(roots)
+    for first in first_level:
+        if first.name == "clips" or not first.is_dir():
+            continue
+        first_clips = first / "clips"
+        if first_clips.is_dir():
+            roots.append(first_clips)
+        try:
+            second_level = tuple(first.iterdir())
+        except OSError:
+            continue
+        for second in second_level:
+            if second.name == "clips" or not second.is_dir():
+                continue
+            second_clips = second / "clips"
+            if second_clips.is_dir():
+                roots.append(second_clips)
+    return tuple(roots)
+
+
+def _sha256(path: Path) -> str:
+    import hashlib
+
+    digest = hashlib.sha256()
+    with path.open("rb") as source:
+        for chunk in iter(lambda: source.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
 
 
 def _backfill_thumbnails(clip_store: Path, *, dry_run: bool) -> dict[str, int | bool]:
@@ -87,7 +149,7 @@ def _backfill_thumbnails(clip_store: Path, *, dry_run: bool) -> dict[str, int | 
         "dry_run": dry_run,
     }
     generator = FfmpegThumbnailGenerator()
-    for clip_path in sorted((clip_store / "clips").glob("*/clip.mp4")):
+    for clip_path in _clip_paths(clip_store):
         summary["scanned"] += 1
         clip_id = clip_path.parent.name
         thumbnail_path = clip_path.parent / "thumbnail.jpg"

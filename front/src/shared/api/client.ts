@@ -5,6 +5,7 @@ import {
   normalizeCameraResponse,
   normalizeCameraTestResult,
   normalizeClipsResponse,
+  normalizeClipAnalysisCancelResult,
   normalizeClipAnalysisStatus,
   normalizeClipStorageBrowse,
   normalizeClipStorageInfo,
@@ -30,6 +31,7 @@ import type {
   Clip,
   ClipArtifacts,
   ClipAnalysisStatus,
+  ClipAnalysisCancelResult,
   ClipStorageBrowseResult,
   ClipStorageInfo,
   ConnectionInput,
@@ -64,6 +66,7 @@ export type {
   CameraTestResult,
   Clip,
   ClipAnalysisStatus,
+  ClipAnalysisCancelResult,
   ClipStorageBrowseEntry,
   ClipStorageBrowseResult,
   ClipStorageInfo,
@@ -410,8 +413,8 @@ export async function triggerClipAnalysis(clipId: string, signal?: AbortSignal):
   }
 }
 
-export async function cancelClipAnalysis(clipId: string, signal?: AbortSignal): Promise<ClipAnalysisStatus> {
-  return normalizeClipAnalysisStatus(await requestJson(`/clips/${encodeURIComponent(clipId)}/analysis/cancel`, { method: 'POST', signal }));
+export async function cancelClipAnalysis(clipId: string, signal?: AbortSignal): Promise<ClipAnalysisCancelResult> {
+  return normalizeClipAnalysisCancelResult(await requestJson(`/clips/${encodeURIComponent(clipId)}/analysis/cancel`, { method: 'POST', signal }));
 }
 
 export async function fetchClipStorage(signal?: AbortSignal): Promise<ClipStorageInfo> {
