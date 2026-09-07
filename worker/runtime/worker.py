@@ -38,7 +38,6 @@ from worker.adapters.model import ort_pose_bbox56, warmup_to_ready
 from worker.adapters.model.clip_reanalysis import ClipAnalysisProfile
 from worker.adapters.model.errors import FatalAcceleratorError, ModelLoadError
 from worker.adapters.model.ort_bed_seg import BED_MODEL_CONFIDENCE, BED_ONNX_MODEL_PATH
-from worker.adapters.model.yolo_pose import POSE_MODEL_PATH
 from worker.domains import (
     AVAILABLE_OBSERVATION_CHANNELS,
     DETECTION_MODULE_REGISTRY,
@@ -869,7 +868,8 @@ class WorkerRuntime:
         supervisor = ClipAnalysisSupervisor(
             clip_store_dir,
             python_executable=sys.executable,
-            pose_model_path=Path(POSE_MODEL_PATH).with_suffix(".onnx"),
+            # The same digest-verified pose ONNX the Flow engine was built from.
+            pose_model_path=Path(self._env["ML_WORKER_FLOW_ONNX_PATH"]),
             bed_model_path=Path(BED_ONNX_MODEL_PATH),
             profile=ClipAnalysisProfile(
                 person_threshold=0.25,

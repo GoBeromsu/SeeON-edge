@@ -157,7 +157,11 @@ def test_flow_live_view_injects_bed_recognizer_and_recognize_request_reaches_it(
 
     runtime = WorkerRuntime(
         _config(),
-        env={"ML_WORKER_PROFILE": "flow", "ML_WORKER_CLIP_ANALYSIS_CPU": "3"},
+        env={
+            "ML_WORKER_PROFILE": "flow",
+            "ML_WORKER_CLIP_ANALYSIS_CPU": "3",
+            "ML_WORKER_FLOW_ONNX_PATH": "/app/models/pose/yolo26n-pose.onnx",
+        },
         serving_client=serving,
         acquire_lease=lambda: GpuLease.acquire(tmp_path),
         state_dir=tmp_path,
@@ -245,7 +249,10 @@ def test_flow_live_view_refuses_to_start_without_clip_analysis_cpu(
 ) -> None:
     runtime = WorkerRuntime(
         _config(),
-        env={"ML_WORKER_PROFILE": "flow"},
+        env={
+            "ML_WORKER_PROFILE": "flow",
+            "ML_WORKER_FLOW_ONNX_PATH": "/app/models/pose/yolo26n-pose.onnx",
+        },
         serving_client=_ServingClient(),
         state_dir=tmp_path,
     )
@@ -271,7 +278,10 @@ def test_only_flow_stop_deadline_uses_terminal_exit(
     actual_exits: list[int] = []
     runtime = WorkerRuntime(
         _config(),
-        env={"ML_WORKER_PROFILE": "flow"},
+        env={
+            "ML_WORKER_PROFILE": "flow",
+            "ML_WORKER_FLOW_ONNX_PATH": "/app/models/pose/yolo26n-pose.onnx",
+        },
         serving_client=_ServingClient(),
         state_dir=tmp_path,
         hard_exit=actual_exits.append,

@@ -2,18 +2,13 @@
 
 from __future__ import annotations
 
-import contextlib
-import json
 import os
-import signal
 import subprocess
 import threading
 from collections.abc import Callable
-from dataclasses import asdict, dataclass, is_dataclass
+from dataclasses import dataclass
 from pathlib import Path
-from tempfile import mkstemp
 from time import monotonic
-from typing import Final
 
 from shared.events.clip_analysis_wire import MAX_CLIP_ANALYSIS_OUTPUT_BYTES, decode_clip_analysis
 from worker.adapters.model.clip_reanalysis import ClipAnalysisRejected
@@ -22,13 +17,11 @@ from worker.pipeline.output.evidence.clip_analysis_artifact import (
     ClipAnalysisArtifactIdentity,
     publish_clip_analysis,
 )
+from worker.runtime import clip_analysis_process
 from worker.runtime.clip_analysis_subprocess import (
     ClipAnalysisPdeathsigUnavailable,
     require_pdeathsig,
 )
-
-_TOOL_MODULE: Final = "worker.tools.clip_analysis"
-_GROUP_EMPTY_RETRIES: Final = 20
 
 
 class ClipAnalysisSupervisorError(RuntimeError):
@@ -43,17 +36,6 @@ class ClipAnalysisLaunchError(ClipAnalysisSupervisorError):
 class ClipAnalysisStatus:
     state: str
     reason: str | None = None
-
-
-@dataclass(frozen=True, slots=True)
-class _Job:
-    clip_id: str
-    clip_path: Path
-    clip_sha256: str
-    pose_model_path: Path
-    bed_model_path: Path
-    profile: object
-    profile_sha256: str
 
 
 class ClipAnalysisSupervisor:
@@ -87,13 +69,13 @@ class ClipAnalysisSupervisor:
         self._pose_model = pose_model_path
         self._bed_model = bed_model_path
         self._profile = profile
-        self._profile_sha = _profile_digest(profile)
+        self._profile_sha = clip_analysis_process.profile_digest(profile)
         self._cpu_index = cpu_index
         self._deadline_s = deadline_s
         self._launch = launch
         self._condition = threading.Condition()
-        self._pending: _Job | None = None
-        self._active: _Job | None = None
+        self._pending: clip_analysis_process.ClipAnalysisJob | None = None
+        self._active: clip_analysis_process.ClipAnalysisJob | None = None
         self._process: subprocess.Popen[bytes] | None = None
         self._cancelled = False
         self._stopping = False
@@ -116,14 +98,14 @@ class ClipAnalysisSupervisor:
         width: int,
         height: int,
     ) -> bool:
-        _validate_sha(clip_sha256)
+        clip_analysis_process.validate_sha(clip_sha256)
         _pre_admission(self._profile, size_bytes, duration_ms, width, height)
         with self._condition:
             if self._active is not None or self._pending is not None:
                 return False
             if self._stopping:
                 raise ClipAnalysisSupervisorError("supervisor_stopped")
-            self._pending = _Job(
+            self._pending = clip_analysis_process.ClipAnalysisJob(
                 clip_id,
                 clip_path,
                 clip_sha256,
@@ -181,13 +163,13 @@ class ClipAnalysisSupervisor:
             try:
                 status, process = self._run(job)
             except Exception as exc:  # noqa: BLE001 - keep the long-lived supervisor alive
-                status = ClipAnalysisStatus("failed", _reason(exc))
+                status = ClipAnalysisStatus("failed", clip_analysis_process.reason(exc))
             teardown_failed = False
             if process is not None:
                 try:
                     self._terminate_group(process)
                 except Exception as exc:  # noqa: BLE001 - never release an unproved process group
-                    status = ClipAnalysisStatus("failed", _reason(exc))
+                    status = ClipAnalysisStatus("failed", clip_analysis_process.reason(exc))
                     teardown_failed = True
             with self._condition:
                 self._process = None
@@ -201,39 +183,20 @@ class ClipAnalysisSupervisor:
                 if self._stopping:
                     return
 
-    def _run(self, job: _Job) -> tuple[ClipAnalysisStatus, subprocess.Popen[bytes] | None]:
-        scratch: Path | None = None
-        request: Path | None = None
-        read_fd = write_fd = -1
+    def _run(
+        self, job: clip_analysis_process.ClipAnalysisJob
+    ) -> tuple[ClipAnalysisStatus, subprocess.Popen[bytes] | None]:
+        child: clip_analysis_process.ClipAnalysisChild | None = None
         process: subprocess.Popen[bytes] | None = None
         try:
-            scratch = _scratch_path(job.clip_path)
-            request = _request_path(job, scratch)
-            read_fd, write_fd = os.pipe()
-            process = self._launch(
-                [
-                    self._python,
-                    "-m",
-                    _TOOL_MODULE,
-                    "--request",
-                    str(request),
-                    "--out",
-                    str(scratch),
-                    "--expected-parent",
-                    str(os.getpid()),
-                    "--cpu",
-                    str(self._cpu_index),
-                    "--control-fd",
-                    str(read_fd),
-                ],
-                stdout=subprocess.PIPE,
-                stderr=subprocess.DEVNULL,
-                start_new_session=True,
-                pass_fds=(read_fd,),
-                env=os.environ.copy(),
+            child = clip_analysis_process.launch_child(
+                self._launch,
+                python_executable=self._python,
+                job=job,
+                cpu_index=self._cpu_index,
             )
-            os.close(read_fd)
-            read_fd = -1
+            process = child.process
+            scratch = child.scratch
             with self._condition:
                 self._process = process
             expires_at = monotonic() + self._deadline_s
@@ -255,13 +218,7 @@ class ClipAnalysisSupervisor:
             if scratch.stat().st_size > MAX_CLIP_ANALYSIS_OUTPUT_BYTES:
                 return ClipAnalysisStatus("failed", "output_too_large"), process
             result = decode_clip_analysis(scratch.read_bytes())
-            if (
-                result.clip_id != job.clip_id
-                or result.clip_sha256 != job.clip_sha256
-                or result.pose_model_sha256 != _model_digest(job.pose_model_path)
-                or result.bed_model_sha256 != _model_digest(job.bed_model_path)
-                or result.analysis_profile_sha256 != job.profile_sha256
-            ):
+            if not clip_analysis_process.identity_matches(job, result):
                 return ClipAnalysisStatus("failed", "identity_mismatch"), process
             identity = ClipAnalysisArtifactIdentity(
                 job.clip_id,
@@ -279,30 +236,13 @@ class ClipAnalysisSupervisor:
                 publish_clip_analysis(job.clip_path, scratch, identity)
             return ClipAnalysisStatus("available"), process
         except (ClipAnalysisArtifactError, OSError, ValueError, subprocess.SubprocessError) as exc:
-            return ClipAnalysisStatus("failed", _reason(exc)), process
+            return ClipAnalysisStatus("failed", clip_analysis_process.reason(exc)), process
         finally:
-            if read_fd >= 0:
-                os.close(read_fd)
-            if write_fd >= 0:
-                os.close(write_fd)
-            if scratch is not None:
-                scratch.unlink(missing_ok=True)
-            if request is not None:
-                request.unlink(missing_ok=True)
+            if child is not None:
+                child.cleanup()
 
     def _terminate_group(self, process: subprocess.Popen[bytes]) -> None:
-        """Kill, reap, and positively prove this job's process group is gone."""
-        pgid = process.pid
-        with contextlib.suppress(ProcessLookupError):
-            os.killpg(pgid, signal.SIGKILL)
-        process.wait()
-        for _ in range(_GROUP_EMPTY_RETRIES):
-            try:
-                os.killpg(pgid, 0)
-            except ProcessLookupError:
-                return
-            threading.Event().wait(0.01)
-        raise ClipAnalysisSupervisorError("process_group_not_empty")
+        clip_analysis_process.terminate_group(process, failure=ClipAnalysisSupervisorError)
 
 
 def _pre_admission(
@@ -319,51 +259,6 @@ def _pre_admission(
         raise ClipAnalysisRejected("duration")
     if width == 0 or height == 0 or width * height > profile.max_pixels:
         raise ClipAnalysisRejected("resolution")
-
-
-def _profile_digest(profile: object) -> str:
-    from worker.adapters.model.clip_reanalysis import profile_sha256
-
-    if not is_dataclass(profile):
-        raise TypeError("profile must be a dataclass")
-    return profile_sha256(profile)
-
-
-def _validate_sha(value: str) -> None:
-    if len(value) != 64 or any(char not in "0123456789abcdef" for char in value):
-        raise ValueError("invalid_clip_sha256")
-
-
-def _model_digest(path: Path) -> str:
-    return path.with_name(f"{path.name}.sha256").read_text(encoding="ascii").strip()
-
-
-def _scratch_path(clip_path: Path) -> Path:
-    fd, name = mkstemp(prefix=".clip-analysis-", suffix=".json", dir=clip_path.parent)
-    os.close(fd)
-    path = Path(name)
-    path.unlink()
-    return path
-
-
-def _request_path(job: _Job, scratch: Path) -> Path:
-    fd, name = mkstemp(prefix=".clip-analysis-request-", suffix=".json", dir=scratch.parent)
-    payload = {
-        "clip_id": job.clip_id,
-        "clip_path": str(job.clip_path),
-        "clip_sha256": job.clip_sha256,
-        "pose_model_path": str(job.pose_model_path),
-        "bed_model_path": str(job.bed_model_path),
-        "analysis_profile": asdict(job.profile),
-    }
-    with os.fdopen(fd, "w", encoding="utf-8") as file:
-        json.dump(payload, file, sort_keys=True, separators=(",", ":"))
-    return Path(name)
-
-
-def _reason(exc: BaseException) -> str:
-    text = str(exc)
-    return text if text and "rtsp" not in text.lower() else type(exc).__name__.lower()
 
 
 __all__ = [
