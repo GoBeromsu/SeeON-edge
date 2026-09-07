@@ -10,9 +10,7 @@ from fastapi.testclient import TestClient
 from receipt_helpers import add_accepted_media_receipts
 
 from backend.app.features.clips.store import (
-    PLAYBACK_H264_FILENAME,
-    PLAYBACK_H264_SHA256_FILENAME,
-    PLAYBACK_H264_TIMING_FILENAME,
+    PLAYBACK_H264_MANIFEST_FILENAME,
     ClipStore,
 )
 from backend.app.main import create_app as _create_app
@@ -23,6 +21,29 @@ def create_app(*, lifespan):
     app = _create_app(lifespan=lifespan)
     add_accepted_media_receipts(app)
     return app
+
+
+def _write_playback_bundle(clip_dir, *, pts_identical: bool) -> tuple[object, str]:
+    rendition_bytes = b"browser-safe"
+    digest = sha256(rendition_bytes).hexdigest()
+    rendition = clip_dir / f"clip.playback-h264.{digest[:16]}.mp4"
+    rendition.write_bytes(rendition_bytes)
+    original_digest = sha256((clip_dir / "clip.mp4").read_bytes()).hexdigest()
+    (clip_dir / PLAYBACK_H264_MANIFEST_FILENAME).write_text(
+        json.dumps(
+            {
+                "rendition": rendition.name,
+                "rendition_sha256": digest,
+                "source_sha256": original_digest,
+                "pts_identical": pts_identical,
+                "time_base": "1/1000",
+                "frames": 1,
+                "source_frames": 1,
+            }
+        ),
+        encoding="ascii",
+    )
+    return rendition, digest
 
 
 # Dashboard auth now always resolves to a session store (persisted file > env
@@ -353,7 +374,7 @@ def test_streams_manifest_video_and_appends_audit(clip_env) -> None:
     ]
 
 
-def test_playback_identity_reports_timing_sidecar_status(clip_env) -> None:
+def test_playback_identity_reports_manifest_timing_status(clip_env) -> None:
     clip_store = clip_env / "clip-store"
     _write_manifest(clip_store, "clip-identity")
     clip_dir = clip_store / "clips" / "clip-identity"
@@ -362,14 +383,7 @@ def test_playback_identity_reports_timing_sidecar_status(clip_env) -> None:
     payload = json.loads(manifest.read_text(encoding="utf-8"))
     payload["sha256"] = sha256(original.read_bytes()).hexdigest()
     manifest.write_text(json.dumps(payload), encoding="utf-8")
-    rendition = clip_dir / PLAYBACK_H264_FILENAME
-    rendition.write_bytes(b"browser-safe")
-    (clip_dir / PLAYBACK_H264_SHA256_FILENAME).write_text(
-        sha256(rendition.read_bytes()).hexdigest() + "\n",
-        encoding="ascii",
-    )
-    original_digest = sha256(original.read_bytes()).hexdigest()
-    rendition_digest = sha256(rendition.read_bytes()).hexdigest()
+    rendition, _ = _write_playback_bundle(clip_dir, pts_identical=False)
     store = ClipStore(clip_store)
     located = store.locate_manifest("clip-identity")
     assert located is not None
@@ -382,22 +396,40 @@ def test_playback_identity_reports_timing_sidecar_status(clip_env) -> None:
     finally:
         identity.opened.handle.close()
 
-    (clip_dir / PLAYBACK_H264_TIMING_FILENAME).write_text(
-        json.dumps(
-            {
-                "source_sha256": original_digest,
-                "rendition_sha256": rendition_digest,
-                "pts_identical": True,
-                "time_base": "1/1000",
-                "frames": 1,
-                "source_frames": 1,
-            }
-        ),
-        encoding="ascii",
-    )
+    _write_playback_bundle(clip_dir, pts_identical=True)
     identity = store.open_located_playback_identity(located)
     try:
         assert identity.served_pts_identical is True
+    finally:
+        identity.opened.handle.close()
+
+
+@pytest.mark.parametrize("tamper", ["source_sha256", "rendition_sha256"])
+def test_playback_manifest_with_unbound_media_falls_back_to_original(clip_env, tamper: str) -> None:
+    clip_store = clip_env / "clip-store"
+    _write_manifest(clip_store, "clip-unbound")
+    clip_dir = clip_store / "clips" / "clip-unbound"
+    original = clip_dir / "clip.mp4"
+    manifest_path = clip_dir / "manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    original_digest = sha256(original.read_bytes()).hexdigest()
+    manifest["sha256"] = original_digest
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    _, rendition_digest = _write_playback_bundle(clip_dir, pts_identical=True)
+    bundle_path = clip_dir / PLAYBACK_H264_MANIFEST_FILENAME
+    bundle = json.loads(bundle_path.read_text(encoding="ascii"))
+    bundle[tamper] = "a" * 64
+    bundle_path.write_text(json.dumps(bundle), encoding="ascii")
+    store = ClipStore(clip_store)
+    located = store.locate_manifest("clip-unbound")
+    assert located is not None
+
+    identity = store.open_located_playback_identity(located)
+    try:
+        assert identity.opened.path == original
+        assert identity.served_media_sha256 == original_digest
+        assert identity.served_media_sha256 != rendition_digest
+        assert identity.served_pts_identical is None
     finally:
         identity.opened.handle.close()
 
@@ -417,12 +449,7 @@ def test_video_media_parameter_binds_range_request_to_served_bytes(
     manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
     served_digest = manifest["sha256"]
     if with_rendition:
-        rendition = clip_dir / PLAYBACK_H264_FILENAME
-        rendition.write_bytes(b"browser-safe")
-        served_digest = sha256(rendition.read_bytes()).hexdigest()
-        (clip_dir / PLAYBACK_H264_SHA256_FILENAME).write_text(
-            served_digest + "\n", encoding="ascii"
-        )
+        _, served_digest = _write_playback_bundle(clip_dir, pts_identical=True)
 
     with TestClient(create_app(lifespan=no_lifespan)) as client:
         _login(client)

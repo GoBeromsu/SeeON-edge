@@ -35,10 +35,8 @@ from backend.app.shared.state_dir import resolve_state_dir
 CLIP_STORE_DIR_ENV = "CLIP_STORE_DIR"
 API_LABEL_STORE_ENV = "API_LABEL_STORE"
 DEFAULT_CLIP_STORE_DIR = "/var/lib/clip-store"
-PLAYBACK_H264_FILENAME = "clip.playback-h264.mp4"
-PLAYBACK_H264_SHA256_FILENAME = f"{PLAYBACK_H264_FILENAME}.sha256"
-PLAYBACK_H264_TIMING_FILENAME = "clip.playback-h264.timing.json"
-_PLAYBACK_SHA256_SIDECAR_BYTES = 65
+PLAYBACK_H264_MANIFEST_FILENAME = "clip.playback-h264.json"
+_PLAYBACK_RENDITION_NAME_RE = re.compile(r"clip\.playback-h264\.[0-9a-f]{16}\.mp4\Z")
 # Immutable, identity-named artifacts published by the worker
 # (worker/pipeline/output/evidence/clip_analysis_artifact.py); the newest
 # digest-verified one for the clip is served.
@@ -46,7 +44,7 @@ CLIP_ANALYSIS_GLOB = "clip.analysis.*.json"
 _CLIP_ANALYSIS_NAME_RE = re.compile(r"^clip\.analysis\.[0-9a-f]{16}\.json$")
 _SHA256_SIDECAR_BYTES = 65
 _SHA256_RE = re.compile(r"[0-9a-f]{64}\Z")
-_PLAYBACK_TIMING_SIDECAR_BYTES = 256
+_PLAYBACK_MANIFEST_BYTES = 1024
 
 
 @dataclass(frozen=True, slots=True)
@@ -67,6 +65,15 @@ class OpenedPlaybackIdentity:
     original_sha256: str | None
     served_media_sha256: str | None
     served_pts_identical: bool | None
+
+
+@dataclass(frozen=True, slots=True)
+class PlaybackAttestation:
+    """A validated immutable rendition pointer."""
+
+    rendition: str
+    rendition_sha256: str
+    pts_identical: bool
 
 
 @dataclass(frozen=True, slots=True)
@@ -246,17 +253,17 @@ class ClipStore:
         """Open served media and expose its immutable-source and timing identity."""
         original = self.open_located_video(located)
         original_sha256 = self.manifest_video_sha256(located)
-        playback = self._open_verified_playback(original.path)
+        playback = self._open_verified_playback(original.path, original_sha256)
         if playback is None:
             return OpenedPlaybackIdentity(original, original_sha256, original_sha256, None)
-        rendition_sha256 = self._playback_digest(playback)
-        timing_identical = self._playback_timing_identical(
-            original.path,
-            source_sha256=original_sha256,
-            rendition_sha256=rendition_sha256,
-        )
+        opened, attestation = playback
         original.handle.close()
-        return OpenedPlaybackIdentity(playback, original_sha256, rendition_sha256, timing_identical)
+        return OpenedPlaybackIdentity(
+            opened,
+            original_sha256,
+            attestation.rendition_sha256,
+            attestation.pts_identical,
+        )
 
     def served_media_sha256(self, located: LocatedClip) -> str | None:
         """Return the digest of the bytes the video route would serve now."""
@@ -272,10 +279,13 @@ class ClipStore:
             original_path = self.resolve_located_video_path(located)
         except (ValueError, FileNotFoundError):
             return located.manifest.codec
-        playback = self._open_verified_playback(original_path)
+        playback = self._open_verified_playback(
+            original_path,
+            self.manifest_video_sha256(located),
+        )
         if playback is None:
             return located.manifest.codec
-        playback.handle.close()
+        playback[0].handle.close()
         return "h264"
 
     def manifest_video_sha256(self, located: LocatedClip) -> str | None:
@@ -329,56 +339,73 @@ class ClipStore:
             raise ValueError("clip analysis digest does not match")
         return payload
 
-    def _open_verified_playback(self, original_path: Path) -> OpenedRegularFile | None:
-        playback_path = original_path.with_name(PLAYBACK_H264_FILENAME)
-        sidecar_path = original_path.with_name(PLAYBACK_H264_SHA256_FILENAME)
+    def _open_verified_playback(
+        self,
+        original_path: Path,
+        source_sha256: str | None,
+    ) -> tuple[OpenedRegularFile, PlaybackAttestation] | None:
+        attestation = self._read_playback_attestation(original_path, source_sha256)
+        if attestation is None:
+            return None
         try:
-            expected_digest = read_bounded_regular_file(
+            playback = open_contained_regular_file(
                 self.root,
-                sidecar_path,
-                _PLAYBACK_SHA256_SIDECAR_BYTES,
+                original_path.with_name(attestation.rendition),
             )
-            if len(expected_digest) != _PLAYBACK_SHA256_SIDECAR_BYTES:
-                return None
-            expected_text = expected_digest[:-1]
-            if expected_digest[-1:] != b"\n" or any(
-                byte not in b"0123456789abcdefABCDEF" for byte in expected_text
-            ):
-                return None
-            playback = open_contained_regular_file(self.root, playback_path)
         except FileNotFoundError:
             return None
         try:
             digest = self._playback_digest(playback)
-            if hmac.compare_digest(digest, expected_text.decode("ascii").lower()):
-                return playback
+            if hmac.compare_digest(digest, attestation.rendition_sha256):
+                return playback, attestation
         except OSError:
             pass
         playback.handle.close()
         return None
 
-    def _playback_timing_identical(
+    def _read_playback_attestation(
         self,
         original_path: Path,
-        *,
         source_sha256: str | None,
-        rendition_sha256: str,
-    ) -> bool:
+    ) -> PlaybackAttestation | None:
+        if source_sha256 is None:
+            return None
         try:
             raw = read_bounded_regular_file(
                 self.root,
-                original_path.with_name(PLAYBACK_H264_TIMING_FILENAME),
-                _PLAYBACK_TIMING_SIDECAR_BYTES,
+                original_path.with_name(PLAYBACK_H264_MANIFEST_FILENAME),
+                _PLAYBACK_MANIFEST_BYTES,
             )
             payload = json.loads(raw.decode("ascii"))
         except (FileNotFoundError, OSError, UnicodeDecodeError, json.JSONDecodeError):
-            return False
-        return (
-            isinstance(payload, dict)
-            and payload.get("pts_identical") is True
-            and payload.get("source_sha256") == source_sha256
-            and payload.get("rendition_sha256") == rendition_sha256
-        )
+            return None
+        if not isinstance(payload, dict):
+            return None
+        rendition = payload.get("rendition")
+        rendition_sha256 = payload.get("rendition_sha256")
+        pts_identical = payload.get("pts_identical")
+        time_base = payload.get("time_base")
+        frames = payload.get("frames")
+        source_frames = payload.get("source_frames")
+        if (
+            not isinstance(rendition, str)
+            or _PLAYBACK_RENDITION_NAME_RE.fullmatch(rendition) is None
+            or not isinstance(rendition_sha256, str)
+            or _SHA256_RE.fullmatch(rendition_sha256) is None
+            or rendition != f"clip.playback-h264.{rendition_sha256[:16]}.mp4"
+            or payload.get("source_sha256") != source_sha256
+            or not isinstance(pts_identical, bool)
+            or not isinstance(time_base, str)
+            or re.fullmatch(r"[1-9][0-9]*/[1-9][0-9]*", time_base) is None
+            or isinstance(frames, bool)
+            or not isinstance(frames, int)
+            or frames < 0
+            or isinstance(source_frames, bool)
+            or not isinstance(source_frames, int)
+            or source_frames < 0
+        ):
+            return None
+        return PlaybackAttestation(rendition, rendition_sha256, pts_identical)
 
     def _playback_digest(self, opened: OpenedRegularFile) -> str:
         file_stat = os.fstat(opened.handle.fileno())
@@ -439,9 +466,7 @@ __all__ = [
     "API_LABEL_STORE_ENV",
     "CLIP_ANALYSIS_GLOB",
     "CLIP_STORE_DIR_ENV",
-    "PLAYBACK_H264_FILENAME",
-    "PLAYBACK_H264_SHA256_FILENAME",
-    "PLAYBACK_H264_TIMING_FILENAME",
+    "PLAYBACK_H264_MANIFEST_FILENAME",
     "ClipManifest",
     "ClipStore",
     "DuplicateClipIdError",

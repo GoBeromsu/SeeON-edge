@@ -406,9 +406,7 @@ export async function triggerClipAnalysis(clipId: string, signal?: AbortSignal):
   try {
     return normalizeClipAnalysisStatus(await requestJson(`/clips/${encodeURIComponent(clipId)}/analysis`, { method: 'POST', signal }));
   } catch (error) {
-    // 409: the worker's single analysis slot is busy (possibly with another clip). That is a
-    // running state to poll, not a failure of this clip.
-    if (error instanceof HttpError && error.status === 409) return { state: 'running' };
+    if (error instanceof HttpError && error.status === 409) return normalizeClipAnalysisStatus(error.body);
     throw error;
   }
 }

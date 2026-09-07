@@ -6,6 +6,7 @@ import argparse
 import json
 import logging
 import math
+import re
 from collections.abc import Sequence
 from pathlib import Path
 
@@ -15,14 +16,15 @@ from worker.adapters.media.ffmpeg_thumbnail import (
 )
 from worker.pipeline.output.evidence.clip_identity import is_clip_id
 from worker.pipeline.output.evidence.playback_rendition import (
-    PLAYBACK_NAME,
-    PLAYBACK_TIMING_NAME,
+    PLAYBACK_MANIFEST_NAME,
+    PLAYBACK_RENDITION_PREFIX,
     PlaybackRenditionError,
     probe_video_codec,
     write_playback_rendition,
 )
 
 LOGGER = logging.getLogger(__name__)
+_SHA256_RE = re.compile(r"[0-9a-f]{64}\Z")
 
 
 def backfill(
@@ -46,8 +48,7 @@ def backfill(
     for clip_path in _clip_paths(clip_store):
         summary["scanned"] += 1
         clip_id = clip_path.parent.name
-        rendition = clip_path.parent / PLAYBACK_NAME
-        if rendition.exists() and _timing_is_identical(clip_path):
+        if _rendition_is_identical(clip_path):
             summary["skipped"] += 1
             continue
         try:
@@ -70,18 +71,63 @@ def backfill(
     return summary
 
 
-def _timing_is_identical(clip_path: Path) -> bool:
+def _rendition_is_identical(clip_path: Path) -> bool:
     try:
-        payload = json.loads((clip_path.parent / PLAYBACK_TIMING_NAME).read_text(encoding="ascii"))
-        source_digest = _sha256(clip_path)
-        rendition_digest = _sha256(clip_path.parent / PLAYBACK_NAME)
+        payload = json.loads(
+            (clip_path.parent / PLAYBACK_MANIFEST_NAME).read_text(encoding="ascii")
+        )
+        source_digest = _manifest_source_sha256(clip_path)
     except (OSError, UnicodeDecodeError, json.JSONDecodeError):
         return False
+    if not isinstance(payload, dict):
+        return False
+    rendition_name = payload.get("rendition")
+    rendition_digest = payload.get("rendition_sha256")
+    if not _valid_attestation(payload, source_digest, rendition_name, rendition_digest):
+        return False
+    try:
+        actual_digest = _sha256(clip_path.parent / rendition_name)
+    except OSError:
+        return False
     return (
-        isinstance(payload, dict)
-        and payload.get("pts_identical") is True
+        payload.get("pts_identical") is True
         and payload.get("source_sha256") == source_digest
-        and payload.get("rendition_sha256") == rendition_digest
+        and rendition_digest == actual_digest
+    )
+
+
+def _manifest_source_sha256(clip_path: Path) -> str | None:
+    payload = json.loads(clip_path.with_name("manifest.json").read_text(encoding="utf-8"))
+    if not isinstance(payload, dict):
+        return None
+    digest = payload.get("sha256")
+    return digest if isinstance(digest, str) and _SHA256_RE.fullmatch(digest) else None
+
+
+def _valid_attestation(
+    payload: dict[object, object],
+    source_digest: str | None,
+    rendition_name: object,
+    rendition_digest: object,
+) -> bool:
+    frames = payload.get("frames")
+    source_frames = payload.get("source_frames")
+    time_base = payload.get("time_base")
+    return (
+        isinstance(rendition_name, str)
+        and isinstance(rendition_digest, str)
+        and _SHA256_RE.fullmatch(rendition_digest) is not None
+        and rendition_name == f"{PLAYBACK_RENDITION_PREFIX}{rendition_digest[:16]}.mp4"
+        and payload.get("source_sha256") == source_digest
+        and payload.get("pts_identical") is True
+        and isinstance(time_base, str)
+        and re.fullmatch(r"[1-9][0-9]*/[1-9][0-9]*", time_base) is not None
+        and isinstance(frames, int)
+        and not isinstance(frames, bool)
+        and frames >= 0
+        and isinstance(source_frames, int)
+        and not isinstance(source_frames, bool)
+        and source_frames >= 0
     )
 
 

@@ -264,6 +264,100 @@ def test_flow_live_view_refuses_to_start_without_clip_analysis_cpu(
         runtime._start_live_view_server()  # noqa: SLF001
 
 
+def test_live_view_analysis_lookup_uses_mount_root_not_active_subdirectory(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    captured: dict[str, object] = {}
+    clip = tmp_path / "clips" / "camera-20260101-abc" / "clip.mp4"
+    clip.parent.mkdir(parents=True)
+    clip.write_bytes(b"clip")
+    clip.with_name("manifest.json").write_text(
+        json.dumps(
+            {
+                "manifest_schema_version": 2,
+                "state": "READY",
+                "clip_id": clip.parent.name,
+                "camera_id": "camera-a",
+                "event_refs": ["11111111-1111-4111-8111-111111111111"],
+                "clip_start_at": "2026-01-01T00:00:00Z",
+                "clip_end_at": "2026-01-01T00:00:01Z",
+                "finalized_at": "2026-01-01T00:00:02Z",
+                "sha256": "a" * 64,
+                "size_bytes": 4,
+                "duration_ms": 1000,
+                "state_version": 2,
+                "source_media": {
+                    "timestamp_translation_seconds": "0",
+                    "streams": [
+                        {
+                            "index": 0,
+                            "media_type": "video",
+                            "time_base": "1/90000",
+                            "width": 640,
+                            "height": 360,
+                            "packet_count": 1,
+                        }
+                    ],
+                },
+            }
+        )
+    )
+
+    class _Supervisor:
+        def __init__(self, store_dir: Path, **_kwargs: object) -> None:
+            captured["store_dir"] = store_dir
+
+        def trigger(
+            self, _clip_id: str, clip_path: Path, *_args: object, **_kwargs: object
+        ) -> bool:
+            captured["clip_path"] = clip_path
+            return True
+
+        def status(self, _clip_id: str) -> object:
+            return SimpleNamespace(state="idle", reason=None)
+
+        def cancel(self, _clip_id: str) -> bool:
+            return False
+
+        def shutdown(self) -> None:
+            return None
+
+    monkeypatch.setattr(worker_module, "ClipAnalysisSupervisor", _Supervisor)
+    config = _config().model_copy(
+        update={"clip": _config().clip.model_copy(update={"store_subdir": "active"})}
+    )
+    runtime = WorkerRuntime(
+        config,
+        env={
+            "ML_WORKER_PROFILE": "flow",
+            "ML_WORKER_CLIP_ANALYSIS_CPU": "3",
+            "ML_WORKER_FLOW_ONNX_PATH": "/app/models/pose/yolo26n-pose.onnx",
+        },
+        serving_client=_ServingClient(),
+        state_dir=tmp_path,
+        clip_store_dir=tmp_path,
+    )
+    runtime._boot = SimpleNamespace(profile=SimpleNamespace(name="flow"))  # noqa: SLF001
+    runtime._mjpeg_config = MjpegServerConfig(  # noqa: SLF001
+        enabled=True, host="127.0.0.1", port=0, probe_token="relay-token"
+    )
+    runtime._start_live_view_server()  # noqa: SLF001
+    server = runtime._mjpeg_server  # noqa: SLF001
+    assert server is not None
+    try:
+        request = urllib.request.Request(
+            f"http://127.0.0.1:{server.port}/clips/camera-20260101-abc/analysis",
+            data=json.dumps({"clip_sha256": "a" * 64}).encode(),
+            headers={"X-Edge-Relay-Token": "relay-token"},
+            method="POST",
+        )
+        with urllib.request.urlopen(request, timeout=2) as response:
+            assert response.status == 202
+        assert captured == {"store_dir": tmp_path, "clip_path": clip}
+    finally:
+        runtime.stop()
+
+
 @pytest.mark.parametrize(
     ("stop_error", "exit_codes"),
     [

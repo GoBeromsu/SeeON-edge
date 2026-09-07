@@ -125,14 +125,27 @@ describe('api client contracts', () => {
     }));
   });
 
-  it('treats a 409 busy analysis slot as a running state to poll, not a failure', async () => {
+  it('normalizes the 409 busy analysis status envelope', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
+      ok: false,
+      status: 409,
+      json: async () => ({ state: 'running', served_media_sha256: 'a'.repeat(64) }),
+    }));
+
+    await expect(triggerClipAnalysis('clip-1')).resolves.toEqual({
+      state: 'running',
+      served_media_sha256: 'a'.repeat(64),
+    });
+  });
+
+  it('rejects an invalid 409 analysis body', async () => {
     vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
       ok: false,
       status: 409,
       json: async () => ({ state: 'running' }),
     }));
 
-    await expect(triggerClipAnalysis('clip-1')).resolves.toEqual({ state: 'running' });
+    await expect(triggerClipAnalysis('clip-1')).rejects.toThrow('Invalid served media digest');
   });
 
   it('returns the cancellation acknowledgement envelope', async () => {

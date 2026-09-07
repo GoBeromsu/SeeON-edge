@@ -29,7 +29,6 @@ from backend.app.features.clips.schemas import (
     SnapshotArtifactState,
 )
 from backend.app.features.clips.store import (
-    PLAYBACK_H264_FILENAME,
     ClipStore,
     DuplicateClipIdError,
     LocatedClip,
@@ -201,7 +200,9 @@ def clip_video(
     if media is not None and media != playback_identity.served_media_sha256:
         opened.handle.close()
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="media_mismatch")
-    rendition = "playback-h264" if opened.path.name == PLAYBACK_H264_FILENAME else "original"
+    rendition = (
+        "playback-h264" if playback_identity.served_pts_identical is not None else "original"
+    )
     try:
         if receipt is not None and rendition == "original":
             verify_artifact(opened.path, receipt)

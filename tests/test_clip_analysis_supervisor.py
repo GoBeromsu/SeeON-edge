@@ -43,6 +43,17 @@ def _wait(supervisor: ClipAnalysisSupervisor, clip_id: str) -> str:
     raise AssertionError("supervisor did not finish")
 
 
+def _wait_gone(pid: int) -> None:
+    deadline = monotonic() + 5
+    while monotonic() < deadline:
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            return
+        threading.Event().wait(0.01)
+    raise AssertionError(f"process {pid} survived supervision")
+
+
 def _model(path: Path, content: bytes) -> str:
     path.write_bytes(content)
     digest = sha256(content).hexdigest()
@@ -175,5 +186,191 @@ def test_timeout_kills_and_reaps_child(tmp_path: Path) -> None:
         assert supervisor.status("event-1").reason == "timeout"
         with pytest.raises(ProcessLookupError):
             os.kill(pids[0], 0)
+    finally:
+        supervisor.shutdown()
+
+
+@pytest.mark.heavy
+def test_timeout_kills_group_and_grandchild_with_zero_survivors(tmp_path: Path) -> None:
+    clip = tmp_path / "clip.mp4"
+    clip.write_bytes(b"clip")
+    _model(tmp_path / "pose.onnx", b"pose")
+    _model(tmp_path / "bed.onnx", b"bed")
+    grandchild_file = tmp_path / "grandchild.pid"
+
+    def launch(command: list[str], **kwargs: object) -> subprocess.Popen[bytes]:
+        code = (
+            "import pathlib,subprocess,sys;"
+            "grandchild=subprocess.Popen([sys.executable, '-c', 'while True: pass']);"
+            f"pathlib.Path({str(grandchild_file)!r}).write_text(str(grandchild.pid));"
+            "\nwhile True: pass"
+        )
+        return subprocess.Popen([sys.executable, "-c", code], **kwargs)
+
+    supervisor = ClipAnalysisSupervisor(
+        tmp_path,
+        python_executable=sys.executable,
+        pose_model_path=tmp_path / "pose.onnx",
+        bed_model_path=tmp_path / "bed.onnx",
+        profile=_Profile(),
+        cpu_index=_cpu(),
+        deadline_s=0.05,
+        launch=launch,
+    )
+    try:
+        assert _trigger(supervisor, "event-1", clip, "a" * 64)
+        assert _wait(supervisor, "event-1") == "failed"
+        assert supervisor.status("event-1").reason == "timeout"
+        deadline = monotonic() + 3
+        while not grandchild_file.exists() and monotonic() < deadline:
+            threading.Event().wait(0.01)
+        _wait_gone(int(grandchild_file.read_text()))
+    finally:
+        supervisor.shutdown()
+
+
+@pytest.mark.heavy
+def test_cancel_kills_group_reaps_and_releases_slot_with_zero_survivors(tmp_path: Path) -> None:
+    clip = tmp_path / "clip.mp4"
+    clip.write_bytes(b"clip")
+    _model(tmp_path / "pose.onnx", b"pose")
+    _model(tmp_path / "bed.onnx", b"bed")
+    pids: list[int] = []
+    supervisor = ClipAnalysisSupervisor(
+        tmp_path,
+        python_executable=sys.executable,
+        pose_model_path=tmp_path / "pose.onnx",
+        bed_model_path=tmp_path / "bed.onnx",
+        profile=_Profile(),
+        cpu_index=_cpu(),
+        launch=_launch_for(b"{}", pids, 10),
+    )
+    try:
+        assert _trigger(supervisor, "event-1", clip, "a" * 64)
+        deadline = monotonic() + 3
+        while not pids and monotonic() < deadline:
+            threading.Event().wait(0.01)
+        assert supervisor.cancel("event-1")
+        assert _wait(supervisor, "event-1") == "failed"
+        assert supervisor.status("event-1").reason == "cancelled"
+        _wait_gone(pids[0])
+        assert _trigger(supervisor, "event-2", clip, "e" * 64)
+    finally:
+        supervisor.shutdown()
+
+
+@pytest.mark.heavy
+def test_completion_after_deadline_is_timeout_and_never_publishes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    clip = tmp_path / "clip.mp4"
+    clip.write_bytes(b"clip")
+    pose_sha = _model(tmp_path / "pose.onnx", b"pose")
+    bed_sha = _model(tmp_path / "bed.onnx", b"bed")
+    pids: list[int] = []
+    times = iter((0.0, 0.0, 2.0))
+    monkeypatch.setattr("worker.runtime.clip_analysis_supervisor.monotonic", lambda: next(times))
+    supervisor = ClipAnalysisSupervisor(
+        tmp_path,
+        python_executable=sys.executable,
+        pose_model_path=tmp_path / "pose.onnx",
+        bed_model_path=tmp_path / "bed.onnx",
+        profile=_Profile(),
+        cpu_index=_cpu(),
+        deadline_s=1.0,
+        launch=_launch_for(_result("event-1", "a" * 64, pose_sha, bed_sha), pids),
+    )
+    try:
+        assert _trigger(supervisor, "event-1", clip, "a" * 64)
+        assert _wait(supervisor, "event-1") == "failed"
+        assert supervisor.status("event-1").reason == "timeout"
+        assert tuple(tmp_path.glob("clip.analysis.*.json")) == ()
+    finally:
+        supervisor.shutdown()
+
+
+def test_launch_failure_keeps_supervisor_alive_and_releases_slot(tmp_path: Path) -> None:
+    clip = tmp_path / "clip.mp4"
+    clip.write_bytes(b"clip")
+    _model(tmp_path / "pose.onnx", b"pose")
+    _model(tmp_path / "bed.onnx", b"bed")
+    attempts = 0
+
+    def launch(_command: list[str], **_kwargs: object) -> subprocess.Popen[bytes]:
+        nonlocal attempts
+        attempts += 1
+        raise OSError("launch_failed")
+
+    supervisor = ClipAnalysisSupervisor(
+        tmp_path,
+        python_executable=sys.executable,
+        pose_model_path=tmp_path / "pose.onnx",
+        bed_model_path=tmp_path / "bed.onnx",
+        profile=_Profile(),
+        cpu_index=_cpu(),
+        launch=launch,
+    )
+    try:
+        assert _trigger(supervisor, "event-1", clip, "a" * 64)
+        assert _wait(supervisor, "event-1") == "failed"
+        assert _trigger(supervisor, "event-2", clip, "e" * 64)
+        assert _wait(supervisor, "event-2") == "failed"
+        assert attempts == 2
+    finally:
+        supervisor.shutdown()
+
+
+def test_teardown_failure_closes_admission(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    clip = tmp_path / "clip.mp4"
+    clip.write_bytes(b"clip")
+    pose_sha = _model(tmp_path / "pose.onnx", b"pose")
+    bed_sha = _model(tmp_path / "bed.onnx", b"bed")
+    pids: list[int] = []
+    supervisor = ClipAnalysisSupervisor(
+        tmp_path,
+        python_executable=sys.executable,
+        pose_model_path=tmp_path / "pose.onnx",
+        bed_model_path=tmp_path / "bed.onnx",
+        profile=_Profile(),
+        cpu_index=_cpu(),
+        launch=_launch_for(_result("event-1", "a" * 64, pose_sha, bed_sha), pids),
+    )
+    monkeypatch.setattr(
+        supervisor, "_terminate_group", lambda _process: (_ for _ in ()).throw(OSError("teardown"))
+    )
+    try:
+        assert _trigger(supervisor, "event-1", clip, "a" * 64)
+        assert _wait(supervisor, "event-1") == "failed"
+        assert not _trigger(supervisor, "event-2", clip, "e" * 64)
+    finally:
+        monkeypatch.setattr(supervisor, "_terminate_group", lambda process: process.kill())
+        supervisor.shutdown()
+
+
+@pytest.mark.heavy
+def test_no_job_state_marker_while_active_or_after_teardown(tmp_path: Path) -> None:
+    clip = tmp_path / "clip.mp4"
+    clip.write_bytes(b"clip")
+    _model(tmp_path / "pose.onnx", b"pose")
+    _model(tmp_path / "bed.onnx", b"bed")
+    pids: list[int] = []
+    supervisor = ClipAnalysisSupervisor(
+        tmp_path,
+        python_executable=sys.executable,
+        pose_model_path=tmp_path / "pose.onnx",
+        bed_model_path=tmp_path / "bed.onnx",
+        profile=_Profile(),
+        cpu_index=_cpu(),
+        launch=_launch_for(b"{}", pids, 10),
+    )
+    try:
+        assert _trigger(supervisor, "event-1", clip, "a" * 64)
+        deadline = monotonic() + 3
+        while not pids and monotonic() < deadline:
+            threading.Event().wait(0.01)
+        assert tuple(tmp_path.glob("*.state")) == ()
+        assert supervisor.cancel("event-1")
+        assert _wait(supervisor, "event-1") == "failed"
+        assert tuple(tmp_path.glob("*.state")) == ()
     finally:
         supervisor.shutdown()

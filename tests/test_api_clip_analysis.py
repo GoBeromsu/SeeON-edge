@@ -29,6 +29,8 @@ CLIP_SHA256 = "a" * 64
 class _WorkerServer(ThreadingHTTPServer):
     response_status: int = 202
     response_body: dict[str, object] = {"state": "running"}
+    get_response_status: int | None = None
+    get_response_body: dict[str, object] | None = None
     requests: list[tuple[str, str, bytes, str | None]]
 
     def __init__(self) -> None:
@@ -43,7 +45,14 @@ class _WorkerServer(ThreadingHTTPServer):
 
 class _WorkerHandler(BaseHTTPRequestHandler):
     def do_GET(self) -> None:  # noqa: N802
-        self._respond()
+        self._respond(
+            self.server.response_status
+            if self.server.get_response_status is None
+            else self.server.get_response_status,
+            self.server.response_body
+            if self.server.get_response_body is None
+            else self.server.get_response_body,
+        )
 
     def do_POST(self) -> None:  # noqa: N802
         length = int(self.headers.get("Content-Length", "0"))
@@ -55,11 +64,11 @@ class _WorkerHandler(BaseHTTPRequestHandler):
                 self.headers.get("X-Edge-Relay-Token"),
             )
         )
-        self._respond()
+        self._respond(self.server.response_status, self.server.response_body)
 
-    def _respond(self) -> None:
-        body = json.dumps(self.server.response_body).encode()
-        self.send_response(self.server.response_status)
+    def _respond(self, response_status: int, response_body: dict[str, object]) -> None:
+        body = json.dumps(response_body).encode()
+        self.send_response(response_status)
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
@@ -159,13 +168,13 @@ def _write_playback(
     source_sha256: str = CLIP_SHA256,
     rendition_sha256: str | None = None,
 ) -> str:
-    playback = clip_dir / "clip.playback-h264.mp4"
-    playback.write_bytes(b"playback")
     digest = hashlib.sha256(b"playback").hexdigest()
-    (clip_dir / "clip.playback-h264.mp4.sha256").write_text(digest + "\n", encoding="ascii")
-    (clip_dir / "clip.playback-h264.timing.json").write_text(
+    playback = clip_dir / f"clip.playback-h264.{digest[:16]}.mp4"
+    playback.write_bytes(b"playback")
+    (clip_dir / "clip.playback-h264.json").write_text(
         json.dumps(
             {
+                "rendition": playback.name,
                 "source_sha256": source_sha256,
                 "rendition_sha256": digest if rendition_sha256 is None else rendition_sha256,
                 "pts_identical": pts_identical,
@@ -188,12 +197,19 @@ def test_trigger_relays_worker_status_and_original_manifest_identity(
 ) -> None:
     _write_clip(_environment)
     worker_server.response_status = worker_status
+    worker_server.get_response_status = 200
+    worker_server.get_response_body = {"state": "running"}
     monkeypatch.setenv("ML_API_WORKER_STREAM_ORIGIN", worker_server.origin)
     get_settings.cache_clear()
     with TestClient(create_app(lifespan=no_lifespan)) as client:
         _login(client)
         response = client.post(f"/api/v1/clips/{CLIP_ID}/analysis")
     assert response.status_code == worker_status
+    if worker_status in {202, 409}:
+        assert response.json() == {
+            "state": "running",
+            "served_media_sha256": CLIP_SHA256,
+        }
     assert worker_server.requests == [
         (
             "POST",

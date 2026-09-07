@@ -864,7 +864,9 @@ class WorkerRuntime:
         if not self._mjpeg_config.enabled:
             LOGGER.info("dev_mjpeg disabled; live view server not started")
             return
-        clip_store_dir = self._resolved_clip_store_dir()
+        # Analysis lookup spans the stable mount, including historical active
+        # subdirectories. New recordings still use `_resolved_clip_store_dir`.
+        clip_store_dir = self._clip_store_dir
         supervisor = ClipAnalysisSupervisor(
             clip_store_dir,
             python_executable=sys.executable,

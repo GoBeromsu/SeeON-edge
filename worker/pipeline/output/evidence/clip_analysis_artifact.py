@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import logging
 import os
+import time
 from dataclasses import dataclass
 from hashlib import sha256
 from os import replace
@@ -15,6 +17,8 @@ from shared.events.clip_analysis_wire import (
     decode_clip_analysis,
     encode_clip_analysis,
 )
+
+LOGGER = logging.getLogger(__name__)
 
 
 class ClipAnalysisArtifactError(ValueError):
@@ -204,12 +208,25 @@ def publish_clip_analysis(
             ):
                 return target
             raise ClipAnalysisArtifactError("identity_collision")
-        if target.exists() and target.read_bytes() == canonical:
+        if target.exists() and target.read_bytes() == canonical and not sidecar.exists():
             _atomic_write(sidecar, f"{sha256(canonical).hexdigest()}\n".encode("ascii"))
             return target
+        _quarantine_unverified(target)
+        _quarantine_unverified(sidecar)
     _atomic_write(sidecar, f"{sha256(canonical).hexdigest()}\n".encode("ascii"))
     _atomic_write(target, canonical)
     return target
+
+
+def _quarantine_unverified(path: Path) -> None:
+    if not path.exists():
+        return
+    quarantined = path.with_name(f"{path.name}.corrupt-{int(time.time())}")
+    try:
+        replace(path, quarantined)
+    except OSError as exc:
+        raise ClipAnalysisArtifactError("corrupt_quarantine_failed") from exc
+    LOGGER.warning("quarantined unverified clip analysis artifact %s as %s", path, quarantined)
 
 
 def _verified_payload(target: Path, sidecar: Path) -> bytes | None:

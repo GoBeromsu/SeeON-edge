@@ -38,4 +38,46 @@ describe('useClipAnalysis', () => {
     await act(async () => { await vi.advanceTimersByTimeAsync(4_000); });
     expect(fetchMock).toHaveBeenCalledTimes(2);
   });
+
+  it('starts polling after a 202 trigger status envelope', async () => {
+    vi.useFakeTimers();
+    const running = { state: 'running', served_media_sha256: 'a'.repeat(64) };
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce({ ok: true, status: 200, json: async () => ({ state: 'idle', served_media_sha256: 'a'.repeat(64) }) })
+      .mockResolvedValueOnce({ ok: true, status: 202, json: async () => running })
+      .mockResolvedValueOnce({ ok: true, status: 200, json: async () => running });
+    vi.stubGlobal('fetch', fetchMock);
+    const host = document.createElement('div');
+    document.body.append(host);
+    const root = createRoot(host);
+    roots.add(root);
+    await act(async () => { root.render(<Harness />); });
+    await act(async () => { await Promise.resolve(); });
+    await act(async () => { host.querySelector('button')?.click(); await Promise.resolve(); });
+    expect(latest?.status.state).toBe('running');
+    await act(async () => { await vi.advanceTimersByTimeAsync(2_000); });
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+    expect(fetchMock).toHaveBeenNthCalledWith(2, '/api/v1/clips/clip-1/analysis', expect.objectContaining({ method: 'POST' }));
+  });
+
+  it('starts polling after a 409 trigger status envelope', async () => {
+    vi.useFakeTimers();
+    const running = { state: 'running', served_media_sha256: 'a'.repeat(64) };
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce({ ok: true, status: 200, json: async () => ({ state: 'idle', served_media_sha256: 'a'.repeat(64) }) })
+      .mockResolvedValueOnce({ ok: false, status: 409, json: async () => running })
+      .mockResolvedValueOnce({ ok: true, status: 200, json: async () => running });
+    vi.stubGlobal('fetch', fetchMock);
+    const host = document.createElement('div');
+    document.body.append(host);
+    const root = createRoot(host);
+    roots.add(root);
+    await act(async () => { root.render(<Harness />); });
+    await act(async () => { await Promise.resolve(); });
+    await act(async () => { host.querySelector('button')?.click(); await Promise.resolve(); });
+    expect(latest?.status.state).toBe('running');
+    await act(async () => { await vi.advanceTimersByTimeAsync(2_000); });
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+    expect(fetchMock).toHaveBeenNthCalledWith(2, '/api/v1/clips/clip-1/analysis', expect.objectContaining({ method: 'POST' }));
+  });
 });

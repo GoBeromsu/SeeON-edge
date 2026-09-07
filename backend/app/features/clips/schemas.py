@@ -126,12 +126,6 @@ class ClipAnalysisResponse(BaseModel):
     result: dict[str, object] | None = Field(default=None)
 
 
-class ClipAnalysisTriggerResponse(BaseModel):
-    model_config: ClassVar[ConfigDict] = ConfigDict(extra="forbid")
-
-    state: Literal["running"] = Field(...)
-
-
 class ClipAnalysisCancelResponse(BaseModel):
     model_config: ClassVar[ConfigDict] = ConfigDict(extra="forbid")
 
