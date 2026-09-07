@@ -83,8 +83,9 @@ export function AutoplayVideo({ src, className, onLoadedMetadata, onVideoElement
           onPlaybackState?.('failed');
         }}
         onLoadedData={() => {
-          setFailure(null);
-          onPlaybackState?.('ready');
+          // Decoded data clears a media *error* notice; it is not playback
+          // permission, so overlay readiness is only reported from onPlay.
+          setFailure((previous) => (previous === 'failed' ? null : previous));
         }}
         onPlay={() => {
           setFailure(null);

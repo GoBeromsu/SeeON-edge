@@ -132,9 +132,12 @@ describe('AutoplayVideo', () => {
 
     vi.mocked(HTMLMediaElement.prototype.play).mockRejectedValueOnce(new DOMException('blocked', 'NotAllowedError'));
     const blocked = vi.fn();
-    renderVideo('/api/v1/clips/blocked', blocked);
+    const blockedRender = renderVideo('/api/v1/clips/blocked', blocked);
     await flushPlayback();
     expect(blocked).toHaveBeenCalledWith('blocked');
+    // Decoded data arriving after autoplay was refused is not playback permission.
+    act(() => blockedRender.host.querySelector('video')?.dispatchEvent(new Event('loadeddata')));
+    expect(blocked).not.toHaveBeenCalledWith('ready');
 
     const failed = vi.fn();
     const { host } = renderVideo('/api/v1/clips/failed', failed);

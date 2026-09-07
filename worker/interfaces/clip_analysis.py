@@ -32,5 +32,7 @@ class ClipAnalysisSupervisor(Protocol):
 
     def cancel(self, clip_id: str) -> bool: ...
 
+    def shutdown(self) -> None: ...
+
 
 __all__ = ["ClipAnalysisDisabledError", "ClipAnalysisStatus", "ClipAnalysisSupervisor"]

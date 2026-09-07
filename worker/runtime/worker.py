@@ -56,6 +56,7 @@ from worker.domains.fall.pose_bbox56 import (
 )
 from worker.domains.tracker import GreedyIouTracker
 from worker.interfaces.clip_analysis import ClipAnalysisDisabledError
+from worker.interfaces.clip_analysis import ClipAnalysisSupervisor as ClipAnalysisControl
 from worker.interfaces.decision import Decider, TraceSnapshotProvider
 from worker.interfaces.fall_model import FallV2ModelProtocol
 from worker.interfaces.serving import ServingClient
@@ -437,6 +438,9 @@ class ClipAnalysisDisabled:
         del clip_id
         raise ClipAnalysisDisabledError("clip_analysis_disabled")
 
+    def shutdown(self) -> None:
+        return None
+
 
 def _clip_analysis_cpu_index(environ: Mapping[str, str]) -> int | None:
     raw_value = environ.get(CLIP_ANALYSIS_CPU_ENV)
@@ -736,7 +740,7 @@ class WorkerRuntime:
         self._mjpeg_config = self._resolve_mjpeg_config()
         self._live_frames = LatestFrameStore()
         self._mjpeg_server: MjpegServer | None = None
-        self._clip_analysis_supervisor: ClipAnalysisSupervisor | None = None
+        self._clip_analysis_supervisor: ClipAnalysisControl | None = None
         self._flow_media_plane: FlowMediaPlane | None = flow_media_plane
         self._flow_lifecycle_supervisor: FlowLifecycleSupervisor | None = None
         self._native_policy_pumps: tuple[NativePolicyPump, ...] = ()
@@ -922,8 +926,7 @@ class WorkerRuntime:
             replay_fall_model=self.fall_model,
         )
         if self._mjpeg_server is None:
-            if isinstance(supervisor, ClipAnalysisSupervisor):
-                supervisor.shutdown()
+            supervisor.shutdown()
             LOGGER.warning(
                 "live view enabled but its server could not bind: host=%s port=%d",
                 self._mjpeg_config.host,
