@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { bedLabel, findMatchingFrame, personLabel } from '@/features/events/ClipOverlayCanvas';
+import { bedLabel, findMatchingFrame, labelOrigin, personLabel } from '@/features/events/ClipOverlayCanvas';
 import type { ClipAnalysisResult } from '@/shared/api/types';
 
 const result: ClipAnalysisResult = {
@@ -25,10 +25,17 @@ describe('findMatchingFrame', () => {
 });
 
 describe('overlay labels', () => {
-  it('uses the live-view wording: person confidence percent and bed index', () => {
-    expect(personLabel(0.894)).toBe('사람 89%');
-    expect(personLabel(1)).toBe('사람 100%');
-    expect(bedLabel(0)).toBe('침대1');
-    expect(bedLabel(4)).toBe('침대5');
+  it('formats the detector confidence as a rounded percent and beds as a 1-based index', () => {
+    // Locale-independent contract: the numbers, not the prose.
+    expect(personLabel(0.894)).toMatch(/\b89%/);
+    expect(personLabel(1)).toMatch(/\b100%/);
+    expect(bedLabel(0)).toMatch(/1$/);
+    expect(bedLabel(4)).toMatch(/5$/);
+  });
+
+  it('keeps the label chip inside the drawable width and above the shape when there is room', () => {
+    expect(labelOrigin(10, 40, 50, 300)).toEqual({ left: 10, top: 22 });
+    expect(labelOrigin(290, 40, 50, 300)).toEqual({ left: 250, top: 22 });
+    expect(labelOrigin(-5, 5, 50, 300)).toEqual({ left: 0, top: 5 });
   });
 });

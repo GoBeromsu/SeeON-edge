@@ -28,16 +28,23 @@ const LABEL_FONT = '600 12px system-ui, sans-serif';
 const LABEL_PADDING = 4;
 const LABEL_HEIGHT = 18;
 
-function drawLabel(context: CanvasRenderingContext2D, text: string, x: number, y: number, color: string): void {
+/** Label chip position kept inside the drawable box (like the live preview renderer). */
+export function labelOrigin(x: number, y: number, width: number, drawableWidth: number): { left: number; top: number } {
+  return {
+    left: Math.max(0, Math.min(x, drawableWidth - width)),
+    top: y - LABEL_HEIGHT >= 0 ? y - LABEL_HEIGHT : y,
+  };
+}
+
+function drawLabel(context: CanvasRenderingContext2D, text: string, x: number, y: number, color: string, drawableWidth: number): void {
   context.font = LABEL_FONT;
   const width = context.measureText(text).width + LABEL_PADDING * 2;
-  // Chip sits above the shape; inside the frame when the shape touches the top edge.
-  const top = y - LABEL_HEIGHT >= 0 ? y - LABEL_HEIGHT : y;
+  const { left, top } = labelOrigin(x, y, width, drawableWidth);
   context.fillStyle = color;
-  context.fillRect(x, top, width, LABEL_HEIGHT);
+  context.fillRect(left, top, width, LABEL_HEIGHT);
   context.fillStyle = '#111111';
   context.textBaseline = 'middle';
-  context.fillText(text, x + LABEL_PADDING, top + LABEL_HEIGHT / 2);
+  context.fillText(text, left + LABEL_PADDING, top + LABEL_HEIGHT / 2);
 }
 
 type Props = {
@@ -77,14 +84,14 @@ export function ClipOverlayCanvas({ video, result, personEnabled, bedEnabled }: 
           context.closePath();
           context.stroke();
           const top = points.reduce((best, point) => (point[1] < best[1] ? point : best), points[0]);
-          drawLabel(context, bedLabel(index), offsetX + top[0] * scale, offsetY + top[1] * scale, '#38bdf8');
+          drawLabel(context, bedLabel(index), offsetX + top[0] * scale, offsetY + top[1] * scale, '#38bdf8', bounds.width);
         });
       }
       if (personEnabled) {
         context.strokeStyle = '#f97316';
         frame.boxes.forEach(({ x1, y1, x2, y2, confidence }) => {
           context.strokeRect(offsetX + x1 * scale, offsetY + y1 * scale, (x2 - x1) * scale, (y2 - y1) * scale);
-          drawLabel(context, personLabel(confidence), offsetX + x1 * scale, offsetY + y1 * scale, '#f97316');
+          drawLabel(context, personLabel(confidence), offsetX + x1 * scale, offsetY + y1 * scale, '#f97316', bounds.width);
         });
       }
     };
