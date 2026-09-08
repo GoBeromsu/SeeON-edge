@@ -11,6 +11,7 @@ import pytest
 
 from contracts.event import EventEvidence
 from contracts.frame import Frame
+from tests_support.clip_analysis import no_op_ready_hook
 from tests_support.thumbnail import DeterministicThumbnailGenerator
 from worker.interfaces.output import EventSink
 from worker.pipeline.output.event_sink import EvidenceEventSink
@@ -165,6 +166,7 @@ def test_relay_detected_at_matches_the_published_manifest_byte_for_byte(tmp_path
         thumbnail_generator=DeterministicThumbnailGenerator(
             error=AssertionError("publish_unavailable must not generate a thumbnail")
         ),
+        on_ready=no_op_ready_hook,
     ).publish_unavailable(
         reservation,
         ClipPublicationMetadata(

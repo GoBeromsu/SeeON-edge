@@ -8,7 +8,8 @@ import logging
 import os
 import shutil
 import subprocess
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Final, final
 
@@ -48,6 +49,15 @@ def _no_barrier(_stage: PublicationStage, _path: Path) -> None:
     return
 
 
+@dataclass(frozen=True, slots=True)
+class ReadyClipPublication:
+    clip_id: str
+    video_path: Path
+    sha256: str
+    size_bytes: int
+    duration_ms: int
+
+
 @final
 class ClipPublisher:
     def __init__(
@@ -57,14 +67,18 @@ class ClipPublisher:
         barrier: PublicationBarrier = _no_barrier,
         ffprobe_bin: str = "ffprobe",
         thumbnail_generator: ThumbnailGenerator,
+        on_ready: Callable[[ReadyClipPublication], None],
         delivery_queue_directory: Path | None = None,
     ) -> None:
         if thumbnail_generator is None:
             raise TypeError("thumbnail_generator is required")
+        if on_ready is None:
+            raise TypeError("on_ready is required")
         self._store_dir = store_dir
         self._barrier = barrier
         self._ffprobe_bin = ffprobe_bin
         self._thumbnail_generator = thumbnail_generator
+        self._on_ready = on_ready
         self._delivery_queue_directory = delivery_queue_directory
 
     def publish_ready(
@@ -119,6 +133,23 @@ class ClipPublisher:
         self._enqueue_clip(manifest, metadata)
         self._cleanup_staging(reservation)
         _ = schedule_playback_rendition(video_path, str(reservation.clip_id))
+        try:
+            self._on_ready(
+                ReadyClipPublication(
+                    clip_id=str(reservation.clip_id),
+                    video_path=video_path,
+                    sha256=manifest.sha256,
+                    size_bytes=manifest.size_bytes,
+                    duration_ms=manifest.duration_ms,
+                )
+            )
+        except Exception as exc:  # noqa: BLE001 - analysis admission cannot undo publication
+            LOGGER.warning(
+                "clip analysis ready hook failed stage=clip_analysis_ready "
+                "clip_id=%s exception_class=%s",
+                reservation.clip_id,
+                type(exc).__name__,
+            )
         return PublishedClip(reservation.clip_id, manifest, manifest_path, video_path)
 
     def publish_adopted_ready(
@@ -340,7 +371,23 @@ __all__ = [
     "PublicationBarrier",
     "PublicationStage",
     "PublishedClip",
+    "ReadyClipPublication",
 ]
+
+
+def _source_dimension(source_media: dict[str, JsonValue] | None, dimension: str) -> int | None:
+    if source_media is None:
+        return None
+    streams = source_media.get("streams")
+    if not isinstance(streams, list):
+        return None
+    for stream in streams:
+        if not isinstance(stream, dict) or stream.get("media_type") != "video":
+            continue
+        value = stream.get(dimension)
+        if isinstance(value, int) and value > 0:
+            return value
+    return None
 
 
 def _adopt_media(source_path: Path, destination: Path) -> None:

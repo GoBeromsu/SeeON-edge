@@ -135,7 +135,7 @@ def test_clip_analysis_trigger_status_and_cancel(tmp_path: Path) -> None:
             timeout=1,
         ) as response:
             assert response.status == 202
-            assert json.loads(response.read()) == {"state": "running"}
+            assert json.loads(response.read()) == {"state": "available"}
         assert supervisor.calls == [("camera-20260101-abc", clip, _SHA256, 4, 1000, 640, 360)]
 
         with urllib.request.urlopen(

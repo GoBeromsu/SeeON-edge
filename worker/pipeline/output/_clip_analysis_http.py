@@ -99,7 +99,7 @@ def handle_post(
     if clip_path is None:
         handler.send_error(HTTPStatus.NOT_FOUND)
         return
-    facts = _manifest_facts(clip_path)
+    facts = manifest_facts(clip_path)
     if facts is None:
         handler.send_error(HTTPStatus.BAD_REQUEST)
         return
@@ -108,7 +108,7 @@ def handle_post(
         _write_json(handler, HTTPStatus.BAD_REQUEST, {"error": "sha_mismatch"})
         return
     try:
-        accepted = supervisor.trigger(
+        admission = supervisor.trigger(
             clip_id,
             clip_path,
             clip_sha256,
@@ -127,13 +127,24 @@ def handle_post(
             {"error": "rejected", "reason": str(exc)},
         )
         return
-    if not accepted:
+    if admission is False:
         _write_json(handler, HTTPStatus.CONFLICT, {"state": "running"})
         return
-    _write_json(handler, HTTPStatus.ACCEPTED, {"state": "running"})
+    if admission == "queue_full":
+        _write_json(handler, HTTPStatus.CONFLICT, {"state": admission})
+        return
+    if admission == "stopped":
+        _write_json(handler, HTTPStatus.SERVICE_UNAVAILABLE, {"state": admission})
+        return
+    if admission == "rejected":
+        _write_json(handler, HTTPStatus.UNPROCESSABLE_ENTITY, {"state": admission})
+        return
+    status = supervisor.status(clip_id)
+    http_status = HTTPStatus.OK if admission == "available" else HTTPStatus.ACCEPTED
+    _write_json(handler, http_status, {"state": status.state})
 
 
-def _manifest_facts(clip_path: Path) -> tuple[str, int, int, int, int] | None:
+def manifest_facts(clip_path: Path) -> tuple[str, int, int, int, int] | None:
     try:
         manifest, _, _ = parse_manifest_content(clip_path.with_name("manifest.json"))
     except ClipEvidenceError:
@@ -153,7 +164,7 @@ def _locate_clip(store_dir: Path, clip_id: str) -> Path | None:
     candidates: list[Path] = []
     for clips_root in bounded_clip_roots(store_dir):
         clip_path = clips_root / clip_id / "clip.mp4"
-        if not clip_path.is_file() or _manifest_facts(clip_path) is None:
+        if not clip_path.is_file() or manifest_facts(clip_path) is None:
             continue
         candidates.append(clip_path)
     if len(candidates) > 1:

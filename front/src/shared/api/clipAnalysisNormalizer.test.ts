@@ -34,6 +34,13 @@ describe('normalizeClipAnalysisStatus', () => {
     })).toEqual({ state: 'unavailable', reason: 'timing_unverified', served_media_sha256: 'e'.repeat(64) });
   });
 
+  it('accepts a queued worker response', () => {
+    expect(normalizeClipAnalysisStatus({
+      state: 'queued',
+      served_media_sha256: 'e'.repeat(64),
+    })).toEqual({ state: 'queued', served_media_sha256: 'e'.repeat(64) });
+  });
+
   it.each([
     { ...available, unexpected: true },
     { ...available, served_timing_identical: undefined },

@@ -15,6 +15,7 @@ from worker.pipeline.output.evidence.clip_analysis_artifact import (
     ClipAnalysisArtifactError,
     ClipAnalysisArtifactIdentity,
     artifact_path,
+    has_current_artifact,
     publish_clip_analysis,
 )
 
@@ -59,6 +60,34 @@ def test_publish_once_and_load_identity_bound_artifact(tmp_path: Path) -> None:
     assert (
         first.with_name(f"{first.name}.sha256").read_text().strip()
         == sha256(_payload(identity)).hexdigest()
+    )
+
+
+def test_current_artifact_matches_exact_decoder_identity(tmp_path: Path) -> None:
+    clip = tmp_path / "clip.mp4"
+    clip.write_bytes(b"clip")
+    scratch = tmp_path / "out.json"
+    identity = _identity()
+    scratch.write_bytes(_payload(identity))
+    publish_clip_analysis(clip, scratch, identity)
+
+    assert has_current_artifact(
+        tmp_path,
+        clip_id=identity.clip_id,
+        clip_sha256=identity.clip_sha256,
+        pose_model_sha256=identity.pose_model_sha256,
+        bed_model_sha256=identity.bed_model_sha256,
+        analysis_profile_sha256=identity.analysis_profile_sha256,
+        decoder_identity=identity.decoder_identity,
+    )
+    assert not has_current_artifact(
+        tmp_path,
+        clip_id=identity.clip_id,
+        clip_sha256=identity.clip_sha256,
+        pose_model_sha256=identity.pose_model_sha256,
+        bed_model_sha256=identity.bed_model_sha256,
+        analysis_profile_sha256=identity.analysis_profile_sha256,
+        decoder_identity="pyav-16/hevc",
     )
 
 

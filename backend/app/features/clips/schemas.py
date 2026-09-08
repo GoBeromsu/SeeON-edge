@@ -109,6 +109,7 @@ class AuditResponse(BaseModel):
 
 ClipAnalysisState: TypeAlias = Literal[
     "idle",
+    "queued",
     "running",
     "available",
     "failed",

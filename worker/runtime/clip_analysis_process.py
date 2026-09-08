@@ -29,6 +29,22 @@ class ClipAnalysisJob:
     bed_model_path: Path
     profile: object
     profile_sha256: str
+    decoder_identity: str
+    front: bool
+    size_bytes: int = 0
+    duration_ms: int = 0
+    width: int = 0
+    height: int = 0
+    pose_model_sha256: str = ""
+    bed_model_sha256: str = ""
+    generation: int = 0
+
+
+@dataclass(frozen=True, slots=True)
+class ClipMediaFacts:
+    width: int
+    height: int
+    decoder_identity: str
 
 
 @dataclass(slots=True)
@@ -160,10 +176,31 @@ def identity_matches(job: ClipAnalysisJob, result: ClipAnalysisResult) -> bool:
     return (
         result.clip_id == job.clip_id
         and result.clip_sha256 == job.clip_sha256
-        and result.pose_model_sha256 == model_digest(job.pose_model_path)
-        and result.bed_model_sha256 == model_digest(job.bed_model_path)
+        and result.pose_model_sha256 == job.pose_model_sha256
+        and result.bed_model_sha256 == job.bed_model_sha256
         and result.analysis_profile_sha256 == job.profile_sha256
+        and result.decoder_identity == job.decoder_identity
     )
+
+
+def probe_media_facts(clip_path: Path) -> ClipMediaFacts:
+    """Probe media using the same single-thread decoder configuration as analysis."""
+    import av
+
+    with av.open(str(clip_path)) as container:
+        stream = container.streams.video[0]
+        stream.thread_type = "NONE"
+        stream.thread_count = 1
+        if stream.width <= 0 or stream.height <= 0:
+            raise ValueError("invalid_dimensions")
+        codec_name = stream.codec_context.name
+        if not codec_name:
+            raise ValueError("missing_codec")
+        return ClipMediaFacts(
+            width=stream.width,
+            height=stream.height,
+            decoder_identity=f"pyav-{av.__version__}/{codec_name}",
+        )
 
 
 def scratch_path(clip_path: Path) -> Path:

@@ -198,7 +198,7 @@ def _write_playback(
     return digest
 
 
-@pytest.mark.parametrize("worker_status", [202, 409, 404])
+@pytest.mark.parametrize("worker_status", [200, 202, 409, 404])
 def test_trigger_relays_worker_status_and_original_manifest_identity(
     _environment: Path,
     worker_server: _WorkerServer,
@@ -215,7 +215,7 @@ def test_trigger_relays_worker_status_and_original_manifest_identity(
         _login(client)
         response = client.post(f"/api/v1/clips/{CLIP_ID}/analysis")
     assert response.status_code == worker_status
-    if worker_status in {202, 409}:
+    if worker_status in {200, 202, 409}:
         assert response.json() == {
             "state": "running",
             "served_media_sha256": CLIP_SHA256,
@@ -228,6 +228,25 @@ def test_trigger_relays_worker_status_and_original_manifest_identity(
             "relay-token",
         )
     ]
+
+
+def test_trigger_projects_worker_rejection_reason(
+    _environment: Path, worker_server: _WorkerServer, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _write_clip(_environment)
+    worker_server.response_status = 422
+    worker_server.response_body = {"error": "rejected", "reason": "duration"}
+    monkeypatch.setenv("ML_API_WORKER_STREAM_ORIGIN", worker_server.origin)
+    get_settings.cache_clear()
+    with TestClient(create_app(lifespan=no_lifespan)) as client:
+        _login(client)
+        response = client.post(f"/api/v1/clips/{CLIP_ID}/analysis")
+    assert response.status_code == 422
+    assert response.json() == {
+        "state": "failed",
+        "served_media_sha256": CLIP_SHA256,
+        "reason": "duration",
+    }
 
 
 def test_available_analysis_reports_identical_served_timing(_environment: Path) -> None:
@@ -360,7 +379,7 @@ def test_analysis_uses_original_when_rendition_attestation_is_unbound(
     assert response.json()["result"]["clip_sha256"] == CLIP_SHA256
 
 
-@pytest.mark.parametrize("worker_state", ["idle", "running", "failed"])
+@pytest.mark.parametrize("worker_state", ["idle", "queued", "running", "failed"])
 def test_worker_states_include_served_media_identity(
     _environment: Path,
     worker_server: _WorkerServer,

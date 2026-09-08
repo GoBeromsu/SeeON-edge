@@ -13,7 +13,7 @@ from backend.app.features.clips.schemas import ClipAnalysisResponse
 from backend.app.features.clips.store import ClipStore, LocatedClip
 from shared.events.clip_analysis_wire import ClipAnalysisWireError, decode_clip_analysis
 
-_WORKER_STATES = frozenset({"idle", "running", "available", "failed"})
+_WORKER_STATES = frozenset({"idle", "queued", "running", "available", "failed"})
 
 
 def assemble_clip_analysis_status(
@@ -95,7 +95,7 @@ def assemble_clip_analysis_status(
     if state_value == "available" and not served_timing_identical:
         return _unavailable(served_media_sha256, "timing_unverified", timing_identical=False)
     return ClipAnalysisResponse(
-        state=cast(Literal["idle", "running", "available", "failed"], state_value),
+        state=cast(Literal["idle", "queued", "running", "available", "failed"], state_value),
         served_media_sha256=served_media_sha256,
         reason=reason,
     )

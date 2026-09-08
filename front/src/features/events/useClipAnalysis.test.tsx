@@ -20,6 +20,24 @@ afterEach(() => {
 });
 
 describe('useClipAnalysis', () => {
+  it('polls a queued analysis every two seconds', async () => {
+    vi.useFakeTimers();
+    const queued = { state: 'queued', served_media_sha256: 'e'.repeat(64) };
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce({ ok: true, status: 200, json: async () => queued })
+      .mockResolvedValueOnce({ ok: true, status: 200, json: async () => queued });
+    vi.stubGlobal('fetch', fetchMock);
+    const host = document.createElement('div');
+    document.body.append(host);
+    const root = createRoot(host);
+    roots.add(root);
+    await act(async () => { root.render(<Harness />); });
+    await act(async () => { await Promise.resolve(); });
+    expect(latest?.status.state).toBe('queued');
+    await act(async () => { await vi.advanceTimersByTimeAsync(2_000); });
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
   it('polls a running analysis every two seconds and stops at available', async () => {
     vi.useFakeTimers();
     const fetchMock = vi.fn()
