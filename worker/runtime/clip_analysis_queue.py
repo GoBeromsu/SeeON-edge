@@ -41,7 +41,7 @@ class ClipAnalysisQueue:
                 for queued in self._jobs:
                     if queued.clip_id == job.clip_id:
                         self._jobs.remove(queued)
-                        self._jobs.appendleft(queued)
+                        self._jobs.appendleft(job)
                         break
             return Admitted(Admission.ALREADY_QUEUED)
         evicted = None

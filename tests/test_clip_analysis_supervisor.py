@@ -19,6 +19,7 @@ from shared.events.clip_analysis_wire import (
     encode_clip_analysis,
 )
 from worker.adapters.model.clip_reanalysis import profile_sha256
+from worker.adapters.model.errors import ModelLoadError
 from worker.runtime.clip_analysis_process import ClipMediaFacts
 from worker.runtime.clip_analysis_queue import Admission
 from worker.runtime.clip_analysis_supervisor import ClipAnalysisSupervisor
@@ -112,6 +113,23 @@ def _result(clip_id: str, clip_sha: str, pose_sha: str, bed_sha: str) -> bytes:
             frames=(ClipAnalysisFrame(0, "no_evidence"),),
         )
     )
+
+
+def test_missing_model_digest_sidecar_fails_closed_at_supervisor_boot(tmp_path: Path) -> None:
+    clip = tmp_path / "clip.mp4"
+    clip.write_bytes(b"clip")
+    (tmp_path / "pose.onnx").write_bytes(b"pose")
+    _model(tmp_path / "bed.onnx", b"bed")
+
+    with pytest.raises(ModelLoadError, match="digest sidecar"):
+        ClipAnalysisSupervisor(
+            python_executable=sys.executable,
+            pose_model_path=tmp_path / "pose.onnx",
+            bed_model_path=tmp_path / "bed.onnx",
+            profile=_Profile(),
+            cpu_index=_cpu(),
+            probe=_probe,
+        )
 
 
 def test_real_request_round_trip_preserves_canonical_clip_id(tmp_path: Path) -> None:
@@ -368,6 +386,12 @@ def test_notify_is_not_blocked_by_probe_and_cancelled_preprobe_never_launches(
         assert _wait(supervisor, "first") == "failed"
         assert supervisor.status("first").reason == "cancelled"
         assert launches == []
+        deadline = monotonic() + 1
+        while supervisor._cancelled and monotonic() < deadline:  # noqa: SLF001
+            threading.Event().wait(0.01)
+        assert not supervisor._cancelled  # noqa: SLF001
+        assert _trigger(supervisor, "first", clip, "a" * 64) == Admission.QUEUED
+        assert _wait(supervisor, "first") == "failed"
     finally:
         release_probe.set()
         supervisor.shutdown()
@@ -517,17 +541,27 @@ def test_teardown_proof_failure_closes_admission_and_never_launches_next(
         launch=_launch_for(_result("event-1", "a" * 64, pose_sha, bed_sha), pids),
         probe=_probe,
     )
-    monkeypatch.setattr(
-        supervisor, "_terminate_group", lambda _process: (_ for _ in ()).throw(OSError("teardown"))
-    )
+    attempts = 0
+
+    def terminate(process: subprocess.Popen[bytes]) -> None:
+        nonlocal attempts
+        attempts += 1
+        if attempts < 3:
+            raise OSError("teardown")
+        process.kill()
+
+    monkeypatch.setattr(supervisor, "_terminate_group", terminate)
     try:
         assert _trigger(supervisor, "event-1", clip, "a" * 64)
-        assert _wait(supervisor, "event-1") == "failed"
+        assert _wait(supervisor, "event-1") == "closed"
+        with supervisor._condition:  # noqa: SLF001
+            assert supervisor._active is not None  # noqa: SLF001
+            assert supervisor._process is not None  # noqa: SLF001
         assert _trigger(supervisor, "event-2", clip, "e" * 64) == Admission.STOPPED
         assert pids == [pids[0]]
     finally:
-        monkeypatch.setattr(supervisor, "_terminate_group", lambda process: process.kill())
         supervisor.shutdown()
+    assert attempts == 3
 
 
 @pytest.mark.heavy

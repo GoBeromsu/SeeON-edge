@@ -35,6 +35,9 @@ class ClipAnalysisJob:
     duration_ms: int = 0
     width: int = 0
     height: int = 0
+    pose_model_sha256: str = ""
+    bed_model_sha256: str = ""
+    generation: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -173,8 +176,8 @@ def identity_matches(job: ClipAnalysisJob, result: ClipAnalysisResult) -> bool:
     return (
         result.clip_id == job.clip_id
         and result.clip_sha256 == job.clip_sha256
-        and result.pose_model_sha256 == model_digest(job.pose_model_path)
-        and result.bed_model_sha256 == model_digest(job.bed_model_path)
+        and result.pose_model_sha256 == job.pose_model_sha256
+        and result.bed_model_sha256 == job.bed_model_sha256
         and result.analysis_profile_sha256 == job.profile_sha256
         and result.decoder_identity == job.decoder_identity
     )

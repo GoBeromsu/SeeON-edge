@@ -24,12 +24,11 @@ _DISCOVERY_SECONDS = 30.0
 
 @dataclass(frozen=True, slots=True)
 class _Candidate:
+    clip_id: str
     clip_path: Path
     clip_sha256: str
     size_bytes: int
     duration_ms: int
-    width: int
-    height: int
     mtime: float
 
 
@@ -58,13 +57,13 @@ def catch_up_clip_analysis(
             break
         try:
             admission = supervisor.enqueue(
-                candidate.clip_path.parent.name,
+                candidate.clip_id,
                 candidate.clip_path,
                 candidate.clip_sha256,
                 size_bytes=candidate.size_bytes,
                 duration_ms=candidate.duration_ms,
-                width=candidate.width,
-                height=candidate.height,
+                width=0,
+                height=0,
             )
         except ClipAnalysisRejected:
             rejected += 1
@@ -111,24 +110,11 @@ def _manifest_candidate(clip_path: Path, manifest_path: Path) -> _Candidate | No
         return None
     if not isinstance(manifest, ReadyClipManifest) or manifest.clip_id != clip_path.parent.name:
         return None
-    dimensions = _dimensions(manifest)
-    if dimensions is None:
-        return None
     return _Candidate(
+        manifest.clip_id,
         clip_path,
         manifest.sha256,
         manifest.size_bytes,
         manifest.duration_ms,
-        dimensions[0],
-        dimensions[1],
         mtime,
     )
-
-
-def _dimensions(manifest: ReadyClipManifest) -> tuple[int, int] | None:
-    if manifest.source_media is None:
-        return None
-    for stream in manifest.source_media.streams:
-        if stream.media_type == "video" and stream.width is not None and stream.height is not None:
-            return stream.width, stream.height
-    return None

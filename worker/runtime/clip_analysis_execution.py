@@ -8,6 +8,7 @@ from collections.abc import Callable
 from time import monotonic
 
 from shared.events.clip_analysis_wire import MAX_CLIP_ANALYSIS_OUTPUT_BYTES, decode_clip_analysis
+from worker.adapters.model.errors import ModelLoadError
 from worker.pipeline.output.evidence.clip_analysis_artifact import (
     ClipAnalysisArtifactError,
     ClipAnalysisArtifactIdentity,
@@ -44,6 +45,8 @@ def execute_job(
             terminate=terminate,
             clock=clock,
         )
+    except ModelLoadError as exc:
+        return ClipAnalysisStatus("failed", clip_analysis_process.reason(exc))
     except Exception as exc:  # noqa: BLE001 - supervisor must remain available
         return ClipAnalysisStatus("failed", clip_analysis_process.reason(exc))
     return status
@@ -69,7 +72,7 @@ def settle_job(
     if status.reason in _TERMINAL_CHILD_EXITS:
         try:
             publish_failed_outcome(job.clip_path, identity(job), status.reason)
-        except OSError:
+        except (ModelLoadError, OSError):
             LOGGER.exception(
                 "clip analysis failure outcome persistence failed clip=%s", job.clip_id
             )
@@ -135,7 +138,13 @@ def run_job(
             return ClipAnalysisStatus("failed", "timeout"), process
         publish_clip_analysis(job.clip_path, scratch, identity)
         return ClipAnalysisStatus("available"), process
-    except (ClipAnalysisArtifactError, OSError, ValueError, subprocess.SubprocessError) as exc:
+    except (
+        ClipAnalysisArtifactError,
+        ModelLoadError,
+        OSError,
+        ValueError,
+        subprocess.SubprocessError,
+    ) as exc:
         return ClipAnalysisStatus("failed", clip_analysis_process.reason(exc)), process
     finally:
         if child is not None:

@@ -9,6 +9,7 @@ from dataclasses import replace
 from pathlib import Path
 
 from worker.adapters.model.clip_reanalysis import ClipAnalysisRejected
+from worker.adapters.model.errors import ModelLoadError
 from worker.pipeline.output.evidence.clip_analysis_artifact import (
     ClipAnalysisArtifactIdentity,
     has_current_artifact,
@@ -61,6 +62,9 @@ def build_job(
     width: int,
     height: int,
     front: bool,
+    pose_model_sha256: str,
+    bed_model_sha256: str,
+    generation: int,
 ) -> clip_analysis_process.ClipAnalysisJob:
     return clip_analysis_process.ClipAnalysisJob(
         clip_id,
@@ -76,6 +80,9 @@ def build_job(
         duration_ms,
         width,
         height,
+        pose_model_sha256,
+        bed_model_sha256,
+        generation,
     )
 
 
@@ -98,7 +105,7 @@ def prepare_job(
             width=facts.width,
             height=facts.height,
         )
-        identity = artifact_identity(job, pose_model_path, bed_model_path, profile_sha256)
+        identity = artifact_identity(job, profile_sha256)
         if has_current_artifact(
             job.clip_path.parent,
             clip_id=identity.clip_id,
@@ -112,21 +119,19 @@ def prepare_job(
         if not job.front and has_failed_outcome(job.clip_path, identity):
             return None, ClipAnalysisStatus("failed", "previous_failure")
         return job, ClipAnalysisStatus("running")
-    except (ClipAnalysisRejected, OSError, ValueError) as exc:
+    except (ClipAnalysisRejected, ModelLoadError, OSError, ValueError) as exc:
         return None, ClipAnalysisStatus("failed", clip_analysis_process.reason(exc))
 
 
 def artifact_identity(
     job: clip_analysis_process.ClipAnalysisJob,
-    pose_model_path: Path,
-    bed_model_path: Path,
     profile_sha256: str,
 ) -> ClipAnalysisArtifactIdentity:
     return ClipAnalysisArtifactIdentity(
         job.clip_id,
         job.clip_sha256,
-        clip_analysis_process.model_digest(pose_model_path),
-        clip_analysis_process.model_digest(bed_model_path),
+        job.pose_model_sha256,
+        job.bed_model_sha256,
         profile_sha256,
         job.decoder_identity,
     )

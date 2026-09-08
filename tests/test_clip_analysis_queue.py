@@ -35,7 +35,8 @@ def test_manual_promotes_existing_queued_duplicate() -> None:
     queue.add(_job("second"), front=False)
 
     assert queue.add(_job("second", manual=True), front=True) == Admission.ALREADY_QUEUED
-    assert [queue.take().clip_id for _ in range(2)] == ["second", "first"]
+    promoted, first = queue.take(), queue.take()
+    assert (promoted.clip_id, promoted.front, first.clip_id) == ("second", True, "first")
 
 
 def test_full_queue_evicts_catchup_tail_for_manual_never_manual_or_running() -> None:
