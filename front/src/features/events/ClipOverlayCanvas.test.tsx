@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { findMatchingFrame } from '@/features/events/ClipOverlayCanvas';
+import { bedLabel, findMatchingFrame, personLabel } from '@/features/events/ClipOverlayCanvas';
 import type { ClipAnalysisResult } from '@/shared/api/types';
 
 const result: ClipAnalysisResult = {
@@ -21,5 +21,14 @@ describe('findMatchingFrame', () => {
 
   it('rejects ambiguous frame matches', () => {
     expect(findMatchingFrame(result, 2)).toBeNull();
+  });
+});
+
+describe('overlay labels', () => {
+  it('uses the live-view wording: person confidence percent and bed index', () => {
+    expect(personLabel(0.894)).toBe('사람 89%');
+    expect(personLabel(1)).toBe('사람 100%');
+    expect(bedLabel(0)).toBe('침대1');
+    expect(bedLabel(4)).toBe('침대5');
   });
 });

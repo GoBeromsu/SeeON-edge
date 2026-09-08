@@ -15,6 +15,31 @@ export function containTransform(width: number, height: number, imageWidth: numb
   return { scale, offsetX: (width - imageWidth * scale) / 2, offsetY: (height - imageHeight * scale) / 2 };
 }
 
+/** Same wording as the live view: `사람 84%` and `침대1`; clips carry no fall/bed-exit state. */
+export function personLabel(confidence: number): string {
+  return `사람 ${Math.round(confidence * 100)}%`;
+}
+
+export function bedLabel(index: number): string {
+  return `침대${index + 1}`;
+}
+
+const LABEL_FONT = '600 12px system-ui, sans-serif';
+const LABEL_PADDING = 4;
+const LABEL_HEIGHT = 18;
+
+function drawLabel(context: CanvasRenderingContext2D, text: string, x: number, y: number, color: string): void {
+  context.font = LABEL_FONT;
+  const width = context.measureText(text).width + LABEL_PADDING * 2;
+  // Chip sits above the shape; inside the frame when the shape touches the top edge.
+  const top = y - LABEL_HEIGHT >= 0 ? y - LABEL_HEIGHT : y;
+  context.fillStyle = color;
+  context.fillRect(x, top, width, LABEL_HEIGHT);
+  context.fillStyle = '#111111';
+  context.textBaseline = 'middle';
+  context.fillText(text, x + LABEL_PADDING, top + LABEL_HEIGHT / 2);
+}
+
 type Props = {
   video: HTMLVideoElement | null;
   result: ClipAnalysisResult | undefined;
@@ -46,16 +71,21 @@ export function ClipOverlayCanvas({ video, result, personEnabled, bedEnabled }: 
       context.lineWidth = 2;
       if (bedEnabled) {
         context.strokeStyle = '#38bdf8';
-        result.bed_geometries.forEach(({ points }) => {
+        result.bed_geometries.forEach(({ points }, index) => {
           context.beginPath();
-          points.forEach(([x, y], index) => index === 0 ? context.moveTo(offsetX + x * scale, offsetY + y * scale) : context.lineTo(offsetX + x * scale, offsetY + y * scale));
+          points.forEach(([x, y], pointIndex) => pointIndex === 0 ? context.moveTo(offsetX + x * scale, offsetY + y * scale) : context.lineTo(offsetX + x * scale, offsetY + y * scale));
           context.closePath();
           context.stroke();
+          const top = points.reduce((best, point) => (point[1] < best[1] ? point : best), points[0]);
+          drawLabel(context, bedLabel(index), offsetX + top[0] * scale, offsetY + top[1] * scale, '#38bdf8');
         });
       }
       if (personEnabled) {
         context.strokeStyle = '#f97316';
-        frame.boxes.forEach(({ x1, y1, x2, y2 }) => context.strokeRect(offsetX + x1 * scale, offsetY + y1 * scale, (x2 - x1) * scale, (y2 - y1) * scale));
+        frame.boxes.forEach(({ x1, y1, x2, y2, confidence }) => {
+          context.strokeRect(offsetX + x1 * scale, offsetY + y1 * scale, (x2 - x1) * scale, (y2 - y1) * scale);
+          drawLabel(context, personLabel(confidence), offsetX + x1 * scale, offsetY + y1 * scale, '#f97316');
+        });
       }
     };
     const render = (mediaTime: number): void => {
