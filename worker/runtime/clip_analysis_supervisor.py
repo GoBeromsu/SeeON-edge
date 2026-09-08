@@ -125,22 +125,10 @@ class ClipAnalysisSupervisor:
             self._generation += 1
             generation = self._generation
         job = build_job(
-            clip_id,
-            clip_path,
-            clip_sha256,
-            self._pose_model,
-            self._bed_model,
-            self._profile,
-            self._profile_sha,
-            size_bytes,
-            duration_ms,
-            width,
-            height,
-            front,
-            self._pose_model_sha,
-            self._bed_model_sha,
-            generation,
-        )
+            clip_id, clip_path, clip_sha256, self._pose_model, self._bed_model, self._profile,
+            self._profile_sha, size_bytes, duration_ms, width, height, front,
+            self._pose_model_sha, self._bed_model_sha, generation,
+        )  # fmt: skip
         with self._condition:
             if self._stopping:
                 return Admission.STOPPED
@@ -161,12 +149,10 @@ class ClipAnalysisSupervisor:
 
     def cancel(self, clip_id: str) -> bool:
         with self._condition:
-            if self._queue.remove(clip_id):
-                self._set_status(clip_id, ClipAnalysisStatus("failed", "cancelled"))
-                self._condition.notify_all()
-                return True
-            if self._preparing is not None and self._preparing.clip_id == clip_id:
-                self._cancelled.add(self._preparing.generation)
+            preparing = self._preparing is not None and self._preparing.clip_id == clip_id
+            if self._queue.remove(clip_id) or preparing:
+                if preparing and self._preparing is not None:
+                    self._cancelled.add(self._preparing.generation)
                 self._set_status(clip_id, ClipAnalysisStatus("failed", "cancelled"))
                 self._condition.notify_all()
                 return True
