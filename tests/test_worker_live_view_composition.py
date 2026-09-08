@@ -150,6 +150,9 @@ def test_flow_live_view_injects_bed_recognizer_and_recognize_request_reaches_it(
         def trigger(self, *_args: object, **_kwargs: object) -> bool:
             return True
 
+        def enqueue(self, *_args: object, **_kwargs: object) -> bool:
+            return True
+
         def cancel(self, _clip_id: str) -> bool:
             return False
 
@@ -328,6 +331,9 @@ def test_live_view_analysis_lookup_uses_mount_root_not_active_subdirectory(
             self, _clip_id: str, clip_path: Path, *_args: object, **_kwargs: object
         ) -> bool:
             captured["clip_path"] = clip_path
+            return True
+
+        def enqueue(self, *_args: object, **_kwargs: object) -> bool:
             return True
 
         def status(self, _clip_id: str) -> object:

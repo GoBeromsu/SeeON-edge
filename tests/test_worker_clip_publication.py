@@ -14,6 +14,7 @@ import pytest
 
 from backend.app.features.clips.catalog import strict_manifest_records
 from backend.app.features.clips.store import ClipStore
+from tests_support.clip_analysis import no_op_ready_hook
 from tests_support.thumbnail import DeterministicThumbnailGenerator
 from worker.pipeline.output.evidence import clip_publication
 from worker.pipeline.output.evidence.clip_identity import ClipIdAllocator, ClipReservation
@@ -58,6 +59,7 @@ def test_process_kill_after_manifest_reconstructs_exact_event_outcomes(tmp_path:
         import os
         from datetime import UTC, datetime, timedelta
         from pathlib import Path
+        from tests_support.clip_analysis import no_op_ready_hook
         from tests_support.thumbnail import DeterministicThumbnailGenerator
         from worker.pipeline.output.evidence.clip_identity import ClipIdAllocator, ClipReservation
         from worker.pipeline.output.evidence.clip_publication import (
@@ -84,6 +86,7 @@ def test_process_kill_after_manifest_reconstructs_exact_event_outcomes(tmp_path:
             root,
             barrier=barrier,
             thumbnail_generator=DeterministicThumbnailGenerator(),
+            on_ready=no_op_ready_hook,
         ).publish_unavailable(
             reservation, metadata, EvidenceReasonCode.ENCODER_FAILED,
         )
@@ -101,6 +104,7 @@ def test_process_kill_after_manifest_reconstructs_exact_event_outcomes(tmp_path:
     publisher = ClipPublisher(
         tmp_path,
         thumbnail_generator=DeterministicThumbnailGenerator(),
+        on_ready=no_op_ready_hook,
     )
     _ = publisher.publish_unavailable(reservation, _metadata(), EvidenceReasonCode.ENCODER_FAILED)
     _ = publisher.publish_unavailable(reservation, _metadata(), EvidenceReasonCode.ENCODER_FAILED)
@@ -165,11 +169,13 @@ def test_publication_retry_recovers_each_durability_boundary_with_same_clip_id(
             tmp_path,
             barrier=interrupt,
             thumbnail_generator=DeterministicThumbnailGenerator(),
+            on_ready=no_op_ready_hook,
         ).publish_ready(reservation, artifact, _metadata())
 
     published = ClipPublisher(
         tmp_path,
         thumbnail_generator=DeterministicThumbnailGenerator(),
+        on_ready=no_op_ready_hook,
     ).publish_ready(reservation, artifact, _metadata())
     payload = json.loads(published.manifest_path.read_text(encoding="utf-8"))
     records = strict_manifest_records(ClipStore(tmp_path))
@@ -223,6 +229,7 @@ def test_strict_manifest_accepts_exact_remux_translation_and_rejects_nonuniform_
     published = ClipPublisher(
         tmp_path,
         thumbnail_generator=DeterministicThumbnailGenerator(),
+        on_ready=no_op_ready_hook,
     ).publish_ready(reservation, artifact, metadata)
 
     records = strict_manifest_records(ClipStore(tmp_path))
@@ -252,6 +259,7 @@ def test_publication_omits_runtime_manifest_when_explicitly_absent(tmp_path: Pat
     published = ClipPublisher(
         tmp_path,
         thumbnail_generator=DeterministicThumbnailGenerator(),
+        on_ready=no_op_ready_hook,
     ).publish_unavailable(
         reservation,
         replace(_metadata(), runtime_manifest_sha256=None),
@@ -280,6 +288,7 @@ def test_successful_thumbnail_is_published_with_ready_clip(
     published = ClipPublisher(
         tmp_path,
         thumbnail_generator=DeterministicThumbnailGenerator(),
+        on_ready=no_op_ready_hook,
     ).publish_ready(reservation, artifact, _metadata())
 
     thumbnail = reservation.final_dir / "thumbnail.jpg"
@@ -294,7 +303,7 @@ def test_clip_publisher_rejects_missing_thumbnail_generator(tmp_path: Path) -> N
 
 def test_clip_publisher_rejects_null_thumbnail_generator(tmp_path: Path) -> None:
     with pytest.raises(TypeError, match="thumbnail_generator"):
-        ClipPublisher(tmp_path, thumbnail_generator=None)
+        ClipPublisher(tmp_path, thumbnail_generator=None, on_ready=no_op_ready_hook)
 
 
 def test_thumbnail_failure_does_not_prevent_ready_clip_publication(
@@ -318,6 +327,7 @@ def test_thumbnail_failure_does_not_prevent_ready_clip_publication(
         thumbnail_generator=DeterministicThumbnailGenerator(
             error=RuntimeError("unavailable"),
         ),
+        on_ready=no_op_ready_hook,
     ).publish_ready(reservation, artifact, _metadata())
 
     assert published.manifest_path.is_file()
@@ -363,6 +373,7 @@ def test_publication_records_deterministic_event_pts_to_media_time_mapping(
     published = ClipPublisher(
         tmp_path,
         thumbnail_generator=DeterministicThumbnailGenerator(),
+        on_ready=no_op_ready_hook,
     ).publish_unavailable(
         reservation,
         metadata,
@@ -392,6 +403,7 @@ def test_unavailable_publication_persists_reason_without_video(tmp_path: Path) -
     published = ClipPublisher(
         tmp_path,
         thumbnail_generator=DeterministicThumbnailGenerator(),
+        on_ready=no_op_ready_hook,
     ).publish_unavailable(
         reservation,
         _metadata(),
@@ -456,6 +468,7 @@ def test_ready_publication_fsyncs_before_renames_and_staging_cleanup(
     _ = ClipPublisher(
         tmp_path,
         thumbnail_generator=DeterministicThumbnailGenerator(),
+        on_ready=no_op_ready_hook,
     ).publish_ready(reservation, artifact, _metadata())
 
     assert operations[:8] == [

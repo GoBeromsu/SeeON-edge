@@ -37,7 +37,7 @@ def _wait(supervisor: ClipAnalysisSupervisor, clip_id: str) -> str:
     end = monotonic() + 3
     while monotonic() < end:
         state = supervisor.status(clip_id).state
-        if state != "running":
+        if state not in {"queued", "running"}:
             return state
         threading.Event().wait(0.01)
     raise AssertionError("supervisor did not finish")
@@ -154,9 +154,8 @@ def test_second_trigger_is_refused_and_slot_releases_after_publish(tmp_path: Pat
     )
     try:
         assert _trigger(supervisor, "event-1", clip, "a" * 64)
-        assert not _trigger(supervisor, "event-2", clip, "e" * 64)
-        assert _wait(supervisor, "event-1") == "available"
         assert _trigger(supervisor, "event-2", clip, "e" * 64)
+        assert _wait(supervisor, "event-1") == "available"
     finally:
         supervisor.shutdown()
 

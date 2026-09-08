@@ -11,7 +11,7 @@ class ClipAnalysisDisabledError(RuntimeError):
 
 
 class ClipAnalysisStatus(Protocol):
-    state: Literal["idle", "running", "available", "failed"]
+    state: Literal["idle", "queued", "running", "available", "failed"]
     reason: str | None
 
 
@@ -28,6 +28,19 @@ class ClipAnalysisSupervisor(Protocol):
         duration_ms: int,
         width: int,
         height: int,
+    ) -> bool: ...
+
+    def enqueue(
+        self,
+        clip_id: str,
+        clip_path: Path,
+        clip_sha256: str,
+        *,
+        size_bytes: int,
+        duration_ms: int,
+        width: int,
+        height: int,
+        front: bool = False,
     ) -> bool: ...
 
     def cancel(self, clip_id: str) -> bool: ...

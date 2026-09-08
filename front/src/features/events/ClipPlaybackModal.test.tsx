@@ -156,6 +156,8 @@ describe('ClipPlaybackModal', () => {
     const video = dialog().querySelector('video') as HTMLVideoElement;
     act(() => video.dispatchEvent(new Event('loadeddata')));
     expect(dialog().querySelector('canvas')).not.toBeNull();
+    expect(dialog().querySelector('[aria-label="사람 오버레이"]')).not.toBeNull();
+    expect(dialog().querySelector('[aria-label="침대 오버레이"]')).not.toBeNull();
     act(() => video.dispatchEvent(new Event('error')));
     expect(dialog().querySelector('canvas')).toBeNull();
     vi.unstubAllGlobals();
@@ -181,6 +183,29 @@ describe('ClipPlaybackModal', () => {
     await act(async () => Promise.resolve());
 
     expect(dialog().querySelector('[title="오버레이 분석 비활성"]')).not.toBeNull();
+    expect(dialog().querySelector('[aria-label="오버레이 분석"]')).toBeNull();
+    vi.unstubAllGlobals();
+  });
+
+  it('shows queued analysis preparation with a cancel action and no trigger', async () => {
+    vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.endsWith('/artifacts')) {
+        return Promise.resolve({ ok: true, status: 200, json: async () => ({ clip_id: 'clip-1', clean: 'AVAILABLE', snapshot: null }) });
+      }
+      return Promise.resolve({
+        ok: true,
+        status: 200,
+        json: async () => ({ state: 'queued', served_media_sha256: 'a'.repeat(64) }),
+      });
+    }));
+
+    render(baseClip);
+    await act(async () => Promise.resolve());
+    await act(async () => Promise.resolve());
+
+    expect(dialog().querySelector('[aria-label="오버레이 준비 중"]')).not.toBeNull();
+    expect(dialog().querySelector('[aria-label="오버레이 분석 취소"]')).not.toBeNull();
     expect(dialog().querySelector('[aria-label="오버레이 분석"]')).toBeNull();
     vi.unstubAllGlobals();
   });

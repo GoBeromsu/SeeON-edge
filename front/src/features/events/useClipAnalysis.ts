@@ -38,7 +38,7 @@ export function useClipAnalysis(clipId: string | undefined, enabled: boolean): {
   }, [clipId, enabled, request]);
 
   useEffect(() => {
-    if (!enabled || state.status?.state !== 'running') return undefined;
+    if (!enabled || (state.status?.state !== 'queued' && state.status?.state !== 'running')) return undefined;
     const timer = window.setInterval(() => request(fetchClipAnalysis), 2_000);
     return () => window.clearInterval(timer);
   }, [enabled, request, state.status?.state]);

@@ -98,7 +98,7 @@ export type ClipAnalysisResult = {
   image_height: number;
 };
 
-export type ClipAnalysisState = 'idle' | 'running' | 'available' | 'failed' | 'unavailable';
+export type ClipAnalysisState = 'idle' | 'queued' | 'running' | 'available' | 'failed' | 'unavailable';
 
 export type ClipAnalysisStatus = {
   state: ClipAnalysisState;

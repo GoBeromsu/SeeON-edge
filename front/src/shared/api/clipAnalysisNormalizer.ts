@@ -78,7 +78,7 @@ function result(value: unknown): ClipAnalysisResult {
 export function normalizeClipAnalysisStatus(value: unknown): ClipAnalysisStatus {
   if (!isRecord(value)) throw new Error('Invalid clip analysis status');
   rejectUnknown(value, ['state', 'reason', 'served_media_sha256', 'served_timing_identical', 'result']);
-  if (value.state !== 'idle' && value.state !== 'running' && value.state !== 'available' && value.state !== 'failed' && value.state !== 'unavailable') throw new Error('Invalid clip analysis state');
+  if (value.state !== 'idle' && value.state !== 'queued' && value.state !== 'running' && value.state !== 'available' && value.state !== 'failed' && value.state !== 'unavailable') throw new Error('Invalid clip analysis state');
   if ('reason' in value && typeof value.reason !== 'string') throw new Error('Invalid clip analysis reason');
   if (typeof value.served_media_sha256 !== 'string' || !/^[0-9a-f]{64}$/.test(value.served_media_sha256)) throw new Error('Invalid served media digest');
   if (value.state === 'available') {

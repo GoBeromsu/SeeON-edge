@@ -52,6 +52,36 @@ def artifact_path(clip_path: Path, identity: ClipAnalysisArtifactIdentity) -> Pa
     return clip_path.parent / f"clip.analysis.{identity.digest}.json"
 
 
+def has_current_artifact(
+    clip_dir: Path,
+    *,
+    clip_id: str,
+    clip_sha256: str,
+    pose_model_sha256: str,
+    bed_model_sha256: str,
+    analysis_profile_sha256: str,
+) -> bool:
+    """Return whether a verified artifact exists for the child-independent identity."""
+    for target in clip_dir.glob("clip.analysis.*.json"):
+        sidecar = _sidecar_path(target)
+        payload = _verified_payload(target, sidecar)
+        if payload is None:
+            continue
+        try:
+            result = decode_clip_analysis(payload)
+        except ClipAnalysisWireError:
+            continue
+        if (
+            result.clip_id == clip_id
+            and result.clip_sha256 == clip_sha256
+            and result.pose_model_sha256 == pose_model_sha256
+            and result.bed_model_sha256 == bed_model_sha256
+            and result.analysis_profile_sha256 == analysis_profile_sha256
+        ):
+            return True
+    return False
+
+
 def _sidecar_path(path: Path) -> Path:
     return path.with_name(f"{path.name}.sha256")
 
@@ -154,6 +184,7 @@ __all__ = [
     "ClipAnalysisArtifactError",
     "ClipAnalysisArtifactIdentity",
     "artifact_path",
+    "has_current_artifact",
     "publish_clip_analysis",
     "validate_scratch",
 ]

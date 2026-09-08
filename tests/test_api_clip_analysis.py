@@ -360,7 +360,7 @@ def test_analysis_uses_original_when_rendition_attestation_is_unbound(
     assert response.json()["result"]["clip_sha256"] == CLIP_SHA256
 
 
-@pytest.mark.parametrize("worker_state", ["idle", "running", "failed"])
+@pytest.mark.parametrize("worker_state", ["idle", "queued", "running", "failed"])
 def test_worker_states_include_served_media_identity(
     _environment: Path,
     worker_server: _WorkerServer,
