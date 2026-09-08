@@ -56,8 +56,6 @@ class ReadyClipPublication:
     sha256: str
     size_bytes: int
     duration_ms: int
-    width: int | None
-    height: int | None
 
 
 @final
@@ -143,8 +141,6 @@ class ClipPublisher:
                     sha256=manifest.sha256,
                     size_bytes=manifest.size_bytes,
                     duration_ms=manifest.duration_ms,
-                    width=_source_dimension(metadata.source_media, "width"),
-                    height=_source_dimension(metadata.source_media, "height"),
                 )
             )
         except Exception as exc:  # noqa: BLE001 - analysis admission cannot undo publication

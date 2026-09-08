@@ -23,7 +23,7 @@ def run_job(
     cpu_index: int,
     deadline_s: float,
     launch: Callable[..., subprocess.Popen[bytes]],
-    set_process: Callable[[subprocess.Popen[bytes]], None],
+    set_process: Callable[[subprocess.Popen[bytes]], bool],
     cancelled: Callable[[], bool],
     terminate: Callable[[subprocess.Popen[bytes]], None],
     clock: Callable[[], float] = monotonic,
@@ -39,7 +39,9 @@ def run_job(
         )
         process = child.process
         scratch = child.scratch
-        set_process(process)
+        if set_process(process):
+            terminate(process)
+            return ClipAnalysisStatus("failed", "cancelled"), process
         expires_at = clock() + deadline_s
         try:
             exit_code = process.wait(timeout=max(0.0, expires_at - clock()))

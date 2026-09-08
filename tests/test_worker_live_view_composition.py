@@ -16,6 +16,7 @@ from worker.adapters.deepstream.service_maker import DeepStreamFlowStopTimeout
 from worker.interfaces.clip_analysis import ClipAnalysisDisabledError
 from worker.pipeline.output.live_view import LatestFrameStore
 from worker.pipeline.output.mjpeg_server import MjpegServer, MjpegServerConfig
+from worker.runtime.clip_analysis_process import probe_media_facts
 from worker.runtime.config import WorkerConfig
 from worker.runtime.lease import GpuLease
 from worker.runtime.worker import WorkerRuntime
@@ -143,6 +144,7 @@ def test_flow_live_view_injects_bed_recognizer_and_recognize_request_reaches_it(
     class _ClipAnalysisSupervisor:
         def __init__(self, **kwargs: object) -> None:
             captured["clip_analysis_cpu"] = kwargs["cpu_index"]
+            captured["probe"] = kwargs.get("probe", probe_media_facts)
 
         def status(self, _clip_id: str) -> object:
             return SimpleNamespace(state="idle", reason=None)
@@ -220,6 +222,7 @@ def test_flow_live_view_injects_bed_recognizer_and_recognize_request_reaches_it(
     assert captured["bed_zone_snapshot"] == plane.native_snapshot
     assert captured["clip_analysis_supervisor"] is not None
     assert captured["clip_analysis_cpu"] == 3
+    assert captured["probe"] is probe_media_facts
     server = runtime._mjpeg_server  # noqa: SLF001
     assert server is not None
     try:

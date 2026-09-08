@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import threading
 from pathlib import Path
 
 from worker.runtime import clip_analysis_catchup
@@ -41,3 +42,34 @@ def test_catchup_enqueues_newest_first_and_stops_at_full_queue(
     clip_analysis_catchup.catch_up_clip_analysis(tmp_path, supervisor)
 
     assert supervisor.clip_ids == ["newest", "oldest"]
+
+
+def test_catchup_stops_on_event_and_respects_candidate_bound(
+    tmp_path: Path, monkeypatch: object
+) -> None:
+    clips: list[Path] = []
+    for number in range(257):
+        clip = tmp_path / f"clip-{number}" / "clip.mp4"
+        clip.parent.mkdir()
+        clip.write_bytes(b"clip")
+        clip.with_name("manifest.json").write_text("{}")
+        clips.append(clip)
+    monkeypatch.setattr(clip_analysis_catchup, "_ready_clips", lambda _store: clips)
+    monkeypatch.setattr(
+        clip_analysis_catchup, "manifest_facts", lambda _path: ("a" * 64, 1, 1, 1, 1)
+    )
+    bounded = _Supervisor([True] * 256)
+    clip_analysis_catchup.catch_up_clip_analysis(tmp_path, bounded)
+    assert len(bounded.clip_ids) == 256
+
+    stop = threading.Event()
+
+    class _StoppingSupervisor(_Supervisor):
+        def enqueue(self, *args: object, **kwargs: object) -> bool:
+            result = super().enqueue(*args, **kwargs)
+            stop.set()
+            return result
+
+    stopped = _StoppingSupervisor([True] * 256)
+    clip_analysis_catchup.catch_up_clip_analysis(tmp_path, stopped, stop)
+    assert len(stopped.clip_ids) == 1

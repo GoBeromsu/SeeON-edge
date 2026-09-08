@@ -108,7 +108,7 @@ def handle_post(
         _write_json(handler, HTTPStatus.BAD_REQUEST, {"error": "sha_mismatch"})
         return
     try:
-        accepted = supervisor.trigger(
+        admission = supervisor.trigger(
             clip_id,
             clip_path,
             clip_sha256,
@@ -127,10 +127,21 @@ def handle_post(
             {"error": "rejected", "reason": str(exc)},
         )
         return
-    if not accepted:
+    if admission is False:
         _write_json(handler, HTTPStatus.CONFLICT, {"state": "running"})
         return
-    _write_json(handler, HTTPStatus.ACCEPTED, {"state": supervisor.status(clip_id).state})
+    if admission == "queue_full":
+        _write_json(handler, HTTPStatus.CONFLICT, {"state": admission})
+        return
+    if admission == "stopped":
+        _write_json(handler, HTTPStatus.SERVICE_UNAVAILABLE, {"state": admission})
+        return
+    if admission == "rejected":
+        _write_json(handler, HTTPStatus.UNPROCESSABLE_ENTITY, {"state": admission})
+        return
+    status = supervisor.status(clip_id)
+    http_status = HTTPStatus.OK if admission == "available" else HTTPStatus.ACCEPTED
+    _write_json(handler, http_status, {"state": status.state})
 
 
 def manifest_facts(clip_path: Path) -> tuple[str, int, int, int, int] | None:

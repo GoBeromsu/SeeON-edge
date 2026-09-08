@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 import threading
 from pathlib import Path
+from time import monotonic
 
 from worker.adapters.model.clip_reanalysis import ClipAnalysisRejected
 from worker.interfaces.clip_analysis import ClipAnalysisSupervisor
@@ -20,11 +21,11 @@ LOGGER = logging.getLogger(__name__)
 
 
 def start_clip_analysis_catchup(
-    store_dir: Path, supervisor: ClipAnalysisSupervisor
+    store_dir: Path, supervisor: ClipAnalysisSupervisor, stop: threading.Event | None = None
 ) -> threading.Thread:
     thread = threading.Thread(
         target=catch_up_clip_analysis,
-        args=(store_dir, supervisor),
+        args=(store_dir, supervisor, stop or threading.Event()),
         name="clip-analysis-catchup",
         daemon=True,
     )
@@ -32,15 +33,26 @@ def start_clip_analysis_catchup(
     return thread
 
 
-def catch_up_clip_analysis(store_dir: Path, supervisor: ClipAnalysisSupervisor) -> None:
+def catch_up_clip_analysis(
+    store_dir: Path, supervisor: ClipAnalysisSupervisor, stop: threading.Event | None = None
+) -> None:
+    if stop is None:
+        stop = threading.Event()
+    deadline = monotonic() + 30
     candidates = sorted(
         _ready_clips(store_dir),
         key=lambda path: path.with_name("manifest.json").stat().st_mtime,
         reverse=True,
     )
     accepted = skipped = rejected = 0
-    for clip_path in candidates:
-        facts = manifest_facts(clip_path)
+    for clip_path in candidates[:256]:
+        if stop.is_set() or monotonic() >= deadline:
+            break
+        try:
+            facts = manifest_facts(clip_path)
+        except OSError:
+            skipped += 1
+            continue
         if facts is None:
             skipped += 1
             continue
@@ -58,7 +70,7 @@ def catch_up_clip_analysis(store_dir: Path, supervisor: ClipAnalysisSupervisor) 
         except ClipAnalysisRejected:
             rejected += 1
             continue
-        if not queued:
+        if queued in ("queue_full", "stopped"):
             break
         accepted += 1
     LOGGER.info(
@@ -79,7 +91,7 @@ def _ready_clips(store_dir: Path) -> list[Path]:
                 continue
             try:
                 manifest, _, _ = parse_manifest_content(manifest_path)
-            except ClipEvidenceError:
+            except (ClipEvidenceError, OSError):
                 continue
             if (
                 isinstance(manifest, ReadyClipManifest)

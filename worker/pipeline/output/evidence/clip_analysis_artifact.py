@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import time
@@ -52,6 +53,26 @@ def artifact_path(clip_path: Path, identity: ClipAnalysisArtifactIdentity) -> Pa
     return clip_path.parent / f"clip.analysis.{identity.digest}.json"
 
 
+def failed_outcome_path(clip_path: Path, identity: ClipAnalysisArtifactIdentity) -> Path:
+    return clip_path.parent / f"clip.analysis.{identity.digest}.failed.json"
+
+
+def has_failed_outcome(clip_path: Path, identity: ClipAnalysisArtifactIdentity) -> bool:
+    return failed_outcome_path(clip_path, identity).is_file()
+
+
+def publish_failed_outcome(
+    clip_path: Path, identity: ClipAnalysisArtifactIdentity, reason: str
+) -> Path:
+    target = failed_outcome_path(clip_path, identity)
+    if not target.exists():
+        _atomic_write(
+            target,
+            json.dumps({"at": int(time.time()), "reason": reason}, sort_keys=True).encode("utf-8"),
+        )
+    return target
+
+
 def has_current_artifact(
     clip_dir: Path,
     *,
@@ -60,6 +81,7 @@ def has_current_artifact(
     pose_model_sha256: str,
     bed_model_sha256: str,
     analysis_profile_sha256: str,
+    decoder_identity: str,
 ) -> bool:
     """Return whether a verified artifact exists for the child-independent identity."""
     for target in clip_dir.glob("clip.analysis.*.json"):
@@ -77,6 +99,7 @@ def has_current_artifact(
             and result.pose_model_sha256 == pose_model_sha256
             and result.bed_model_sha256 == bed_model_sha256
             and result.analysis_profile_sha256 == analysis_profile_sha256
+            and result.decoder_identity == decoder_identity
         ):
             return True
     return False
@@ -184,7 +207,10 @@ __all__ = [
     "ClipAnalysisArtifactError",
     "ClipAnalysisArtifactIdentity",
     "artifact_path",
+    "failed_outcome_path",
     "has_current_artifact",
+    "has_failed_outcome",
     "publish_clip_analysis",
+    "publish_failed_outcome",
     "validate_scratch",
 ]

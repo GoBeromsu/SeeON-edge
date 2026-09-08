@@ -63,7 +63,7 @@ def test_publish_once_and_load_identity_bound_artifact(tmp_path: Path) -> None:
     )
 
 
-def test_current_artifact_matches_without_decoder_identity(tmp_path: Path) -> None:
+def test_current_artifact_matches_exact_decoder_identity(tmp_path: Path) -> None:
     clip = tmp_path / "clip.mp4"
     clip.write_bytes(b"clip")
     scratch = tmp_path / "out.json"
@@ -78,6 +78,16 @@ def test_current_artifact_matches_without_decoder_identity(tmp_path: Path) -> No
         pose_model_sha256=identity.pose_model_sha256,
         bed_model_sha256=identity.bed_model_sha256,
         analysis_profile_sha256=identity.analysis_profile_sha256,
+        decoder_identity=identity.decoder_identity,
+    )
+    assert not has_current_artifact(
+        tmp_path,
+        clip_id=identity.clip_id,
+        clip_sha256=identity.clip_sha256,
+        pose_model_sha256=identity.pose_model_sha256,
+        bed_model_sha256=identity.bed_model_sha256,
+        analysis_profile_sha256=identity.analysis_profile_sha256,
+        decoder_identity="pyav-16/hevc",
     )
 
 

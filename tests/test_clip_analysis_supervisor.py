@@ -19,7 +19,10 @@ from shared.events.clip_analysis_wire import (
     encode_clip_analysis,
 )
 from worker.adapters.model.clip_reanalysis import profile_sha256
+from worker.runtime.clip_analysis_process import ClipMediaFacts
+from worker.runtime.clip_analysis_queue import Admission
 from worker.runtime.clip_analysis_supervisor import ClipAnalysisSupervisor
+from worker.runtime.clip_analysis_supervisor_status import ClipAnalysisStatus
 from worker.tools.clip_analysis import _load_request
 
 
@@ -65,7 +68,13 @@ def _cpu() -> int:
     return next(iter(os.sched_getaffinity(0)))
 
 
-def _trigger(supervisor: ClipAnalysisSupervisor, clip_id: str, clip: Path, digest: str) -> bool:
+def _probe(_clip: Path) -> ClipMediaFacts:
+    return ClipMediaFacts(width=10, height=10, decoder_identity="pyav-16/h264")
+
+
+def _trigger(
+    supervisor: ClipAnalysisSupervisor, clip_id: str, clip: Path, digest: str
+) -> Admission:
     return supervisor.trigger(
         clip_id, clip, digest, size_bytes=4, duration_ms=100, width=10, height=10
     )
@@ -124,6 +133,7 @@ def test_real_request_round_trip_preserves_canonical_clip_id(tmp_path: Path) -> 
         profile=_Profile(),
         cpu_index=_cpu(),
         launch=launch,
+        probe=_probe,
     )
     try:
         assert _trigger(supervisor, "canonical-id", clip, "a" * 64)
@@ -151,6 +161,7 @@ def test_second_trigger_is_refused_and_slot_releases_after_publish(tmp_path: Pat
         profile=_Profile(),
         cpu_index=_cpu(),
         launch=_launch_for(_result("event-1", "a" * 64, pose_sha, bed_sha), pids, 0.05),
+        probe=_probe,
     )
     try:
         assert _trigger(supervisor, "event-1", clip, "a" * 64)
@@ -175,6 +186,7 @@ def test_timeout_kills_and_reaps_child(tmp_path: Path) -> None:
         cpu_index=_cpu(),
         deadline_s=0.05,
         launch=_launch_for(b"{}", pids, 10),
+        probe=_probe,
     )
     try:
         assert _trigger(supervisor, "event-1", clip, "a" * 64)
@@ -211,6 +223,7 @@ def test_timeout_kills_group_and_grandchild_with_zero_survivors(tmp_path: Path) 
         cpu_index=_cpu(),
         deadline_s=0.05,
         launch=launch,
+        probe=_probe,
     )
     try:
         assert _trigger(supervisor, "event-1", clip, "a" * 64)
@@ -225,7 +238,7 @@ def test_timeout_kills_group_and_grandchild_with_zero_survivors(tmp_path: Path) 
 
 
 @pytest.mark.heavy
-def test_cancel_kills_group_reaps_and_releases_slot_with_zero_survivors(tmp_path: Path) -> None:
+def test_cancel_racing_launch_kills_and_reaps_promptly(tmp_path: Path) -> None:
     clip = tmp_path / "clip.mp4"
     clip.write_bytes(b"clip")
     _model(tmp_path / "pose.onnx", b"pose")
@@ -238,6 +251,7 @@ def test_cancel_kills_group_reaps_and_releases_slot_with_zero_survivors(tmp_path
         profile=_Profile(),
         cpu_index=_cpu(),
         launch=_launch_for(b"{}", pids, 10),
+        probe=_probe,
     )
     try:
         assert _trigger(supervisor, "event-1", clip, "a" * 64)
@@ -272,6 +286,7 @@ def test_completion_after_deadline_is_timeout_and_never_publishes(
         cpu_index=_cpu(),
         deadline_s=1.0,
         launch=_launch_for(_result("event-1", "a" * 64, pose_sha, bed_sha), pids),
+        probe=_probe,
     )
     try:
         assert _trigger(supervisor, "event-1", clip, "a" * 64)
@@ -301,6 +316,7 @@ def test_launch_failure_keeps_supervisor_alive_and_releases_slot(tmp_path: Path)
         profile=_Profile(),
         cpu_index=_cpu(),
         launch=launch,
+        probe=_probe,
     )
     try:
         assert _trigger(supervisor, "event-1", clip, "a" * 64)
@@ -312,7 +328,133 @@ def test_launch_failure_keeps_supervisor_alive_and_releases_slot(tmp_path: Path)
         supervisor.shutdown()
 
 
-def test_teardown_failure_closes_admission(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_enqueue_short_circuits_to_available_only_for_exact_identity_including_decoder(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    clip = tmp_path / "clip.mp4"
+    clip.write_bytes(b"clip")
+    _model(tmp_path / "pose.onnx", b"pose")
+    _model(tmp_path / "bed.onnx", b"bed")
+    expected: list[str] = []
+    monkeypatch.setattr(
+        "worker.runtime.clip_analysis_supervisor.has_current_artifact",
+        lambda _directory, **identity: expected.append(identity["decoder_identity"]) or True,
+    )
+    supervisor = ClipAnalysisSupervisor(
+        python_executable=sys.executable,
+        pose_model_path=tmp_path / "pose.onnx",
+        bed_model_path=tmp_path / "bed.onnx",
+        profile=_Profile(),
+        cpu_index=_cpu(),
+        probe=_probe,
+    )
+    try:
+        assert (
+            supervisor.enqueue(
+                "event-1", clip, "a" * 64, size_bytes=4, duration_ms=100, width=0, height=0
+            )
+            == Admission.AVAILABLE
+        )
+        assert expected == ["pyav-16/h264"]
+    finally:
+        supervisor.shutdown()
+
+
+def test_failed_child_writes_immutable_identity_outcome_and_auto_admission_skips_it(
+    tmp_path: Path,
+) -> None:
+    clip = tmp_path / "clip.mp4"
+    clip.write_bytes(b"clip")
+    _model(tmp_path / "pose.onnx", b"pose")
+    _model(tmp_path / "bed.onnx", b"bed")
+
+    def launch(_command: list[str], **_kwargs: object) -> subprocess.Popen[bytes]:
+        raise OSError("launch_failed")
+
+    supervisor = ClipAnalysisSupervisor(
+        python_executable=sys.executable,
+        pose_model_path=tmp_path / "pose.onnx",
+        bed_model_path=tmp_path / "bed.onnx",
+        profile=_Profile(),
+        cpu_index=_cpu(),
+        launch=launch,
+        probe=_probe,
+    )
+    try:
+        assert (
+            supervisor.enqueue(
+                "event-1", clip, "a" * 64, size_bytes=4, duration_ms=100, width=0, height=0
+            )
+            == Admission.QUEUED
+        )
+        assert _wait(supervisor, "event-1") == "failed"
+        assert tuple(tmp_path.glob("clip.analysis.*.failed.json"))
+        assert (
+            supervisor.enqueue(
+                "event-1", clip, "a" * 64, size_bytes=4, duration_ms=100, width=0, height=0
+            )
+            == Admission.REJECTED
+        )
+    finally:
+        supervisor.shutdown()
+
+
+def test_manual_trigger_bypasses_failed_outcome(tmp_path: Path) -> None:
+    clip = tmp_path / "clip.mp4"
+    clip.write_bytes(b"clip")
+    _model(tmp_path / "pose.onnx", b"pose")
+    _model(tmp_path / "bed.onnx", b"bed")
+
+    def launch(_command: list[str], **_kwargs: object) -> subprocess.Popen[bytes]:
+        raise OSError("launch_failed")
+
+    supervisor = ClipAnalysisSupervisor(
+        python_executable=sys.executable,
+        pose_model_path=tmp_path / "pose.onnx",
+        bed_model_path=tmp_path / "bed.onnx",
+        profile=_Profile(),
+        cpu_index=_cpu(),
+        launch=launch,
+        probe=_probe,
+    )
+    try:
+        supervisor.enqueue(
+            "event-1", clip, "a" * 64, size_bytes=4, duration_ms=100, width=0, height=0
+        )
+        _wait(supervisor, "event-1")
+        assert _trigger(supervisor, "event-1", clip, "a" * 64) == Admission.QUEUED
+    finally:
+        supervisor.shutdown()
+
+
+def test_terminal_statuses_are_bounded_but_queued_and_active_never_evicted(tmp_path: Path) -> None:
+    _model(tmp_path / "pose.onnx", b"pose")
+    _model(tmp_path / "bed.onnx", b"bed")
+    supervisor = ClipAnalysisSupervisor(
+        python_executable=sys.executable,
+        pose_model_path=tmp_path / "pose.onnx",
+        bed_model_path=tmp_path / "bed.onnx",
+        profile=_Profile(),
+        cpu_index=_cpu(),
+        probe=_probe,
+    )
+    try:
+        with supervisor._condition:  # noqa: SLF001
+            supervisor._set_status("queued", ClipAnalysisStatus("queued"))  # noqa: SLF001
+            supervisor._set_status("running", ClipAnalysisStatus("running"))  # noqa: SLF001
+            for number in range(257):
+                supervisor._set_status(f"terminal-{number}", ClipAnalysisStatus("failed"))  # noqa: SLF001
+        assert supervisor.status("queued").state == "queued"
+        assert supervisor.status("running").state == "running"
+        assert supervisor.status("terminal-0").state == "idle"
+        assert supervisor.status("terminal-256").state == "failed"
+    finally:
+        supervisor.shutdown()
+
+
+def test_teardown_proof_failure_closes_admission_and_never_launches_next(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     clip = tmp_path / "clip.mp4"
     clip.write_bytes(b"clip")
     pose_sha = _model(tmp_path / "pose.onnx", b"pose")
@@ -325,6 +467,7 @@ def test_teardown_failure_closes_admission(tmp_path: Path, monkeypatch: pytest.M
         profile=_Profile(),
         cpu_index=_cpu(),
         launch=_launch_for(_result("event-1", "a" * 64, pose_sha, bed_sha), pids),
+        probe=_probe,
     )
     monkeypatch.setattr(
         supervisor, "_terminate_group", lambda _process: (_ for _ in ()).throw(OSError("teardown"))
@@ -332,7 +475,8 @@ def test_teardown_failure_closes_admission(tmp_path: Path, monkeypatch: pytest.M
     try:
         assert _trigger(supervisor, "event-1", clip, "a" * 64)
         assert _wait(supervisor, "event-1") == "failed"
-        assert not _trigger(supervisor, "event-2", clip, "e" * 64)
+        assert _trigger(supervisor, "event-2", clip, "e" * 64) == Admission.STOPPED
+        assert pids == [pids[0]]
     finally:
         monkeypatch.setattr(supervisor, "_terminate_group", lambda process: process.kill())
         supervisor.shutdown()
@@ -352,6 +496,7 @@ def test_no_job_state_marker_while_active_or_after_teardown(tmp_path: Path) -> N
         profile=_Profile(),
         cpu_index=_cpu(),
         launch=_launch_for(b"{}", pids, 10),
+        probe=_probe,
     )
     try:
         assert _trigger(supervisor, "event-1", clip, "a" * 64)

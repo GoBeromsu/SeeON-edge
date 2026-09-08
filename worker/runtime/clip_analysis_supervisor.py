@@ -5,17 +5,21 @@ from __future__ import annotations
 import os
 import subprocess
 import threading
+from collections import OrderedDict
 from collections.abc import Callable
 from pathlib import Path
 from time import monotonic
 
 from worker.adapters.model.clip_reanalysis import ClipAnalysisRejected
 from worker.pipeline.output.evidence.clip_analysis_artifact import (
+    ClipAnalysisArtifactIdentity,
     has_current_artifact,
+    has_failed_outcome,
+    publish_failed_outcome,
 )
 from worker.runtime import clip_analysis_process
 from worker.runtime.clip_analysis_execution import run_job
-from worker.runtime.clip_analysis_queue import ClipAnalysisQueue
+from worker.runtime.clip_analysis_queue import Admission, ClipAnalysisQueue
 from worker.runtime.clip_analysis_subprocess import (
     ClipAnalysisPdeathsigUnavailable,
     require_pdeathsig,
@@ -38,6 +42,9 @@ class ClipAnalysisSupervisor:
         cpu_index: int | None,
         deadline_s: float = 600.0,
         launch: Callable[..., subprocess.Popen[bytes]] = subprocess.Popen,
+        probe: Callable[[Path], clip_analysis_process.ClipMediaFacts] = (
+            clip_analysis_process.probe_media_facts
+        ),
     ) -> None:
         if deadline_s <= 0:
             raise ValueError("deadline_s must be positive")
@@ -60,19 +67,32 @@ class ClipAnalysisSupervisor:
         self._cpu_index = cpu_index
         self._deadline_s = deadline_s
         self._launch = launch
+        self._probe = probe
         self._condition = threading.Condition()
         self._queue = ClipAnalysisQueue()
+        self._notifications: list[tuple[str, Path, str, int, int]] = []
         self._active: clip_analysis_process.ClipAnalysisJob | None = None
         self._process: subprocess.Popen[bytes] | None = None
         self._cancelled = False
         self._stopping = False
-        self._statuses: dict[str, ClipAnalysisStatus] = {}
+        self._statuses: OrderedDict[str, ClipAnalysisStatus] = OrderedDict()
         self._thread = threading.Thread(target=self._serve, name="clip-analysis", daemon=True)
         self._thread.start()
 
     def status(self, clip_id: str) -> ClipAnalysisStatus:
         with self._condition:
             return self._statuses.get(clip_id, ClipAnalysisStatus("idle"))
+
+    def notify(
+        self, clip_id: str, clip_path: Path, clip_sha256: str, *, size_bytes: int, duration_ms: int
+    ) -> None:
+        """Constant-time publication hook; media I/O belongs to this thread."""
+        with self._condition:
+            if self._stopping:
+                return
+            self._notifications.append((clip_id, clip_path, clip_sha256, size_bytes, duration_ms))
+            self._set_status(clip_id, ClipAnalysisStatus("queued"))
+            self._condition.notify()
 
     def trigger(
         self,
@@ -84,7 +104,7 @@ class ClipAnalysisSupervisor:
         duration_ms: int,
         width: int,
         height: int,
-    ) -> bool:
+    ) -> Admission:
         return self.enqueue(
             clip_id,
             clip_path,
@@ -107,14 +127,15 @@ class ClipAnalysisSupervisor:
         width: int,
         height: int,
         front: bool = False,
-    ) -> bool:
+    ) -> Admission:
         clip_analysis_process.validate_sha(clip_sha256)
-        _pre_admission(self._profile, size_bytes, duration_ms, width, height)
+        facts = self._probe(clip_path)
+        _pre_admission(self._profile, size_bytes, duration_ms, facts.width, facts.height)
         with self._condition:
             if self._stopping:
-                return False
+                return Admission.STOPPED
             if self._active is not None and self._active.clip_id == clip_id:
-                return True
+                return Admission.ALREADY_RUNNING
             if has_current_artifact(
                 clip_path.parent,
                 clip_id=clip_id,
@@ -122,9 +143,10 @@ class ClipAnalysisSupervisor:
                 pose_model_sha256=clip_analysis_process.model_digest(self._pose_model),
                 bed_model_sha256=clip_analysis_process.model_digest(self._bed_model),
                 analysis_profile_sha256=self._profile_sha,
+                decoder_identity=facts.decoder_identity,
             ):
-                self._statuses[clip_id] = ClipAnalysisStatus("available")
-                return True
+                self._set_status(clip_id, ClipAnalysisStatus("available"))
+                return Admission.AVAILABLE
             job = clip_analysis_process.ClipAnalysisJob(
                 clip_id,
                 clip_path,
@@ -133,12 +155,26 @@ class ClipAnalysisSupervisor:
                 self._bed_model,
                 self._profile,
                 self._profile_sha,
+                facts.decoder_identity,
+                front,
             )
-            if not self._queue.add(job, front=front):
-                return False
-            self._statuses[clip_id] = ClipAnalysisStatus("queued")
+            identity = ClipAnalysisArtifactIdentity(
+                clip_id,
+                clip_sha256,
+                clip_analysis_process.model_digest(self._pose_model),
+                clip_analysis_process.model_digest(self._bed_model),
+                self._profile_sha,
+                facts.decoder_identity,
+            )
+            if not front and has_failed_outcome(clip_path, identity):
+                self._set_status(clip_id, ClipAnalysisStatus("failed", "previous_failure"))
+                return Admission.REJECTED
+            admission = self._queue.add(job, front=front)
+            if admission == Admission.QUEUE_FULL:
+                return admission
+            self._set_status(clip_id, ClipAnalysisStatus("queued"))
             self._condition.notify()
-            return True
+            return admission
 
     def cancel(self, clip_id: str) -> bool:
         with self._condition:
@@ -167,19 +203,40 @@ class ClipAnalysisSupervisor:
     def _serve(self) -> None:
         while True:
             with self._condition:
-                self._condition.wait_for(lambda: self._queue or self._stopping)
+                self._condition.wait_for(
+                    lambda: self._queue or self._notifications or self._stopping
+                )
                 if self._stopping:
                     while (pending := self._queue.take()) is not None:
                         self._statuses[pending.clip_id] = ClipAnalysisStatus("failed", "cancelled")
                     return
+                if self._notifications:
+                    clip_id, clip_path, clip_sha256, size_bytes, duration_ms = (
+                        self._notifications.pop(0)
+                    )
+                    try:
+                        self.enqueue(
+                            clip_id,
+                            clip_path,
+                            clip_sha256,
+                            size_bytes=size_bytes,
+                            duration_ms=duration_ms,
+                            width=0,
+                            height=0,
+                        )
+                    except (ClipAnalysisRejected, OSError, ValueError) as exc:
+                        self._set_status(
+                            clip_id, ClipAnalysisStatus("failed", clip_analysis_process.reason(exc))
+                        )
+                    continue
                 job = self._queue.take()
                 self._active = job
                 self._cancelled = False
                 self._statuses[job.clip_id] = ClipAnalysisStatus("running")
             assert job is not None
-            process: subprocess.Popen[bytes] | None = None
+            status = ClipAnalysisStatus("failed", "unknown")
             try:
-                status, process = run_job(
+                status, _ = run_job(
                     job,
                     python_executable=self._python,
                     cpu_index=self._cpu_index,
@@ -192,6 +249,8 @@ class ClipAnalysisSupervisor:
                 )
             except Exception as exc:  # noqa: BLE001 - keep the long-lived supervisor alive
                 status = ClipAnalysisStatus("failed", clip_analysis_process.reason(exc))
+            with self._condition:
+                process = self._process
             teardown_failed = False
             if process is not None:
                 try:
@@ -200,20 +259,43 @@ class ClipAnalysisSupervisor:
                     status = ClipAnalysisStatus("failed", clip_analysis_process.reason(exc))
                     teardown_failed = True
             with self._condition:
-                self._process = None
-                self._statuses[job.clip_id] = status
+                self._set_status(job.clip_id, status)
+                if status.state == "failed" and status.reason not in ("timeout", "cancelled"):
+                    publish_failed_outcome(
+                        job.clip_path,
+                        ClipAnalysisArtifactIdentity(
+                            job.clip_id,
+                            job.clip_sha256,
+                            clip_analysis_process.model_digest(self._pose_model),
+                            clip_analysis_process.model_digest(self._bed_model),
+                            self._profile_sha,
+                            job.decoder_identity,
+                        ),
+                        status.reason or "failed",
+                    )
                 if teardown_failed:
                     self._stopping = True
                     self._condition.notify_all()
                     return
+                self._process = None
                 self._active = None
                 self._condition.notify_all()
                 if self._stopping:
                     return
 
-    def _set_process(self, process: subprocess.Popen[bytes]) -> None:
+    def _set_process(self, process: subprocess.Popen[bytes]) -> bool:
         with self._condition:
             self._process = process
+            return self._cancelled or self._stopping
+
+    def _set_status(self, clip_id: str, status: ClipAnalysisStatus) -> None:
+        self._statuses[clip_id] = status
+        self._statuses.move_to_end(clip_id)
+        terminal = [
+            key for key, value in self._statuses.items() if value.state not in ("queued", "running")
+        ]
+        while len(terminal) > 256:
+            self._statuses.pop(terminal.pop(0))
 
     def _cancelled_or_stopping(self) -> bool:
         with self._condition:

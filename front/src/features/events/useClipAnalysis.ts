@@ -44,7 +44,7 @@ export function useClipAnalysis(clipId: string | undefined, enabled: boolean): {
   }, [enabled, request, state.status?.state]);
 
   return {
-    status: state.pending ? { state: 'running', served_media_sha256: state.status?.served_media_sha256 ?? '' } : state.status ?? initial,
+    status: state.status ?? (state.pending ? { state: 'running', served_media_sha256: '' } : initial),
     received: Boolean(state.status?.served_media_sha256),
     settled: state.status !== null,
     trigger: () => request(triggerClipAnalysis),

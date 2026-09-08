@@ -63,7 +63,6 @@ from worker.interfaces.serving import ServingClient
 from worker.pipeline.analytics.merge import result_merger_names
 from worker.pipeline.decision import EventAggregator, IncidentManager
 from worker.pipeline.decision.event_identity import event_identity_path
-from worker.pipeline.output._clip_analysis_http import manifest_facts
 from worker.pipeline.output.evidence.clip_config import DEFAULT_CLIP_STORE_DIR
 from worker.pipeline.output.evidence.clip_identity import ClipIdAllocator
 from worker.pipeline.output.evidence.clip_publication import ClipPublisher, ReadyClipPublication
@@ -440,6 +439,9 @@ class ClipAnalysisDisabled:
         del args, kwargs
         return False
 
+    def notify(self, *args: object, **kwargs: object) -> None:
+        del args, kwargs
+
     def cancel(self, clip_id: str) -> bool:
         del clip_id
         raise ClipAnalysisDisabledError("clip_analysis_disabled")
@@ -748,6 +750,7 @@ class WorkerRuntime:
         self._mjpeg_server: MjpegServer | None = None
         self._clip_analysis_supervisor: ClipAnalysisControl | None = None
         self._clip_analysis_catchup_thread: threading.Thread | None = None
+        self._clip_analysis_catchup_stop = threading.Event()
         self._flow_media_plane: FlowMediaPlane | None = flow_media_plane
         self._flow_lifecycle_supervisor: FlowLifecycleSupervisor | None = None
         self._native_policy_pumps: tuple[NativePolicyPump, ...] = ()
@@ -871,8 +874,10 @@ class WorkerRuntime:
             self._mjpeg_server.stop()
             self._mjpeg_server = None
         if self._clip_analysis_catchup_thread is not None:
-            self._clip_analysis_catchup_thread.join(timeout=1.0)
-            self._clip_analysis_catchup_thread = None
+            self._clip_analysis_catchup_stop.set()
+            self._clip_analysis_catchup_thread.join(timeout=5.0)
+            if not self._clip_analysis_catchup_thread.is_alive():
+                self._clip_analysis_catchup_thread = None
         if self._clip_analysis_supervisor is not None:
             self._clip_analysis_supervisor.shutdown()
             self._clip_analysis_supervisor = None
@@ -949,8 +954,9 @@ class WorkerRuntime:
         else:
             self._clip_analysis_supervisor = supervisor
             if not isinstance(supervisor, ClipAnalysisDisabled):
+                self._clip_analysis_catchup_stop.clear()
                 self._clip_analysis_catchup_thread = start_clip_analysis_catchup(
-                    clip_store_dir, supervisor
+                    clip_store_dir, supervisor, self._clip_analysis_catchup_stop
                 )
             LOGGER.info(
                 "live view server bound: host=%s port=%d",
@@ -1419,26 +1425,13 @@ class WorkerRuntime:
         supervisor = self._clip_analysis_supervisor
         if supervisor is None:
             return
-        width, height = publication.width, publication.height
-        if width is None or height is None:
-            facts = manifest_facts(publication.video_path)
-            if facts is None:
-                LOGGER.warning(
-                    "clip analysis ready hook failed stage=clip_analysis_ready clip_id=%s "
-                    "exception_class=ValueError",
-                    publication.clip_id,
-                )
-                return
-            _, _, _, width, height = facts
         try:
-            supervisor.enqueue(
+            supervisor.notify(
                 publication.clip_id,
                 publication.video_path,
                 publication.sha256,
                 size_bytes=publication.size_bytes,
                 duration_ms=publication.duration_ms,
-                width=width,
-                height=height,
             )
         except Exception as exc:  # noqa: BLE001 - publication already succeeded
             LOGGER.warning(

@@ -306,6 +306,34 @@ def test_clip_publisher_rejects_null_thumbnail_generator(tmp_path: Path) -> None
         ClipPublisher(tmp_path, thumbnail_generator=None, on_ready=no_op_ready_hook)
 
 
+def test_ready_notification_is_constant_time_and_never_fails_publication(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    reservation = ClipIdAllocator(
+        tmp_path, id_factory=lambda _camera: "ready-notification"
+    ).reserve("camera-1")
+    artifact = reservation.staging_dir / "clip.mp4"
+    artifact.write_bytes(b"derivative-media")
+    monkeypatch.setattr(
+        "worker.pipeline.output.evidence.evidence_manifest.inspect_finalized_media",
+        lambda _path, **_kwargs: MediaFacts("a" * 64, len(b"derivative-media"), 1000),
+    )
+    notifications: list[object] = []
+
+    def notify(publication: object) -> None:
+        notifications.append(publication)
+        raise RuntimeError("notification failure")
+
+    published = ClipPublisher(
+        tmp_path,
+        thumbnail_generator=DeterministicThumbnailGenerator(),
+        on_ready=notify,
+    ).publish_ready(reservation, artifact, _metadata())
+
+    assert published.manifest_path.is_file()
+    assert len(notifications) == 1
+
+
 def test_thumbnail_failure_does_not_prevent_ready_clip_publication(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
