@@ -6,16 +6,20 @@ import threading
 from pathlib import Path
 
 from worker.runtime import clip_analysis_catchup
+from worker.runtime.clip_analysis_queue import Admission
 
 
 class _Supervisor:
-    def __init__(self, results: list[bool]) -> None:
+    def __init__(self, results: list[Admission]) -> None:
         self._results = iter(results)
         self.clip_ids: list[str] = []
 
-    def enqueue(self, clip_id: str, *_args: object, **_kwargs: object) -> bool:
+    def enqueue(self, clip_id: str, *_args: object, **_kwargs: object) -> Admission:
         self.clip_ids.append(clip_id)
         return next(self._results)
+
+    def wait_for_capacity(self, _timeout: float) -> bool:
+        return True
 
 
 def test_catchup_enqueues_newest_first_and_stops_at_full_queue(
@@ -45,7 +49,7 @@ def test_catchup_enqueues_newest_first_and_stops_at_full_queue(
             for path in (oldest, newest)
         ],
     )
-    supervisor = _Supervisor([True, False])
+    supervisor = _Supervisor([Admission.QUEUED, Admission.STOPPED])
 
     clip_analysis_catchup.catch_up_clip_analysis(tmp_path, supervisor)
 
@@ -70,21 +74,55 @@ def test_catchup_stops_on_event_and_respects_candidate_bound(
             for path in clips[:256]
         ],
     )
-    bounded = _Supervisor([True] * 256)
+    bounded = _Supervisor([Admission.QUEUED] * 256)
     clip_analysis_catchup.catch_up_clip_analysis(tmp_path, bounded)
     assert len(bounded.clip_ids) == 256
 
     stop = threading.Event()
 
     class _StoppingSupervisor(_Supervisor):
-        def enqueue(self, *args: object, **kwargs: object) -> bool:
+        def enqueue(self, *args: object, **kwargs: object) -> Admission:
             result = super().enqueue(*args, **kwargs)
             stop.set()
             return result
 
-    stopped = _StoppingSupervisor([True] * 256)
+    stopped = _StoppingSupervisor([Admission.QUEUED] * 256)
     clip_analysis_catchup.catch_up_clip_analysis(tmp_path, stopped, stop)
     assert len(stopped.clip_ids) == 1
+
+
+def test_catchup_retries_full_queue_until_missing_artifact_is_enqueued(
+    tmp_path: Path, monkeypatch: object
+) -> None:
+    candidates = [
+        clip_analysis_catchup._Candidate(
+            f"current-{number}", tmp_path, "a" * 64, 1, 1, 100 - number
+        )
+        for number in range(65)
+    ]
+    candidates.append(clip_analysis_catchup._Candidate("missing", tmp_path, "b" * 64, 1, 1, 0))
+    monkeypatch.setattr(clip_analysis_catchup, "_ready_candidates", lambda *_args: candidates)
+
+    class _ShortCircuitingSupervisor:
+        def __init__(self) -> None:
+            self.pending = 0
+            self.clip_ids: list[str] = []
+
+        def enqueue(self, clip_id: str, *_args: object, **_kwargs: object) -> Admission:
+            if self.pending == 64:
+                return Admission.QUEUE_FULL
+            self.pending += 1
+            self.clip_ids.append(clip_id)
+            return Admission.QUEUED
+
+        def wait_for_capacity(self, _timeout: float) -> bool:
+            self.pending -= 1
+            return True
+
+    supervisor = _ShortCircuitingSupervisor()
+    clip_analysis_catchup.catch_up_clip_analysis(tmp_path, supervisor)
+
+    assert supervisor.clip_ids[-1] == "missing"
 
 
 def test_ready_candidate_accepts_flow_published_manifest_without_source_media(

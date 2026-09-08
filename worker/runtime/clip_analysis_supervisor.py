@@ -99,6 +99,15 @@ class ClipAnalysisSupervisor:
             clip_id, clip_path, clip_sha256, size_bytes, duration_ms, width, height, front
         )
 
+    def wait_for_capacity(self, timeout: float) -> bool:
+        with self._condition:
+            return (
+                self._condition.wait_for(
+                    lambda: self._stopping or self._queue.has_capacity(), timeout
+                )
+                and not self._stopping
+            )
+
     def _admit(
         self,
         clip_id: str,
@@ -198,6 +207,7 @@ class ClipAnalysisSupervisor:
                 pending = self._queue.take()
                 assert pending is not None
                 self._preparing = pending
+                self._condition.notify_all()
             job, status = prepare_job(
                 pending,
                 profile=self._profile,
@@ -246,7 +256,7 @@ class ClipAnalysisSupervisor:
             self._set_status(job.clip_id, status)
             if teardown_failed:
                 self._stopping = True
-                self._set_status(job.clip_id, ClipAnalysisStatus("closed", status.reason))
+                self._set_status(job.clip_id, ClipAnalysisStatus("failed", "teardown_unproved"))
             else:
                 self._active, self._process = None, None
             self._cancelled.discard(job.generation)

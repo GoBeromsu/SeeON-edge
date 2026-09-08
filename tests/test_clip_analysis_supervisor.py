@@ -524,7 +524,7 @@ def test_terminal_statuses_are_bounded_but_queued_and_active_never_evicted(tmp_p
         supervisor.shutdown()
 
 
-def test_teardown_proof_failure_closes_admission_and_never_launches_next(
+def test_teardown_proof_failure_fails_admission_and_never_launches_next(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     clip = tmp_path / "clip.mp4"
@@ -553,7 +553,8 @@ def test_teardown_proof_failure_closes_admission_and_never_launches_next(
     monkeypatch.setattr(supervisor, "_terminate_group", terminate)
     try:
         assert _trigger(supervisor, "event-1", clip, "a" * 64)
-        assert _wait(supervisor, "event-1") == "closed"
+        assert _wait(supervisor, "event-1") == "failed"
+        assert supervisor.status("event-1").reason == "teardown_unproved"
         with supervisor._condition:  # noqa: SLF001
             assert supervisor._active is not None  # noqa: SLF001
             assert supervisor._process is not None  # noqa: SLF001

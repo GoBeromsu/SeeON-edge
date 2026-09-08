@@ -4,11 +4,12 @@ from __future__ import annotations
 
 from collections import OrderedDict
 from dataclasses import dataclass
+from typing import Literal
 
 
 @dataclass(frozen=True, slots=True)
 class ClipAnalysisStatus:
-    state: str
+    state: Literal["idle", "queued", "running", "available", "failed"]
     reason: str | None = None
 
 

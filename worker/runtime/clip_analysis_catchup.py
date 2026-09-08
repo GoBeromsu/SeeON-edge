@@ -16,6 +16,7 @@ from worker.pipeline.output.evidence.evidence_manifest import (
     parse_manifest_content,
 )
 from worker.pipeline.output.evidence.manifest_models import ReadyClipManifest
+from worker.runtime.clip_analysis_queue import Admission
 
 LOGGER = logging.getLogger(__name__)
 _CANDIDATE_LIMIT = 256
@@ -51,31 +52,49 @@ def catch_up_clip_analysis(
     stop = stop or threading.Event()
     deadline = monotonic() + _DISCOVERY_SECONDS
     candidates = _ready_candidates(store_dir, stop, deadline)
-    accepted = skipped = rejected = 0
-    for candidate in sorted(candidates, key=lambda item: item.mtime, reverse=True):
-        if stop.is_set() or monotonic() >= deadline:
+    accepted = skipped = rejected = remaining = 0
+    ordered = sorted(candidates, key=lambda item: item.mtime, reverse=True)
+    for index, candidate in enumerate(ordered):
+        while not stop.is_set() and monotonic() < deadline:
+            try:
+                admission = supervisor.enqueue(
+                    candidate.clip_id,
+                    candidate.clip_path,
+                    candidate.clip_sha256,
+                    size_bytes=candidate.size_bytes,
+                    duration_ms=candidate.duration_ms,
+                    width=0,
+                    height=0,
+                )
+            except ClipAnalysisRejected:
+                rejected += 1
+                break
+            if admission is Admission.QUEUE_FULL:
+                supervisor.wait_for_capacity(min(1.0, max(0.0, deadline - monotonic())))
+                continue
+            if admission is Admission.STOPPED:
+                remaining = len(ordered) - index
+                break
+            if admission in (
+                Admission.ALREADY_QUEUED,
+                Admission.ALREADY_RUNNING,
+                Admission.AVAILABLE,
+            ):
+                skipped += 1
+            else:
+                accepted += 1
             break
-        try:
-            admission = supervisor.enqueue(
-                candidate.clip_id,
-                candidate.clip_path,
-                candidate.clip_sha256,
-                size_bytes=candidate.size_bytes,
-                duration_ms=candidate.duration_ms,
-                width=0,
-                height=0,
-            )
-        except ClipAnalysisRejected:
-            rejected += 1
-            continue
-        if admission in ("queue_full", "stopped"):
+        else:
+            remaining = len(ordered) - index
+        if remaining:
             break
-        accepted += 1
     LOGGER.info(
-        "clip analysis catch-up complete accepted=%d skipped=%d rejected=%d discovered=%d",
+        "clip analysis catch-up complete accepted=%d skipped=%d rejected=%d remaining=%d "
+        "discovered=%d",
         accepted,
         skipped,
         rejected,
+        remaining,
         len(candidates),
     )
 

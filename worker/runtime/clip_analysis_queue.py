@@ -77,6 +77,9 @@ class ClipAnalysisQueue:
         self._clip_ids.remove(job.clip_id)
         return job
 
+    def has_capacity(self) -> bool:
+        return len(self._jobs) < self._capacity
+
     def remove(self, clip_id: str) -> bool:
         for job in self._jobs:
             if job.clip_id == clip_id:
