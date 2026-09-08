@@ -52,3 +52,14 @@ def test_full_queue_rejects_automatic_with_queue_full() -> None:
     queue.add(_job("manual", manual=True), front=True)
 
     assert queue.add(_job("automatic"), front=False) == Admission.QUEUE_FULL
+
+
+def test_push_returns_the_automatic_job_evicted_for_manual_work() -> None:
+    queue = ClipAnalysisQueue(capacity=1)
+    queue.add(_job("automatic"), front=False)
+
+    admitted = queue.push(_job("manual", manual=True), front=True)
+
+    assert admitted.kind == Admission.QUEUED
+    assert admitted.evicted is not None
+    assert admitted.evicted.clip_id == "automatic"

@@ -876,7 +876,9 @@ class WorkerRuntime:
         if self._clip_analysis_catchup_thread is not None:
             self._clip_analysis_catchup_stop.set()
             self._clip_analysis_catchup_thread.join(timeout=5.0)
-            if not self._clip_analysis_catchup_thread.is_alive():
+            if self._clip_analysis_catchup_thread.is_alive():
+                LOGGER.error("clip analysis catch-up thread did not stop within timeout")
+            else:
                 self._clip_analysis_catchup_thread = None
         if self._clip_analysis_supervisor is not None:
             self._clip_analysis_supervisor.shutdown()

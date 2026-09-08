@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections import deque
+from dataclasses import dataclass
 from enum import StrEnum
 
 from worker.runtime.clip_analysis_process import ClipAnalysisJob
@@ -18,6 +19,12 @@ class Admission(StrEnum):
     REJECTED = "rejected"
 
 
+@dataclass(frozen=True, slots=True)
+class Admitted:
+    kind: Admission
+    evicted: ClipAnalysisJob | None = None
+
+
 class ClipAnalysisQueue:
     """A bounded, de-duplicated queue whose head can accept manual work."""
 
@@ -28,7 +35,7 @@ class ClipAnalysisQueue:
         self._jobs: deque[ClipAnalysisJob] = deque()
         self._clip_ids: set[str] = set()
 
-    def add(self, job: ClipAnalysisJob, *, front: bool) -> Admission:
+    def push(self, job: ClipAnalysisJob, *, front: bool) -> Admitted:
         if job.clip_id in self._clip_ids:
             if front:
                 for queued in self._jobs:
@@ -36,23 +43,32 @@ class ClipAnalysisQueue:
                         self._jobs.remove(queued)
                         self._jobs.appendleft(queued)
                         break
-            return Admission.ALREADY_QUEUED
-        if len(self._jobs) >= self._capacity and (not front or not self._evict_tail_automatic()):
-            return Admission.QUEUE_FULL
+            return Admitted(Admission.ALREADY_QUEUED)
+        evicted = None
+        if len(self._jobs) >= self._capacity:
+            if not front:
+                return Admitted(Admission.QUEUE_FULL)
+            evicted = self._evict_tail_automatic()
+            if evicted is None:
+                return Admitted(Admission.QUEUE_FULL)
         if front:
             self._jobs.appendleft(job)
         else:
             self._jobs.append(job)
         self._clip_ids.add(job.clip_id)
-        return Admission.QUEUED
+        return Admitted(Admission.QUEUED, evicted)
 
-    def _evict_tail_automatic(self) -> bool:
+    def add(self, job: ClipAnalysisJob, *, front: bool) -> Admission:
+        """Return only the admission kind for legacy callers."""
+        return self.push(job, front=front).kind
+
+    def _evict_tail_automatic(self) -> ClipAnalysisJob | None:
         for job in reversed(self._jobs):
             if not job.front:
                 self._jobs.remove(job)
                 self._clip_ids.remove(job.clip_id)
-                return True
-        return False
+                return job
+        return None
 
     def take(self) -> ClipAnalysisJob | None:
         if not self._jobs:

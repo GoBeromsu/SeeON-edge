@@ -328,7 +328,52 @@ def test_launch_failure_keeps_supervisor_alive_and_releases_slot(tmp_path: Path)
         supervisor.shutdown()
 
 
-def test_enqueue_short_circuits_to_available_only_for_exact_identity_including_decoder(
+def test_notify_is_not_blocked_by_probe_and_cancelled_preprobe_never_launches(
+    tmp_path: Path,
+) -> None:
+    clip = tmp_path / "clip.mp4"
+    clip.write_bytes(b"clip")
+    _model(tmp_path / "pose.onnx", b"pose")
+    _model(tmp_path / "bed.onnx", b"bed")
+    probing = threading.Event()
+    release_probe = threading.Event()
+    launches: list[str] = []
+
+    def blocked_probe(_clip: Path) -> ClipMediaFacts:
+        probing.set()
+        assert release_probe.wait(2)
+        return _probe(_clip)
+
+    def launch(_command: list[str], **_kwargs: object) -> subprocess.Popen[bytes]:
+        launches.append("launch")
+        raise OSError("unexpected_launch")
+
+    supervisor = ClipAnalysisSupervisor(
+        python_executable=sys.executable,
+        pose_model_path=tmp_path / "pose.onnx",
+        bed_model_path=tmp_path / "bed.onnx",
+        profile=_Profile(),
+        cpu_index=_cpu(),
+        launch=launch,
+        probe=blocked_probe,
+    )
+    try:
+        supervisor.notify("first", clip, "a" * 64, size_bytes=4, duration_ms=100)
+        assert probing.wait(1)
+        started = monotonic()
+        supervisor.notify("first", clip, "a" * 64, size_bytes=4, duration_ms=100)
+        assert monotonic() - started < 0.05
+        assert supervisor.cancel("first")
+        release_probe.set()
+        assert _wait(supervisor, "first") == "failed"
+        assert supervisor.status("first").reason == "cancelled"
+        assert launches == []
+    finally:
+        release_probe.set()
+        supervisor.shutdown()
+
+
+def test_background_preparation_short_circuits_to_available_for_exact_identity(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     clip = tmp_path / "clip.mp4"
@@ -337,7 +382,7 @@ def test_enqueue_short_circuits_to_available_only_for_exact_identity_including_d
     _model(tmp_path / "bed.onnx", b"bed")
     expected: list[str] = []
     monkeypatch.setattr(
-        "worker.runtime.clip_analysis_supervisor.has_current_artifact",
+        "worker.runtime.clip_analysis_admission.has_current_artifact",
         lambda _directory, **identity: expected.append(identity["decoder_identity"]) or True,
     )
     supervisor = ClipAnalysisSupervisor(
@@ -353,14 +398,15 @@ def test_enqueue_short_circuits_to_available_only_for_exact_identity_including_d
             supervisor.enqueue(
                 "event-1", clip, "a" * 64, size_bytes=4, duration_ms=100, width=0, height=0
             )
-            == Admission.AVAILABLE
+            == Admission.QUEUED
         )
+        assert _wait(supervisor, "event-1") == "available"
         assert expected == ["pyav-16/h264"]
     finally:
         supervisor.shutdown()
 
 
-def test_failed_child_writes_immutable_identity_outcome_and_auto_admission_skips_it(
+def test_launch_failure_is_retryable_and_does_not_write_an_outcome(
     tmp_path: Path,
 ) -> None:
     clip = tmp_path / "clip.mp4"
@@ -388,12 +434,12 @@ def test_failed_child_writes_immutable_identity_outcome_and_auto_admission_skips
             == Admission.QUEUED
         )
         assert _wait(supervisor, "event-1") == "failed"
-        assert tuple(tmp_path.glob("clip.analysis.*.failed.json"))
+        assert tuple(tmp_path.glob("clip.analysis.*.failed.json")) == ()
         assert (
             supervisor.enqueue(
                 "event-1", clip, "a" * 64, size_bytes=4, duration_ms=100, width=0, height=0
             )
-            == Admission.REJECTED
+            == Admission.QUEUED
         )
     finally:
         supervisor.shutdown()
@@ -440,10 +486,12 @@ def test_terminal_statuses_are_bounded_but_queued_and_active_never_evicted(tmp_p
     )
     try:
         with supervisor._condition:  # noqa: SLF001
-            supervisor._set_status("queued", ClipAnalysisStatus("queued"))  # noqa: SLF001
-            supervisor._set_status("running", ClipAnalysisStatus("running"))  # noqa: SLF001
+            supervisor._statuses.record("queued", ClipAnalysisStatus("queued"))  # noqa: SLF001
+            supervisor._statuses.record("running", ClipAnalysisStatus("running"))  # noqa: SLF001
             for number in range(257):
-                supervisor._set_status(f"terminal-{number}", ClipAnalysisStatus("failed"))  # noqa: SLF001
+                supervisor._statuses.record(  # noqa: SLF001
+                    f"terminal-{number}", ClipAnalysisStatus("failed")
+                )
         assert supervisor.status("queued").state == "queued"
         assert supervisor.status("running").state == "running"
         assert supervisor.status("terminal-0").state == "idle"

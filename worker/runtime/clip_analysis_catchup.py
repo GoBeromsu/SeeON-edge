@@ -1,15 +1,15 @@
-"""One-shot boot catch-up for published clips awaiting analysis."""
+"""One-shot, bounded boot catch-up for published clips awaiting analysis."""
 
 from __future__ import annotations
 
 import logging
 import threading
+from dataclasses import dataclass
 from pathlib import Path
 from time import monotonic
 
 from worker.adapters.model.clip_reanalysis import ClipAnalysisRejected
 from worker.interfaces.clip_analysis import ClipAnalysisSupervisor
-from worker.pipeline.output._clip_analysis_http import manifest_facts
 from worker.pipeline.output.evidence.clip_identity import bounded_clip_roots
 from worker.pipeline.output.evidence.evidence_manifest import (
     ClipEvidenceError,
@@ -18,6 +18,19 @@ from worker.pipeline.output.evidence.evidence_manifest import (
 from worker.pipeline.output.evidence.manifest_models import ReadyClipManifest
 
 LOGGER = logging.getLogger(__name__)
+_CANDIDATE_LIMIT = 256
+_DISCOVERY_SECONDS = 30.0
+
+
+@dataclass(frozen=True, slots=True)
+class _Candidate:
+    clip_path: Path
+    clip_sha256: str
+    size_bytes: int
+    duration_ms: int
+    width: int
+    height: int
+    mtime: float
 
 
 def start_clip_analysis_catchup(
@@ -36,66 +49,86 @@ def start_clip_analysis_catchup(
 def catch_up_clip_analysis(
     store_dir: Path, supervisor: ClipAnalysisSupervisor, stop: threading.Event | None = None
 ) -> None:
-    if stop is None:
-        stop = threading.Event()
-    deadline = monotonic() + 30
-    candidates = sorted(
-        _ready_clips(store_dir),
-        key=lambda path: path.with_name("manifest.json").stat().st_mtime,
-        reverse=True,
-    )
+    stop = stop or threading.Event()
+    deadline = monotonic() + _DISCOVERY_SECONDS
+    candidates = _ready_candidates(store_dir, stop, deadline)
     accepted = skipped = rejected = 0
-    for clip_path in candidates[:256]:
+    for candidate in sorted(candidates, key=lambda item: item.mtime, reverse=True):
         if stop.is_set() or monotonic() >= deadline:
             break
         try:
-            facts = manifest_facts(clip_path)
-        except OSError:
-            skipped += 1
-            continue
-        if facts is None:
-            skipped += 1
-            continue
-        clip_sha256, size_bytes, duration_ms, width, height = facts
-        try:
-            queued = supervisor.enqueue(
-                clip_path.parent.name,
-                clip_path,
-                clip_sha256,
-                size_bytes=size_bytes,
-                duration_ms=duration_ms,
-                width=width,
-                height=height,
+            admission = supervisor.enqueue(
+                candidate.clip_path.parent.name,
+                candidate.clip_path,
+                candidate.clip_sha256,
+                size_bytes=candidate.size_bytes,
+                duration_ms=candidate.duration_ms,
+                width=candidate.width,
+                height=candidate.height,
             )
         except ClipAnalysisRejected:
             rejected += 1
             continue
-        if queued in ("queue_full", "stopped"):
+        if admission in ("queue_full", "stopped"):
             break
         accepted += 1
     LOGGER.info(
-        "clip analysis catch-up complete accepted=%d skipped=%d rejected=%d remaining=%d",
+        "clip analysis catch-up complete accepted=%d skipped=%d rejected=%d discovered=%d",
         accepted,
         skipped,
         rejected,
-        max(0, len(candidates) - accepted - skipped - rejected),
+        len(candidates),
     )
 
 
-def _ready_clips(store_dir: Path) -> list[Path]:
-    clips: list[Path] = []
+def _ready_candidates(store_dir: Path, stop: threading.Event, deadline: float) -> list[_Candidate]:
+    candidates: list[_Candidate] = []
     for clips_root in bounded_clip_roots(store_dir):
-        for manifest_path in clips_root.glob("*/manifest.json"):
-            clip_path = manifest_path.with_name("clip.mp4")
-            if not clip_path.is_file():
-                continue
-            try:
-                manifest, _, _ = parse_manifest_content(manifest_path)
-            except (ClipEvidenceError, OSError):
-                continue
-            if (
-                isinstance(manifest, ReadyClipManifest)
-                and manifest.clip_id == clip_path.parent.name
-            ):
-                clips.append(clip_path)
-    return clips
+        if stop.is_set() or monotonic() >= deadline:
+            break
+        try:
+            directories = clips_root.iterdir()
+            for clip_dir in directories:
+                if stop.is_set() or monotonic() >= deadline or len(candidates) >= _CANDIDATE_LIMIT:
+                    return candidates
+                manifest_path = clip_dir / "manifest.json"
+                clip_path = clip_dir / "clip.mp4"
+                if not clip_dir.is_dir() or not clip_path.is_file():
+                    continue
+                candidate = _manifest_candidate(clip_path, manifest_path)
+                if candidate is not None:
+                    candidates.append(candidate)
+        except OSError:
+            continue
+    return candidates
+
+
+def _manifest_candidate(clip_path: Path, manifest_path: Path) -> _Candidate | None:
+    try:
+        manifest, _, _ = parse_manifest_content(manifest_path)
+        mtime = manifest_path.stat().st_mtime
+    except (ClipEvidenceError, OSError):
+        return None
+    if not isinstance(manifest, ReadyClipManifest) or manifest.clip_id != clip_path.parent.name:
+        return None
+    dimensions = _dimensions(manifest)
+    if dimensions is None:
+        return None
+    return _Candidate(
+        clip_path,
+        manifest.sha256,
+        manifest.size_bytes,
+        manifest.duration_ms,
+        dimensions[0],
+        dimensions[1],
+        mtime,
+    )
+
+
+def _dimensions(manifest: ReadyClipManifest) -> tuple[int, int] | None:
+    if manifest.source_media is None:
+        return None
+    for stream in manifest.source_media.streams:
+        if stream.media_type == "video" and stream.width is not None and stream.height is not None:
+            return stream.width, stream.height
+    return None

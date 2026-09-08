@@ -1,7 +1,8 @@
-"""Child execution stage for stored clip analysis."""
+"""Child execution and completion stages for stored clip analysis."""
 
 from __future__ import annotations
 
+import logging
 import subprocess
 from collections.abc import Callable
 from time import monotonic
@@ -11,9 +12,68 @@ from worker.pipeline.output.evidence.clip_analysis_artifact import (
     ClipAnalysisArtifactError,
     ClipAnalysisArtifactIdentity,
     publish_clip_analysis,
+    publish_failed_outcome,
 )
 from worker.runtime import clip_analysis_process
 from worker.runtime.clip_analysis_supervisor_status import ClipAnalysisStatus
+
+LOGGER = logging.getLogger(__name__)
+_TERMINAL_CHILD_EXITS = frozenset({"child_exit_2", "child_exit_3"})
+
+
+def execute_job(
+    job: clip_analysis_process.ClipAnalysisJob,
+    python_executable: str,
+    cpu_index: int,
+    deadline_s: float,
+    launch: Callable[..., subprocess.Popen[bytes]],
+    set_process: Callable[[subprocess.Popen[bytes]], bool],
+    cancelled: Callable[[], bool],
+    terminate: Callable[[subprocess.Popen[bytes]], None],
+    clock: Callable[[], float],
+) -> ClipAnalysisStatus:
+    try:
+        status, _ = run_job(
+            job,
+            python_executable=python_executable,
+            cpu_index=cpu_index,
+            deadline_s=deadline_s,
+            launch=launch,
+            set_process=set_process,
+            cancelled=cancelled,
+            terminate=terminate,
+            clock=clock,
+        )
+    except Exception as exc:  # noqa: BLE001 - supervisor must remain available
+        return ClipAnalysisStatus("failed", clip_analysis_process.reason(exc))
+    return status
+
+
+def settle_job(
+    job: clip_analysis_process.ClipAnalysisJob,
+    status: ClipAnalysisStatus,
+    process: subprocess.Popen[bytes] | None,
+    *,
+    identity: Callable[[clip_analysis_process.ClipAnalysisJob], ClipAnalysisArtifactIdentity],
+    terminate: Callable[[subprocess.Popen[bytes]], None],
+) -> tuple[ClipAnalysisStatus, bool]:
+    teardown_failed = False
+    if process is not None:
+        try:
+            terminate(process)
+        except Exception as exc:  # noqa: BLE001
+            status, teardown_failed = (
+                ClipAnalysisStatus("failed", clip_analysis_process.reason(exc)),
+                True,
+            )
+    if status.reason in _TERMINAL_CHILD_EXITS:
+        try:
+            publish_failed_outcome(job.clip_path, identity(job), status.reason)
+        except OSError:
+            LOGGER.exception(
+                "clip analysis failure outcome persistence failed clip=%s", job.clip_id
+            )
+    return status, teardown_failed
 
 
 def run_job(

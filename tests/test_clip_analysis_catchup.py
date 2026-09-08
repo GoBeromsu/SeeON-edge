@@ -30,12 +30,14 @@ def test_catchup_enqueues_newest_first_and_stops_at_full_queue(
         manifest.write_text("{}")
         os.utime(manifest, (timestamp, timestamp))
     monkeypatch.setattr(
-        clip_analysis_catchup, "_ready_clips", lambda _store: [oldest, newest, ignored]
-    )
-    monkeypatch.setattr(
         clip_analysis_catchup,
-        "manifest_facts",
-        lambda path: None if path == ignored else ("a" * 64, 1, 1, 1, 1),
+        "_ready_candidates",
+        lambda *_args: [
+            clip_analysis_catchup._Candidate(
+                path, "a" * 64, 1, 1, 1, 1, path.with_name("manifest.json").stat().st_mtime
+            )
+            for path in (oldest, newest)
+        ],
     )
     supervisor = _Supervisor([True, False])
 
@@ -54,9 +56,12 @@ def test_catchup_stops_on_event_and_respects_candidate_bound(
         clip.write_bytes(b"clip")
         clip.with_name("manifest.json").write_text("{}")
         clips.append(clip)
-    monkeypatch.setattr(clip_analysis_catchup, "_ready_clips", lambda _store: clips)
     monkeypatch.setattr(
-        clip_analysis_catchup, "manifest_facts", lambda _path: ("a" * 64, 1, 1, 1, 1)
+        clip_analysis_catchup,
+        "_ready_candidates",
+        lambda *_args: [
+            clip_analysis_catchup._Candidate(path, "a" * 64, 1, 1, 1, 1, 0) for path in clips[:256]
+        ],
     )
     bounded = _Supervisor([True] * 256)
     clip_analysis_catchup.catch_up_clip_analysis(tmp_path, bounded)

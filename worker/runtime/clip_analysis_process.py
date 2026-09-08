@@ -31,6 +31,10 @@ class ClipAnalysisJob:
     profile_sha256: str
     decoder_identity: str
     front: bool
+    size_bytes: int = 0
+    duration_ms: int = 0
+    width: int = 0
+    height: int = 0
 
 
 @dataclass(frozen=True, slots=True)
