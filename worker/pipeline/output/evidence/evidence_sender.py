@@ -40,6 +40,10 @@ _EXHAUSTED_STATUS: Final = 599
 _SHED_DETAIL_WARNING_INTERVAL_SECONDS = 60.0
 
 
+#: How long to wait before re-sending an entry that only an operator can unblock.
+_OPERATOR_BLOCKED_RETRY_SECONDS: Final = 300.0
+
+
 class SenderStep(StrEnum):
     RETRY_SCHEDULED = "RETRY_SCHEDULED"
     EVENT_ACKED = "EVENT_ACKED"
@@ -96,13 +100,20 @@ class EvidenceSender:
         transport: EvidenceTransport | None = None,
         clip_export_enabled: Callable[[], bool] | None = None,
         flow_sealed_sidecar_directory: Path | None = None,
+        clock: Callable[[], float] = time.monotonic,
     ) -> None:
+        self._clock = clock
         self.queue_directory = queue_directory
         self.config = config
         self._transport = transport or RelayEvidenceClient(config.relay_url, config.relay_token)
         self._clip_export_enabled = clip_export_enabled or (lambda: True)
         self._flow_sealed_sidecar_directory = flow_sealed_sidecar_directory
         self._clip_export_disabled_logged = False
+        #: Entries whose failure only an operator can clear (a camera with no
+        #: backend mapping). They are never dropped, but retrying them at the
+        #: sender's tick rate produced 264,661 attempts and an ERROR per second
+        #: against the same 409 for three days. Wait between attempts instead.
+        self._blocked_until: dict[str, float] = {}
         self._last_shed_detail_warning_at = float("-inf")
         self._attempts: dict[str, int] = {}
         self._deferred: set[str] = set()
@@ -132,7 +143,7 @@ class EvidenceSender:
             )
             return False
 
-    def _select(self, entries: tuple[dict[str, object], ...]) -> dict[str, object]:
+    def _select(self, entries: tuple[dict[str, object], ...]) -> dict[str, object] | None:
         """Pick the next entry to send, skipping ones that keep failing.
 
         Selection used to be a fixed preference for the first EVENT, and
@@ -157,12 +168,21 @@ class EvidenceSender:
         # cannot keep a failing head from blocking everything behind it. When
         # every candidate has been deferred the cycle restarts, so a queue whose
         # entries all fail still retries them all.
-        undeferred = tuple(
-            item for item in candidates if str(item["entry_id"]) not in self._deferred
+        now = self._clock()
+        due = tuple(
+            item
+            for item in candidates
+            if self._blocked_until.get(str(item["entry_id"]), 0.0) <= now
         )
+        if not due:
+            # Every candidate is waiting on an operator action. Say nothing is
+            # due rather than spinning on the same refusal; the next tick after
+            # the wait expires picks them up again.
+            return None
+        undeferred = tuple(item for item in due if str(item["entry_id"]) not in self._deferred)
         if not undeferred:
             self._deferred.clear()
-            undeferred = candidates
+            undeferred = due
         return next((item for item in undeferred if item["kind"] == "EVENT"), undeferred[0])
 
     def run_once(self) -> SenderStep:
@@ -171,6 +191,8 @@ class EvidenceSender:
         if not entries:
             return SenderStep.IDLE
         entry = self._select(entries)
+        if entry is None:
+            return SenderStep.IDLE
         entry_id = str(entry["entry_id"])
         if entry["kind"] == "CLIP" and not self._clip_export_enabled():
             if not self._clip_export_disabled_logged:
@@ -230,7 +252,11 @@ class EvidenceSender:
                 entry["kind"] == "CLIP"
                 and result.code == DeliveryFailureCode.CAMERA_MAPPING_MISSING
             ):
+                # The camera may be mapped later, so this entry is kept and never
+                # dead-lettered -- but only an operator can clear it, so wait
+                # instead of re-sending it on every tick.
                 self._deferred.add(entry_id)
+                self._blocked_until[entry_id] = self._clock() + _OPERATOR_BLOCKED_RETRY_SECONDS
                 return SenderStep.RETRY_SCHEDULED
             if (
                 result.disposition is DeliveryDisposition.PERMANENT

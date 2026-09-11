@@ -67,7 +67,17 @@ class DeepStreamMediaPlaneConfig:
 class _Recording:
     session_id: int
     on_sealed: Callable[[RecordingInfo], None]
+    #: When the recording must have sealed by. The SDK seals a Smart Record
+    #: session itself at the duration given at start; if its callback never
+    #: arrives the slot below would otherwise coalesce every later alert onto
+    #: this dead session and the camera silently stops producing evidence.
+    seal_deadline: float
     sealed: bool = False
+
+
+#: Slack over the SDK's own seal duration before a silent session is declared
+#: abandoned. Sealing writes the file and calls back; seconds are enough.
+_SEAL_GRACE_SECONDS: Final = 30.0
 
 
 @dataclass(frozen=True, slots=True)
@@ -138,7 +148,9 @@ class DeepStreamMediaPlane(MediaPlane):
         native_frame_grabber: Callable[[str], bytes] = grab_native_jpeg,
         worker_boot_id: str | None = None,
         child_instance_id: str | None = None,
+        clock: Callable[[], float] = time.monotonic,
     ) -> None:
+        self._clock = clock
         self._config = config
         self._slot = metadata_slot
         handle = flow_factory(config)
@@ -170,6 +182,7 @@ class DeepStreamMediaPlane(MediaPlane):
         self._publish_sequence: dict[str, int] = {}
         self._unmapped_pads: set[int] = set()
         self._recordings: dict[str, _Recording] = {}
+        self._abandoned_recordings = 0
         self._active_encode_sessions: set[int] = set()
         self._started = False
         self._flow_thread: threading.Thread | None = None
@@ -380,10 +393,37 @@ class DeepStreamMediaPlane(MediaPlane):
             raise RecordingRefused(f"source has not published a frame: {camera_id}")
         existing = self._recordings.get(camera_id)
         if existing is not None:
-            return existing.session_id
+            now = self._clock()
+            if now < existing.seal_deadline:
+                # A recording really is in flight for this camera; one Smart
+                # Record session per source is the contract.
+                return existing.session_id
+            # The SDK never delivered this session's sealed callback. Keeping
+            # the slot would make every future alert on this camera return a
+            # dead session id and record nothing, with no error anywhere.
+            self._abandoned_recordings += 1
+            LOGGER.error(
+                "smart record session %d on camera_id=%s never sealed within %.0fs; "
+                "releasing the recording slot so new alerts can record again "
+                "(abandoned_total=%d)",
+                existing.session_id,
+                camera_id,
+                now - (existing.seal_deadline - duration_sec - _SEAL_GRACE_SECONDS),
+                self._abandoned_recordings,
+            )
+            self._recordings.pop(camera_id, None)
         session_id = self._start_signal(camera_id, lookback_sec, duration_sec)
-        self._recordings[camera_id] = _Recording(session_id, on_sealed)
+        self._recordings[camera_id] = _Recording(
+            session_id,
+            on_sealed,
+            seal_deadline=self._clock() + duration_sec + _SEAL_GRACE_SECONDS,
+        )
         return session_id
+
+    @property
+    def abandoned_recordings(self) -> int:
+        """Smart Record sessions whose sealed callback never arrived."""
+        return self._abandoned_recordings
 
     def stop_recording(self, camera_id: str, session_id: int) -> None:
         recording = self._recordings.get(camera_id)
