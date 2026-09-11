@@ -126,6 +126,7 @@ def _plane(
     *,
     snapshot_branch_enabled: bool = False,
     native_frame_grabber: Callable[[str], bytes] | None = None,
+    clock: Callable[[], float] | None = None,
 ) -> tuple[DeepStreamMediaPlane, _Pipeline]:
     pipeline = pipeline or _Pipeline()
     config = DeepStreamMediaPlaneConfig(
@@ -141,6 +142,8 @@ def _plane(
     kwargs: dict[str, object] = {}
     if native_frame_grabber is not None:
         kwargs["native_frame_grabber"] = native_frame_grabber
+    if clock is not None:
+        kwargs["clock"] = clock
     plane = DeepStreamMediaPlane(
         config,
         metadata_slot=LatestMetadataSlot(),
@@ -227,6 +230,51 @@ def test_start_uses_the_sdk_primitive_and_an_inflight_start_is_absorbed() -> Non
     again = plane.start_recording("camera", lookback_sec=1, duration_sec=2, on_sealed=sealed.append)
     assert again == session
     assert pipeline.started == [("batch_capture-source-0_0", 15, 45)]
+
+
+def test_a_session_that_never_seals_releases_its_slot_instead_of_silencing_the_camera() -> None:
+    """A Smart Record session whose sealed callback never arrives must not make the
+    camera stop recording forever: production went clip-blind for three days that way
+    (bed-exit alerts kept firing, no evidence was captured, nothing was logged)."""
+    now = [1_000.0]
+    plane, pipeline = _plane(clock=lambda: now[0])
+    plane.add_source("camera", "rtsp://one")
+    plane._live.add("camera")  # noqa: SLF001 - a frame has been published
+    first = plane.start_recording(
+        "camera", lookback_sec=15, duration_sec=45, on_sealed=lambda _: None
+    )
+
+    # Still inside the session's own seal window: coalescing is correct here.
+    now[0] += 40.0
+    assert (
+        plane.start_recording("camera", lookback_sec=15, duration_sec=45, on_sealed=lambda _: None)
+        == first
+    )
+    assert len(pipeline.started) == 1
+    assert plane.abandoned_recordings == 0
+
+    # Past duration + grace with no seal: the slot is abandoned and a new
+    # recording actually starts.
+    now[0] += 45.0
+    second = plane.start_recording(
+        "camera", lookback_sec=15, duration_sec=45, on_sealed=lambda _: None
+    )
+    assert second != first or len(pipeline.started) == 2
+    assert len(pipeline.started) == 2
+    assert plane.abandoned_recordings == 1
+
+
+def test_an_abandoned_slot_on_one_camera_does_not_affect_another() -> None:
+    now = [1_000.0]
+    plane, pipeline = _plane(clock=lambda: now[0])
+    for camera in ("camera", "other"):
+        plane.add_source(camera, f"rtsp://{camera}")
+        plane._live.add(camera)  # noqa: SLF001 - a frame has been published
+    plane.start_recording("camera", lookback_sec=15, duration_sec=45, on_sealed=lambda _: None)
+    now[0] += 200.0
+    plane.start_recording("other", lookback_sec=15, duration_sec=45, on_sealed=lambda _: None)
+    assert plane.abandoned_recordings == 0
+    assert len(pipeline.started) == 2
 
 
 def test_early_stop_is_a_typed_refusal_not_a_silent_no_op() -> None:

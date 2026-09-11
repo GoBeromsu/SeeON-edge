@@ -64,6 +64,7 @@ def _sender(
     *,
     enabled: bool = True,
     flow_sealed_sidecar_directory: Path | None = None,
+    clock: object | None = None,
 ) -> EvidenceSender:
     return EvidenceSender(
         directory,
@@ -71,6 +72,7 @@ def _sender(
         transport=transport,
         clip_export_enabled=lambda: enabled,
         flow_sealed_sidecar_directory=flow_sealed_sidecar_directory,
+        **({} if clock is None else {"clock": clock}),
     )
 
 
@@ -178,6 +180,35 @@ def test_clip_mapping_refusal_retries_but_bad_clip_dead_letters(tmp_path: Path) 
     retrying = _Transport(DeliveryFailure(DeliveryDisposition.RETRY, "UNAVAILABLE", 503))
     assert _sender(tmp_path, retrying).run_once() is SenderStep.RETRY_SCHEDULED
     assert len(tuple(queue.entries())) == 1
+
+
+def test_mapping_refusal_waits_between_attempts_instead_of_spinning(tmp_path: Path) -> None:
+    """An unmapped camera is an operator action, not a transient failure. Production
+    re-sent the same receipt 264,661 times against the same 409, one ERROR per second
+    for three days, because the deferral set was cleared whenever every entry was
+    deferred."""
+    queue = DeliveryQueue(tmp_path)
+    assert queue.try_admit(_entry()).accepted
+    now = [1_000.0]
+    transport = _Transport(
+        DeliveryFailure(DeliveryDisposition.PERMANENT, "CAMERA_MAPPING_MISSING", 409)
+    )
+    sender = _sender(tmp_path, transport, clock=lambda: now[0])
+
+    assert sender.run_once() is SenderStep.RETRY_SCHEDULED
+    sent_once = len(transport.claims)
+
+    # Immediately after: nothing is due, so the sender does no work at all.
+    for _ in range(5):
+        assert sender.run_once() is SenderStep.IDLE
+    assert len(transport.claims) == sent_once
+
+    # After the wait the same entry is retried exactly once more, still queued.
+    now[0] += 301.0
+    assert sender.run_once() is SenderStep.RETRY_SCHEDULED
+    assert len(transport.claims) == sent_once + 1
+    assert len(tuple(queue.entries())) == 1
+    assert not queue.dead_letter_directory.exists()
 
 
 def test_clip_receipt_removes_flow_sealed_state(tmp_path: Path) -> None:
