@@ -147,6 +147,32 @@ def test_person_label_reads_confidence_bed_and_state_without_tracker_counter() -
     assert "#" not in label(0.5, FallPreviewState(7, "normal", None), 1)
 
 
+def test_absent_fall_state_is_unknown_not_normal(
+    renderer: PreviewRenderer, jpeg: bytes
+) -> None:
+    absent = _pixels(
+        renderer.render(
+            jpeg,
+            OverlaySelection(True, False),
+            (_track(),),
+            None,
+            {},
+        )
+    )
+    normal = _pixels(
+        renderer.render(
+            jpeg,
+            OverlaySelection(True, False),
+            (_track(),),
+            None,
+            {7: FallPreviewState(7, "normal", 0.12)},
+        )
+    )
+    assert not np.array_equal(absent[45, 80], normal[45, 80])
+    assert absent[45, 80, 2] > absent[45, 80, 1]
+    assert "정상" not in PreviewRenderer._person_label(0.9, None, None)  # noqa: SLF001
+
+
 def test_bed_number_uses_the_box_foot_point_inside_a_saved_polygon() -> None:
     beds = PreviewRenderer._bed_number_at  # noqa: SLF001
     square = (((10, 10), (50, 10), (50, 50), (10, 50)),)

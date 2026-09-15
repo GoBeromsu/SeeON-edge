@@ -47,8 +47,12 @@ def _trace_state(state: _TrackState | None, episode_state: str | None = None) ->
     return "clear"
 
 
-def _missing_score_snapshot(track_id: int, state: _TrackState | None) -> DecisionTraceSnapshot:
-    current = _trace_state(state)
+def _missing_score_snapshot(
+    track_id: int,
+    state: _TrackState | None,
+    episode_state: str | None = None,
+) -> DecisionTraceSnapshot:
+    current = _trace_state(state, episode_state)
     return DecisionTraceSnapshot(
         reason="score-missing",
         previous_state=current,
@@ -115,7 +119,11 @@ class FallPolicyDeciderV2:
                 existing_state.last_seen_frame = frame_index
             probability = probabilities_by_track.get(track_id)
             if probability is None:
-                snapshots.append(_missing_score_snapshot(track_id, existing_state))
+                snapshots.append(
+                    _missing_score_snapshot(
+                        track_id, existing_state, self._episode_state(track_id)
+                    )
+                )
                 continue
             state = self._state_for(track_id, frame_index)
             previous_state = _trace_state(state, self._episode_state(track_id))

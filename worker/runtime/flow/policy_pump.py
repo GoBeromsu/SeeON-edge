@@ -201,15 +201,18 @@ class NativePolicyPump:
         states: dict[int, FallPreviewState] = {}
         for snapshot in self._decision.last_trace_snapshots:
             track_id = snapshot.track_id
-            if track_id is None or (
-                DecisionTraceValueName.FALL_TRANSITION_PROBABILITY not in snapshot.values
-                and DecisionTraceValueName.FALL_TRANSITION_PROBABILITY
-                not in snapshot.missing_values
-            ):
-                continue
             probability_value = snapshot.values.get(
                 DecisionTraceValueName.FALL_TRANSITION_PROBABILITY
             )
+            scored_gap = (
+                DecisionTraceValueName.FALL_TRANSITION_PROBABILITY in snapshot.missing_values
+                and snapshot.current_state != DecisionTraceState.UNKNOWN
+            )
+            # A track the classifier has never scored (warmup) carries no fall
+            # state, so it must not be asserted "normal". A previously scored
+            # track keeps its policy state through stride gaps.
+            if track_id is None or (probability_value is None and not scored_gap):
+                continue
             states[track_id] = FallPreviewState(
                 track_id=track_id,
                 status=(
