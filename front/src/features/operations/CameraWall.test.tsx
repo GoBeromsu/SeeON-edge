@@ -84,15 +84,17 @@ function statusResource(data: StatusSnapshot | null): PollingResource<StatusSnap
 }
 
 type WallOptions = {
-  cameras?: Camera[];
+  cameras?: Camera[] | undefined;
   floor?: string | undefined;
   status?: PollingResource<StatusSnapshot>['status'];
 };
 
 function renderWall(
   snapshot: StatusSnapshot | null,
-  { cameras = [cameraA, cameraB], floor = undefined }: WallOptions = {},
+  options: WallOptions = {},
 ): { host: HTMLDivElement; root: Root; rerender: (next: StatusSnapshot | null) => void } {
+  const cameras = Object.prototype.hasOwnProperty.call(options, 'cameras') ? options.cameras : [cameraA, cameraB];
+  const { floor = undefined, status = 'success' } = options;
   vi.mocked(useStatusResource).mockReturnValue(statusResource(snapshot));
   const host = document.createElement('div');
   document.body.append(host);
@@ -100,7 +102,7 @@ function renderWall(
   const paint = (): void => {
     act(() => root.render(
       <CameraWall
-        status="success"
+        status={status}
         cameras={cameras}
         floor={floor}
         onFloorChange={vi.fn()}
@@ -140,10 +142,58 @@ afterEach(() => {
 });
 
 describe('기준선 — 감지 상태를 붙이기 전의 카메라 월 동작', () => {
+  it('성공한 조회가 카메라 0대를 반환하면 Edge 설정 시작 CTA를 보여 준다', () => {
+    const { host } = renderWall(null, { cameras: [] });
+
+    const cta = host.querySelector('[data-testid="edge-setup-start"]');
+    expect(cta).not.toBeNull();
+    expect(cta?.getAttribute('href')).toBe('?page=settings#edge-setup');
+    expect(host.querySelector('[data-camera-id]')).toBeNull();
+    cta instanceof HTMLElement && cta.focus();
+    expect(document.activeElement).toBe(cta);
+  });
+
+  it('CTA를 활성화하면 고정된 설정 해시로 SPA 이동한다', () => {
+    window.history.replaceState(null, '', '/?page=operations');
+    const onPopState = vi.fn();
+    window.addEventListener('popstate', onPopState);
+    const { host } = renderWall(null, { cameras: [] });
+    const cta = host.querySelector('[data-testid="edge-setup-start"]');
+
+    act(() => {
+      cta?.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
+    });
+
+    expect(window.location.search).toBe('?page=settings');
+    expect(window.location.hash).toBe('#edge-setup');
+    expect(onPopState).toHaveBeenCalledTimes(1);
+    window.removeEventListener('popstate', onPopState);
+  });
+
+  it.each(['idle', 'loading', 'error'] as const)('%s 상태는 신규 설치 CTA로 오인하지 않는다', (status) => {
+    const { host } = renderWall(null, { cameras: [], status });
+
+    expect(host.querySelector('[data-testid="edge-setup-start"]')).toBeNull();
+  });
+
+  it('성공 상태여도 카메라 응답이 없으면 빈 배열로 지어내지 않는다', () => {
+    const { host } = renderWall(null, { cameras: undefined });
+
+    expect(host.querySelector('[data-testid="edge-setup-start"]')).toBeNull();
+  });
+
+  it('층 필터로 비어도 설치 CTA를 띄우지 않는다', () => {
+    const { host } = renderWall(null, { cameras: [cameraA], floor: '2층' });
+
+    expect(host.querySelector('[data-testid="edge-setup-start"]')).toBeNull();
+    expect(host.querySelector('[data-camera-id]')).toBeNull();
+  });
+
   it('보이는 카메라마다 타일을 하나씩 그리고 라이브 스트림은 열지 않는다', () => {
     const { host } = renderWall(null);
 
     expect(host.querySelectorAll('[data-camera-id]').length).toBe(2);
+    expect(host.querySelector('[data-testid="edge-setup-start"]')).toBeNull();
     expect(host.querySelector('canvas')).toBeNull();
     expect(globalThis.fetch).not.toHaveBeenCalled();
   });

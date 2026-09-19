@@ -13,3 +13,9 @@ export function navigateToPage(page: DashboardPage): void {
   window.history.pushState(null, '', `${window.location.pathname}?${params.toString()}${window.location.hash}`);
   window.dispatchEvent(new PopStateEvent('popstate'));
 }
+
+/** Fixed activation path for an empty camera wall. No camera or installation data enters the URL. */
+export function navigateToEdgeSetup(): void {
+  window.history.pushState(null, '', `${window.location.pathname}?page=settings#edge-setup`);
+  window.dispatchEvent(new PopStateEvent('popstate'));
+}

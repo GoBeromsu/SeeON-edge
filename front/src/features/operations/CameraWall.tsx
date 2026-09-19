@@ -3,6 +3,7 @@ import { countCamerasByLiveness, filterCamerasByFloor, isCameraOnline, listFloor
 import { CameraWallTile } from '@/features/operations/CameraWallTile';
 import { useSnapshotQueue } from '@/features/operations/useSnapshotQueue';
 import { detectionStateOf, DetectionStateIcon } from '@/features/operations/detectionStatus';
+import { navigateToEdgeSetup } from '@/features/operations/crossPageNavigation';
 import { getPageLabel } from '@/shared/ui/NavBar';
 import { statusBadgeClassName } from '@/shared/ui/StatusBadge';
 import { useStatusResource } from '@/shared/api/usePollingResource';
@@ -95,9 +96,27 @@ export function CameraWall({ status, cameras, floor, onFloorChange, onSelectCame
         </div>
       ) : null}
 
-      {status !== 'loading' && status !== 'error' && visible.length === 0 ? (
+      {status === 'success' && !floor && cameras?.length === 0 ? (
+        <div role="status" className="flex flex-col items-center gap-4 py-10 text-center text-sm text-muted-foreground">
+          <p>아직 관제를 시작할 카메라가 없습니다.</p>
+          <a
+            href="?page=settings#edge-setup"
+            data-testid="edge-setup-start"
+            onClick={(event) => {
+              if (event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
+              event.preventDefault();
+              navigateToEdgeSetup();
+            }}
+            className="brand-action inline-flex min-h-11 items-center rounded-control px-4"
+          >
+            Edge 설정 시작
+          </a>
+        </div>
+      ) : null}
+
+      {status === 'success' && Boolean(floor) && visible.length === 0 ? (
         <p role="status" className="py-10 text-center text-sm text-muted-foreground">
-          {floor ? `${floor}에 등록된 카메라가 없습니다.` : '등록된 카메라가 없습니다.'}
+          {`${floor}에 등록된 카메라가 없습니다.`}
         </p>
       ) : null}
 

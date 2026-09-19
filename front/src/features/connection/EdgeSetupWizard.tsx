@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import type { CameraRegistry, ConnectionView } from '@/shared/api/client';
 import { fetchTopology, fetchTopologyPreview, type CameraTopology, type TopologyPreview } from '@/shared/api/topologyClient';
 import type { PollingResource } from '@/shared/api/usePollingResource';
@@ -48,6 +48,8 @@ export function EdgeSetupWizard({ connectionResource, camerasResource }: Props):
   const [preview, setPreview] = useState<TopologyPreview | null>(null);
   const [topologyLoading, setTopologyLoading] = useState(true);
   const [topologyError, setTopologyError] = useState<string | null>(null);
+  const activeStepRef = useRef<HTMLElement>(null);
+  const focusedSetupHash = useRef(false);
 
   async function reloadTopology(): Promise<void> {
     const [nextTopology, nextPreview] = await Promise.all([fetchTopology(), fetchTopologyPreview()]);
@@ -81,8 +83,16 @@ export function EdgeSetupWizard({ connectionResource, camerasResource }: Props):
   const serverComplete = isServerStepComplete(cameras, topology, preview);
   const activeStep = deriveActiveStep({ connection, cameras, topology, preview });
 
+  useEffect(() => {
+    if (focusedSetupHash.current || window.location.hash !== '#edge-setup') return;
+    if (connectionResource.status !== 'success' || camerasResource.status !== 'success' || topologyLoading || topologyError || !topology || serverComplete) return;
+    if (!activeStepRef.current) return;
+    activeStepRef.current.focus();
+    focusedSetupHash.current = true;
+  }, [activeStep, camerasResource.status, connectionResource.status, serverComplete, topology, topologyError, topologyLoading]);
+
   return (
-    <div className="flex flex-col gap-5">
+    <div id="edge-setup" className="flex flex-col gap-5">
       <WizardStep
         index={1}
         title="장치 연결"
@@ -91,6 +101,7 @@ export function EdgeSetupWizard({ connectionResource, camerasResource }: Props):
         locked={false}
         lockReason=""
         active={activeStep === 1}
+        focusRef={activeStep === 1 ? activeStepRef : undefined}
       >
         <ConnectionSettingsPanel resource={connectionResource} />
       </WizardStep>
@@ -103,6 +114,7 @@ export function EdgeSetupWizard({ connectionResource, camerasResource }: Props):
         locked={activeStep < 2}
         lockReason={activeStep < 2 ? lockReason(activeStep as 1) : ''}
         active={activeStep === 2}
+        focusRef={activeStep === 2 ? activeStepRef : undefined}
       >
         {topologyLoading ? (
           <p className="text-sm text-muted-foreground" aria-busy="true">카메라 상태를 확인하고 있습니다.</p>
@@ -121,6 +133,7 @@ export function EdgeSetupWizard({ connectionResource, camerasResource }: Props):
         locked={activeStep < 3}
         lockReason={activeStep < 3 ? lockReason(activeStep as 1 | 2) : ''}
         active={activeStep === 3}
+        focusRef={activeStep === 3 ? activeStepRef : undefined}
       >
         {topologyLoading ? (
           <p className="text-sm text-muted-foreground" aria-busy="true">서버 반영 상태를 확인하고 있습니다.</p>

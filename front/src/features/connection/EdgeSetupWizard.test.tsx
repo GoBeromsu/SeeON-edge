@@ -115,12 +115,14 @@ function hasCompleteBadge(container: Element): boolean {
 }
 
 beforeEach(() => {
+  window.history.replaceState(null, '', '/?page=settings');
   vi.mocked(fetchTopology).mockResolvedValue(readyTopology);
   vi.mocked(fetchTopologyPreview).mockResolvedValue({ preview: null });
 });
 
 afterEach(() => {
   document.body.innerHTML = '';
+  window.history.replaceState(null, '', '/');
   vi.clearAllMocks();
 });
 
@@ -159,5 +161,94 @@ describe('EdgeSetupWizard', () => {
 
     expect(step(host, 3).textContent).toContain('반영 전 확인이 필요합니다');
     expect(hasCompleteBadge(step(host, 3))).toBe(false);
+  });
+
+  it('edge-setup 해시로 들어오면 서버 상태 로드 후 현재 미완료 단계에 한 번 포커스한다', async () => {
+    window.history.replaceState(null, '', '/?page=settings#edge-setup');
+
+    const { host } = await renderWizard(notEnrolledConnection, { registry_version: 1, cameras: [] });
+    const active = step(host, 1) as HTMLElement;
+
+    expect(host.querySelector('#edge-setup')).not.toBeNull();
+    expect(active.tabIndex).toBe(-1);
+    expect(active.getAttribute('aria-labelledby')).toBe('wizard-step-1-title');
+    expect(document.activeElement).toBe(active);
+  });
+
+  it('카메라 확인이 현재 미완료 단계면 해시 진입 포커스도 해당 단계로 이동한다', async () => {
+    window.history.replaceState(null, '', '/?page=settings#edge-setup');
+
+    const { host } = await renderWizard(enrolledConnection, { registry_version: 1, cameras: [] });
+
+    expect(document.activeElement).toBe(step(host, 2));
+  });
+
+  it('서버 반영이 현재 미완료 단계면 해시 진입 포커스도 해당 단계로 이동한다', async () => {
+    window.history.replaceState(null, '', '/?page=settings#edge-setup');
+    vi.mocked(fetchTopologyPreview).mockResolvedValue({ preview: pendingPreview });
+
+    const { host } = await renderWizard(enrolledConnection, { registry_version: 1, cameras: [{ id: 'cam-0', label: 'cam-0', rtsp_url_masked: 'x', floor_name: null, status: 'online', created_at: null }] });
+
+    expect(document.activeElement).toBe(step(host, 3));
+  });
+
+  it('모든 서버 단계가 완료됐으면 해시 진입도 완료 단계로 포커스를 옮기지 않는다', async () => {
+    window.history.replaceState(null, '', '/?page=settings#edge-setup');
+    const before = document.createElement('button');
+    document.body.append(before);
+    before.focus();
+
+    const { host } = await renderWizard(enrolledConnection, { registry_version: 1, cameras: [{ id: 'cam-0', label: 'cam-0', rtsp_url_masked: 'x', floor_name: null, status: 'online', created_at: null }] });
+
+    expect(hasCompleteBadge(step(host, 3))).toBe(true);
+    expect(document.activeElement).toBe(before);
+  });
+
+  it('해시 진입 포커스 뒤 서버 상태가 갱신돼도 사용자의 새 포커스를 다시 빼앗지 않는다', async () => {
+    window.history.replaceState(null, '', '/?page=settings#edge-setup');
+    const { host, root } = await renderWizard(enrolledConnection, { registry_version: 1, cameras: [] });
+    expect(document.activeElement).toBe(step(host, 2));
+    const userTarget = document.createElement('button');
+    document.body.append(userTarget);
+    userTarget.focus();
+
+    act(() => {
+      root.render(
+        <EdgeSetupWizard
+          connectionResource={connectionResource(enrolledConnection)}
+          camerasResource={camerasResource({
+            registry_version: 1,
+            cameras: [{ id: 'cam-0', label: 'cam-0', rtsp_url_masked: 'x', floor_name: null, status: 'online', created_at: null }],
+          })}
+        />,
+      );
+    });
+    await flush();
+
+    expect(step(host, 3).getAttribute('aria-current')).toBe('step');
+    expect(document.activeElement).toBe(userTarget);
+  });
+
+  it('일반 설정 진입은 사용자의 기존 포커스를 강제로 옮기지 않는다', async () => {
+    const before = document.createElement('button');
+    document.body.append(before);
+    before.focus();
+
+    await renderWizard(notEnrolledConnection, { registry_version: 1, cameras: [] });
+
+    expect(document.activeElement).toBe(before);
+  });
+
+  it('토폴로지 상태 조회가 실패하면 현재 단계를 확정하지 않고 포커스도 옮기지 않는다', async () => {
+    window.history.replaceState(null, '', '/?page=settings#edge-setup');
+    vi.mocked(fetchTopology).mockRejectedValue(new Error('topology unavailable'));
+    const before = document.createElement('button');
+    document.body.append(before);
+    before.focus();
+
+    const { host } = await renderWizard(enrolledConnection, { registry_version: 1, cameras: [] });
+
+    expect(host.querySelector('[role="alert"]')).not.toBeNull();
+    expect(document.activeElement).toBe(before);
   });
 });
