@@ -6,6 +6,7 @@ from worker.interfaces.bus import FrameBus, FrameSubscription
 from worker.interfaces.decision import Decider
 from worker.interfaces.decode import DecodeAdapter, DecodeSession
 from worker.interfaces.encode import ClipEncoder, ClipFinalizer, EncoderSession
+from worker.interfaces.execution_records import ExecutionRecordSink
 from worker.interfaces.extract import Extractor
 from worker.interfaces.frame import FrameMaterializer, HostFrameView
 from worker.interfaces.output import EventSink
@@ -22,6 +23,7 @@ __all__ = [
     "DecodeSession",
     "EncoderSession",
     "EventSink",
+    "ExecutionRecordSink",
     "Extractor",
     "FrameBus",
     "FrameMaterializer",

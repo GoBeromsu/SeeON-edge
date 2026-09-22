@@ -21,6 +21,8 @@ from shared.events.evidence_export_contract import (
     DeliveryFailureCode,
     EventReceipt,
 )
+from worker.interfaces.execution_records import ExecutionRecordSink
+from worker.pipeline.diagnostics.emit import backend_acceptance_record, try_emit
 from worker.pipeline.output.evidence.evidence_outbox_types import (
     ClipId,
     ClipLocalState,
@@ -101,13 +103,21 @@ class EvidenceSender:
         clip_export_enabled: Callable[[], bool] | None = None,
         flow_sealed_sidecar_directory: Path | None = None,
         clock: Callable[[], float] = time.monotonic,
+        execution_records: ExecutionRecordSink | None = None,
+        observing_boot_id: str | None = None,
     ) -> None:
+        if execution_records is not None and not (observing_boot_id or "").strip():
+            raise ValueError(
+                "evidence sender with an execution-record sink requires the observing boot id"
+            )
+        self._observing_boot_id = observing_boot_id
         self._clock = clock
         self.queue_directory = queue_directory
         self.config = config
         self._transport = transport or RelayEvidenceClient(config.relay_url, config.relay_token)
         self._clip_export_enabled = clip_export_enabled or (lambda: True)
         self._flow_sealed_sidecar_directory = flow_sealed_sidecar_directory
+        self._execution_records = execution_records
         self._clip_export_disabled_logged = False
         #: Entries whose failure only an operator can clear (a camera with no
         #: backend mapping). They are never dropped, but retrying them at the
@@ -325,6 +335,17 @@ class EvidenceSender:
             )
             return SenderStep.RETRY_SCHEDULED
         self._deferred.discard(entry_id)
+        if entry["kind"] == "EVENT" and isinstance(result, EventReceipt):
+            try_emit(
+                self._execution_records,
+                backend_acceptance_record(
+                    camera_id=str(entry["camera_id"]),
+                    observing_boot_id=str(self._observing_boot_id),
+                    edge_event_id=result.edge_event_id,
+                    status=result.status,
+                    hub_event_id=result.event_id,
+                ),
+            )
         if entry["kind"] == "CLIP":
             self._remove_flow_sealed_sidecar(entry)
         return _acknowledged_step(entry)

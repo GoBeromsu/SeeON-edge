@@ -16,6 +16,7 @@ admission, here only.
 - `perception/`: worker-owned conversion and feature helpers; do not duplicate
 SDK tracking or inference.
 - `trace/`: bounded diagnostic traces.
+- `diagnostics/`: bounded in-memory execution-record lanes and export drain.
 
 ## Evidence and ownership
 

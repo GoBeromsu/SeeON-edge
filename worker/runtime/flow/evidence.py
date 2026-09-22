@@ -9,6 +9,8 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Protocol
 
+from worker.interfaces.execution_records import ExecutionRecordSink
+from worker.pipeline.diagnostics.emit import event_delivery_record, try_emit
 from worker.pipeline.output.evidence.flow_clip_publication import FlowClipPublisher
 from worker.pipeline.output.evidence.flow_sealed_sidecar import (
     FlowSealedRecovery,
@@ -43,6 +45,7 @@ class FlowEvidenceBinding:
     publisher: FlowClipPublisher
     sidecars: FlowSealedSidecars
     camera_id: str
+    execution_records: ExecutionRecordSink | None = None
     now: Callable[[], datetime] = lambda: datetime.now(UTC)
     _events: dict[str, BusinessEvent] = field(default_factory=dict, init=False)
     sealed_recovery_missing_media_total: int = field(default=0, init=False)
@@ -69,6 +72,21 @@ class FlowEvidenceBinding:
                     "time_sec": event.time_sec,
                 },
             }
+        )
+        try_emit(
+            self.execution_records,
+            event_delivery_record(
+                camera_id=event.camera_id,
+                worker_boot_id=trigger.worker_boot_id,
+                source_generation=trigger.source_generation,
+                stream_epoch=trigger.stream_epoch,
+                frame_seq=trigger.seq,
+                source_pts_ns=trigger.source_pts,
+                edge_event_id=event_ref,
+                event_type=event.event_type,
+                domain=event.domain,
+                admitted=True,
+            ),
         )
         self._events[event_ref] = event
         self.actor.admit(event_ref, detected_at)
