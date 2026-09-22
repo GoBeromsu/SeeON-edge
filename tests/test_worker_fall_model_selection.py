@@ -30,10 +30,11 @@ from __future__ import annotations
 import hashlib
 import json
 from collections.abc import Callable
-from dataclasses import replace
+from dataclasses import FrozenInstanceError, replace
 from pathlib import Path
 from typing import final
 
+import numpy as np
 import pytest
 
 from contracts.model_selection import (
@@ -50,8 +51,9 @@ from worker.adapters.model.errors import ModelLoadError
 from worker.adapters.model.ort_pose_bbox56 import OrtPoseBbox56Runner
 from worker.adapters.model.pose_bbox56_bundle import PoseBbox56BundleRunner
 from worker.domains import DETECTION_MODULE_REGISTRY, CameraModuleContext
+from worker.domains.fall import FallPolicyDeciderV2, FallWindowClassifierV2
 from worker.domains.registry import _audit_snapshot, _effective_transition_threshold
-from worker.interfaces.fall_model import FallV2Probabilities
+from worker.interfaces.fall_model import BinaryFallScoreEvidence, FallV2Probabilities
 from worker.runtime import bootstrap
 from worker.runtime.config import WorkerConfig, local_env
 from worker.runtime.config.worker_models import SelectedFallBundleConfig
@@ -94,9 +96,25 @@ class _FakeRunner:
 
 
 @final
-class _ZeroLogitSession:
+class _ControlledLogitSession:
+    def __init__(self, logit: float = 0.0) -> None:
+        self.logit = logit
+        self.run_count = 0
+
     def run(self, _output_names: object, _input_feed: object) -> list[object]:
-        return [[[0.0]]]
+        self.run_count += 1
+        return [[[self.logit]]]
+
+
+@final
+class _FixedFallModel:
+    def __init__(self, result: FallV2Probabilities) -> None:
+        self.result = result
+        self.predict_count = 0
+
+    def predict(self, _features: object) -> FallV2Probabilities:
+        self.predict_count += 1
+        return self.result
 
 
 def _rewrite_packaged_json_member(
@@ -202,13 +220,14 @@ def _flow_boot() -> BootContext:
 def _selected_onnx_bundle(
     tmp_path: Path,
     *,
+    temperature: float = 1.0,
     transition_threshold: float = 0.5,
     threshold_source: str = "default",
     calibration_grants: tuple[bool, float] | None = None,
     class_order: list[str] | None = None,
     temporal_rule: object = None,
 ) -> tuple[Path, DesiredModelBundle]:
-    source = write_pose_bbox56_bundle(tmp_path / "source")
+    source = write_pose_bbox56_bundle(tmp_path / "source", temperature=temperature)
     # A selection that declares its threshold comes from the receipt must be
     # backed by the calibration: a real promoted publication states
     # promotion_eligible and the granted threshold there. Write that in, so
@@ -338,6 +357,167 @@ def _selected_onnx_bundle(
     )
 
 
+def test_probability_only_result_has_no_inferred_binary_evidence() -> None:
+    result = FallV2Probabilities(0.2, 0.3, 0.4)
+
+    assert (result.background, result.fall_transition, result.fallen) == (0.2, 0.3, 0.4)
+    assert result.model_evidence is None
+
+    evidence = BinaryFallScoreEvidence(raw_logit=0.0, applied_temperature=1.0)
+    with pytest.raises(TypeError):
+        FallV2Probabilities(0.2, 0.3, 0.4, evidence)  # type: ignore[call-arg]
+
+
+def test_packaged_onnx_result_retains_per_call_binary_score_evidence(
+    tmp_path: Path,
+) -> None:
+    session = _ControlledLogitSession(1.25)
+    runner = OrtPoseBbox56Runner.from_artifact_dir(
+        write_pose_bbox56_bundle(tmp_path / "bundle", temperature=2.0),
+        session_factory=lambda _path, _providers: session,
+    )
+    window = np.zeros((30, 56), dtype=np.float32)
+
+    first = runner.predict(window)
+    first_evidence = first.model_evidence
+    assert first_evidence is not None
+    expected = float(1.0 / (1.0 + np.exp(-np.float32(1.25) / 2.0)))
+    assert (first.background, first.fall_transition, first.fallen) == (
+        1.0 - expected,
+        expected,
+        0.0,
+    )
+    assert first_evidence == BinaryFallScoreEvidence(
+        raw_logit=1.25,
+        applied_temperature=2.0,
+    )
+    assert first_evidence.class_origins == (
+        "derived_complement",
+        "temperature_sigmoid",
+        "constant_zero",
+    )
+
+    session.logit = -2.5
+    second = runner.predict(window)
+    second_evidence = second.model_evidence
+    assert second_evidence is not None
+    assert session.run_count == 3
+    assert second is not first
+    assert second_evidence is not first_evidence
+    assert second_evidence.raw_logit == -2.5
+    assert first_evidence.raw_logit == 1.25
+    with pytest.raises(FrozenInstanceError):
+        first_evidence.raw_logit = 0.0
+    with pytest.raises(FrozenInstanceError):
+        first.model_evidence = None
+
+
+def test_admitted_non_promotable_onnx_result_still_applies_loaded_temperature(
+    tmp_path: Path,
+) -> None:
+    models_root, desired = _selected_onnx_bundle(tmp_path, temperature=4.0)
+    selection = desired.selection
+    assert selection is not None
+    proof = admit_model_bundle(models_root, desired)
+    session = _ControlledLogitSession(-2.0)
+    runner = OrtPoseBbox56Runner.from_admitted_bundle(
+        models_root / "bundles" / desired.bundle_sha256,
+        proof,
+        selection,
+        session_factory=lambda _path, _providers: session,
+    )
+
+    result = runner.predict(np.zeros((30, 56), dtype=np.float32))
+    evidence = result.model_evidence
+    assert evidence is not None
+    expected = float(1.0 / (1.0 + np.exp(-np.float32(-2.0) / 4.0)))
+    assert runner.promotion_eligible is False
+    assert session.run_count == 2
+    assert evidence.raw_logit == -2.0
+    assert evidence.applied_temperature == 4.0
+    assert result.fall_transition == expected
+
+
+def test_classifier_retains_the_typed_evidence_result_through_stride_ticks() -> None:
+    result = FallV2Probabilities(
+        background=0.5,
+        fall_transition=0.5,
+        fallen=0.0,
+        model_evidence=BinaryFallScoreEvidence(
+            raw_logit=0.0,
+            applied_temperature=2.0,
+        ),
+    )
+    model = _FixedFallModel(result)
+    classifier = FallWindowClassifierV2(model)
+    row = (0.0,) * 56
+
+    for _ in range(29):
+        assert classifier.update({7: row}, (7,)) == {}
+    due = classifier.update({7: row}, (7,))
+
+    assert due[7] is result
+    assert classifier.probabilities_for(7) is result
+    for _ in range(4):
+        assert classifier.update({7: row}, (7,)) == {}
+        assert classifier.probabilities_for(7) is result
+    assert model.predict_count == 1
+
+
+def test_binary_evidence_does_not_change_policy_threshold_or_results() -> None:
+    generic_policy = FallPolicyDeciderV2(
+        camera_id="camera",
+        facility_id="facility",
+        boot_id="boot",
+        stream_epoch="epoch",
+        source_generation=0,
+    )
+    evidenced_policy = FallPolicyDeciderV2(
+        camera_id="camera",
+        facility_id="facility",
+        boot_id="boot",
+        stream_epoch="epoch",
+        source_generation=0,
+    )
+    emitted_counts: list[int] = []
+
+    for frame, raw_logit in enumerate((-0.25, 0.0, 0.0, 0.0)):
+        temperature = 2.0
+        transition = float(1.0 / (1.0 + np.exp(-np.float32(raw_logit) / temperature)))
+        generic = FallV2Probabilities(1.0 - transition, transition, 0.0)
+        evidenced = FallV2Probabilities(
+            1.0 - transition,
+            transition,
+            0.0,
+            model_evidence=BinaryFallScoreEvidence(
+                raw_logit=raw_logit,
+                applied_temperature=temperature,
+            ),
+        )
+
+        generic_events = generic_policy.update(
+            {7: generic},
+            (7,),
+            frame_index=frame,
+            time_sec=float(frame),
+        )
+        evidenced_events = evidenced_policy.update(
+            {7: evidenced},
+            (7,),
+            frame_index=frame,
+            time_sec=float(frame),
+        )
+
+        assert evidenced_events == generic_events
+        assert evidenced_policy.last_trace_snapshots == generic_policy.last_trace_snapshots
+        emitted_counts.append(len(generic_events))
+
+    assert emitted_counts == [0, 0, 0, 1]
+    assert generic_policy.last_trace_snapshots[0].values[
+        "fall_transition_probability"
+    ] == pytest.approx(0.5)
+
+
 def test_packaged_bundle_refuses_conformance_preprocessing_identity(
     tmp_path: Path,
 ) -> None:
@@ -356,7 +536,7 @@ def test_packaged_bundle_refuses_conformance_preprocessing_identity(
         ),
     ):
         OrtPoseBbox56Runner.from_artifact_dir(
-            root, session_factory=lambda *_args: _ZeroLogitSession()
+            root, session_factory=lambda *_args: _ControlledLogitSession()
         )
 
 
@@ -380,7 +560,7 @@ def test_packaged_bundle_refuses_incompatible_conformance_shape(
 
     with pytest.raises(ModelLoadError, match=message):
         OrtPoseBbox56Runner.from_artifact_dir(
-            root, session_factory=lambda *_args: _ZeroLogitSession()
+            root, session_factory=lambda *_args: _ControlledLogitSession()
         )
 
 
@@ -402,7 +582,7 @@ def test_packaged_bundle_refuses_calibration_for_other_preprocessing(
         ),
     ):
         OrtPoseBbox56Runner.from_artifact_dir(
-            root, session_factory=lambda *_args: _ZeroLogitSession()
+            root, session_factory=lambda *_args: _ControlledLogitSession()
         )
 
 
@@ -449,7 +629,7 @@ def test_runtime_refuses_conformance_that_differs_from_domain_contract(
 ) -> None:
     runner = OrtPoseBbox56Runner.from_artifact_dir(
         write_pose_bbox56_bundle(tmp_path),
-        session_factory=lambda *_args: _ZeroLogitSession(),
+        session_factory=lambda *_args: _ControlledLogitSession(),
     )
 
     with pytest.raises(ModelLoadError, match=message):
@@ -489,7 +669,7 @@ def test_create_fall_model_uses_the_configured_bundle_artifact_on_the_cpu(
     calls: list[tuple[Path, str]] = []
     sentinel = _FakeRunner("fall")
     sentinel.conformance = OrtPoseBbox56Runner.from_artifact_dir(  # type: ignore[attr-defined]
-        artifact_dir, session_factory=lambda *_args: _ZeroLogitSession()
+        artifact_dir, session_factory=lambda *_args: _ControlledLogitSession()
     ).conformance
 
     def fake_load_packaged_bundle(artifact_dir: Path) -> object:
@@ -678,7 +858,7 @@ def test_selected_bundle_uses_the_admitted_onnx_member_without_model_pt(tmp_path
         artifact_dir,
         proof,
         selection,
-        session_factory=lambda _path, _providers: _ZeroLogitSession(),
+        session_factory=lambda _path, _providers: _ControlledLogitSession(),
     )
 
     assert not (artifact_dir / "model.pt").exists()
@@ -721,7 +901,7 @@ def test_non_promotable_bundle_keeps_default_confirmation_rule_and_records_decla
     artifact_dir = write_pose_bbox56_bundle(tmp_path / "bundle")
     runner = OrtPoseBbox56Runner.from_artifact_dir(
         artifact_dir,
-        session_factory=lambda _path, _providers: _ZeroLogitSession(),
+        session_factory=lambda _path, _providers: _ControlledLogitSession(),
     )
     policy = default_policy_bundle(("camera-a",)).resolve("camera-a", "fall", 2)
 
@@ -763,7 +943,7 @@ def test_packaged_loaders_ignore_contradictory_evaluation_receipt(
     runners = (
         OrtPoseBbox56Runner.from_artifact_dir(
             artifact_dir,
-            session_factory=lambda _path, _providers: _ZeroLogitSession(),
+            session_factory=lambda _path, _providers: _ControlledLogitSession(),
         ),
         PoseBbox56BundleRunner.from_artifact_dir(artifact_dir),
     )
@@ -795,7 +975,7 @@ def test_bundle_refuses_malformed_temporal_rule(tmp_path: Path, temporal_rule: o
             models_root / "bundles" / desired.bundle_sha256,
             proof,
             selection,
-            session_factory=lambda _path, _providers: _ZeroLogitSession(),
+            session_factory=lambda _path, _providers: _ControlledLogitSession(),
         )
 
 
@@ -810,7 +990,7 @@ def test_selected_receipt_without_threshold_refuses_construction(tmp_path: Path)
             models_root / "bundles" / desired.bundle_sha256,
             proof,
             replace(selection, transition_threshold=None),  # type: ignore[arg-type]
-            session_factory=lambda _path, _providers: _ZeroLogitSession(),
+            session_factory=lambda _path, _providers: _ControlledLogitSession(),
         )
 
 
@@ -827,7 +1007,7 @@ def test_selected_preprocessing_contradiction_refuses_construction(tmp_path: Pat
             models_root / "bundles" / desired.bundle_sha256,
             proof,
             replace(selection, preprocessing_identity="contradictory-preprocessing"),
-            session_factory=lambda _path, _providers: _ZeroLogitSession(),
+            session_factory=lambda _path, _providers: _ControlledLogitSession(),
         )
 
 
@@ -848,7 +1028,7 @@ def test_selected_default_source_with_a_non_default_threshold_refuses(tmp_path: 
             models_root / "bundles" / desired.bundle_sha256,
             proof,
             replace(selection, threshold_source="default", transition_threshold=0.3),
-            session_factory=lambda _path, _providers: _ZeroLogitSession(),
+            session_factory=lambda _path, _providers: _ControlledLogitSession(),
         )
 
 
@@ -868,7 +1048,7 @@ def test_selected_receipt_claim_refuses_when_the_calibration_grants_none(tmp_pat
             bundle_dir,
             proof,
             selection,
-            session_factory=lambda _path, _providers: _ZeroLogitSession(),
+            session_factory=lambda _path, _providers: _ControlledLogitSession(),
         )
 
 
@@ -893,7 +1073,7 @@ def test_selected_receipt_claim_refuses_when_the_granted_threshold_differs(
             bundle_dir,
             proof,
             selection,
-            session_factory=lambda _path, _providers: _ZeroLogitSession(),
+            session_factory=lambda _path, _providers: _ControlledLogitSession(),
         )
 
 
@@ -914,7 +1094,7 @@ def test_selected_output_contract_mismatch_refuses_construction(tmp_path: Path) 
             models_root / "bundles" / desired.bundle_sha256,
             proof,
             replace(selection, output_class_count=3),
-            session_factory=lambda _path, _providers: _ZeroLogitSession(),
+            session_factory=lambda _path, _providers: _ControlledLogitSession(),
         )
 
 
@@ -930,7 +1110,7 @@ def test_selected_bundle_refuses_reversed_calibration_class_order(tmp_path: Path
             models_root / "bundles" / desired.bundle_sha256,
             proof,
             selection,
-            session_factory=lambda _path, _providers: _ZeroLogitSession(),
+            session_factory=lambda _path, _providers: _ControlledLogitSession(),
         )
 
 
@@ -965,7 +1145,7 @@ def test_selected_bundle_refuses_calibration_class_order_with_wrong_count(tmp_pa
             models_root / "bundles" / desired.bundle_sha256,
             proof,
             selection,
-            session_factory=lambda _path, _providers: _ZeroLogitSession(),
+            session_factory=lambda _path, _providers: _ControlledLogitSession(),
         )
 
 

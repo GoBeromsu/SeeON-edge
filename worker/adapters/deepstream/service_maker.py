@@ -642,6 +642,7 @@ class DeepStreamMediaPlane(MediaPlane):
             layer = tensor_meta.as_tensor_output().get_layers()["output0"]
             rows = rows_from_tensor(layer)
             break
+        inference_tensor_present = rows is not None
         objects = sum(1 for _ in frame_meta.object_items)
         self._objects_observed[camera_id] = self._objects_observed.get(camera_id, 0) + objects
         if rows is None:
@@ -669,6 +670,7 @@ class DeepStreamMediaPlane(MediaPlane):
         metadata = convert_frame(
             frame_meta,
             rows=rows,
+            inference_tensor_present=inference_tensor_present,
             binding=binding,
             frame_w=self._config.frame_width,
             frame_h=self._config.frame_height,

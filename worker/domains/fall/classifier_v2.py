@@ -10,8 +10,10 @@ import math
 from collections import deque
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
+from types import MappingProxyType
 
 from worker.interfaces.fall_model import FallV2ModelProtocol, FallV2Probabilities
+from worker.types.trace import DecisionTraceMissingReason
 
 FALL_WINDOW_FRAMES = 30
 FALL_STRIDE_FRAMES = 5
@@ -32,6 +34,9 @@ class FallWindowClassifierV2:
     _generations: dict[int, int] = field(default_factory=dict, init=False)
     _next_generations: dict[int, int] = field(default_factory=dict, init=False)
     _reconnect_ids: set[int] = field(default_factory=set, init=False)
+    _current_call_missing_score_reasons: dict[int, DecisionTraceMissingReason] = field(
+        default_factory=dict, init=False
+    )
     _frame_counter: int = field(default=0, init=False)
 
     def update(
@@ -48,7 +53,11 @@ class FallWindowClassifierV2:
         missing row. After exact TTL expiry all classifier state is evicted. A
         reused numeric id then immediately receives an inferable window of 29
         zero rows plus its current row; ordinary first startup remains warming.
+        ``current_call_missing_score_reasons`` describes only this invocation:
+        non-due live tracks are stride-skipped, while due tracks without a full
+        window are warming.
         """
+        self._current_call_missing_score_reasons = {}
         self._frame_counter += 1
         live_ids = frozenset(live_track_ids)
         for track_id in live_ids:
@@ -69,12 +78,18 @@ class FallWindowClassifierV2:
             self._buffer_for(track_id).append(self._last_rows.get(track_id, _ZERO_ROW))
 
         if self._frame_counter % FALL_STRIDE_FRAMES:
+            self._current_call_missing_score_reasons = dict.fromkeys(
+                live_ids, DecisionTraceMissingReason.CLASSIFIER_STRIDE_NOT_DUE
+            )
             return {}
 
         due: dict[int, FallV2Probabilities] = {}
         for track_id in sorted(live_ids):
             buffer = self._buffers.get(track_id)
             if buffer is None or len(buffer) != FALL_WINDOW_FRAMES:
+                self._current_call_missing_score_reasons[track_id] = (
+                    DecisionTraceMissingReason.CLASSIFIER_WARMUP
+                )
                 continue
             prediction = self.model.predict(tuple(buffer))
             if not isinstance(prediction, FallV2Probabilities):
@@ -87,6 +102,13 @@ class FallWindowClassifierV2:
             self._last_probabilities[track_id] = prediction
             due[track_id] = prediction
         return due
+
+    @property
+    def current_call_missing_score_reasons(
+        self,
+    ) -> Mapping[int, DecisionTraceMissingReason]:
+        """Explain missing scores from the immediately preceding ``update`` only."""
+        return MappingProxyType(self._current_call_missing_score_reasons)
 
     def probabilities_for(self, track_id: int) -> FallV2Probabilities | None:
         return self._last_probabilities.get(track_id)
