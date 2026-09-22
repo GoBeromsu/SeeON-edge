@@ -63,3 +63,24 @@ def test_export_failure_is_reported_on_the_next_batch() -> None:
     assert [gap.cause for gap in second.gaps] == [EXPORT_FAILED_CAUSE]
     assert second.gaps[0].from_sequence == 0
     assert second.records[0].producer_sequence == 1
+
+
+def test_overflow_gap_time_range_is_min_max_not_arrival_order() -> None:
+    """Dropped items' observed_at_ns may arrive out of order (PTS-derived and
+    process-monotonic producers, reordered publishes). The gap is a range, so
+    its bounds must be min/max; first/last produced from_ns > to_ns, which the
+    wire contract rejects and which killed the exporter thread instead of
+    reporting the loss."""
+    lanes = ExecutionRecordLanes(lane_capacity=1)
+    assert lanes.try_emit(_record(observed=5_000)) is True
+    # three drops, non-monotonic timestamps
+    assert lanes.try_emit(_record(observed=9_000)) is False
+    assert lanes.try_emit(_record(observed=3_000)) is False
+    assert lanes.try_emit(_record(observed=7_000)) is False
+    drained = lanes.drain_for("cam-1", "boot-1", limit=1)
+    assert drained is not None
+    (gap,) = drained.gaps
+    assert gap.cause == LANE_OVERFLOW_CAUSE
+    assert gap.record_count == 3
+    assert (gap.from_ns, gap.to_ns) == (3_000, 9_000)
+    assert gap.from_sequence <= gap.to_sequence
