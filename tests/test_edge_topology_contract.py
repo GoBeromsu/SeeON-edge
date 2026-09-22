@@ -158,8 +158,8 @@ def test_edge_db_migrator_owns_schema_lifecycle_before_runtime_start() -> None:
 
     assert "depends_on" not in migrator
     assert migrator["restart"] == "no"
-    # Create-only: the bootstrap mounts nothing but the one state volume it
-    # creates schema 18 in. There is no legacy state to import or gate on.
+    # Create-or-extend: the bootstrap mounts nothing but the one state volume it
+    # creates schema 19 in. There is no legacy state to import or gate on.
     assert _list_field(migrator, "volumes") == ["edge-state:/var/lib/seeon-state"]
     assert migrator["command"] == [
         "python",

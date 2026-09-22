@@ -1,11 +1,12 @@
-"""Canonical machine-readable schema 18 structural contract."""
+"""Canonical machine-readable structural contract for schema 18 and schema 19."""
 
 from __future__ import annotations
 
 import sqlite3
+from collections.abc import Sequence
 from dataclasses import dataclass
 
-from backend.app.edge_db.compact_schema import SCHEMA_18_STATEMENTS
+from backend.app.edge_db.compact_schema import SCHEMA_18_STATEMENTS, SCHEMA_19_STATEMENTS
 
 
 @dataclass(frozen=True, slots=True)
@@ -63,10 +64,10 @@ class TableSpec:
 
 
 @dataclass(frozen=True, slots=True)
-class Schema18Manifest:
+class SchemaManifest:
     tables: tuple[TableSpec, ...]
 
-    def diff(self, other: Schema18Manifest) -> tuple[str, ...]:
+    def diff(self, other: SchemaManifest) -> tuple[str, ...]:
         if self == other:
             return ()
         left = {table.name: table for table in self.tables}
@@ -85,7 +86,7 @@ class Schema18Manifest:
         return tuple(deltas)
 
 
-def read_schema18_manifest(connection: sqlite3.Connection) -> Schema18Manifest:
+def read_schema_manifest(connection: sqlite3.Connection) -> SchemaManifest:
     tables = [
         str(row[0])
         for row in connection.execute(
@@ -93,16 +94,25 @@ def read_schema18_manifest(connection: sqlite3.Connection) -> Schema18Manifest:
             "AND name NOT LIKE 'sqlite_%' ORDER BY name"
         )
     ]
-    return Schema18Manifest(tables=tuple(_read_table(connection, name) for name in tables))
+    return SchemaManifest(tables=tuple(_read_table(connection, name) for name in tables))
 
 
-def compile_schema18_manifest() -> Schema18Manifest:
+def compile_schema18_manifest() -> SchemaManifest:
+    """Compile the retained schema-18 contract used by the extension verifier."""
+    return _compile_manifest(SCHEMA_18_STATEMENTS)
+
+
+def compile_schema19_manifest() -> SchemaManifest:
+    return _compile_manifest(SCHEMA_19_STATEMENTS)
+
+
+def _compile_manifest(statements: Sequence[str]) -> SchemaManifest:
     connection = sqlite3.connect(":memory:")
     try:
         connection.execute("PRAGMA foreign_keys = ON")
-        for statement in SCHEMA_18_STATEMENTS:
+        for statement in statements:
             connection.execute(statement)
-        return read_schema18_manifest(connection)
+        return read_schema_manifest(connection)
     finally:
         connection.close()
 
@@ -197,9 +207,10 @@ __all__ = [
     "ForeignKeySpec",
     "IndexColumnSpec",
     "IndexSpec",
-    "Schema18Manifest",
+    "SchemaManifest",
     "TableSpec",
     "TriggerSpec",
     "compile_schema18_manifest",
-    "read_schema18_manifest",
+    "compile_schema19_manifest",
+    "read_schema_manifest",
 ]
