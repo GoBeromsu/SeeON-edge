@@ -4,8 +4,9 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from functools import lru_cache
-from typing import ClassVar, Final
+from typing import ClassVar, Final, Self
 
+from pydantic import model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 _RETIRED_BACKEND_ENV: Final = frozenset(
@@ -61,6 +62,25 @@ class Settings(BaseSettings):
     # (see BED_ZONE_FRAME_TIMEOUT_SECONDS) before it even runs inference, so
     # this must stay comfortably above worker_stream_timeout_s.
     worker_bed_zone_timeout_s: float = 25.0
+    execution_records_enabled: bool = False
+    execution_records_budget_bytes: int | None = None
+
+    @model_validator(mode="after")
+    def require_execution_records_budget_when_enabled(self) -> Self:
+        if not self.execution_records_enabled:
+            return self
+        budget = self.execution_records_budget_bytes
+        if budget is None:
+            raise ValueError(
+                "ML_API_EXECUTION_RECORDS_BUDGET_BYTES is required when "
+                "ML_API_EXECUTION_RECORDS_ENABLED is true"
+            )
+        if type(budget) is not int or budget < 256:
+            raise ValueError(
+                "ML_API_EXECUTION_RECORDS_BUDGET_BYTES must be an integer >= 256 "
+                "when execution records are enabled"
+            )
+        return self
 
 
 @lru_cache

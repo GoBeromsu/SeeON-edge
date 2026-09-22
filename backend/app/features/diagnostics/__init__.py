@@ -26,6 +26,7 @@ from backend.app.features.diagnostics.records import (
 )
 from backend.app.features.diagnostics.retention import RetentionBudget
 from backend.app.features.diagnostics.store import ExecutionRecordStore
+from backend.app.features.diagnostics.wire import ingest_batch_from_wire, wire_receipt_from_store
 
 __all__ = [
     "AvailabilityKind",
@@ -48,4 +49,6 @@ __all__ = [
     "UnitCausalState",
     "UnitView",
     "availability",
+    "ingest_batch_from_wire",
+    "wire_receipt_from_store",
 ]

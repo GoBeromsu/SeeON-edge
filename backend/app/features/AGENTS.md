@@ -10,8 +10,9 @@ Do not `include_router` a sibling slice from inside this tree.
 Owner constructs (`from_env()` or lifespan) and exposes a getter that
 writes `app.state` once. Dependents call the getter. They never
 `from_env()` a second copy of someone else's store.
-Lifespan pre-builds `camera_registry`, in-memory `heartbeat_store`, and
-`runtime_status_store`. Clip listing is compact-authority on request. Other
+Lifespan pre-builds `camera_registry`, in-memory `heartbeat_store`,
+`runtime_status_store`, and (when `ML_API_EXECUTION_RECORDS_ENABLED`)
+`execution_record_store`. Clip listing is compact-authority on request. Other
 stores may lazy-open so `no_lifespan` tests still boot. Catalog is optional:
 `get_catalog_store` returns `None` and sets `catalog_error` when the file
 cannot open. Relay still accepts the alert when the Hub push carries
@@ -24,6 +25,10 @@ terminal receipt deletes the worker's only other copy (`_local_accept_body`).
 Read or call. Do not construct the other slice's store.
 - `relay` consumes cameras (`worker_config_snapshot`, registry), clips
   catalog, and status stores. No store of its own.
+- `diagnostics` owns `execution_record_store` and the engineer query
+  `GET /diagnostics/executions`. Worker ingest is `POST /relay/execution-records`
+  on the diagnostics router; relay only registers the BoundedBodyRoute suffix
+  and `require_relay_execution_records`.
 - `evidence` reuses `relay.auth` plus `_camera_binding`, clip-dir constants,
   and the runtime-settings export gate. Worker ingest stays under `/relay`.
   Operator incidents are the second router in this same slice.
