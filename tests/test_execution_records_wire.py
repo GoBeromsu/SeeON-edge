@@ -78,6 +78,19 @@ def test_record_rejects_invalid_fields(field: str, value: object, message: str) 
         _record(0, **{field: value})
 
 
+def test_process_scoped_kind_requires_process_scope_sentinel() -> None:
+    accepted = _record(
+        0,
+        record_kind="backend.acceptance",
+        producer="backend",
+        source_generation=0,
+        stream_epoch=0,
+    )
+    assert accepted.record_kind == "backend.acceptance"
+    with pytest.raises(ExecutionRecordContractError, match="process-scoped"):
+        _record(0, record_kind="backend.acceptance", producer="backend", stream_epoch=3)
+
+
 def test_record_rejects_non_json_payload() -> None:
     with pytest.raises(ExecutionRecordContractError, match="JSON"):
         _record(0, payload={"bad": object()})
