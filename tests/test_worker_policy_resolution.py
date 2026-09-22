@@ -18,8 +18,8 @@ from shared.detection_policies import (
     make_effective_policy,
 )
 from worker.domains.bed_exit import BedExitMonitor
-from worker.domains.fall import FallV2DomainDecider
-from worker.interfaces.fall_model import FallV2Probabilities
+from worker.domains.fall import FallDomainDecider
+from worker.interfaces.fall_model import FallProbabilities
 from worker.runtime.config.config_pull import ConfigSource, load_worker_config_from_relay
 from worker.runtime.config.errors import WorkerConfigError
 from worker.runtime.config.lkg_store import JsonObject, WorkerConfigLkgStore
@@ -35,9 +35,9 @@ class _Metadata:
 
 
 class _FallModel:
-    def predict(self, features: NDArray[np.float32]) -> FallV2Probabilities:
+    def predict(self, features: NDArray[np.float32]) -> FallProbabilities:
         del features
-        return FallV2Probabilities(background=0.3, fall_transition=0.7, fallen=0.0)
+        return FallProbabilities(background=0.3, fall_transition=0.7, fallen=0.0)
 
 
 class _Response:
@@ -197,7 +197,7 @@ def test_runtime_camera_module_receives_policy_not_model_or_profile_threshold() 
         )
     )
 
-    assert isinstance(fall_module.decider, FallV2DomainDecider)
+    assert isinstance(fall_module.decider, FallDomainDecider)
     # P1a-AC7: the decision threshold is the eligible bundle receipt, else the
     # image default 0.5. A facility/camera override is received and audited but
     # is not yet authoritative for the fall transition threshold in P1a, so it

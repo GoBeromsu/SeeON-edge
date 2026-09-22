@@ -17,10 +17,10 @@ from shared.detection_policies import FallPolicyV2, make_effective_policy
 from shared.events.delivery_queue import DeliveryQueue, EventEntry
 from worker.domains.bed_exit import BedExitConfig, BedExitMonitor
 from worker.domains.fall import (
-    FallPolicyDeciderV2,
-    FallV2DomainDecider,
-    FallV2Probabilities,
-    FallWindowClassifierV2,
+    FallDomainDecider,
+    FallPolicyDecider,
+    FallProbabilities,
+    FallWindowClassifier,
 )
 from worker.pipeline.trace import (
     BoundedTraceWriter,
@@ -42,30 +42,30 @@ class _TraceResult:
     decision_input: DecisionInput
 
 
-class _ImmediateV2Classifier:
+class _ImmediateClassifier:
     def update(
         self, _rows: object, live_track_ids: tuple[int, ...]
-    ) -> dict[int, FallV2Probabilities]:
+    ) -> dict[int, FallProbabilities]:
         return {
-            track_id: FallV2Probabilities(background=0.1, fall_transition=0.8, fallen=0.1)
+            track_id: FallProbabilities(background=0.1, fall_transition=0.8, fallen=0.1)
             for track_id in live_track_ids
         }
 
 
-class _RecordingV2Model:
+class _RecordingModel:
     def __init__(self) -> None:
         self.inputs: list[object] = []
 
-    def predict(self, features: object) -> FallV2Probabilities:
+    def predict(self, features: object) -> FallProbabilities:
         self.inputs.append(features)
-        return FallV2Probabilities(background=0.1, fall_transition=0.8, fallen=0.1)
+        return FallProbabilities(background=0.1, fall_transition=0.8, fallen=0.1)
 
 
-def _traceable_fall_v2(*, camera_id: str, facility_id: str) -> FallV2DomainDecider:
-    """The production V2 decider records compiled-vocabulary trace snapshots itself."""
-    return FallV2DomainDecider(
-        classifier=_ImmediateV2Classifier(),
-        policy=FallPolicyDeciderV2(
+def _traceable_fall(*, camera_id: str, facility_id: str) -> FallDomainDecider:
+    """The production decider records compiled-vocabulary trace snapshots itself."""
+    return FallDomainDecider(
+        classifier=_ImmediateClassifier(),
+        policy=FallPolicyDecider(
             camera_id=camera_id,
             facility_id=facility_id,
             boot_id="boot-a",
@@ -76,10 +76,10 @@ def _traceable_fall_v2(*, camera_id: str, facility_id: str) -> FallV2DomainDecid
     )
 
 
-def _classifier_fall_v2(model: _RecordingV2Model, *, camera_id: str) -> FallV2DomainDecider:
-    return FallV2DomainDecider(
-        classifier=FallWindowClassifierV2(model),
-        policy=FallPolicyDeciderV2(
+def _classifier_fall(model: _RecordingModel, *, camera_id: str) -> FallDomainDecider:
+    return FallDomainDecider(
+        classifier=FallWindowClassifier(model),
+        policy=FallPolicyDecider(
             camera_id=camera_id,
             facility_id="facility-a",
             boot_id="boot-a",
@@ -117,7 +117,7 @@ def _input(
 
 
 def test_fall_trace_records_v2_transition_confirmation() -> None:
-    detector = _traceable_fall_v2(camera_id="camera-a", facility_id="facility-a")
+    detector = _traceable_fall(camera_id="camera-a", facility_id="facility-a")
 
     # transition_votes=1: the first qualifying frame confirms the transition.
     events = detector.update(_input(BoundingBox(10, 10, 70, 90, 0.9), frame_index=1))
@@ -138,8 +138,8 @@ def test_fall_trace_records_v2_transition_confirmation() -> None:
 
 
 def test_fall_trace_links_current_classifier_warmup_and_stride_dispositions() -> None:
-    model = _RecordingV2Model()
-    detector = _classifier_fall_v2(model, camera_id="camera-a")
+    model = _RecordingModel()
+    detector = _classifier_fall(model, camera_id="camera-a")
     person = BoundingBox(10, 10, 70, 90, 0.9)
 
     for frame_index in range(5):
@@ -187,8 +187,8 @@ def test_fall_trace_links_current_classifier_warmup_and_stride_dispositions() ->
 
 
 def test_fall_trace_uses_valid_row_disposition_across_gaps_and_pts_reset() -> None:
-    model = _RecordingV2Model()
-    detector = _classifier_fall_v2(model, camera_id="camera-a")
+    model = _RecordingModel()
+    detector = _classifier_fall(model, camera_id="camera-a")
     person = BoundingBox(10, 10, 70, 90, 0.9)
 
     assert detector.update(_input(person, frame_index=0, time_sec=0.0)) == ()
@@ -215,9 +215,9 @@ def test_fall_trace_uses_valid_row_disposition_across_gaps_and_pts_reset() -> No
 
 
 def test_fall_classifier_dispositions_are_camera_local_with_a_shared_model() -> None:
-    model = _RecordingV2Model()
-    camera_a = _classifier_fall_v2(model, camera_id="camera-a")
-    camera_b = _classifier_fall_v2(model, camera_id="camera-b")
+    model = _RecordingModel()
+    camera_a = _classifier_fall(model, camera_id="camera-a")
+    camera_b = _classifier_fall(model, camera_id="camera-b")
     person = BoundingBox(10, 10, 70, 90, 0.9)
 
     camera_a_events = ()
@@ -298,7 +298,7 @@ def _packet() -> FramePacket:
     )
 
 
-def _trace_capture(detector: FallV2DomainDecider) -> TraceCapture:
+def _trace_capture(detector: FallDomainDecider) -> TraceCapture:
     policy = make_effective_policy(
         module_id="fall",
         module_version=2,
@@ -324,7 +324,7 @@ def _trace_capture(detector: FallV2DomainDecider) -> TraceCapture:
 def test_admitted_event_decision_basis_is_atomic_in_delivery_queue(
     tmp_path: Path,
 ) -> None:
-    detector = _traceable_fall_v2(camera_id="camera-a", facility_id="facility-a")
+    detector = _traceable_fall(camera_id="camera-a", facility_id="facility-a")
     # transition_votes=1: the very first qualifying frame opens the episode.
     decision_input = _input(BoundingBox(10, 10, 70, 90, 0.9), frame_index=1)
     events = detector.update(decision_input)
@@ -363,8 +363,8 @@ def test_admitted_event_decision_basis_is_atomic_in_delivery_queue(
 
 
 def test_numeric_decision_trace_is_hardware_neutral_for_equal_inputs() -> None:
-    cpu = _traceable_fall_v2(camera_id="camera-a", facility_id="f")
-    nvidia = _traceable_fall_v2(camera_id="camera-a", facility_id="f")
+    cpu = _traceable_fall(camera_id="camera-a", facility_id="f")
+    nvidia = _traceable_fall(camera_id="camera-a", facility_id="f")
     input_value = _input(BoundingBox(10, 10, 70, 90, 0.9), frame_index=1)
 
     assert cpu.update(input_value) == nvidia.update(input_value)

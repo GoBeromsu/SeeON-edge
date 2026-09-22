@@ -15,7 +15,7 @@ from worker.adapters.model.fall_family_registry import (
     default_fall_model_family_registry,
 )
 from worker.domains import DETECTION_MODULE_REGISTRY, CameraModuleContext
-from worker.interfaces.fall_model import FallV2Probabilities
+from worker.interfaces.fall_model import FallProbabilities
 from worker.runtime.config import WorkerConfig
 
 
@@ -34,9 +34,9 @@ class _FakeFamilyFallModel:
     def __init__(self) -> None:
         self.predict_calls = 0
 
-    def predict(self, _features: object) -> FallV2Probabilities:
+    def predict(self, _features: object) -> FallProbabilities:
         self.predict_calls += 1
-        return FallV2Probabilities(background=0.58, fall_transition=0.42, fallen=0.0)
+        return FallProbabilities(background=0.58, fall_transition=0.42, fallen=0.0)
 
     def warmup(self) -> None:
         self.predict(None)

@@ -1,4 +1,4 @@
-"""Structural contracts for the inactive V2 fall temporal policy."""
+"""Structural contracts for the inactive fall temporal policy."""
 
 from __future__ import annotations
 
@@ -8,19 +8,19 @@ from pathlib import Path
 import pytest
 
 from worker.domains.fall import (
-    FallPolicyDeciderV2,
-    FallV2Probabilities,
-    FallWindowClassifierV2,
+    FallPolicyDecider,
+    FallProbabilities,
+    FallWindowClassifier,
 )
 
 
-def _probability(transition: float, fallen: float = 0.0) -> FallV2Probabilities:
-    return FallV2Probabilities(0.0, transition, fallen)
+def _probability(transition: float, fallen: float = 0.0) -> FallProbabilities:
+    return FallProbabilities(0.0, transition, fallen)
 
 
 def _update(
-    decider: FallPolicyDeciderV2,
-    probability: FallV2Probabilities,
+    decider: FallPolicyDecider,
+    probability: FallProbabilities,
     frame: int,
     track: int = 7,
 ) -> tuple:
@@ -28,7 +28,7 @@ def _update(
 
 
 def test_transition_confirmation_emits_once_with_deterministic_camera_winner() -> None:
-    decider = FallPolicyDeciderV2(
+    decider = FallPolicyDecider(
         camera_id="camera",
         facility_id="facility",
         boot_id="boot",
@@ -48,7 +48,7 @@ def test_transition_confirmation_emits_once_with_deterministic_camera_winner() -
 
 
 def test_fallen_is_internal_and_starting_fallen_does_not_alert() -> None:
-    decider = FallPolicyDeciderV2(
+    decider = FallPolicyDecider(
         camera_id="camera",
         facility_id="facility",
         boot_id="boot",
@@ -63,7 +63,7 @@ def test_fallen_is_internal_and_starting_fallen_does_not_alert() -> None:
 
 
 def test_recovery_requires_five_joint_clear_scores() -> None:
-    decider = FallPolicyDeciderV2(
+    decider = FallPolicyDecider(
         camera_id="camera",
         facility_id="facility",
         boot_id="boot",
@@ -82,7 +82,7 @@ def test_recovery_requires_five_joint_clear_scores() -> None:
 
 
 def test_eviction_reconnects_with_a_new_generation() -> None:
-    decider = FallPolicyDeciderV2(
+    decider = FallPolicyDecider(
         camera_id="camera",
         facility_id="facility",
         boot_id="boot",
@@ -100,7 +100,7 @@ def test_eviction_reconnects_with_a_new_generation() -> None:
 
 
 def test_nonlive_track_cannot_confirm_an_alert_and_reconnect_before_ttl_keeps_generation() -> None:
-    decider = FallPolicyDeciderV2(
+    decider = FallPolicyDecider(
         camera_id="camera",
         facility_id="facility",
         boot_id="boot",
@@ -122,7 +122,7 @@ class _RecordingModel:
     def __init__(self) -> None:
         self.windows: list[tuple[tuple[float, ...], ...]] = []
 
-    def predict(self, features: object) -> FallV2Probabilities:
+    def predict(self, features: object) -> FallProbabilities:
         assert isinstance(features, tuple)
         self.windows.append(features)
         return _probability(0.0)
@@ -130,7 +130,7 @@ class _RecordingModel:
 
 def test_missing_live_coasts_until_exact_ttl_then_reconnect_zero_fills_fresh_window() -> None:
     model = _RecordingModel()
-    classifier = FallWindowClassifierV2(model)
+    classifier = FallWindowClassifier(model)
     row = (0.25,) * 56
 
     for _ in range(30):
@@ -164,7 +164,7 @@ def test_committed_reconnect_after_eviction_case_preloads_a_fresh_generation_win
     representative_rows = tuple(tuple(row) for row in reconnect_case["expected_windows"][0]["rows"])
     reconnect_row = representative_rows[-1]
     model = _RecordingModel()
-    classifier = FallWindowClassifierV2(model)
+    classifier = FallWindowClassifier(model)
 
     # Align the initial live observation so the exact reconnect tick is stride
     # due: 3 idle ticks + first live tick + 45 absent ticks + reconnect tick.
@@ -186,7 +186,7 @@ def test_committed_reconnect_after_eviction_case_preloads_a_fresh_generation_win
 
 
 def test_release_reopens_only_the_exact_failed_onset() -> None:
-    decider = FallPolicyDeciderV2(
+    decider = FallPolicyDecider(
         camera_id="camera",
         facility_id="facility",
         boot_id="boot",
@@ -208,7 +208,7 @@ def test_release_reopens_only_the_exact_failed_onset() -> None:
 
 
 def test_track_switch_inside_window_is_absorbed_without_a_second_fall_alert() -> None:
-    decider = FallPolicyDeciderV2(
+    decider = FallPolicyDecider(
         camera_id="camera",
         facility_id="facility",
         boot_id="boot",
@@ -225,7 +225,7 @@ def test_track_switch_inside_window_is_absorbed_without_a_second_fall_alert() ->
 
 
 def test_immediate_track_switch_is_absorbed_before_replacement_scores() -> None:
-    decider = FallPolicyDeciderV2(
+    decider = FallPolicyDecider(
         camera_id="camera",
         facility_id="facility",
         boot_id="boot",
@@ -246,7 +246,7 @@ def test_immediate_track_switch_is_absorbed_before_replacement_scores() -> None:
 
 
 def test_two_residents_falling_on_the_same_tick_both_emit_in_track_order() -> None:
-    decider = FallPolicyDeciderV2(
+    decider = FallPolicyDecider(
         camera_id="camera",
         facility_id="facility",
         boot_id="boot",
@@ -265,14 +265,14 @@ def test_two_residents_falling_on_the_same_tick_both_emit_in_track_order() -> No
 
 def test_rejects_nonfinite_or_wrong_arity_outputs() -> None:
     with pytest.raises(ValueError):
-        FallV2Probabilities(0.0, float("nan"), 0.0)
+        FallProbabilities(0.0, float("nan"), 0.0)
 
 
 def test_policy_requires_immutable_boot_and_epoch_and_binds_onset_identity() -> None:
     with pytest.raises(TypeError):
-        FallPolicyDeciderV2(camera_id="camera", facility_id="facility")  # type: ignore[call-arg]
+        FallPolicyDecider(camera_id="camera", facility_id="facility")  # type: ignore[call-arg]
     with pytest.raises(ValueError, match="boot and source epoch"):
-        FallPolicyDeciderV2(
+        FallPolicyDecider(
             camera_id="camera",
             facility_id="facility",
             boot_id="",
@@ -280,14 +280,14 @@ def test_policy_requires_immutable_boot_and_epoch_and_binds_onset_identity() -> 
             stream_epoch="epoch",
         )
 
-    first = FallPolicyDeciderV2(
+    first = FallPolicyDecider(
         camera_id="camera",
         facility_id="facility",
         boot_id="boot-a",
         source_generation=0,
         stream_epoch="epoch-a",
     )
-    second = FallPolicyDeciderV2(
+    second = FallPolicyDecider(
         camera_id="camera",
         facility_id="facility",
         boot_id="boot-b",

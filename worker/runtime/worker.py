@@ -48,8 +48,8 @@ from worker.domains import (
     SharedComponentIdentity,
 )
 from worker.domains.detection_window import DetectionWindow
-from worker.domains.fall import FallV2DomainDecider
-from worker.domains.fall.classifier_v2 import FALL_STRIDE_FRAMES, FALL_WINDOW_FRAMES
+from worker.domains.fall import FallDomainDecider
+from worker.domains.fall.classifier import FALL_STRIDE_FRAMES, FALL_WINDOW_FRAMES
 from worker.domains.fall.pose_bbox56 import (
     COCO17_KEYPOINT_ORDER,
     POSE_BBOX56_CONFIDENCE_GATE,
@@ -58,7 +58,7 @@ from worker.domains.tracker import GreedyIouTracker
 from worker.interfaces.clip_analysis import ClipAnalysisDisabledError
 from worker.interfaces.clip_analysis import ClipAnalysisSupervisor as ClipAnalysisControl
 from worker.interfaces.decision import Decider, TraceSnapshotProvider
-from worker.interfaces.fall_model import FallV2ModelProtocol
+from worker.interfaces.fall_model import FallModelProtocol
 from worker.interfaces.serving import ServingClient
 from worker.pipeline.analytics.merge import result_merger_names
 from worker.pipeline.decision import EventAggregator, IncidentManager
@@ -410,9 +410,9 @@ class _WindowGatedDecider:
 def _absorbed_track_id_switch_total(decision: EventAggregator) -> int:
     for decider in decision.deciders:
         fall_decider = decider.decider if isinstance(decider, _WindowGatedDecider) else decider
-        if isinstance(fall_decider, FallV2DomainDecider):
+        if isinstance(fall_decider, FallDomainDecider):
             return fall_decider.track_id_switch_absorbed_total
-    raise RuntimeError("native policy decision lacks a fall V2 absorbed-switch counter")
+    raise RuntimeError("native policy decision lacks a fall absorbed-switch counter")
 
 
 def _delivery_queue_dir(state_dir: Path) -> Path:
@@ -716,7 +716,7 @@ class WorkerRuntime:
         self._max_frames_per_camera = max_frames_per_camera
         self._context = bootstrap.BootstrapContext()
         self._boot: BootContext | None = None
-        self.fall_model: FallV2ModelProtocol | None = None
+        self.fall_model: FallModelProtocol | None = None
         self._loaded_fall_bundle: ort_pose_bbox56.PackagedFallBundle | None = None
         self._shared_graph: SharedComponentGraph | None = None
         self._warmed_component_ids: frozenset[str] = frozenset()
@@ -1172,7 +1172,7 @@ class WorkerRuntime:
             self._loaded_fall_bundle = bundle
         return bundle.published_weights_digest
 
-    def _create_fall_model(self) -> FallV2ModelProtocol:
+    def _create_fall_model(self) -> FallModelProtocol:
         """Construct the selected bundle or the packaged fall model.
 
         Fall model selection has no implicit fallback: an operator who omits
@@ -1232,7 +1232,7 @@ class WorkerRuntime:
         self._warm_one(self.fall_model, "cpu")
         return tuple(sorted(self._warmed_component_ids))
 
-    def _warm_one(self, model: RunnerProtocol | FallV2ModelProtocol, device: str) -> None:
+    def _warm_one(self, model: RunnerProtocol | FallModelProtocol, device: str) -> None:
         if not isinstance(model, _Warmable):
             raise TypeError("configured model does not expose warmup")
         _ = warmup_to_ready(model, device=device)
@@ -1866,7 +1866,7 @@ class WorkerRuntime:
         self,
         name: str,
         camera: CameraRuntimeConfig,
-        fall_model: FallV2ModelProtocol,
+        fall_model: FallModelProtocol,
         tracker: GreedyIouTracker | None = None,
     ) -> Decider:
         """Compile one registered module without domain-name dispatch."""
@@ -1907,7 +1907,7 @@ def _night_window_active(window: DetectionWindow | None) -> Callable[[], bool]:
     return (lambda: False) if window is None else lambda: window.contains(datetime.now(UTC))
 
 
-def _is_confirmed_cpu_fall_runner(model: FallV2ModelProtocol | None) -> bool:
+def _is_confirmed_cpu_fall_runner(model: FallModelProtocol | None) -> bool:
     """Report CPU policy inference only from a runner that declares CPU placement."""
     if model is None:
         return False

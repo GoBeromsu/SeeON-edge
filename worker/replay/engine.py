@@ -30,7 +30,7 @@ from worker.domains.module_definition import (
 )
 from worker.domains.registry import DETECTION_MODULE_REGISTRY
 from worker.interfaces.decision import Decider
-from worker.interfaces.fall_model import FallV2ModelProtocol
+from worker.interfaces.fall_model import FallModelProtocol
 from worker.pipeline.decision.incident_manager import IncidentManager
 from worker.pipeline.trace.models import (
     AnalysisTrace,
@@ -130,7 +130,7 @@ def replay_recovered(
     module_id: str,
     policy: EffectivePolicy,
     facility_id: str = "replay",
-    fall_model: FallV2ModelProtocol | None = None,
+    fall_model: FallModelProtocol | None = None,
     clock: Callable[[], datetime] = _STATIC_CLOCK,
 ) -> ReplayRun:
     """Legacy HTTP replay retained until that production endpoint is retired."""
@@ -153,7 +153,7 @@ def replay_camera(
     module_id: str,
     policy: EffectivePolicy,
     facility_id: str = "replay",
-    fall_model: FallV2ModelProtocol | None = None,
+    fall_model: FallModelProtocol | None = None,
     clock: Callable[[], datetime] = _STATIC_CLOCK,
     truncation: TraceTruncation | None = None,
 ) -> ReplayRun:
@@ -234,7 +234,7 @@ class _ReplayWindow:
 
 @dataclass(frozen=True, slots=True)
 class ReplayTraceFrame:
-    """One raw V2 source frame passed to the production decider."""
+    """One raw source frame passed to the production decider."""
 
     stream_epoch: int
     boot_segment: int
@@ -277,7 +277,7 @@ def replay(
     module_id: str,
     policy: EffectivePolicy,
     facility_id: str = "replay",
-    fall_model: FallV2ModelProtocol | None = None,
+    fall_model: FallModelProtocol | None = None,
     clock: Callable[[], datetime] = _STATIC_CLOCK,
 ) -> ReplayRun:
     """Replay frame-level rows through production resampling and admission."""
@@ -426,7 +426,7 @@ def _decider_trace_snapshots(
 
 
 def _replay_components(
-    module_id: str, policy: EffectivePolicy, fall_model: FallV2ModelProtocol | None
+    module_id: str, policy: EffectivePolicy, fall_model: FallModelProtocol | None
 ) -> tuple[DetectionModuleDefinition, dict[str, object]]:
     definition = DETECTION_MODULE_REGISTRY.get(module_id)
     expected_schema = f"{policy.schema_id}.v{policy.schema_version}"

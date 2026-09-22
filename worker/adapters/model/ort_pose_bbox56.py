@@ -20,7 +20,7 @@ from worker.adapters.model.pose_bbox56_bundle_support import (
     read_json,
     verify_bundle,
 )
-from worker.interfaces.fall_model import BinaryFallScoreEvidence, FallV2Probabilities
+from worker.interfaces.fall_model import BinaryFallScoreEvidence, FallProbabilities
 from worker.types import FallModelInput
 
 _SHAPE: Final = (30, 56)
@@ -244,7 +244,7 @@ class OrtPoseBbox56Runner:
         runner.warmup()
         return runner
 
-    def predict(self, features: FallModelInput) -> FallV2Probabilities:
+    def predict(self, features: FallModelInput) -> FallProbabilities:
         values = np.asarray(features, dtype=np.float32)
         if values.shape != _SHAPE or not np.isfinite(values).all():
             raise ModelLoadError("pose-bbox56 input must be finite shape (30, 56)")
@@ -258,7 +258,7 @@ class OrtPoseBbox56Runner:
         if logits.shape != (1, 1) or not np.isfinite(logits).all():
             raise ModelLoadError("pose-bbox56 ONNX model must return finite shape (1, 1)")
         fall_transition = float(1.0 / (1.0 + np.exp(-logits[0, 0] / self._temperature)))
-        return FallV2Probabilities(
+        return FallProbabilities(
             background=1.0 - fall_transition,
             fall_transition=fall_transition,
             fallen=0.0,
