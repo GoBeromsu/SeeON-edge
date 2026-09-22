@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
 from worker.domains.fall import FallDomainDecider
 from worker.interfaces.execution_records import ExecutionRecordSink
 from worker.pipeline.decision import EventAggregator
@@ -12,6 +14,10 @@ from worker.pipeline.diagnostics.emit import (
     try_emit,
 )
 from worker.types.metadata import MetadataCounters, MetadataFrame
+from worker.types.trace import decision_trace_id
+
+if TYPE_CHECKING:
+    from worker.runtime.flow.policy_pump import DecisionIdentity
 
 
 def emit_policy_consume(
@@ -37,6 +43,7 @@ def emit_model_and_decision(
     sink: ExecutionRecordSink | None,
     metadata: MetadataFrame,
     decision: EventAggregator,
+    decision_identity: DecisionIdentity | None = None,
 ) -> None:
     if sink is None:
         return
@@ -68,6 +75,15 @@ def emit_model_and_decision(
             sink,
             policy_decision_record(
                 snapshot,
+                decision_trace_id=(
+                    None
+                    if decision_identity is None
+                    else decision_trace_id(
+                        snapshot,
+                        module_qualified_id=decision_identity.module_qualified_id,
+                        effective_policy_id=decision_identity.effective_policy_id,
+                    )
+                ),
                 camera_id=identity.camera_id,
                 worker_boot_id=identity.worker_boot_id,
                 source_generation=metadata.source_generation,

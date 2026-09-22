@@ -25,7 +25,7 @@ from worker.runtime.flow.observation_coverage import ObservationCoverage
 from worker.types import BusinessEvent, ChannelState, NativeEvidenceTrigger
 from worker.types.metadata import MetadataFrame, SourceBinding
 from worker.types.preview import FallPreviewState
-from worker.types.trace import DecisionTraceState, DecisionTraceValueName
+from worker.types.trace import DecisionTraceState, DecisionTraceValueName, decision_trace_id
 
 LOGGER = logging.getLogger(__name__)
 _FPS_WINDOW_SEC = 10.0
@@ -64,6 +64,14 @@ class NativeDiagnostics(Protocol):
 
 
 @dataclass(frozen=True, slots=True)
+class DecisionIdentity:
+    """Module + effective policy that every fall decision is attributed to."""
+
+    module_qualified_id: str
+    effective_policy_id: str
+
+
+@dataclass(frozen=True, slots=True)
 class NativePolicyContext:
     metadata: LatestMetadataSlot
     control: NativeSnapshotControl
@@ -79,6 +87,7 @@ class NativePolicyContext:
     recreate_decision: Callable[[SourceBinding], EventAggregator] | None = None
     track_id_switch_absorbed_total: Callable[[EventAggregator], int] | None = None
     execution_records: ExecutionRecordSink | None = None
+    decision_identity: DecisionIdentity | None = None
 
 
 @final
@@ -103,6 +112,7 @@ class NativePolicyPump:
             raise ValueError("native policy pump requires an absorbed-switch reader")
         self._track_id_switch_absorbed_total = context.track_id_switch_absorbed_total
         self._execution_records = context.execution_records
+        self._decision_identity = context.decision_identity
         self._stop = threading.Event()
         self._fps: deque[float] = deque()
         self.processed_count = 0
@@ -297,7 +307,9 @@ class NativePolicyPump:
         self._capture_replay_row(metadata, boxes, resolved_track_ids)
         gap_rows_before = _resample_gap_rows_total(self._decision)
         events = self._decision.update(decision_input)
-        emit_model_and_decision(self._execution_records, metadata, self._decision)
+        emit_model_and_decision(
+            self._execution_records, metadata, self._decision, self._decision_identity
+        )
         self._refresh_preview_states()
         self._diagnostics.record_track_id_switch_absorbed_total(
             self.camera_id, self._track_id_switch_absorbed_total(self._decision)
@@ -315,6 +327,7 @@ class NativePolicyPump:
             metadata.source_time_ns / 1_000_000_000,
         )
         for position, event in enumerate(events):
+            event = _with_decision_trace_id(event, self._decision, self._decision_identity)
             try:
                 snapshot = self._control.snapshot(self.camera_id)
             except OnDemandSnapshotUnsupported as error:
@@ -595,4 +608,30 @@ def _resample_gap_rows_total(decision: EventAggregator) -> int:
     return total
 
 
-__all__ = ["NativeEventSink", "NativePolicyContext", "NativePolicyPump"]
+def _with_decision_trace_id(
+    event: BusinessEvent,
+    decision: EventAggregator,
+    identity: DecisionIdentity | None,
+) -> BusinessEvent:
+    """Stamp the triggering snapshot's decision_trace_id into the alert audit.
+
+    The same id is stamped on the policy.decision execution record by
+    execution_record_emit, computed by worker.types.trace.decision_trace_id.
+    An event whose triggering snapshot cannot be identified keeps its audit
+    untouched; nothing is fabricated.
+    """
+    if identity is None:
+        return event
+    for snapshot in decision.last_trace_snapshots:
+        if snapshot.triggered and snapshot.track_id == event.person_id:
+            audit = dict(event.audit or {})
+            audit["decision_trace_id"] = decision_trace_id(
+                snapshot,
+                module_qualified_id=identity.module_qualified_id,
+                effective_policy_id=identity.effective_policy_id,
+            )
+            return replace(event, audit=audit)
+    return event
+
+
+__all__ = ["DecisionIdentity", "NativeEventSink", "NativePolicyContext", "NativePolicyPump"]

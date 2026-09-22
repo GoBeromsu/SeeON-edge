@@ -10,7 +10,7 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass, replace
 from datetime import datetime
 from types import MappingProxyType
-from typing import Literal, NamedTuple, Protocol, cast, runtime_checkable
+from typing import Final, Literal, NamedTuple, Protocol, cast, runtime_checkable
 
 from shared.detection_policies import (
     FALL_POLICY_V2_DEFAULT,
@@ -512,12 +512,21 @@ def enabled_domains() -> tuple[str, ...]:
     return list_domains(enabled=True)
 
 
+FALL_MODULE_QUALIFIED_ID: Final = "fall.v2"
+"""Qualified id of the compiled fall module (module_id.v{version}).
+
+Stamped on every fall decision's trace id; must equal the registry definition
+below, which a test pins.
+"""
+
+
 __all__ = [
     "AVAILABLE_OBSERVATION_CHANNELS",
     "DETECTION_MODULE_DEFINITIONS",
     "DETECTION_MODULE_REGISTRY",
     "DOMAIN_REGISTRY",
     "EXTERNAL_DOMAIN_MODULE_IDS",
+    "FALL_MODULE_QUALIFIED_ID",
     "BedExitDomainDependencies",
     "DomainRegistration",
     "enabled_domains",
