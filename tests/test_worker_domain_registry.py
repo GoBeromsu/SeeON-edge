@@ -6,14 +6,14 @@ from zoneinfo import ZoneInfo
 from contracts.observation import BedRegionCacheState, BedRegionDebugSnapshot, FrameObservation
 from worker.domains import DOMAIN_REGISTRY, BedExitDomainDependencies, enabled_domains, list_domains
 from worker.domains.bed_exit import BedExitConfig, BedExitMonitor
-from worker.domains.fall import FallV2DomainDecider, FallV2Probabilities
+from worker.domains.fall import FallDomainDecider, FallProbabilities
 from worker.interfaces.decision import Decider
 from worker.types import DecisionInput
 
 
 class _FallModel:
-    def predict(self, _features: object) -> FallV2Probabilities:
-        return FallV2Probabilities(0.1, 0.9, 0.0)
+    def predict(self, _features: object) -> FallProbabilities:
+        return FallProbabilities(0.1, 0.9, 0.0)
 
 
 def _clock() -> datetime:
@@ -58,7 +58,7 @@ def test_registry_wires_v2_fall_and_bed_exit_deciders() -> None:
             source_generation=0,
         )
     )
-    assert isinstance(fall, FallV2DomainDecider)
+    assert isinstance(fall, FallDomainDecider)
     assert isinstance(bed_exit, BedExitMonitor)
     assert isinstance(fall, Decider)
     assert isinstance(bed_exit, Decider)

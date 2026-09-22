@@ -51,9 +51,9 @@ from worker.adapters.model.errors import ModelLoadError
 from worker.adapters.model.ort_pose_bbox56 import OrtPoseBbox56Runner
 from worker.adapters.model.pose_bbox56_bundle import PoseBbox56BundleRunner
 from worker.domains import DETECTION_MODULE_REGISTRY, CameraModuleContext
-from worker.domains.fall import FallPolicyDeciderV2, FallWindowClassifierV2
+from worker.domains.fall import FallPolicyDecider, FallWindowClassifier
 from worker.domains.registry import _audit_snapshot, _effective_transition_threshold
-from worker.interfaces.fall_model import BinaryFallScoreEvidence, FallV2Probabilities
+from worker.interfaces.fall_model import BinaryFallScoreEvidence, FallProbabilities
 from worker.runtime import bootstrap
 from worker.runtime.config import WorkerConfig, local_env
 from worker.runtime.config.worker_models import SelectedFallBundleConfig
@@ -88,8 +88,8 @@ class _FakeRunner:
     def __call__(self, _image: Image) -> RunnerResult:
         raise AssertionError("this test must not run model inference")
 
-    def predict(self, _features: object) -> FallV2Probabilities:
-        return FallV2Probabilities(background=1.0, fall_transition=0.0, fallen=0.0)
+    def predict(self, _features: object) -> FallProbabilities:
+        return FallProbabilities(background=1.0, fall_transition=0.0, fallen=0.0)
 
     def warmup(self) -> None:
         self.warmup_count += 1
@@ -108,11 +108,11 @@ class _ControlledLogitSession:
 
 @final
 class _FixedFallModel:
-    def __init__(self, result: FallV2Probabilities) -> None:
+    def __init__(self, result: FallProbabilities) -> None:
         self.result = result
         self.predict_count = 0
 
-    def predict(self, _features: object) -> FallV2Probabilities:
+    def predict(self, _features: object) -> FallProbabilities:
         self.predict_count += 1
         return self.result
 
@@ -358,14 +358,14 @@ def _selected_onnx_bundle(
 
 
 def test_probability_only_result_has_no_inferred_binary_evidence() -> None:
-    result = FallV2Probabilities(0.2, 0.3, 0.4)
+    result = FallProbabilities(0.2, 0.3, 0.4)
 
     assert (result.background, result.fall_transition, result.fallen) == (0.2, 0.3, 0.4)
     assert result.model_evidence is None
 
     evidence = BinaryFallScoreEvidence(raw_logit=0.0, applied_temperature=1.0)
     with pytest.raises(TypeError):
-        FallV2Probabilities(0.2, 0.3, 0.4, evidence)  # type: ignore[call-arg]
+        FallProbabilities(0.2, 0.3, 0.4, evidence)  # type: ignore[call-arg]
 
 
 def test_packaged_onnx_result_retains_per_call_binary_score_evidence(
@@ -439,7 +439,7 @@ def test_admitted_non_promotable_onnx_result_still_applies_loaded_temperature(
 
 
 def test_classifier_retains_the_typed_evidence_result_through_stride_ticks() -> None:
-    result = FallV2Probabilities(
+    result = FallProbabilities(
         background=0.5,
         fall_transition=0.5,
         fallen=0.0,
@@ -449,7 +449,7 @@ def test_classifier_retains_the_typed_evidence_result_through_stride_ticks() -> 
         ),
     )
     model = _FixedFallModel(result)
-    classifier = FallWindowClassifierV2(model)
+    classifier = FallWindowClassifier(model)
     row = (0.0,) * 56
 
     for _ in range(29):
@@ -465,14 +465,14 @@ def test_classifier_retains_the_typed_evidence_result_through_stride_ticks() -> 
 
 
 def test_binary_evidence_does_not_change_policy_threshold_or_results() -> None:
-    generic_policy = FallPolicyDeciderV2(
+    generic_policy = FallPolicyDecider(
         camera_id="camera",
         facility_id="facility",
         boot_id="boot",
         stream_epoch="epoch",
         source_generation=0,
     )
-    evidenced_policy = FallPolicyDeciderV2(
+    evidenced_policy = FallPolicyDecider(
         camera_id="camera",
         facility_id="facility",
         boot_id="boot",
@@ -484,8 +484,8 @@ def test_binary_evidence_does_not_change_policy_threshold_or_results() -> None:
     for frame, raw_logit in enumerate((-0.25, 0.0, 0.0, 0.0)):
         temperature = 2.0
         transition = float(1.0 / (1.0 + np.exp(-np.float32(raw_logit) / temperature)))
-        generic = FallV2Probabilities(1.0 - transition, transition, 0.0)
-        evidenced = FallV2Probabilities(
+        generic = FallProbabilities(1.0 - transition, transition, 0.0)
+        evidenced = FallProbabilities(
             1.0 - transition,
             transition,
             0.0,

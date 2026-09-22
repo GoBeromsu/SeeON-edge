@@ -1,6 +1,6 @@
-"""V2 fall scoring and proposal policy.
+"""Fall scoring and proposal policy.
 
-V2 retains classifier votes, fallen/recovery streaks, and trace snapshots.
+Retains classifier votes, fallen/recovery streaks, and trace snapshots.
 It deliberately surrenders event emission, de-duplication, and identity
 minting to :mod:`worker.domains.episode`.
 """
@@ -13,7 +13,7 @@ from dataclasses import dataclass, field, replace
 
 from shared.detection_policies import FallPolicyV2
 from worker.domains.episode import EpisodeAuthority, EpisodeProposal
-from worker.domains.fall.classifier_v2 import FallV2Probabilities, FallWindowClassifierV2
+from worker.domains.fall.classifier import FallProbabilities, FallWindowClassifier
 from worker.domains.fall.pose_bbox56 import PoseBbox56Track, pose_bbox56_tracks
 from worker.pipeline.perception.pts_resample import PtsResampler, ResampledRow
 from worker.types import BusinessEvent, DecisionInput, DecisionTraceSnapshot
@@ -69,8 +69,8 @@ def _missing_score_snapshot(
 
 
 @dataclass(slots=True)
-class FallPolicyDeciderV2:
-    """Camera-local lifecycle and alert policy for V2 model probabilities.
+class FallPolicyDecider:
+    """Camera-local lifecycle and alert policy for model probabilities.
 
     The caller creates one instance per camera.  State is keyed by track id and
     monotonically increasing generation so a reused id is never deduplicated
@@ -104,7 +104,7 @@ class FallPolicyDeciderV2:
 
     def update(
         self,
-        probabilities_by_track: Mapping[int, FallV2Probabilities],
+        probabilities_by_track: Mapping[int, FallProbabilities],
         live_track_ids: Iterable[int],
         *,
         frame_index: int,
@@ -204,7 +204,7 @@ class FallPolicyDeciderV2:
         self,
         track_id: int,
         state: _TrackState,
-        probability: FallV2Probabilities,
+        probability: FallProbabilities,
         frame_index: int,
         time_sec: float,
     ) -> BusinessEvent | None:
@@ -278,7 +278,7 @@ class FallPolicyDeciderV2:
         track_id: int,
         state: _TrackState,
         previous_state: str,
-        probability: FallV2Probabilities,
+        probability: FallProbabilities,
         event: BusinessEvent | None,
     ) -> DecisionTraceSnapshot:
         current_state = _trace_state(state, self._episode_state(track_id))
@@ -310,11 +310,11 @@ class FallPolicyDeciderV2:
 
 
 @dataclass(slots=True)
-class FallV2DomainDecider:
-    """Adapt the V2 row classifier and temporal policy to the domain port."""
+class FallDomainDecider:
+    """Adapt the row classifier and temporal policy to the domain port."""
 
     classifier: object
-    policy: FallPolicyDeciderV2
+    policy: FallPolicyDecider
     _resampler: PtsResampler[dict[int, tuple[float, ...]]] = field(
         default_factory=PtsResampler, init=False
     )
@@ -340,7 +340,7 @@ class FallV2DomainDecider:
         self._reset_on_pts_rollback(pts_ns)
         classifier = self.classifier
         if not hasattr(classifier, "update"):
-            raise TypeError("fall.v2 classifier is invalid")
+            raise TypeError("fall classifier is invalid")
         resampled = self._resample(pts_ns, rows)
         if not resampled:
             return self.policy.coast()
@@ -349,7 +349,7 @@ class FallV2DomainDecider:
         for row in resampled:
             if row.valid:
                 probabilities = classifier.update(row.value, input_value.live_track_ids)
-                if isinstance(classifier, FallWindowClassifierV2):
+                if isinstance(classifier, FallWindowClassifier):
                     # Copy this valid call's fact immediately. Synthetic gap
                     # calls also update the classifier, but are not the result
                     # handed to policy for this source observation.
@@ -382,10 +382,10 @@ class FallV2DomainDecider:
 
     def _reset_on_pts_rollback(self, pts_ns: int) -> None:
         if self._last_pts_ns is not None and pts_ns < self._last_pts_ns:
-            if not isinstance(self.classifier, FallWindowClassifierV2):
-                raise TypeError("fall.v2 classifier must support stream-epoch reset")
+            if not isinstance(self.classifier, FallWindowClassifier):
+                raise TypeError("fall classifier must support stream-epoch reset")
             self._resampler = PtsResampler()
-            self.classifier = FallWindowClassifierV2(self.classifier.model)
+            self.classifier = FallWindowClassifier(self.classifier.model)
         self._last_pts_ns = pts_ns
 
     def _resample(
@@ -404,4 +404,4 @@ class FallV2DomainDecider:
         return self._resampler.push(pts_ns, rows)
 
 
-__all__ = ["FallPolicyDeciderV2", "FallPolicyV2", "FallV2DomainDecider"]
+__all__ = ["FallDomainDecider", "FallPolicyDecider", "FallPolicyV2"]

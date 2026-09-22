@@ -1,4 +1,4 @@
-"""Frozen, runtime-independent contracts for fall v2 fixture artifacts."""
+"""Frozen, runtime-independent contracts for fall fixture artifacts."""
 
 from __future__ import annotations
 
@@ -12,7 +12,7 @@ from pathlib import Path
 from worker.domains.fall.pose_bbox56 import PoseBbox56Track, pose_bbox56_tracks
 
 _EDGE_ROOT = Path(__file__).resolve().parents[1]
-_POLICY_FIXTURE = _EDGE_ROOT / "tests" / "fixtures_fall_policy_v2.json"
+_POLICY_FIXTURE = _EDGE_ROOT / "tests" / "fixtures_fall_policy.json"
 _POLICY_SHA256 = "9234acebd07f7494bc107d0471eff52ae08cb46b75ecfa47d9c709f4e16ea1b7"
 
 

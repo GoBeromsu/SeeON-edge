@@ -20,7 +20,7 @@ from shared.detection_policies import parse_effective_policy
 from shared.events.replay_wire import MAX_REPLAY_BODY_BYTES as _REPLAY_BODY_LIMIT
 from shared.events.replay_wire import ReplayWireError, decode_replay_trace
 from worker.interfaces.clip_analysis import ClipAnalysisSupervisor
-from worker.interfaces.fall_model import FallV2ModelProtocol
+from worker.interfaces.fall_model import FallModelProtocol
 from worker.pipeline.output._clip_analysis_http import (
     MAX_ANALYSIS_BODY_BYTES,
     clip_analysis_path,
@@ -131,7 +131,7 @@ def build_http_server(
     clip_analysis_supervisor: ClipAnalysisSupervisor,
     bed_zone_recognizer: BedZoneRecognizer | None = None,
     bed_zone_snapshot: BedZoneSnapshot | None = None,
-    replay_fall_model: FallV2ModelProtocol | None = None,
+    replay_fall_model: FallModelProtocol | None = None,
 ) -> HTTPServer:
     class Handler(BaseHTTPRequestHandler):
         def do_GET(self) -> None:  # noqa: N802 - stdlib hook name

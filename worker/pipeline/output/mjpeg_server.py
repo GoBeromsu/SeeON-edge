@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Final
 
 from worker.interfaces.clip_analysis import ClipAnalysisSupervisor
-from worker.interfaces.fall_model import FallV2ModelProtocol
+from worker.interfaces.fall_model import FallModelProtocol
 from worker.pipeline.output._mjpeg_http import (
     BedZoneNotFoundError,
     BedZoneRecognizer,
@@ -49,7 +49,7 @@ class MjpegServer:
         probe: MjpegProbe | None = None,
         bed_zone_recognizer: BedZoneRecognizer | None = None,
         bed_zone_snapshot: BedZoneSnapshot | None = None,
-        replay_fall_model: FallV2ModelProtocol | None = None,
+        replay_fall_model: FallModelProtocol | None = None,
     ) -> None:
         self.host = config.host
         self._server: HTTPServer = build_http_server(
@@ -136,7 +136,7 @@ def start_optional_mjpeg_server(
     probe: MjpegProbe | None = None,
     bed_zone_recognizer: BedZoneRecognizer | None = None,
     bed_zone_snapshot: BedZoneSnapshot | None = None,
-    replay_fall_model: FallV2ModelProtocol | None = None,
+    replay_fall_model: FallModelProtocol | None = None,
 ) -> MjpegServer | None:
     resolved = dev_mjpeg_config() if config is None else config
     if not resolved.enabled:

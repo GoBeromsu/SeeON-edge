@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from worker.domains.fall import FallV2DomainDecider
+from worker.domains.fall import FallDomainDecider
 from worker.interfaces.execution_records import ExecutionRecordSink
 from worker.pipeline.decision import EventAggregator
 from worker.pipeline.diagnostics.emit import (
@@ -79,18 +79,18 @@ def emit_model_and_decision(
         )
 
 
-def _fall_decider(decision: EventAggregator) -> FallV2DomainDecider | None:
+def _fall_decider(decision: EventAggregator) -> FallDomainDecider | None:
     for decider in decision.deciders:
         target: object = decider
         while hasattr(target, "decider"):
             target = target.decider
-        if isinstance(target, FallV2DomainDecider):
+        if isinstance(target, FallDomainDecider):
             return target
     return None
 
 
 def _generation(
-    fall: FallV2DomainDecider | None, classifier: object, track_id: int | None
+    fall: FallDomainDecider | None, classifier: object, track_id: int | None
 ) -> int | None:
     if track_id is None:
         return None

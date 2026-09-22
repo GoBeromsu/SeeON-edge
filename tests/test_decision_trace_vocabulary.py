@@ -162,7 +162,7 @@ FALL_V2_STATES: frozenset[str] = frozenset(
         "fallen",
     }
 )
-FALL_V2_VALUE_NAMES: frozenset[str] = frozenset(
+FALL_VALUE_NAMES: frozenset[str] = frozenset(
     {
         "fall_transition_probability",
         "fallen_probability",
@@ -171,7 +171,7 @@ FALL_V2_VALUE_NAMES: frozenset[str] = frozenset(
         "transition_window",
     }
 )
-FALL_V2_MISSING_REASONS: frozenset[str] = frozenset(
+FALL_MISSING_REASONS: frozenset[str] = frozenset(
     {
         "classifier-warmup",
         "classifier-stride-not-due",
@@ -384,8 +384,8 @@ def test_baseline_vocabularies_are_exactly_the_pre_extension_sets() -> None:
     if extra_reasons | extra_states | extra_value_names | extra_missing:
         assert extra_reasons == BED_EXIT_REASONS | FALL_V2_REASONS
         assert extra_states == BED_EXIT_STATES | FALL_V2_STATES
-        assert extra_value_names == BED_EXIT_VALUE_NAMES | FALL_V2_VALUE_NAMES
-        assert extra_missing == BED_EXIT_MISSING_REASONS | FALL_V2_MISSING_REASONS
+        assert extra_value_names == BED_EXIT_VALUE_NAMES | FALL_VALUE_NAMES
+        assert extra_missing == BED_EXIT_MISSING_REASONS | FALL_MISSING_REASONS
     else:
         assert current_reasons == BASELINE_REASONS
         assert current_states == BASELINE_STATES
@@ -398,11 +398,11 @@ def test_bed_exit_and_fall_v2_tokens_are_additive_and_closed() -> None:
     assert _values(DecisionTraceState) == BASELINE_STATES | BED_EXIT_STATES | FALL_V2_STATES
     assert (
         _values(DecisionTraceValueName)
-        == BASELINE_VALUE_NAMES | BED_EXIT_VALUE_NAMES | FALL_V2_VALUE_NAMES
+        == BASELINE_VALUE_NAMES | BED_EXIT_VALUE_NAMES | FALL_VALUE_NAMES
     )
     assert (
         _values(DecisionTraceMissingReason)
-        == BASELINE_MISSING_REASONS | BED_EXIT_MISSING_REASONS | FALL_V2_MISSING_REASONS
+        == BASELINE_MISSING_REASONS | BED_EXIT_MISSING_REASONS | FALL_MISSING_REASONS
     )
 
 

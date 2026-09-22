@@ -12,7 +12,7 @@ from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from types import MappingProxyType
 
-from worker.interfaces.fall_model import FallV2ModelProtocol, FallV2Probabilities
+from worker.interfaces.fall_model import FallModelProtocol, FallProbabilities
 from worker.types.trace import DecisionTraceMissingReason
 
 FALL_WINDOW_FRAMES = 30
@@ -23,13 +23,13 @@ _ZERO_ROW = (0.0,) * _ROW_WIDTH
 
 
 @dataclass(slots=True)
-class FallWindowClassifierV2:
+class FallWindowClassifier:
     """Maintain independent `[30, 56]` windows for the tracks of one camera."""
 
-    model: FallV2ModelProtocol
+    model: FallModelProtocol
     _buffers: dict[int, deque[tuple[float, ...]]] = field(default_factory=dict, init=False)
     _last_rows: dict[int, tuple[float, ...]] = field(default_factory=dict, init=False)
-    _last_probabilities: dict[int, FallV2Probabilities] = field(default_factory=dict, init=False)
+    _last_probabilities: dict[int, FallProbabilities] = field(default_factory=dict, init=False)
     _last_seen_frames: dict[int, int] = field(default_factory=dict, init=False)
     _generations: dict[int, int] = field(default_factory=dict, init=False)
     _next_generations: dict[int, int] = field(default_factory=dict, init=False)
@@ -43,7 +43,7 @@ class FallWindowClassifierV2:
         self,
         rows_by_track: Mapping[int, Sequence[float] | None],
         live_track_ids: Iterable[int],
-    ) -> Mapping[int, FallV2Probabilities]:
+    ) -> Mapping[int, FallProbabilities]:
         """Append one row per live track and return predictions due this tick.
 
         A missing row coasts by repeating that track's previous valid row. A
@@ -83,7 +83,7 @@ class FallWindowClassifierV2:
             )
             return {}
 
-        due: dict[int, FallV2Probabilities] = {}
+        due: dict[int, FallProbabilities] = {}
         for track_id in sorted(live_ids):
             buffer = self._buffers.get(track_id)
             if buffer is None or len(buffer) != FALL_WINDOW_FRAMES:
@@ -92,13 +92,11 @@ class FallWindowClassifierV2:
                 )
                 continue
             prediction = self.model.predict(tuple(buffer))
-            if not isinstance(prediction, FallV2Probabilities):
+            if not isinstance(prediction, FallProbabilities):
                 try:
-                    prediction = FallV2Probabilities(*prediction)  # type: ignore[arg-type]
+                    prediction = FallProbabilities(*prediction)  # type: ignore[arg-type]
                 except (TypeError, ValueError) as exc:
-                    raise ValueError(
-                        "fall v2 model must return three finite probabilities"
-                    ) from exc
+                    raise ValueError("fall model must return three finite probabilities") from exc
             self._last_probabilities[track_id] = prediction
             due[track_id] = prediction
         return due
@@ -110,7 +108,7 @@ class FallWindowClassifierV2:
         """Explain missing scores from the immediately preceding ``update`` only."""
         return MappingProxyType(self._current_call_missing_score_reasons)
 
-    def probabilities_for(self, track_id: int) -> FallV2Probabilities | None:
+    def probabilities_for(self, track_id: int) -> FallProbabilities | None:
         return self._last_probabilities.get(track_id)
 
     def generation_for(self, track_id: int) -> int | None:
@@ -150,6 +148,6 @@ def _valid_row(value: Sequence[float] | None) -> tuple[float, ...] | None:
 __all__ = [
     "FALL_STRIDE_FRAMES",
     "FALL_WINDOW_FRAMES",
-    "FallV2Probabilities",
-    "FallWindowClassifierV2",
+    "FallProbabilities",
+    "FallWindowClassifier",
 ]
