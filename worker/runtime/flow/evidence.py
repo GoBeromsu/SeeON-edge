@@ -10,7 +10,8 @@ from pathlib import Path
 from typing import Protocol
 
 from worker.interfaces.execution_records import ExecutionRecordSink
-from worker.pipeline.diagnostics.emit import event_delivery_record, try_emit
+from worker.pipeline.diagnostics.emit_delivery import event_delivery_record
+from worker.pipeline.diagnostics.record_builder import try_emit
 from worker.pipeline.output.evidence.flow_clip_publication import FlowClipPublisher
 from worker.pipeline.output.evidence.flow_sealed_sidecar import (
     FlowSealedRecovery,

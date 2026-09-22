@@ -2,17 +2,18 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from typing import TYPE_CHECKING
 
 from worker.domains.fall import FallDomainDecider
 from worker.interfaces.execution_records import ExecutionRecordSink
-from worker.pipeline.decision import EventAggregator
-from worker.pipeline.diagnostics.emit import (
+from worker.pipeline.decision import EventAggregator, unwrap_decider
+from worker.pipeline.diagnostics.emit_policy import (
     model_score_record,
     policy_consume_record,
     policy_decision_record,
-    try_emit,
 )
+from worker.pipeline.diagnostics.record_builder import try_emit
 from worker.types.metadata import MetadataCounters, MetadataFrame
 from worker.types.trace import decision_trace_id
 
@@ -51,10 +52,18 @@ def emit_model_and_decision(
     pts = identity.source_pts
     fall = _fall_decider(decision)
     classifier = None if fall is None else getattr(fall, "classifier", None)
+    # Tracks the classifier deliberately did not score on this call (stride
+    # not due, window warming). probabilities_for() would return the cached
+    # score from an earlier call for them; a model.score record must mean
+    # "this CPU model call", so those tracks get no record here. The policy
+    # snapshot still carries the missing reason.
+    not_scored: Mapping[int, object] = (
+        {} if classifier is None else getattr(classifier, "current_call_missing_score_reasons", {})
+    )
     for snapshot in decision.last_trace_snapshots:
         track_id = snapshot.track_id
         generation = _generation(fall, classifier, track_id)
-        if track_id is not None and classifier is not None:
+        if track_id is not None and classifier is not None and track_id not in not_scored:
             probability = classifier.probabilities_for(track_id)
             if probability is not None:
                 try_emit(
@@ -67,7 +76,7 @@ def emit_model_and_decision(
                         frame_seq=identity.seq,
                         source_pts_ns=pts,
                         track_id=track_id,
-                        generation=0 if generation is None else generation,
+                        generation=generation,
                         probability=probability,
                     ),
                 )
@@ -97,9 +106,7 @@ def emit_model_and_decision(
 
 def _fall_decider(decision: EventAggregator) -> FallDomainDecider | None:
     for decider in decision.deciders:
-        target: object = decider
-        while hasattr(target, "decider"):
-            target = target.decider
+        target = unwrap_decider(decider)
         if isinstance(target, FallDomainDecider):
             return target
     return None

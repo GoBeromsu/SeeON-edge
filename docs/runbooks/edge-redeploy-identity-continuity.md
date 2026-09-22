@@ -3,8 +3,9 @@
 이미지를 교체하거나 스택을 다시 세울 때 **카메라 신원(Hub 매핑)을 잃지 않기 위한 절차**다.
 GPU 프로파일 전환, Dockerfile 변경, 호스트 이전 모두 이 절차를 따른다.
 
-스키마는 18 하나뿐이며 `edge-db-migrator` 는 빈 볼륨에 schema 18 을 만들기만 한다
-(`docs/architecture.md` 의 "Schema 18 is the sole schema" 절). 이 문서는 그
+스키마는 19 이며 `edge-db-migrator` 는 빈 볼륨에 schema 19 를 만들거나 정확한
+schema 18 을 확장한다 (`docs/runbooks/edge-database-schema-19.md`,
+`docs/architecture.md` 의 "Schema 19; bootstrap creates or extends" 절). 이 문서는 그
 위에 있는 문제 — **DB 는 멀쩡한데 Hub 가 카메라를 못 알아보는 상태** — 를 다룬다.
 
 ## 왜 필요한가
@@ -60,8 +61,9 @@ docker compose -f compose.edge.yaml -f compose.edge.<profile>.yaml up -d --pull 
 ### 3. 순서를 지킨다
 
 `edge-db-migrator` → `ml-api`(healthy) → `ml-worker`. compose 의존성이 이를
-강제한다. migrator 는 create-only 다: 빈 볼륨이면 schema 18 을 만들고, 이미 schema 18
-이면 검증만 하고, 그 외 버전이면 `EDGE_DB_BOOTSTRAP_FAILED` 로 거부한다.
+강제한다. migrator 는 create-or-extend 다: 빈 볼륨이면 schema 19 을 만들고, 이미
+정확한 schema 18 이면 여섯 execution 테이블을 확장하고, 이미 schema 19 이면
+검증만 하고, 그 외 버전이면 `EDGE_DB_BOOTSTRAP_FAILED` 로 거부한다.
 
 API 가 떠 있는 상태로 migrator 를 돌리면 다음으로 실패한다.
 

@@ -10,6 +10,7 @@ from shared.events.execution_records import ExecutionRecordContractError, WireGa
 
 LANE_OVERFLOW_CAUSE = "lane-overflow"
 EXPORT_FAILED_CAUSE = "export-failed"
+RECORD_INVALID_CAUSE = "record-invalid"
 
 
 @dataclass(frozen=True, slots=True)
@@ -23,6 +24,7 @@ class _Lane:
     records: deque[WireRecord]
     next_sequence: int = 0
     overflow: list[WireRecord] | None = None
+    invalid_gaps: list[WireGap] | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -55,11 +57,13 @@ class ExecutionRecordLanes:
                 lane = _Lane(deque())
                 self._lanes[key] = lane
             sequence = lane.next_sequence
-            lane.next_sequence = sequence + 1
             try:
                 queued = _with_sequence(record, sequence)
             except ExecutionRecordContractError:
+                lane.next_sequence = sequence + 1
+                _note_invalid(lane, record, sequence)
                 return False
+            lane.next_sequence = sequence + 1
             if len(lane.records) >= self._capacity:
                 if lane.overflow is None:
                     lane.overflow = []
@@ -102,9 +106,17 @@ class ExecutionRecordLanes:
                         break
                     records.append(lane.records.popleft())
                     gaps.extend(_take_overflow(lane))
-            if records:
+                    gaps.extend(_take_invalid(lane))
+            if not records:
+                for key, lane in self._lanes.items():
+                    if key.camera_id != camera_id:
+                        continue
+                    pending = _take_invalid(lane)
+                    if pending:
+                        gaps.extend(pending)
+            if records or gaps:
                 gaps.extend(self._export_failed.pop((camera_id, worker_boot_id), ()))
-        if not records:
+        if not records and not gaps:
             return None
         return DrainedLane(camera_id, worker_boot_id, tuple(records), tuple(gaps))
 
@@ -140,6 +152,29 @@ def _take_overflow(lane: _Lane) -> tuple[WireGap, ...]:
         return ()
     lane.overflow = None
     return _gaps_for_records(tuple(dropped), LANE_OVERFLOW_CAUSE)
+
+
+def _take_invalid(lane: _Lane) -> tuple[WireGap, ...]:
+    gaps = lane.invalid_gaps
+    if not gaps:
+        return ()
+    lane.invalid_gaps = None
+    return tuple(gaps)
+
+
+def _note_invalid(lane: _Lane, record: WireRecord, sequence: int) -> None:
+    gap = WireGap(
+        producer=record.producer,
+        from_sequence=sequence,
+        to_sequence=sequence,
+        from_ns=record.observed_at_ns,
+        to_ns=record.observed_at_ns,
+        record_count=1,
+        cause=RECORD_INVALID_CAUSE,
+    )
+    if lane.invalid_gaps is None:
+        lane.invalid_gaps = []
+    lane.invalid_gaps.append(gap)
 
 
 def _gaps_for_records(
@@ -192,6 +227,7 @@ def _with_sequence(record: WireRecord, sequence: int) -> WireRecord:
 __all__ = [
     "EXPORT_FAILED_CAUSE",
     "LANE_OVERFLOW_CAUSE",
+    "RECORD_INVALID_CAUSE",
     "DrainedLane",
     "ExecutionRecordLanes",
 ]

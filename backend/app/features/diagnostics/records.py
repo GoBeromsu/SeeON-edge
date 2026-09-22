@@ -8,15 +8,15 @@ DDL identity check is 1..128 chars.
 from __future__ import annotations
 
 import hashlib
-import json
 import re
 from collections.abc import Mapping
 from dataclasses import dataclass
 from enum import StrEnum
 from typing import Final
 
+from shared.events.execution_records import canonical_json
+
 _SHA256_RE: Final = re.compile(r"^[0-9a-f]{64}$")
-_JSON_KW: Final = {"ensure_ascii": False, "sort_keys": True, "separators": (",", ":")}
 _PROVENANCE_FIELDS: Final = (
     "backend_build_revision",
     "calibration_digest",
@@ -76,10 +76,6 @@ class AvailabilityKind(StrEnum):
     DELETED_BY_CAPACITY = "DELETED_BY_CAPACITY"
     UNKNOWN_COARSENED = "UNKNOWN_COARSENED"
     UNKNOWN = "UNKNOWN"
-
-
-def canonical_json(value: object) -> str:
-    return json.dumps(value, **_JSON_KW)
 
 
 def require_sha256(value: str, *, what: str) -> str:

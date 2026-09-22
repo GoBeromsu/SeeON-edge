@@ -24,7 +24,6 @@ def compose_execution_records(
     config: WorkerConfig,
     *,
     env: Mapping[str, str],
-    worker_boot_id: str,
     build_revision: str | None,
     image_digest: str | None,
     model_digest: str | None,
@@ -36,7 +35,6 @@ def compose_execution_records(
     ExecutionRecordLanes | None,
     ExecutionRecordExporter | None,
 ]:
-    del worker_boot_id
     settings = execution_records_settings_from_environment(env)
     if settings is None:
         return None, None, None
