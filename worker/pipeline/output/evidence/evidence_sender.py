@@ -22,7 +22,8 @@ from shared.events.evidence_export_contract import (
     EventReceipt,
 )
 from worker.interfaces.execution_records import ExecutionRecordSink
-from worker.pipeline.diagnostics.emit import backend_acceptance_record, try_emit
+from worker.pipeline.diagnostics.emit_delivery import backend_acceptance_record
+from worker.pipeline.diagnostics.record_builder import try_emit
 from worker.pipeline.output.evidence.evidence_outbox_types import (
     ClipId,
     ClipLocalState,

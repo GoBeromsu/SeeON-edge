@@ -226,7 +226,7 @@ forbidden_modules = ["backend.app.edge_db.bootstrap"]
 # manifest from current-schema DDL alone. The broad contract above uses the
 # whole `backend` package as source, which does not catch intra-edge_db chains;
 # this one pins the exact serving leaf.
-name = "schema-18 runtime compatibility stays free of the bootstrap DDL owner"
+name = "runtime compatibility stays free of the bootstrap DDL owner"
 type = "forbidden"
 source_modules = [
     "backend.app.edge_db.compatibility",

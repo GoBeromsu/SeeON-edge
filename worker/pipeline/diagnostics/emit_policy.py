@@ -91,7 +91,7 @@ def model_score_record(
     frame_seq: int,
     source_pts_ns: int | None,
     track_id: int,
-    generation: int,
+    generation: int | None,
     probability: object,
     observed_at_ns: int | None = None,
 ) -> WireRecord | None:
@@ -140,8 +140,6 @@ def policy_decision_record(
     decision_trace_id: str | None = None,
     observed_at_ns: int | None = None,
 ) -> WireRecord | None:
-    track_id = 0 if snapshot.track_id is None else snapshot.track_id
-    unit_generation = 0 if generation is None else generation
     return make_record(
         record_kind="policy.decision",
         camera_id=camera_id,
@@ -152,7 +150,7 @@ def policy_decision_record(
         observed_at_ns=monotonic_or(observed_at_ns),
         time_quality="monotonic",
         causal_unit_id=fall_causal_unit_id(
-            camera_id, worker_boot_id, stream_epoch, track_id, unit_generation
+            camera_id, worker_boot_id, stream_epoch, snapshot.track_id, generation
         ),
         outcome="triggered" if snapshot.triggered else snapshot.current_state,
         payload={

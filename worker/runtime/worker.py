@@ -1398,7 +1398,6 @@ class WorkerRuntime:
         _settings, lanes, exporter = compose_execution_records(
             self.config,
             env=self._env,
-            worker_boot_id=str(self._worker_boot_uuid),
             build_revision=self._build_revision,
             image_digest=image_digest if isinstance(image_digest, str) else None,
             model_digest=None if bundle is None else bundle.published_weights_digest,

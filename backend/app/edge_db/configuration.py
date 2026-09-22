@@ -1,4 +1,4 @@
-"""DDL-free access to schema-18 durable configuration authorities."""
+"""DDL-free access to schema-19 durable configuration authorities."""
 
 from __future__ import annotations
 
