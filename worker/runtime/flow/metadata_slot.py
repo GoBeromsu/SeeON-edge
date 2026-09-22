@@ -6,6 +6,8 @@ import threading
 from dataclasses import dataclass, replace
 from typing import Literal, TypeAlias, final
 
+from worker.interfaces.execution_records import ExecutionRecordSink
+from worker.pipeline.diagnostics.emit import sdk_frame_record, try_emit
 from worker.types.metadata import MetadataCounters, MetadataFrame, SourceBinding
 
 CounterName: TypeAlias = Literal[
@@ -59,6 +61,10 @@ class LatestMetadataSlot:
         self._latest: dict[str, MetadataFrame] = {}
         self._high_water: dict[tuple[str, int, int], tuple[int, int, int]] = {}
         self._counters = MetadataCounters()
+        self._execution_records: ExecutionRecordSink | None = None
+
+    def set_execution_record_sink(self, sink: ExecutionRecordSink | None) -> None:
+        self._execution_records = sink
 
     def register_source(self, binding: SourceBinding) -> AcceptanceToken:
         with self._condition:
@@ -140,7 +146,8 @@ class LatestMetadataSlot:
             self._high_water[binding_key] = identity
             self._counters = _increment(counters, "accepted")
             self._condition.notify_all()
-            return True
+        try_emit(self._execution_records, sdk_frame_record(metadata))
+        return True
 
     def peek(self, camera_id: str) -> MetadataFrame | None:
         with self._lock:

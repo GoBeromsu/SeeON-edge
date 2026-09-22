@@ -9,6 +9,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Protocol
 
+from worker.interfaces.execution_records import ExecutionRecordSink
 from worker.pipeline.output.evidence.evidence_sender import (
     EvidenceSender,
     SenderConfig,
@@ -45,6 +46,8 @@ class EvidenceExportRuntime:
         probe_camera_id: str,
         clip_export_enabled: Callable[[], bool],
         flow_sealed_sidecar_directory: Path | None = None,
+        execution_records: ExecutionRecordSink | None = None,
+        observing_boot_id: str | None = None,
     ) -> EvidenceExportRuntime:
         token = "" if relay_token is None else relay_token.strip()
         if not relay_url.strip() or not token or not probe_camera_id.strip():
@@ -60,6 +63,8 @@ class EvidenceExportRuntime:
                 config,
                 clip_export_enabled=clip_export_enabled,
                 flow_sealed_sidecar_directory=flow_sealed_sidecar_directory,
+                execution_records=execution_records,
+                observing_boot_id=observing_boot_id,
             ),
         )
 
