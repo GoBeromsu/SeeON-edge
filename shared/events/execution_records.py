@@ -40,6 +40,16 @@ RECORD_KINDS: Final = frozenset(
     }
 )
 TIME_QUALITIES: Final = frozenset({"monotonic", "wall", "pts", "unknown"})
+
+# Record kinds that are produced by a process-scoped observer (the durable
+# delivery-queue drainer) rather than by a camera stream. Their rows carry the
+# observing boot id and PROCESS_SCOPE for source_generation and stream_epoch.
+# This is declared vocabulary: the Backend keys those rows into a per-boot
+# process-scope segment, and the join to the originating stream happens through
+# causal_unit_id (the edge_event_id), which the event.delivery record shares.
+# It is not a fallback for a missing stream identity on any other kind.
+PROCESS_SCOPED_KINDS: Final = frozenset({"backend.acceptance"})
+PROCESS_SCOPE: Final = 0
 STORAGE_STATES: Final = frozenset({"committed", "STORAGE_UNAVAILABLE"})
 
 _JSON_KW: Final = {"sort_keys": True, "separators": (",", ":"), "ensure_ascii": False}
@@ -146,6 +156,12 @@ class WireRecord:
             raise ExecutionRecordContractError("invalid record_kind")
         if self.time_quality not in TIME_QUALITIES:
             raise ExecutionRecordContractError("invalid time_quality")
+        if self.record_kind in PROCESS_SCOPED_KINDS and (
+            self.source_generation != PROCESS_SCOPE or self.stream_epoch != PROCESS_SCOPE
+        ):
+            raise ExecutionRecordContractError(
+                f"{self.record_kind} is process-scoped and must use PROCESS_SCOPE"
+            )
         for name in ("camera_id", "worker_boot_id", "producer", "causal_unit_id", "outcome"):
             _identity(getattr(self, name), name)
         for name in ("source_generation", "stream_epoch", "producer_sequence", "observed_at_ns"):
@@ -366,6 +382,8 @@ class WireBatchReceipt:
 
 __all__ = [
     "MAX_EXECUTION_RECORD_BODY_BYTES",
+    "PROCESS_SCOPE",
+    "PROCESS_SCOPED_KINDS",
     "RECORD_KINDS",
     "RELAY_EXECUTION_RECORDS_PATH",
     "STORAGE_STATES",
