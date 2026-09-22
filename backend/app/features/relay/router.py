@@ -53,6 +53,7 @@ from shared.events.evidence_export_contract import (
     DeliveryFailure,
     EventReceipt,
 )
+from shared.events.execution_records import MAX_EXECUTION_RECORD_BODY_BYTES
 
 RELAY_TOKEN_HEADER = "X-Edge-Relay-Token"
 
@@ -86,6 +87,7 @@ _MAX_BODY_BYTES_BY_SUFFIX: dict[str, int] = {
     "/runtime-status": MAX_RELAY_RUNTIME_STATUS_BODY_BYTES,
     "/snapshot-attachments": MAX_RELAY_SNAPSHOT_ATTACHMENT_BODY_BYTES,
     "/snapshot-dispositions": MAX_RELAY_SNAPSHOT_DISPOSITION_BODY_BYTES,
+    "/execution-records": MAX_EXECUTION_RECORD_BODY_BYTES,
 }
 
 
@@ -214,6 +216,19 @@ def require_relay_runtime_status(
     _authorize_relay_body(
         request,
         max_bytes=MAX_RELAY_RUNTIME_STATUS_BODY_BYTES,
+        relay_token=relay_token,
+        authorization=authorization,
+    )
+
+
+def require_relay_execution_records(
+    request: Request,
+    relay_token: Annotated[str | None, Header(alias=RELAY_TOKEN_HEADER)] = None,
+    authorization: Annotated[str | None, Header()] = None,
+) -> None:
+    _authorize_relay_body(
+        request,
+        max_bytes=MAX_EXECUTION_RECORD_BODY_BYTES,
         relay_token=relay_token,
         authorization=authorization,
     )
