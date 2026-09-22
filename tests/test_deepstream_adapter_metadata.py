@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import gc
 import json
+import weakref
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -36,6 +38,7 @@ def test_letterbox_inverse_is_exact_for_boxes_and_keypoints() -> None:
     converted = convert_frame(
         meta,
         rows=rows,
+        inference_tensor_present=True,
         binding=binding,
         frame_w=1280,
         frame_h=720,
@@ -48,6 +51,34 @@ def test_letterbox_inverse_is_exact_for_boxes_and_keypoints() -> None:
     assert converted.frame.person_box.boxes[0].y2 == 300
     assert converted.frame.human_pose.poses[0][0].x == 200
     assert converted.frame.human_pose.poses[0][0].y == 200
+
+
+def test_sdk_frame_number_is_not_replaced_by_the_application_publish_sequence() -> None:
+    binding = SourceBinding("boot", "child", "camera", 2, 3, "transform")
+    meta = SimpleNamespace(
+        buffer_pts=10,
+        frame_number=91,
+        source_id=17,
+        object_items=[],
+    )
+
+    converted = convert_frame(
+        meta,
+        rows=np.zeros((0, 57), dtype=np.float32),
+        inference_tensor_present=True,
+        binding=binding,
+        frame_w=100,
+        frame_h=100,
+        publish_sequence=4,
+        boot_id="boot",
+    )
+
+    evidence = converted.native_observation_evidence
+    assert converted.frame.identity.seq == 4
+    assert converted.native_publish_sequence == 4
+    assert evidence is not None
+    assert evidence.sdk_frame_number == 91
+    assert evidence.source_id == 17
 
 
 def test_association_blocks_row_reuse_and_marks_coasted_track_unmatched() -> None:
@@ -67,6 +98,80 @@ def test_association_blocks_row_reuse_and_marks_coasted_track_unmatched() -> Non
     assert observation.matched_rows == (0,)
 
 
+def test_evidence_counts_raw_filtered_unmatched_and_matched_rows() -> None:
+    binding = SourceBinding("boot", "child", "camera", 2, 3, "transform")
+    rows = np.zeros((3, 57), dtype=np.float32)
+    rows[:, 4] = (0.9, 0.8, 0.05)  # the last raw row is filtered
+    rows[0, :4] = (64, 64, 128, 128)
+    rows[1, :4] = (320, 320, 384, 384)  # eligible, but unmatched
+    meta = SimpleNamespace(
+        buffer_pts=10,
+        object_items=[_object(7, 10, 10, 10, 10)],
+    )
+
+    converted = convert_frame(
+        meta,
+        rows=rows,
+        inference_tensor_present=True,
+        binding=binding,
+        frame_w=100,
+        frame_h=100,
+        publish_sequence=1,
+        boot_id="boot",
+    )
+
+    evidence = converted.native_observation_evidence
+    assert evidence is not None
+    assert evidence.raw_output_row_count == 3
+    assert evidence.eligible_row_count == 2
+    assert evidence.matched_row_count == 1
+    assert evidence.sdk_frame_number is None
+    assert evidence.source_id is None
+
+
+def test_native_observation_evidence_does_not_retain_sdk_objects_or_rows() -> None:
+    class _SdkValue:
+        pass
+
+    binding = SourceBinding("boot", "child", "camera", 2, 3, "transform")
+    tracked = _SdkValue()
+    tracked.object_id = 7
+    tracked.confidence = 0.9
+    tracked.rect_params = SimpleNamespace(left=10.0, top=10.0, width=10.0, height=10.0)
+    meta = _SdkValue()
+    meta.buffer_pts = 10
+    meta.frame_number = np.int64(91)
+    meta.source_id = np.int32(17)
+    meta.object_items = [tracked]
+    rows = np.zeros((1, 57), dtype=np.float32)
+    rows[0, 4] = 0.9
+    rows[0, :4] = (64, 64, 128, 128)
+    meta_ref = weakref.ref(meta)
+    tracked_ref = weakref.ref(tracked)
+    rows_ref = weakref.ref(rows)
+
+    converted = convert_frame(
+        meta,
+        rows=rows,
+        inference_tensor_present=True,
+        binding=binding,
+        frame_w=100,
+        frame_h=100,
+        publish_sequence=1,
+        boot_id="boot",
+    )
+    del meta, tracked, rows
+    gc.collect()
+
+    assert meta_ref() is None
+    assert tracked_ref() is None
+    assert rows_ref() is None
+    evidence = converted.native_observation_evidence
+    assert evidence is not None
+    assert isinstance(evidence.sdk_frame_number, int)
+    assert isinstance(evidence.source_id, int)
+
+
 def test_slot_rejects_stale_source_generation() -> None:
     binding = SourceBinding("boot", "child", "camera", 2, 3, "transform")
     rows = np.zeros((1, 57), dtype=np.float32)
@@ -76,6 +181,7 @@ def test_slot_rejects_stale_source_generation() -> None:
     converted = convert_frame(
         meta,
         rows=rows,
+        inference_tensor_present=True,
         binding=binding,
         frame_w=100,
         frame_h=100,
@@ -89,6 +195,7 @@ def test_slot_rejects_stale_source_generation() -> None:
     stale_frame = convert_frame(
         meta,
         rows=rows,
+        inference_tensor_present=True,
         binding=stale,
         frame_w=100,
         frame_h=100,

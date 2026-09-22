@@ -16,7 +16,12 @@ from contracts.observation import (
 from shared.detection_policies import FallPolicyV2, make_effective_policy
 from shared.events.delivery_queue import DeliveryQueue, EventEntry
 from worker.domains.bed_exit import BedExitConfig, BedExitMonitor
-from worker.domains.fall import FallPolicyDeciderV2, FallV2DomainDecider, FallV2Probabilities
+from worker.domains.fall import (
+    FallPolicyDeciderV2,
+    FallV2DomainDecider,
+    FallV2Probabilities,
+    FallWindowClassifierV2,
+)
 from worker.pipeline.trace import (
     BoundedTraceWriter,
     TraceCapture,
@@ -24,6 +29,7 @@ from worker.pipeline.trace import (
     TraceRetentionPolicy,
 )
 from worker.types import DecisionInput, FramePacket
+from worker.types.trace import DecisionTraceMissingReason
 
 RUNTIME_MANIFEST_SHA256 = "a" * 64
 COMPONENT_SHA256 = "b" * 64
@@ -46,6 +52,15 @@ class _ImmediateV2Classifier:
         }
 
 
+class _RecordingV2Model:
+    def __init__(self) -> None:
+        self.inputs: list[object] = []
+
+    def predict(self, features: object) -> FallV2Probabilities:
+        self.inputs.append(features)
+        return FallV2Probabilities(background=0.1, fall_transition=0.8, fallen=0.1)
+
+
 def _traceable_fall_v2(*, camera_id: str, facility_id: str) -> FallV2DomainDecider:
     """The production V2 decider records compiled-vocabulary trace snapshots itself."""
     return FallV2DomainDecider(
@@ -61,7 +76,27 @@ def _traceable_fall_v2(*, camera_id: str, facility_id: str) -> FallV2DomainDecid
     )
 
 
-def _input(person: BoundingBox, *, frame_index: int, live: tuple[int, ...] = (9,)) -> DecisionInput:
+def _classifier_fall_v2(model: _RecordingV2Model, *, camera_id: str) -> FallV2DomainDecider:
+    return FallV2DomainDecider(
+        classifier=FallWindowClassifierV2(model),
+        policy=FallPolicyDeciderV2(
+            camera_id=camera_id,
+            facility_id="facility-a",
+            boot_id="boot-a",
+            stream_epoch="1",
+            source_generation=0,
+            policy=FallPolicyV2(transition_votes=1),
+        ),
+    )
+
+
+def _input(
+    person: BoundingBox,
+    *,
+    frame_index: int,
+    live: tuple[int, ...] = (9,),
+    time_sec: float | None = None,
+) -> DecisionInput:
     bed = BoundingBox(0, 0, 80, 100, 0.9)
     pose = tuple((index + 1, index + 2, 0.9) for index in range(17))
     observation = FrameObservation(
@@ -75,7 +110,7 @@ def _input(person: BoundingBox, *, frame_index: int, live: tuple[int, ...] = (9,
         frame_width=180,
         frame_height=120,
         live_track_ids=live,
-        time_sec=float(frame_index),
+        time_sec=float(frame_index) if time_sec is None else time_sec,
         frame_index=frame_index,
         bed_region=BedRegionDebugSnapshot(source=BedRegionCacheState.FRESH),
     )
@@ -100,6 +135,118 @@ def test_fall_trace_records_v2_transition_confirmation() -> None:
         "transition_votes": 1,
         "transition_window": 5,
     }
+
+
+def test_fall_trace_links_current_classifier_warmup_and_stride_dispositions() -> None:
+    model = _RecordingV2Model()
+    detector = _classifier_fall_v2(model, camera_id="camera-a")
+    person = BoundingBox(10, 10, 70, 90, 0.9)
+
+    for frame_index in range(5):
+        assert (
+            detector.update(
+                _input(
+                    person,
+                    frame_index=frame_index,
+                    time_sec=frame_index * 0.0667,
+                )
+            )
+            == ()
+        )
+    warmup = detector.last_trace_snapshots[0]
+    assert warmup.reason == "score-missing"
+    assert warmup.missing_values == {
+        "fall_transition_probability": DecisionTraceMissingReason.CLASSIFIER_WARMUP
+    }
+    assert model.inputs == []
+
+    events = ()
+    for frame_index in range(5, 30):
+        events = detector.update(
+            _input(
+                person,
+                frame_index=frame_index,
+                time_sec=frame_index * 0.0667,
+            )
+        )
+    assert len(events) == 1
+    assert events[0].probability == 0.8
+    assert len(model.inputs) == 1
+    scored = detector.last_trace_snapshots[0]
+    assert scored.reason == "transition-confirmed"
+    assert scored.values["fall_transition_probability"] == 0.8
+
+    assert detector.update(_input(person, frame_index=30, time_sec=30 * 0.0667)) == ()
+    stride = detector.last_trace_snapshots[0]
+    assert stride.reason == "score-missing"
+    assert stride.current_state == "transition-confirmed"
+    assert stride.missing_values == {
+        "fall_transition_probability": (DecisionTraceMissingReason.CLASSIFIER_STRIDE_NOT_DUE)
+    }
+    assert len(model.inputs) == 1
+
+
+def test_fall_trace_uses_valid_row_disposition_across_gaps_and_pts_reset() -> None:
+    model = _RecordingV2Model()
+    detector = _classifier_fall_v2(model, camera_id="camera-a")
+    person = BoundingBox(10, 10, 70, 90, 0.9)
+
+    assert detector.update(_input(person, frame_index=0, time_sec=0.0)) == ()
+    assert detector.update(_input(person, frame_index=1, time_sec=4 * 0.0667)) == ()
+    assert detector.resample_gap_rows_total == 3
+    gap_then_valid = detector.last_trace_snapshots
+    assert gap_then_valid[0].missing_values == {
+        "fall_transition_probability": DecisionTraceMissingReason.CLASSIFIER_WARMUP
+    }
+
+    assert detector.update(_input(person, frame_index=2, time_sec=0.26681)) == ()
+    assert detector.last_trace_snapshots is gap_then_valid
+    assert detector.resample_gap_rows_total == 3
+    assert model.inputs == []
+
+    classifier_before_reset = detector.classifier
+    assert detector.update(_input(person, frame_index=3, time_sec=0.0)) == ()
+    assert detector.classifier is not classifier_before_reset
+    reset = detector.last_trace_snapshots[0]
+    assert reset.missing_values == {
+        "fall_transition_probability": (DecisionTraceMissingReason.CLASSIFIER_STRIDE_NOT_DUE)
+    }
+    assert model.inputs == []
+
+
+def test_fall_classifier_dispositions_are_camera_local_with_a_shared_model() -> None:
+    model = _RecordingV2Model()
+    camera_a = _classifier_fall_v2(model, camera_id="camera-a")
+    camera_b = _classifier_fall_v2(model, camera_id="camera-b")
+    person = BoundingBox(10, 10, 70, 90, 0.9)
+
+    camera_a_events = ()
+    for frame_index in range(30):
+        camera_a_events = camera_a.update(
+            _input(
+                person,
+                frame_index=frame_index,
+                time_sec=frame_index * 0.0667,
+            )
+        )
+    for frame_index in range(5):
+        assert (
+            camera_b.update(
+                _input(
+                    person,
+                    frame_index=frame_index,
+                    time_sec=frame_index * 0.0667,
+                )
+            )
+            == ()
+        )
+
+    assert len(camera_a_events) == 1
+    assert camera_a.last_trace_snapshots[0].reason == "transition-confirmed"
+    assert camera_b.last_trace_snapshots[0].missing_values == {
+        "fall_transition_probability": DecisionTraceMissingReason.CLASSIFIER_WARMUP
+    }
+    assert len(model.inputs) == 1
 
 
 def test_bed_exit_trace_distinguishes_live_grace_from_stale_track_exit() -> None:

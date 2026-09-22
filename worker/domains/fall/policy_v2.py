@@ -17,6 +17,7 @@ from worker.domains.fall.classifier_v2 import FallV2Probabilities, FallWindowCla
 from worker.domains.fall.pose_bbox56 import PoseBbox56Track, pose_bbox56_tracks
 from worker.pipeline.perception.pts_resample import PtsResampler, ResampledRow
 from worker.types import BusinessEvent, DecisionInput, DecisionTraceSnapshot
+from worker.types.trace import DecisionTraceMissingReason
 
 
 @dataclass(slots=True)
@@ -51,6 +52,9 @@ def _missing_score_snapshot(
     track_id: int,
     state: _TrackState | None,
     episode_state: str | None = None,
+    missing_reason: DecisionTraceMissingReason = (
+        DecisionTraceMissingReason.NO_LIVE_CLASSIFIED_TRACK
+    ),
 ) -> DecisionTraceSnapshot:
     current = _trace_state(state, episode_state)
     return DecisionTraceSnapshot(
@@ -60,7 +64,7 @@ def _missing_score_snapshot(
         triggered=False,
         track_id=track_id,
         bed_id=None,
-        missing_values={"fall_transition_probability": "no-live-classified-track"},
+        missing_values={"fall_transition_probability": missing_reason},
     )
 
 
@@ -105,8 +109,14 @@ class FallPolicyDeciderV2:
         *,
         frame_index: int,
         time_sec: float,
+        missing_score_reasons: Mapping[int, DecisionTraceMissingReason] | None = None,
     ) -> tuple[BusinessEvent, ...]:
-        """Advance live tracks and emit every newly opened episode in track order."""
+        """Advance live tracks and emit every newly opened episode in track order.
+
+        Optional missing-score reasons must describe the same classifier call
+        that supplied ``probabilities_by_track``; cached probabilities are not
+        consulted to infer a current disposition.
+        """
         live_ids = frozenset(live_track_ids)
         self._evict_stale(live_ids, frame_index, time_sec)
         emitted: list[BusinessEvent] = []
@@ -121,7 +131,17 @@ class FallPolicyDeciderV2:
             if probability is None:
                 snapshots.append(
                     _missing_score_snapshot(
-                        track_id, existing_state, self._episode_state(track_id)
+                        track_id,
+                        existing_state,
+                        self._episode_state(track_id),
+                        (
+                            DecisionTraceMissingReason.NO_LIVE_CLASSIFIED_TRACK
+                            if missing_score_reasons is None
+                            else missing_score_reasons.get(
+                                track_id,
+                                DecisionTraceMissingReason.NO_LIVE_CLASSIFIED_TRACK,
+                            )
+                        ),
                     )
                 )
                 continue
@@ -325,9 +345,15 @@ class FallV2DomainDecider:
         if not resampled:
             return self.policy.coast()
         probabilities = {}
+        missing_score_reasons: Mapping[int, DecisionTraceMissingReason] = {}
         for row in resampled:
             if row.valid:
                 probabilities = classifier.update(row.value, input_value.live_track_ids)
+                if isinstance(classifier, FallWindowClassifierV2):
+                    # Copy this valid call's fact immediately. Synthetic gap
+                    # calls also update the classifier, but are not the result
+                    # handed to policy for this source observation.
+                    missing_score_reasons = dict(classifier.current_call_missing_score_reasons)
                 continue
             zero_rows = dict.fromkeys(input_value.live_track_ids, (0.0,) * 56)
             classifier.update(zero_rows, input_value.live_track_ids)
@@ -337,6 +363,7 @@ class FallV2DomainDecider:
             input_value.live_track_ids,
             frame_index=input_value.frame_index,
             time_sec=0.0 if input_value.time_sec is None else input_value.time_sec,
+            missing_score_reasons=missing_score_reasons,
         )
 
     def coast(self) -> tuple[BusinessEvent, ...]:

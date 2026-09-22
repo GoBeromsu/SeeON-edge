@@ -117,6 +117,8 @@ class DecisionTraceMissingReason(StrEnum):
     ADAPTER_RETURNED_NO_DATA = "adapter-returned-no-data"
     OUTSIDE_DETECTION_WINDOW = "outside-detection-window"
     NO_LIVE_CLASSIFIED_TRACK = "no-live-classified-track"
+    CLASSIFIER_WARMUP = "classifier-warmup"
+    CLASSIFIER_STRIDE_NOT_DUE = "classifier-stride-not-due"
     BED_REGION_UNAVAILABLE = "bed-region-unavailable"
     BED_OBSERVATION_MISSING = "bed-observation-missing"
     TRACK_NO_LONGER_LIVE = "track-no-longer-live"
