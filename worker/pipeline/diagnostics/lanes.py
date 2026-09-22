@@ -15,7 +15,16 @@ RECORD_INVALID_CAUSE = "record-invalid"
 
 @dataclass(frozen=True, slots=True)
 class _LaneKey:
+    """One lane per (camera, boot, producer).
+
+    Boot is part of the key so producer_sequence restarts per boot (the
+    Backend indexes sequences per boot) and so pending loss - overflow and
+    record-invalid gaps - is attributed to the boot that suffered it, never
+    swallowed by a drain for another boot of the same camera.
+    """
+
     camera_id: str
+    worker_boot_id: str
     producer: str
 
 
@@ -51,7 +60,7 @@ class ExecutionRecordLanes:
         if not isinstance(record, WireRecord):
             return False
         with self._condition:
-            key = _LaneKey(record.camera_id, record.producer)
+            key = _LaneKey(record.camera_id, record.worker_boot_id, record.producer)
             lane = self._lanes.get(key)
             if lane is None:
                 lane = _Lane(deque())
@@ -62,12 +71,14 @@ class ExecutionRecordLanes:
             except ExecutionRecordContractError:
                 lane.next_sequence = sequence + 1
                 _note_invalid(lane, record, sequence)
+                self._condition.notify_all()
                 return False
             lane.next_sequence = sequence + 1
             if len(lane.records) >= self._capacity:
                 if lane.overflow is None:
                     lane.overflow = []
                 lane.overflow.append(queued)
+                self._condition.notify_all()
                 return False
             lane.records.append(queued)
             self._condition.notify_all()
@@ -76,17 +87,25 @@ class ExecutionRecordLanes:
     def wait_for_work(self, *, timeout_sec: float, batch_max: int) -> None:
         with self._condition:
             _ = self._condition.wait_for(
-                lambda: self._batch_ready(batch_max) or self._has_records(),
+                lambda: self._batch_ready(batch_max) or self._has_work(),
                 timeout=timeout_sec,
             )
 
     def cameras_with_work(self) -> tuple[tuple[str, str], ...]:
+        """Every (camera, boot) with queued records OR pending loss to report.
+
+        A lane holding only overflow / record-invalid gaps still has work:
+        the loss must reach the Backend even if no further valid record ever
+        arrives for that boot, otherwise the gap is hidden until it happens
+        to ride along with a later batch.
+        """
         with self._lock:
             keys: dict[tuple[str, str], None] = {}
-            for lane in self._lanes.values():
-                if lane.records:
-                    record = lane.records[0]
-                    keys[(record.camera_id, record.worker_boot_id)] = None
+            for key, lane in self._lanes.items():
+                if lane.records or lane.overflow or lane.invalid_gaps:
+                    keys[(key.camera_id, key.worker_boot_id)] = None
+            for key in self._export_failed:
+                keys[key] = None
             return tuple(keys)
 
     def queued(self) -> int:
@@ -99,23 +118,18 @@ class ExecutionRecordLanes:
         records: list[WireRecord] = []
         gaps: list[WireGap] = []
         with self._lock:
-            for lane in self._lanes.values():
+            for key, lane in self._lanes.items():
+                if key.camera_id != camera_id or key.worker_boot_id != worker_boot_id:
+                    continue
                 while lane.records and len(records) < limit:
-                    record = lane.records[0]
-                    if record.camera_id != camera_id or record.worker_boot_id != worker_boot_id:
-                        break
                     records.append(lane.records.popleft())
-                    gaps.extend(_take_overflow(lane))
-                    gaps.extend(_take_invalid(lane))
-            if not records:
-                for key, lane in self._lanes.items():
-                    if key.camera_id != camera_id:
-                        continue
-                    pending = _take_invalid(lane)
-                    if pending:
-                        gaps.extend(pending)
+                # Pending loss for this boot's lane drains with or without records.
+                gaps.extend(_take_overflow(lane))
+                gaps.extend(_take_invalid(lane))
             if records or gaps:
                 gaps.extend(self._export_failed.pop((camera_id, worker_boot_id), ()))
+            elif (camera_id, worker_boot_id) in self._export_failed:
+                gaps.extend(self._export_failed.pop((camera_id, worker_boot_id)))
         if not records and not gaps:
             return None
         return DrainedLane(camera_id, worker_boot_id, tuple(records), tuple(gaps))
@@ -128,12 +142,15 @@ class ExecutionRecordLanes:
         if not gaps:
             return
         key = (drained.camera_id, drained.worker_boot_id)
-        with self._lock:
+        with self._condition:
             pending = self._export_failed.setdefault(key, [])
             pending.extend(gaps)
+            self._condition.notify_all()
 
-    def _has_records(self) -> bool:
-        return any(lane.records for lane in self._lanes.values())
+    def _has_work(self) -> bool:
+        return bool(self._export_failed) or any(
+            lane.records or lane.overflow or lane.invalid_gaps for lane in self._lanes.values()
+        )
 
     def _batch_ready(self, batch_max: int) -> bool:
         counts: dict[tuple[str, str], int] = {}

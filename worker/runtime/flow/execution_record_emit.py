@@ -57,8 +57,10 @@ def emit_model_and_decision(
     # score from an earlier call for them; a model.score record must mean
     # "this CPU model call", so those tracks get no record here. The policy
     # snapshot still carries the missing reason.
+    # FallDomainDecider enforces that every classifier reports which live
+    # tracks it deliberately did not score on this call; read it plainly.
     not_scored: Mapping[int, object] = (
-        {} if classifier is None else getattr(classifier, "current_call_missing_score_reasons", {})
+        {} if classifier is None else classifier.current_call_missing_score_reasons
     )
     for snapshot in decision.last_trace_snapshots:
         track_id = snapshot.track_id

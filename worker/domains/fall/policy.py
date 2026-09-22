@@ -339,8 +339,18 @@ class FallDomainDecider:
         pts_ns = int(seconds * 1_000_000_000)
         self._reset_on_pts_rollback(pts_ns)
         classifier = self.classifier
-        if not hasattr(classifier, "update"):
-            raise TypeError("fall classifier is invalid")
+        if not hasattr(classifier, "update") or not hasattr(
+            classifier, "current_call_missing_score_reasons"
+        ):
+            # One contract for every classifier, real or double: it scores, and
+            # it says which live tracks it deliberately did not score on this
+            # call. Both the policy's missing-score snapshot and the model.score
+            # record depend on that fact; a classifier that cannot report it
+            # would make "score-missing" indistinguishable from "scored".
+            raise TypeError(
+                "fall classifier must provide update() and "
+                "current_call_missing_score_reasons"
+            )
         resampled = self._resample(pts_ns, rows)
         if not resampled:
             return self.policy.coast()
@@ -349,11 +359,10 @@ class FallDomainDecider:
         for row in resampled:
             if row.valid:
                 probabilities = classifier.update(row.value, input_value.live_track_ids)
-                if isinstance(classifier, FallWindowClassifier):
-                    # Copy this valid call's fact immediately. Synthetic gap
-                    # calls also update the classifier, but are not the result
-                    # handed to policy for this source observation.
-                    missing_score_reasons = dict(classifier.current_call_missing_score_reasons)
+                # Copy this valid call's fact immediately. Synthetic gap calls
+                # also update the classifier, but are not the result handed to
+                # policy for this source observation.
+                missing_score_reasons = dict(classifier.current_call_missing_score_reasons)
                 continue
             zero_rows = dict.fromkeys(input_value.live_track_ids, (0.0,) * 56)
             classifier.update(zero_rows, input_value.live_track_ids)

@@ -31,6 +31,9 @@ def _sync_preview(pump: NativePolicyPump, decider: object) -> None:
 
 
 class _ImmediateClassifier:
+    # Scores every live track on every call.
+    current_call_missing_score_reasons: dict[int, str] = {}
+
     def update(
         self, _rows: object, live_track_ids: tuple[int, ...]
     ) -> dict[int, FallProbabilities]:
@@ -38,10 +41,15 @@ class _ImmediateClassifier:
 
 
 class _SilentClassifier:
+    """Never scores: every live track is warming on every call, and says so."""
+
+    def __init__(self) -> None:
+        self.current_call_missing_score_reasons: dict[int, str] = {}
+
     def update(
         self, _rows: object, live_track_ids: tuple[int, ...]
     ) -> dict[int, FallProbabilities]:
-        del live_track_ids
+        self.current_call_missing_score_reasons = dict.fromkeys(live_track_ids, "classifier-warmup")
         return {}
 
 
