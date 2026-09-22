@@ -424,3 +424,9 @@ def test_module_definitions_are_profile_independent_and_emit_no_secrets_or_local
         not value.startswith(("/", "\\\\")) and re.match(r"[A-Za-z]:[\\/]", value) is None
         for value in _strings((flow_content["modules"], flow_content["components"]))
     )
+
+
+def test_fall_module_qualified_id_constant_matches_registry_definition() -> None:
+    from worker.domains.registry import FALL_MODULE_QUALIFIED_ID
+
+    assert DETECTION_MODULE_REGISTRY.get("fall", 2).qualified_id == FALL_MODULE_QUALIFIED_ID

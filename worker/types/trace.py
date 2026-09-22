@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import hashlib
+import json
 import math
 from collections.abc import Mapping
 from dataclasses import dataclass, field
@@ -209,6 +211,37 @@ class DecisionTraceSnapshot:
         object.__setattr__(self, "missing_values", MappingProxyType(missing))
 
 
+def decision_trace_id(
+    snapshot: DecisionTraceSnapshot,
+    *,
+    module_qualified_id: str,
+    effective_policy_id: str,
+) -> str:
+    """The one identity of a decision, shared by every surface that names it.
+
+    A relayed alert's ``audit.decision_trace_id`` and the ``policy.decision``
+    execution record must carry the same value so an engineer can hop from an
+    incident to the original-run record. Both are computed here and nowhere
+    else. The id is content-derived from the snapshot plus the module/policy
+    identity that produced it; it deliberately excludes frame pixels and any
+    per-process state so it is stable across replay of the same decision.
+    """
+    body = {
+        "module": module_qualified_id,
+        "effective_policy_id": effective_policy_id,
+        "reason": str(snapshot.reason),
+        "previous_state": str(snapshot.previous_state),
+        "current_state": str(snapshot.current_state),
+        "triggered": snapshot.triggered,
+        "track_id": snapshot.track_id,
+        "bed_id": snapshot.bed_id,
+        "values": {str(k): v for k, v in snapshot.values.items()},
+        "missing_values": {str(k): str(v) for k, v in snapshot.missing_values.items()},
+    }
+    encoded = json.dumps(body, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+    return hashlib.sha256(encoded.encode()).hexdigest()
+
+
 __all__ = [
     "TRACE_FLOAT_DECIMAL_PLACES",
     "DecisionTraceMissingReason",
@@ -218,4 +251,5 @@ __all__ = [
     "DecisionTraceValueName",
     "NumericTraceValue",
     "canonical_trace_number",
+    "decision_trace_id",
 ]
