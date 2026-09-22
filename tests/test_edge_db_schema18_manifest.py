@@ -6,11 +6,13 @@ from pathlib import Path
 import pytest
 
 from backend.app.edge_db.bootstrap import bootstrap_database
+from backend.app.edge_db.compact_schema import SCHEMA_18_STATEMENTS
 from backend.app.edge_db.compatibility import SchemaLedgerError
 from backend.app.edge_db.connection import RuntimeActor, open_runtime_database
 from backend.app.edge_db.schema18_manifest import (
     compile_schema18_manifest,
-    read_schema18_manifest,
+    compile_schema19_manifest,
+    read_schema_manifest,
 )
 
 
@@ -20,12 +22,28 @@ def _fresh(tmp_path: Path) -> Path:
     return database
 
 
-def test_compiled_schema18_manifest_matches_fresh_database(tmp_path: Path) -> None:
+def test_compiled_schema19_manifest_matches_fresh_database(tmp_path: Path) -> None:
     database = _fresh(tmp_path)
     with sqlite3.connect(database) as connection:
-        actual = read_schema18_manifest(connection)
+        actual = read_schema_manifest(connection)
+    assert actual == compile_schema19_manifest()
+    assert actual.diff(compile_schema19_manifest()) == ()
+
+
+def test_compiled_schema18_manifest_matches_schema18_only_database(tmp_path: Path) -> None:
+    database = tmp_path / "schema18.sqlite3"
+    connection = sqlite3.connect(database)
+    try:
+        connection.execute("PRAGMA foreign_keys = ON")
+        for statement in SCHEMA_18_STATEMENTS:
+            connection.execute(statement)
+        connection.commit()
+        actual = read_schema_manifest(connection)
+    finally:
+        connection.close()
     assert actual == compile_schema18_manifest()
     assert actual.diff(compile_schema18_manifest()) == ()
+    assert compile_schema18_manifest().diff(compile_schema19_manifest()) != ()
 
 
 @pytest.mark.parametrize(
@@ -124,9 +142,13 @@ def test_compiled_schema18_manifest_matches_fresh_database(tmp_path: Path) -> No
             ),
             id="schema_migrations_check_drift",
         ),
+        pytest.param(
+            lambda c: c.execute("DROP TABLE execution_coverage"),
+            id="missing_execution_table",
+        ),
     ],
 )
-def test_runtime_rejects_schema18_structural_mutations(
+def test_runtime_rejects_schema19_structural_mutations(
     tmp_path: Path,
     mutate: object,
 ) -> None:
@@ -135,5 +157,5 @@ def test_runtime_rejects_schema18_structural_mutations(
         mutate(connection)
         connection.commit()
 
-    with pytest.raises(SchemaLedgerError, match="schema 18"):
+    with pytest.raises(SchemaLedgerError, match="invalid"):
         open_runtime_database(database, actor=RuntimeActor.API)

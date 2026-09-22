@@ -178,7 +178,7 @@ def test_backend_only_sqlite_cutover_is_atomic() -> None:
 
     from backend.app.edge_db.compatibility import (  # noqa: PLC0415
         CURRENT_SCHEMA_RANGE,
-        SCHEMA_18_IDENTITY,
+        SCHEMA_19_IDENTITY,
     )
     from shared.release_identity import EDGE_DATABASE_SCHEMA_VERSION  # noqa: PLC0415
 
@@ -186,9 +186,9 @@ def test_backend_only_sqlite_cutover_is_atomic() -> None:
         CURRENT_SCHEMA_RANGE.minimum
         == CURRENT_SCHEMA_RANGE.maximum
         == EDGE_DATABASE_SCHEMA_VERSION
-        == SCHEMA_18_IDENTITY[0]
+        == SCHEMA_19_IDENTITY[0]
     ), (
-        "the backend compatibility range, shared release identity, and schema-18 "
+        "the backend compatibility range, shared release identity, and schema-19 "
         "ledger identity must identify the same schema release"
     )
 

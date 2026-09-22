@@ -19,7 +19,7 @@ def require_api_release_identity(
     urlopen: UrlOpen | None = None,
     timeout_sec: float = 5.0,
 ) -> None:
-    """Fetch the API release identity and refuse a 17/18 pair."""
+    """Fetch the API release identity and refuse a mixed schema pair."""
     opener = urllib.request.urlopen if urlopen is None else urlopen
     request = urllib.request.Request(
         f"{relay_url.rstrip('/')}/health/release-identity",

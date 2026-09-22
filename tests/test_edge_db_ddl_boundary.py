@@ -1,9 +1,9 @@
-"""Serving/runtime compatibility must validate schema 18 without the DDL owner.
+"""Serving/runtime compatibility must validate schema 19 without the DDL owner.
 
 The runtime schema check (`backend.app.edge_db.compatibility`) is reachable from
-every API process that opens the edge database. It proves the schema-18
+every API process that opens the edge database. It proves the schema-19
 structural manifest from the current-schema DDL alone and never imports the
-create-only bootstrap, which is the sole module allowed to execute DDL.
+create-or-extend bootstrap, which is the sole module allowed to execute DDL.
 """
 
 from __future__ import annotations

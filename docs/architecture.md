@@ -25,13 +25,14 @@ The backend alone owns `/var/lib/seeon-state/edge.sqlite3`; the database,
 `0700` local directory and the database is `0600`. The runtime slot has no
 database mount and never opens, migrates, or repairs a SQLite database.
 
-### Schema 18 is the sole schema; bootstrap is create-only
+### Schema 19; bootstrap creates or extends, never rewrites schema 18
 
-There is exactly one edge database schema: schema 18, the compact ten-table
-contract in `backend/app/edge_db/compact_schema_ddl.py`. The v1-v18 migration
+Schema 19 is schema 18 (the compact ten-table contract in
+`backend/app/edge_db/compact_schema_ddl.py`) plus six STRICT execution-record
+tables (`backend/app/edge_db/execution_records_ddl.py`). The v1-v18 migration
 ledger, the schema-17 to schema-18 cutover, the legacy state import, and the
-drain and inventory gates were retired (2026-08-28); nothing migrates a database
-any more.
+drain and inventory gates were retired (2026-08-28). Schema-18 tables and rows
+are never ALTER/DROP rewritten.
 
 Only the one-shot `python -m backend.app.edge_db` bootstrap
 (`backend/app/edge_db/bootstrap.py`, run by the `edge-db-migrator` compose
@@ -40,16 +41,19 @@ contract:
 
 | `edge.sqlite3` on the `edge-state` volume | Bootstrap behavior |
 | --- | --- |
-| absent or empty | create schema 18 in one transaction, record the single `schema_migrations` row, `user_version = 18`, print `EDGE_DB_BOOTSTRAP_OK ... created=true` |
-| schema 18 | verify the ledger row, the ten STRICT tables, and the structural manifest; mutate nothing; print `EDGE_DB_BOOTSTRAP_OK ... created=false` |
-| any other `user_version` | refuse with `EDGE_DB_BOOTSTRAP_FAILED` and leave the file byte-identical; there is no upgrade path |
+| absent or empty | create schema 19 in one transaction, record ledger row 19 only, `user_version = 19`, print `EDGE_DB_BOOTSTRAP_OK ... created=true extended=false` |
+| exact schema 18 | consistent backup to `<name>.schema18-backup.sqlite3`, then create the six execution tables in one transaction, ledger row 19 with `source_schema_version=18`, `user_version = 19`, print `... created=false extended=true` |
+| schema 19 | verify the ledger ends at the schema-19 identity, the sixteen STRICT tables, and the structural manifest; mutate nothing; print `... created=false extended=false` |
+| `user_version` greater than 19 | refuse with `NewerSchemaError`; leave the file unmigrated |
+| any other `user_version` | refuse with `EDGE_DB_BOOTSTRAP_FAILED`; there is no rewrite path |
 | `user_version = 0` but tables exist | refuse; never bootstrap over foreign data |
 
 The bootstrap holds the exclusive `deployment.lock` that every runtime
 connection takes shared, so it refuses while a runtime is open and runtimes
-refuse while it runs. A database that reached schema 18 through the retired
-ledger (rows 1-17 plus 18 in `schema_migrations`) is accepted: the newest row
-must be the frozen schema-18 identity and nothing may sit beyond it.
+refuse while it runs. The ledger may contain rows 1-17 plus 18 plus 19
+(upgraded deployed DB), 18 plus 19 (extended fresh-18 DB), or only 19 (fresh
+create). The newest row must be the frozen schema-19 identity and nothing may
+sit beyond it.
 
 Backend connections verify that contract on open, enable foreign keys, use WAL
 with `synchronous=FULL` and a fixed 5000 ms busy timeout, and are guarded by a
@@ -59,24 +63,30 @@ short: never hold one across hash, fsync, HTTP, or other external work.
 | Table | Sole writer |
 | --- | --- |
 | `schema_migrations` | one-shot bootstrap |
-| the nine application tables | backend API |
+| the fifteen application tables (nine compact plus six execution-record) | backend API |
 
-Schema compatibility is an explicit inclusive range, `18..18`:
+Schema compatibility is an explicit inclusive range, `19..19`:
 
 | Database version relative to binary range | Runtime behavior |
 | --- | --- |
 | below minimum (including no database) | refuse; bootstrap required |
-| 18 | open read/write with ownership guard, no DDL |
+| 19 | open read/write with ownership guard, no DDL |
 | above maximum | refuse; binary is too old |
 
 ### Image rollback preserves the state volume
 
 Rollback is binary-only and image-digest based. Pin the previous `@sha256:`
 digests in `ML_API_IMAGE` / `ML_WORKER_IMAGE`, never a mutable tag, and restart
-in the fixed order `edge-db-migrator` -> `ml-api` (healthy) -> `ml-worker`. The
-previous images must support schema 18; there is no older schema to fall back
-to. Never run `down -v`, never delete the `edge-state` volume, and never repair
-`edge.sqlite3` with direct SQL. The redeploy sequence itself is in
+in the fixed order `edge-db-migrator` -> `ml-api` (healthy) -> `ml-worker`. A
+schema-18 image refuses a schema-19 database by design. Rolling back to a
+schema-18 image after extension requires stopping the stack and restoring
+`<database name>.schema18-backup.sqlite3` over `edge.sqlite3` (remove `-wal` /
+`-shm`); that restore discards every application write made after the
+extension. There is no in-process downgrade path. Never run `down -v`, never
+delete the `edge-state` volume, and never repair `edge.sqlite3` with direct
+SQL. See
+[`docs/runbooks/edge-database-schema-19.md`](runbooks/edge-database-schema-19.md)
+and
 [`docs/runbooks/edge-redeploy-identity-continuity.md`](runbooks/edge-redeploy-identity-continuity.md).
 
 ## Layers

@@ -53,7 +53,7 @@ the sole composition root. The worker is an RTSP client only.
 | Evidence | `worker/pipeline/output/evidence/` | Smart record actor, clip publication, sealed sidecar, durable stager, delivery queue, and snapshot store. |
 | Event wire | `shared/events/` | Schemas and `edge_ingest_client.py` (events and clip receipts to the backend over relay HTTP). |
 | Dashboard | `front/src/app/App.tsx` | `AuthGate` + `Dashboard`. Pages: events, operations, settings. |
-| SQLite foundation | `backend/app/edge_db/` | Schema 18 (the only schema), the create-only bootstrap, and ownership. The backend writes the nine application tables; the bootstrap alone writes `schema_migrations`. |
+| SQLite foundation | `backend/app/edge_db/` | Schema 19 (compact ten-table plus six execution-record tables), the create-or-extend bootstrap, and ownership. The backend writes the fifteen application tables; the bootstrap alone writes `schema_migrations`. |
 
 Read the nearest scoped `AGENTS.md` before changing a package.
 

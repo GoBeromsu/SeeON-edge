@@ -49,7 +49,7 @@ HTTP schemas are Pydantic `BaseModel`, never `dataclass`. They live in the slice
 - status: `heartbeat_store`, `runtime_status_store`
 - detection_settings: `detection_settings_store`, `detection_policy_store`
 
-Connection and runtime settings load through their slice `from_env()` helpers. API writes remaining compact authorities as `RuntimeActor.API`. Do not open worker table families. `shared/sqlite_bootstrap.py` may connect; it must not import feature stores.
+Connection and runtime settings load through their slice `from_env()` helpers. API writes remaining compact authorities and the six schema-19 execution-record tables as `RuntimeActor.API`. Do not open worker table families. `shared/sqlite_bootstrap.py` may connect; it must not import feature stores.
 
 ## Focused tests
 
