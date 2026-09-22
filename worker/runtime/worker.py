@@ -1335,7 +1335,9 @@ class WorkerRuntime:
                 clip_export_enabled=self._clip_export_policy.enabled,
                 flow_sealed_sidecar_directory=self._state_dir / "flow-sealed",
                 execution_records=self._execution_record_lanes,
-                observing_boot_id=str(self._worker_boot_uuid),
+                observing_boot_id=(
+                    None if self._execution_record_lanes is None else str(self._worker_boot_uuid)
+                ),
             )
             with ClipStoreLock.acquire(self._resolved_clip_store_dir()):
                 runtime.initialize_under_lock()
