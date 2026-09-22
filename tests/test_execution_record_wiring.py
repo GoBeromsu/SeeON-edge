@@ -146,6 +146,8 @@ class _ImmediateClassifier:
     def __init__(self, fall_transition: float = 0.1) -> None:
         self._last: dict[int, FallProbabilities] = {}
         self._fall_transition = fall_transition
+        # Immediate classifier scores every live track on every call.
+        self.current_call_missing_score_reasons: dict[int, str] = {}
 
     def update(
         self, _rows: object, live_track_ids: tuple[int, ...]
