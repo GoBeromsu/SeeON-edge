@@ -23,6 +23,7 @@ CounterName: TypeAlias = Literal[
     "transform_mismatch",
     "malformed",
     "pull_failures",
+    "pts_missing",
 ]
 
 
@@ -60,7 +61,7 @@ class LatestMetadataSlot:
         self._condition = threading.Condition(self._lock)
         self._expected: dict[str, SourceBinding] = {}
         self._latest: dict[str, MetadataFrame] = {}
-        self._high_water: dict[tuple[str, int, int], tuple[int | None, int, int]] = {}
+        self._high_water: dict[tuple[str, int, int], tuple[int, int, int]] = {}
         self._counters = MetadataCounters()
         self._execution_records: ExecutionRecordSink | None = None
 
@@ -129,6 +130,15 @@ class LatestMetadataSlot:
             if mismatch is not None:
                 self._counters = _increment(counters, mismatch)
                 return False
+            if metadata.identity.source_pts is None:
+                # Production's only publisher (deepstream/metadata.py) always
+                # sets an int source_pts; a None here is a malformed/synthetic
+                # frame that must never reach the high-water logic below --
+                # a fabricated 0.0 downstream reads as a PTS rollback and
+                # wipes dwell/window state that keys off real elapsed PTS.
+                # Named honestly rather than folded into "late".
+                self._counters = _increment(counters, "pts_missing")
+                return False
             identity = (
                 metadata.identity.source_pts,
                 metadata.identity.seq,
@@ -137,19 +147,14 @@ class LatestMetadataSlot:
             binding_key = (camera_id, metadata.source_generation, metadata.identity.stream_epoch)
             high_water = self._high_water.get(binding_key)
             if high_water is not None and any(
-                current is not None and previous is not None and current <= previous
-                for current, previous in zip(identity, high_water, strict=True)
+                current <= previous for current, previous in zip(identity, high_water, strict=True)
             ):
                 self._counters = _increment(counters, "late")
                 return False
             if camera_id in self._latest:
                 counters = _increment(counters, "overwritten")
             self._latest[camera_id] = metadata
-            self._high_water[binding_key] = (
-                identity[0] if identity[0] is not None else (high_water[0] if high_water else None),
-                identity[1],
-                identity[2],
-            )
+            self._high_water[binding_key] = identity
             self._counters = _increment(counters, "accepted")
             self._condition.notify_all()
         try_emit(self._execution_records, sdk_frame_record(metadata))

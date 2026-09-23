@@ -364,3 +364,101 @@ def test_new_track_contained_in_a_different_bed_does_not_inherit_outside_dwell()
     assert PERSON_ID not in monitor._assignments  # noqa: SLF001
     assert monitor._assignments[other_id].armed is False  # noqa: SLF001
     assert monitor._assignments[other_id].outside_dwell_sec == 0.0  # noqa: SLF001
+
+
+def test_unrelated_new_track_far_away_does_not_inherit_outside_dwell() -> None:
+    """A new ID appearing elsewhere in frame must never, by itself, inherit.
+
+    Restores (correctly scoped) the negative case dropped when the
+    outside-dwell hand-off was added: a caregiver arriving at the door while
+    the resident is genuinely still outside is another live, bed-unclaimed
+    body, but it never overlaps where the resident was actually last seen.
+    Finding (independent review, PR #588): the hand-off previously picked
+    the first unclaimed, bed-unaccounted-for track with no regard for
+    position, so a caregiver merely being "the only other body in frame"
+    was enough to inherit the resident's outside-dwell progress and fire a
+    false exit. The hand-off now also requires spatial overlap with the
+    vacating track's last observed box.
+    """
+    door: Final = BoundingBox(300, 10, 360, 90, 0.9)
+    monitor = _monitor(camera_id="camera-caregiver-at-door", hold_frames=1, outside_dwell_sec=2.0)
+    assert monitor.update(_input(IN_BED, (BED,), 0)) == ()
+    assert monitor.update(_input(IN_BED, (BED,), 1, bed_pose_features=_lying_pose())) == ()
+
+    # When: PERSON_ID walks outside (armed, only halfway through
+    # outside_dwell_sec) then vanishes entirely, while an unrelated
+    # caregiver ID appears at the door -- far from where PERSON_ID was last
+    # seen and not contained in any bed.
+    assert monitor.update(_input(OUTSIDE_BED, (BED,), 2)) == ()
+    caregiver_id = 9
+    events = monitor.update(
+        DecisionInput(
+            observation=FrameObservation(
+                detections=((door,), ()),
+                regions=((BED,), ()),
+                track_ids=(caregiver_id,),
+            ),
+            frame_width=400,
+            frame_height=120,
+            live_track_ids=(caregiver_id,),
+            time_sec=3.0,
+            frame_index=3,
+            bed_region=BedRegionDebugSnapshot(source=BedRegionCacheState.FRESH),
+        )
+    )
+
+    # Then: no event, and the caregiver starts with no inherited state.
+    assert events == ()
+    assert PERSON_ID not in monitor._assignments  # noqa: SLF001
+    assert monitor._assignments[caregiver_id].armed is False  # noqa: SLF001
+    assert monitor._assignments[caregiver_id].outside_dwell_sec == 0.0  # noqa: SLF001
+
+
+def test_outside_handoff_blocked_when_the_vacated_bed_is_reoccupied() -> None:
+    """A track re-occupying the vacated bed must block any hand-off elsewhere.
+
+    Finding (independent review, PR #588): reproduced as a caregiver
+    entering at the door inheriting the resident's outside-dwell while the
+    resident is actually back in bed under a new, posture-unconfirmed ID --
+    the bed-exit alert fired anyway. Even before the reentrant track has
+    held containment long enough to arm (posture not yet confirmed this
+    frame), the bed being physically occupied again is itself proof the
+    departure never became an exit, so no one else in frame -- including an
+    unrelated caregiver at the door -- may be handed the vacating resident's
+    progress.
+    """
+    door: Final = BoundingBox(300, 10, 360, 90, 0.9)
+    monitor = _monitor(
+        camera_id="camera-reentry-blocks-handoff", hold_frames=1, outside_dwell_sec=2.0
+    )
+    assert monitor.update(_input(IN_BED, (BED,), 0)) == ()
+    assert monitor.update(_input(IN_BED, (BED,), 1, bed_pose_features=_lying_pose())) == ()
+    assert monitor.update(_input(OUTSIDE_BED, (BED,), 2)) == ()
+
+    # When: PERSON_ID vanishes mid-departure while, this same frame, a new ID
+    # re-occupies the bed (posture not yet confirmed) and an unrelated
+    # caregiver ID appears at the door.
+    reentry_id = 10
+    door_id = 11
+    events = monitor.update(
+        DecisionInput(
+            observation=FrameObservation(
+                detections=((IN_BED, door), ()),
+                regions=((BED,), ()),
+                track_ids=(reentry_id, door_id),
+            ),
+            frame_width=400,
+            frame_height=120,
+            live_track_ids=(reentry_id, door_id),
+            time_sec=3.0,
+            frame_index=3,
+            bed_region=BedRegionDebugSnapshot(source=BedRegionCacheState.FRESH),
+        )
+    )
+
+    # Then: no event, and neither new track inherits armed/outside state.
+    assert events == ()
+    assert PERSON_ID not in monitor._assignments  # noqa: SLF001
+    assert monitor._assignments[reentry_id].armed is False  # noqa: SLF001
+    assert monitor._assignments[door_id].armed is False  # noqa: SLF001
+    assert monitor._assignments[door_id].outside_dwell_sec == 0.0  # noqa: SLF001
