@@ -7,8 +7,8 @@ from uuid import UUID, uuid4
 
 import pytest
 
-from worker.domains.fall.policy_v2 import FallPolicyDeciderV2, FallV2DomainDecider
-from worker.interfaces.fall_model import FallV2Probabilities
+from worker.domains.fall.policy import FallDomainDecider, FallPolicyDecider
+from worker.interfaces.fall_model import FallProbabilities
 from worker.pipeline.decision import EventAggregator, IncidentManager
 from worker.pipeline.diagnostics.lanes import ExecutionRecordLanes
 from worker.pipeline.perception import SceneState
@@ -142,16 +142,16 @@ def _metadata(*, seq: int = 1, pts: int = 100, child: UUID | None = None) -> Met
 
 class _ImmediateClassifier:
     def __init__(self) -> None:
-        self._last: dict[int, FallV2Probabilities] = {}
+        self._last: dict[int, FallProbabilities] = {}
 
     def update(
         self, _rows: object, live_track_ids: tuple[int, ...]
-    ) -> dict[int, FallV2Probabilities]:
-        scored = {track_id: FallV2Probabilities(0.8, 0.1, 0.1) for track_id in live_track_ids}
+    ) -> dict[int, FallProbabilities]:
+        scored = {track_id: FallProbabilities(0.8, 0.1, 0.1) for track_id in live_track_ids}
         self._last = scored
         return scored
 
-    def probabilities_for(self, track_id: int) -> FallV2Probabilities | None:
+    def probabilities_for(self, track_id: int) -> FallProbabilities | None:
         return self._last.get(track_id)
 
     def generation_for(self, track_id: int) -> int:
@@ -165,9 +165,9 @@ def _pump(sink: ExecutionRecordLanes | None) -> NativePolicyPump:
     slot.register_source(binding)
     slot.set_execution_record_sink(sink)
     classifier = _ImmediateClassifier()
-    decider = FallV2DomainDecider(
+    decider = FallDomainDecider(
         classifier=classifier,
-        policy=FallPolicyDeciderV2(
+        policy=FallPolicyDecider(
             camera_id="cam-1",
             facility_id="facility-a",
             boot_id="boot-1",

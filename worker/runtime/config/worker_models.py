@@ -37,7 +37,7 @@ class FallModelConfig(BaseModel):
 
     # Issue #65: the fall-model family is config/metadata-driven, not code-pinned.
     # A brand-new AI model family (a different architecture, not a same-family
-    # weights version-up) is added by implementing FallV2ModelProtocol and
+    # weights version-up) is added by implementing FallModelProtocol and
     # registering a factory in
     # ``worker.adapters.model.fall_family_registry.DEFAULT_FALL_MODEL_FAMILY_REGISTRY``
     # under the same string used here -- no edits to this Literal, and no edits

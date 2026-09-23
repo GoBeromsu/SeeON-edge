@@ -17,22 +17,22 @@ from shared.detection_policies import FallPolicyV2, make_effective_policy
 from tests_support import episode_metric
 from tests_support.episode_metric import _id_churn_allowance, _load_rows, evaluate
 from tests_support.golden_episodes import GoldenEpisode
-from worker.interfaces.fall_model import FallV2Probabilities
+from worker.interfaces.fall_model import FallProbabilities
 
 
 @dataclass(frozen=True)
 class _FallModel:
     artifact_digest = "test-fall-model"
 
-    def predict(self, features: object) -> FallV2Probabilities:
+    def predict(self, features: object) -> FallProbabilities:
         del features
-        return FallV2Probabilities(background=1.0, fall_transition=0.0, fallen=0.0)
+        return FallProbabilities(background=1.0, fall_transition=0.0, fallen=0.0)
 
 
 class _HighFallModel(_FallModel):
-    def predict(self, features: object) -> FallV2Probabilities:
+    def predict(self, features: object) -> FallProbabilities:
         del features
-        return FallV2Probabilities(background=0.01, fall_transition=0.99, fallen=0.0)
+        return FallProbabilities(background=0.01, fall_transition=0.99, fallen=0.0)
 
 
 class _RecoveringFallModel(_FallModel):
@@ -49,12 +49,12 @@ class _RecoveringFallModel(_FallModel):
         self._clear_from = clear_from
         self._clear_until = clear_until
 
-    def predict(self, features: object) -> FallV2Probabilities:
+    def predict(self, features: object) -> FallProbabilities:
         del features
         self._calls += 1
         if self._clear_from <= self._calls <= self._clear_until:
-            return FallV2Probabilities(background=0.99, fall_transition=0.01, fallen=0.0)
-        return FallV2Probabilities(background=0.01, fall_transition=0.99, fallen=0.0)
+            return FallProbabilities(background=0.99, fall_transition=0.01, fallen=0.0)
+        return FallProbabilities(background=0.01, fall_transition=0.99, fallen=0.0)
 
 
 def _golden() -> GoldenEpisode:
@@ -204,10 +204,10 @@ def _run_cli(
 
 
 _FRAME_NS = 66_666_667
-# A V2 fall alert needs a 30-row pose+bbox56 window plus three predictions at
+# A fall alert needs a 30-row pose+bbox56 window plus three predictions at
 # stride 5 (rows 30, 35, 40): 41 contiguous 15 fps rows per onset.
 _ONSET_ROWS = 41
-# Rows without the track after an onset: past the 45-frame track TTL the V2
+# Rows without the track after an onset: past the 45-frame track TTL the
 # state is evicted, so the next appearance is a fresh episode.
 _ABSENT_ROWS = 50
 # 30 s of 15 fps frames clears the IncidentManager's admission cooldown.

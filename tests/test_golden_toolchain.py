@@ -20,9 +20,9 @@ class _NoFallModel:
 
     def predict(self, features: object) -> object:
         del features
-        from worker.interfaces.fall_model import FallV2Probabilities
+        from worker.interfaces.fall_model import FallProbabilities
 
-        return FallV2Probabilities(background=1.0, fall_transition=0.0, fallen=0.0)
+        return FallProbabilities(background=1.0, fall_transition=0.0, fallen=0.0)
 
 
 def _manifest_rows(per_event: int = 4) -> list[dict[str, object]]:
@@ -31,9 +31,7 @@ def _manifest_rows(per_event: int = 4) -> list[dict[str, object]]:
     for camera_index, camera_id in enumerate(_ROSTER):
         for event_type, horizon in (("fall", 126), ("bed-exit", 66)):
             for index in range(per_event):
-                detected_at = start + timedelta(
-                    days=camera_index, seconds=(index + 1) * horizon
-                )
+                detected_at = start + timedelta(days=camera_index, seconds=(index + 1) * horizon)
                 rows.append(
                     {
                         "camera_id": camera_id,
@@ -78,9 +76,10 @@ def _build_complete_fixture(tmp_path: Path) -> tuple[Path, Path, Path]:
     _labelled_copy(worksheet, labelled_one, "reviewer-one")
     _labelled_copy(worksheet, labelled_two, "reviewer-two")
     fixture = tmp_path / "golden.json"
-    assert golden_from_worksheet.convert(
-        [labelled_one, labelled_two], fixture, manifest, None, 5.0
-    ) == 100
+    assert (
+        golden_from_worksheet.convert([labelled_one, labelled_two], fixture, manifest, None, 5.0)
+        == 100
+    )
     return manifest, worksheet, fixture
 
 
@@ -176,9 +175,7 @@ def test_worksheet_selection_is_deterministic_and_conversion_rejects_incomplete_
         writer.writerows(rows)
 
     with pytest.raises(ValueError, match="must contain labelled rows"):
-        golden_from_worksheet.convert(
-            [incomplete], tmp_path / "golden.json", manifest, None, 5.0
-        )
+        golden_from_worksheet.convert([incomplete], tmp_path / "golden.json", manifest, None, 5.0)
 
     malformed = tmp_path / "malformed.csv"
     _labelled_copy(first, malformed, "reviewer-one")
@@ -192,6 +189,4 @@ def test_worksheet_selection_is_deterministic_and_conversion_rejects_incomplete_
         writer.writerows(rows)
 
     with pytest.raises(ValueError, match="must contain labelled rows"):
-        golden_from_worksheet.convert(
-            [malformed], tmp_path / "golden.json", manifest, None, 5.0
-        )
+        golden_from_worksheet.convert([malformed], tmp_path / "golden.json", manifest, None, 5.0)

@@ -7,7 +7,7 @@ import pytest
 
 from contracts.replay_trace import decode_document
 from shared.detection_policies import BedExitPolicyV1, FallPolicyV2, make_effective_policy
-from worker.domains.fall import FallV2Probabilities
+from worker.domains.fall import FallProbabilities
 from worker.pipeline.trace.models import TraceTruncation
 from worker.replay.comparison import MismatchReason, compare_runs
 from worker.replay.engine import ReplayConfigurationError, replay, replay_camera
@@ -40,8 +40,8 @@ def _bed_policy(containment: float = 0.5):
 
 
 class _FallModel:
-    def predict(self, _: tuple[tuple[float, ...], ...]) -> FallV2Probabilities:
-        return FallV2Probabilities(0.1, 0.8, 0.1)
+    def predict(self, _: tuple[tuple[float, ...], ...]) -> FallProbabilities:
+        return FallProbabilities(0.1, 0.8, 0.1)
 
 
 def _fall_rows():

@@ -6,12 +6,12 @@ from collections.abc import Callable
 from typing import Final, Protocol, TypeAlias
 
 from contracts.runner import RunnerProtocol
-from worker.interfaces.fall_model import FallV2ModelProtocol
+from worker.interfaces.fall_model import FallModelProtocol
 
 ModelOption: TypeAlias = str | int | float | bool | None
 
 
-class FallModel(FallV2ModelProtocol, Protocol):
+class FallModel(FallModelProtocol, Protocol):
     def warmup(self) -> None: ...
 
 

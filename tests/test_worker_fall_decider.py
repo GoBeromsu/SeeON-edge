@@ -1,9 +1,9 @@
 from __future__ import annotations
 
 from shared.detection_policies import FallPolicyV2
-from worker.domains.fall.policy_v2 import FallPolicyDeciderV2
+from worker.domains.fall.policy import FallPolicyDecider
 from worker.domains.fall.pose_bbox56 import pose_bbox56_row
-from worker.interfaces.fall_model import FallV2Probabilities
+from worker.interfaces.fall_model import FallProbabilities
 
 _CAMERA_ID = "camera-fall"
 _FACILITY_ID = "facility-fall"
@@ -27,8 +27,8 @@ def _policy(**overrides: object) -> FallPolicyV2:
     return FallPolicyV2(**values)
 
 
-def _decider(policy: FallPolicyV2 | None = None) -> FallPolicyDeciderV2:
-    return FallPolicyDeciderV2(
+def _decider(policy: FallPolicyV2 | None = None) -> FallPolicyDecider:
+    return FallPolicyDecider(
         camera_id=_CAMERA_ID,
         facility_id=_FACILITY_ID,
         boot_id=_BOOT_ID,
@@ -40,7 +40,7 @@ def _decider(policy: FallPolicyV2 | None = None) -> FallPolicyDeciderV2:
 
 def test_transition_votes_emit_one_rising_edge_at_default_threshold() -> None:
     decider = _decider()
-    transition = FallV2Probabilities(0.5, 0.5, 0.0)
+    transition = FallProbabilities(0.5, 0.5, 0.0)
 
     # The first qualifying frame is the first vote (plan G7: CANDIDATE on the
     # first qualifying proposal, OPEN after transition_votes), so a 2-of-2
@@ -57,8 +57,8 @@ def test_transition_votes_emit_one_rising_edge_at_default_threshold() -> None:
 
 def test_fallen_state_recovers_only_after_configured_safe_streak() -> None:
     decider = _decider()
-    fallen = FallV2Probabilities(0.05, 0.9, 0.9)
-    safe = FallV2Probabilities(0.9, 0.1, 0.1)
+    fallen = FallProbabilities(0.05, 0.9, 0.9)
+    safe = FallProbabilities(0.9, 0.1, 0.1)
 
     decider.update({4: fallen}, (4,), frame_index=1, time_sec=1.0)
     decider.update({4: fallen}, (4,), frame_index=2, time_sec=2.0)
@@ -71,8 +71,8 @@ def test_fallen_state_recovers_only_after_configured_safe_streak() -> None:
 
 def test_confirmed_recovery_rearms_the_shared_episode_authority() -> None:
     decider = _decider(_policy(transition_votes=1, transition_window=1))
-    transition = FallV2Probabilities(0.5, 0.5, 0.0)
-    safe = FallV2Probabilities(0.9, 0.1, 0.1)
+    transition = FallProbabilities(0.5, 0.5, 0.0)
+    safe = FallProbabilities(0.9, 0.1, 0.1)
 
     # A 1-of-1 policy opens on the first qualifying frame; the episode then
     # stays silent until a confirmed recovery (2 consecutive clear scores)
