@@ -43,6 +43,9 @@ class _TraceResult:
 
 
 class _ImmediateClassifier:
+    # Scores every live track on every call, so no track is ever "not scored".
+    current_call_missing_score_reasons: dict[int, str] = {}
+
     def update(
         self, _rows: object, live_track_ids: tuple[int, ...]
     ) -> dict[int, FallProbabilities]:

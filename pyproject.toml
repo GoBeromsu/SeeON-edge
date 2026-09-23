@@ -215,14 +215,14 @@ modules = ["backend", "worker"]
 
 [[tool.importlinter.contracts]]
 # The create-only bootstrap is the sole module that executes DDL. Runtime
-# packages open an already-bootstrapped schema-18 database and never reach it.
+# packages open an already-bootstrapped schema-19 database and never reach it.
 name = "runtime packages cannot import edge database DDL"
 type = "forbidden"
 source_modules = ["backend", "worker"]
 forbidden_modules = ["backend.app.edge_db.bootstrap"]
 
 [[tool.importlinter.contracts]]
-# Serving/runtime schema-compatibility validates the schema-18 structural
+# Serving/runtime schema-compatibility validates the schema-19 structural
 # manifest from current-schema DDL alone. The broad contract above uses the
 # whole `backend` package as source, which does not catch intra-edge_db chains;
 # this one pins the exact serving leaf.
