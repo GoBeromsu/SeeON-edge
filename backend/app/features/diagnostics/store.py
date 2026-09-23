@@ -26,7 +26,7 @@ from backend.app.features.diagnostics.records import (
     StorageState,
     canonical_json,
 )
-from backend.app.features.diagnostics.retention import RetentionBudget, enforce_budget
+from backend.app.features.diagnostics.retention import RetentionBudget, UsageMeter, enforce_budget
 
 ConnectionFactory = Callable[[], sqlite3.Connection]
 
@@ -68,6 +68,7 @@ class ExecutionRecordStore:
         self._connect = connection_factory
         self.budget = budget
         self._clock = clock
+        self._meter = UsageMeter()
 
     def ingest_batch(self, batch: IngestBatch) -> BatchReceipt:
         now_ns = self._clock()
@@ -105,6 +106,7 @@ class ExecutionRecordStore:
         connection.execute("SAVEPOINT ingest")
         provenance_id = upsert_provenance(connection, batch.provenance, now_ns)
         accepted = 0
+        written_bytes = 0
         duplicates = 0
         rejected: list[tuple[str, str]] = []
         epoch_ns = _batch_epoch(batch, now_ns)
@@ -142,6 +144,7 @@ class ExecutionRecordStore:
             )
             if disposition is None:
                 accepted += 1
+                written_bytes += payload_bytes
             elif disposition == "duplicate":
                 duplicates += 1
             else:
@@ -176,7 +179,8 @@ class ExecutionRecordStore:
         # before the budget is enforced; otherwise every commit lands a few
         # hundred bytes over the line it was just checked against.
         _write_batch_row(connection, batch, receipt, now_ns)
-        if not enforce_budget(connection, self.budget, now_ns):
+        self._meter.accrue(written_bytes)
+        if not enforce_budget(connection, self.budget, now_ns, meter=self._meter):
             connection.execute("ROLLBACK TO ingest")
             insert_coverage(
                 connection,
