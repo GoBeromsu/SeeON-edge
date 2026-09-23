@@ -54,6 +54,7 @@ from worker.domains.fall.pose_bbox56 import (
     COCO17_KEYPOINT_ORDER,
     POSE_BBOX56_CONFIDENCE_GATE,
 )
+from worker.domains.registry import FALL_MODULE_QUALIFIED_ID
 from worker.domains.tracker import GreedyIouTracker
 from worker.interfaces.clip_analysis import ClipAnalysisDisabledError
 from worker.interfaces.clip_analysis import ClipAnalysisSupervisor as ClipAnalysisControl
@@ -109,6 +110,7 @@ from worker.runtime.flow.media_plane import (
     FlowMediaPlaneConfig,
 )
 from worker.runtime.flow.policy_pump import (
+    DecisionIdentity,
     NativePolicyContext,
     NativePolicyPump,
 )
@@ -405,6 +407,21 @@ class _WindowGatedDecider:
                 self.decider.last_trace_snapshots,
             )
         return events
+
+
+def _fall_decision_identity(config: WorkerConfig) -> DecisionIdentity | None:
+    """Identity every fall decision is stamped with (alert audit + policy.decision).
+
+    None only when no effective fall policy is configured, in which case the
+    fall module is not composed either.
+    """
+    policy = config.detection_policies.defaults.get("fall")
+    if policy is None:
+        return None
+    return DecisionIdentity(
+        module_qualified_id=FALL_MODULE_QUALIFIED_ID,
+        effective_policy_id=str(policy.effective_policy_id),
+    )
 
 
 def _absorbed_track_id_switch_total(decision: EventAggregator) -> int:
@@ -1607,6 +1624,7 @@ class WorkerRuntime:
                 ),
                 track_id_switch_absorbed_total=_absorbed_track_id_switch_total,
                 execution_records=self._execution_record_lanes,
+                decision_identity=_fall_decision_identity(self.config),
             ),
         )
         self._native_policy_pumps_by_camera[camera.camera_id] = pump

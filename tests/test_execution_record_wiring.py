@@ -17,7 +17,11 @@ from worker.runtime.config.execution_records import execution_records_settings_f
 from worker.runtime.execution_records import compose_execution_records
 from worker.runtime.flow.execution_record_emit import emit_policy_consume
 from worker.runtime.flow.metadata_slot import LatestMetadataSlot
-from worker.runtime.flow.policy_pump import NativePolicyContext, NativePolicyPump
+from worker.runtime.flow.policy_pump import (
+    DecisionIdentity,
+    NativePolicyContext,
+    NativePolicyPump,
+)
 from worker.types.metadata import (
     MetadataCounters,
     MetadataFrame,
@@ -141,13 +145,15 @@ def _metadata(*, seq: int = 1, pts: int = 100, child: UUID | None = None) -> Met
 
 
 class _ImmediateClassifier:
-    def __init__(self) -> None:
+    def __init__(self, fall_transition: float = 0.1) -> None:
         self._last: dict[int, FallProbabilities] = {}
+        self._fall_transition = fall_transition
 
     def update(
         self, _rows: object, live_track_ids: tuple[int, ...]
     ) -> dict[int, FallProbabilities]:
-        scored = {track_id: FallProbabilities(0.8, 0.1, 0.1) for track_id in live_track_ids}
+        p = self._fall_transition
+        scored = {track_id: FallProbabilities(1.0 - p, p, 0.0) for track_id in live_track_ids}
         self._last = scored
         return scored
 
@@ -159,12 +165,18 @@ class _ImmediateClassifier:
         return 0
 
 
-def _pump(sink: ExecutionRecordLanes | None) -> NativePolicyPump:
+def _pump(
+    sink: ExecutionRecordLanes | None,
+    *,
+    identity: DecisionIdentity | None = None,
+    emitted: list[object] | None = None,
+    fall_transition: float = 0.1,
+) -> NativePolicyPump:
     binding = SourceBinding("boot-1", str(uuid4()), "cam-1", 1, 3, "transform-a")
     slot = LatestMetadataSlot()
     slot.register_source(binding)
     slot.set_execution_record_sink(sink)
-    classifier = _ImmediateClassifier()
+    classifier = _ImmediateClassifier(fall_transition)
     decider = FallDomainDecider(
         classifier=classifier,
         policy=FallPolicyDecider(
@@ -212,7 +224,9 @@ def _pump(sink: ExecutionRecordLanes | None) -> NativePolicyPump:
 
     class _Sink:
         def emit_for_frame(self, event: object, trigger: object) -> None:
-            del event, trigger
+            del trigger
+            if emitted is not None:
+                emitted.append(event)
 
     class _Attacher:
         def attach_native(self, event: object, snapshot: object) -> object:
@@ -232,6 +246,7 @@ def _pump(sink: ExecutionRecordLanes | None) -> NativePolicyPump:
             1,
             track_id_switch_absorbed_total=lambda _decision: 0,
             execution_records=sink,
+            decision_identity=identity,
         ),
     )
     pump._slot = slot  # noqa: SLF001
@@ -277,3 +292,57 @@ def test_policy_invariance_with_sink_on_and_off() -> None:
     on_pump._process(on_metadata)  # noqa: SLF001
     assert off_pump._decision.last_trace_snapshots == on_pump._decision.last_trace_snapshots  # noqa: SLF001
     assert on_lanes.queued() > 0
+
+
+def test_alert_audit_and_policy_decision_record_share_one_decision_trace_id() -> None:
+    from worker.domains.registry import FALL_MODULE_QUALIFIED_ID
+    from worker.types.trace import decision_trace_id
+
+    identity = DecisionIdentity(
+        module_qualified_id=FALL_MODULE_QUALIFIED_ID,
+        effective_policy_id="a" * 64,
+    )
+    lanes = ExecutionRecordLanes(lane_capacity=32)
+    emitted: list[object] = []
+    pump = _pump(lanes, identity=identity, emitted=emitted, fall_transition=0.9)
+    # transition_votes=3 within transition_window=5: three scored frames trigger.
+    for seq in range(3):
+        # ~15 fps PTS spacing so the resampler sees three distinct rows.
+        pump._process(  # noqa: SLF001
+            _metadata(child=pump._child, seq=seq, pts=100 + seq * 66_666_667)  # noqa: SLF001
+        )
+
+    drained = lanes.drain_for("cam-1", "boot-1", limit=64)
+    assert drained is not None
+    decisions = [r for r in drained.records if r.record_kind == "policy.decision"]
+    assert decisions
+    triggered = [r for r in decisions if r.payload["triggered"] is True]
+    assert triggered, "the immediate classifier must trigger a fall in this fixture"
+    (record,) = triggered
+    assert emitted, "a triggered decision must emit an alert"
+    (event,) = emitted
+    audit = event.audit  # type: ignore[attr-defined]
+    assert audit is not None
+    assert audit["decision_trace_id"] == record.payload["decision_trace_id"]
+    # and both equal the single-source function over the triggering snapshot
+    snapshot = next(
+        s
+        for s in pump._decision.last_trace_snapshots  # noqa: SLF001
+        if s.triggered and s.track_id == event.person_id  # type: ignore[attr-defined]
+    )
+    assert audit["decision_trace_id"] == decision_trace_id(
+        snapshot,
+        module_qualified_id=FALL_MODULE_QUALIFIED_ID,
+        effective_policy_id="a" * 64,
+    )
+
+
+def test_policy_decision_record_carries_no_trace_id_without_identity() -> None:
+    lanes = ExecutionRecordLanes(lane_capacity=32)
+    pump = _pump(lanes, identity=None)
+    pump._process(_metadata(child=pump._child))  # noqa: SLF001
+    drained = lanes.drain_for("cam-1", "boot-1", limit=64)
+    assert drained is not None
+    for record in drained.records:
+        if record.record_kind == "policy.decision":
+            assert record.payload["decision_trace_id"] is None

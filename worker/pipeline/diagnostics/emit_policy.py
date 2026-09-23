@@ -137,6 +137,7 @@ def policy_decision_record(
     frame_seq: int,
     source_pts_ns: int | None,
     generation: int | None,
+    decision_trace_id: str | None = None,
     observed_at_ns: int | None = None,
 ) -> WireRecord | None:
     track_id = 0 if snapshot.track_id is None else snapshot.track_id
@@ -163,6 +164,9 @@ def policy_decision_record(
             "bed_id": snapshot.bed_id,
             "values": dict(snapshot.values),
             "missing_values": dict(snapshot.missing_values),
+            # Same id the relayed alert carries in audit.decision_trace_id;
+            # None when the pump had no decision identity to attribute to.
+            "decision_trace_id": decision_trace_id,
         },
         frame_seq=frame_seq,
         source_pts_ns=source_pts_ns,
