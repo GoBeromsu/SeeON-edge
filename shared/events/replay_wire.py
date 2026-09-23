@@ -65,9 +65,8 @@ def decode_replay_trace(payload: object) -> ReplayTrace:
 
 
 #: Frames a single camera may retain in one replay request. This is the replay
-#: wire's own bound; the worker-side trace writer that once mirrored it is gone.
-#: Declared here because both the worker sender and the backend receiver must
-#: agree, and neither may import the other.
+#: wire's own bound. Declared here because both the worker sender and the
+#: backend receiver must agree, and neither may import the other.
 MAX_TRACE_FRAMES: Final = 3_000
 
 #: Measured upper bound for one serialized frame. A frame carrying two persons

@@ -455,7 +455,7 @@ def _update_fall(
     )
 
 
-def test_g11_5_fall_recovery_is_not_labelled_suppression() -> None:
+def test_g11_5_new_onset_after_recovery_is_emitted_and_not_suppressed() -> None:
     """After onset, 0.9 is episode-already-open; five clears re-arm a new onset."""
     decider = FallPolicyDecider(
         camera_id=_CAMERA,

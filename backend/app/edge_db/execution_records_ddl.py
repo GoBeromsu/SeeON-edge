@@ -29,14 +29,11 @@ EXECUTION_RECORD_TABLES: Final = frozenset(
 
 EXECUTION_RECORD_KINDS: Final = (
     "sdk.frame",
-    "cpu.projection",
-    "handoff.slot",
     "policy.consume",
     "model.score",
     "policy.decision",
     "event.delivery",
     "backend.acceptance",
-    "coverage.gap",
 )
 
 SEGMENT_STORAGE_STATES: Final = ("OPEN", "SEALED_PENDING", "SEALED_FINAL", "PRUNED_SUMMARY")

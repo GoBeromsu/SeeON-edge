@@ -43,8 +43,6 @@ Two producers share the kind and join on `causal_unit_id == edge_event_id`:
   `refused-retained` (PERMANENT 4xx kept in the dead-letter directory),
   `refused-retention-full` (PERMANENT 4xx, retention area full, still queued),
   `exhausted-retained`, `exhausted-retention-full`,
-  `operator-blocked` (`CAMERA_MAPPING_MISSING`; `run_once` applies that wait
-  only to CLIP entries, so EVENT never takes this outcome today),
   `ack-removal-deferred` (delivered but `queue.acknowledge` failed).
 
 These sender outcomes are the sender's own dispositions, not Hub acceptance.
@@ -56,8 +54,7 @@ Focused tests also include `tests/test_execution_record_delivery.py`,
 `tests/test_observability_end_to_end.py`.
 
 `producer_sequence` is assigned by the lane. `causal_unit_id` for sdk records
-uses `seq // FALL_WINDOW_FRAMES` (imported from `worker.domains.fall.classifier`, the deployed 30-frame window) as a pre-Gate-R frame bucket; no `cpu.projection` producer
-exists yet. Fall units use explicit `NO_TRACK` / `NO_GENERATION` tokens when
+uses `seq // FALL_WINDOW_FRAMES` (imported from `worker.domains.fall.classifier`, the deployed 30-frame window) as a pre-Gate-R frame bucket; `cpu.projection`, `handoff.slot`, and `coverage.gap` do not exist. Fall units use explicit `NO_TRACK` / `NO_GENERATION` tokens when
 track or generation is absent.
 
 Seam default is `None` (feature off). No stub sink.

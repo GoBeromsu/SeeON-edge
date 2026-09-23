@@ -116,12 +116,8 @@ class EventAggregator:
 
     def identity_for(self, decider: Decider) -> DecisionIdentity | None:
         """Identity of ``decider`` (or of the wrapper that holds it), else None."""
-        identities = self.identities or (None,) * len(self.deciders)
-        target = unwrap_decider(decider)
-        for candidate, identity in zip(self.deciders, identities, strict=True):
-            if candidate is decider or unwrap_decider(candidate) is target:
-                return identity
-        return None
+        index = self.index_of(decider)
+        return None if index is None else (self.identities or (None,) * len(self.deciders))[index]
 
     def update(self, input_value: DecisionInput) -> tuple[BusinessEvent, ...]:
         produced: list[tuple[BusinessEvent, Decider]] = [

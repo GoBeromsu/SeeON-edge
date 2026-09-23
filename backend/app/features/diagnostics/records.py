@@ -31,14 +31,11 @@ _PROVENANCE_FIELDS: Final = (
 
 class RecordKind(StrEnum):
     SDK_FRAME = "sdk.frame"
-    CPU_PROJECTION = "cpu.projection"
-    HANDOFF_SLOT = "handoff.slot"
     POLICY_CONSUME = "policy.consume"
     MODEL_SCORE = "model.score"
     POLICY_DECISION = "policy.decision"
     EVENT_DELIVERY = "event.delivery"
     BACKEND_ACCEPTANCE = "backend.acceptance"
-    COVERAGE_GAP = "coverage.gap"
 
 
 class CoverageKind(StrEnum):
