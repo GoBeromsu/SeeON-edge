@@ -1,0 +1,395 @@
+"""Retention, prune, coarsening, and capacity receipts for execution records."""
+
+from __future__ import annotations
+
+import hashlib
+from pathlib import Path
+
+import pytest
+
+from backend.app.edge_db.bootstrap import bootstrap_database
+from backend.app.edge_db.connection import RuntimeActor, open_runtime_database
+from backend.app.features.diagnostics.coverage import insert_coverage
+from backend.app.features.diagnostics.records import (
+    CoverageKind,
+    ExecutionRecordInput,
+    IngestBatch,
+    Provenance,
+    RecordKind,
+    SegmentStorageState,
+    StorageState,
+    UnitCausalState,
+)
+from backend.app.features.diagnostics.retention import RetentionBudget, logical_bytes
+from backend.app.features.diagnostics.store import ExecutionRecordStore
+from backend.app.features.diagnostics.terminals import refresh_unit_terminals
+
+CAMERA = "cam-a"
+BOOT = "boot-1"
+HORIZON = 1_000
+PROVENANCE = Provenance(
+    worker_build_revision="worker-rev",
+    worker_image_digest="sha256:worker",
+    model_digest="sha256:model",
+    calibration_digest="sha256:cal",
+    preprocessing_identity="pre-v1",
+    config_digest="sha256:cfg",
+    policy_identity="policy-v1",
+    backend_build_revision="backend-rev",
+)
+
+
+class _Clock:
+    def __init__(self, now: int = 1) -> None:
+        self.now = now
+
+    def __call__(self) -> int:
+        current = self.now
+        self.now += 1
+        return current
+
+
+def _hex(label: str) -> str:
+    return hashlib.sha256(label.encode()).hexdigest()
+
+
+def _open(path: Path):
+    return open_runtime_database(path, actor=RuntimeActor.API)
+
+
+def _store(tmp_path: Path, budget: RetentionBudget) -> tuple[ExecutionRecordStore, Path]:
+    path = tmp_path / "edge-state" / "edge.sqlite3"
+    bootstrap_database(path)
+    store = ExecutionRecordStore(lambda: _open(path), budget, clock=_Clock())
+    return store, path
+
+
+def _record(
+    *,
+    label: str,
+    unit: str,
+    seq: int,
+    observed: int,
+    payload: str,
+    boot: str = BOOT,
+    generation: int = 0,
+    epoch: int = 0,
+    producer: str = "sdk",
+) -> ExecutionRecordInput:
+    return ExecutionRecordInput(
+        record_id=_hex(label),
+        record_kind=RecordKind.SDK_FRAME,
+        camera_id=CAMERA,
+        worker_boot_id=boot,
+        source_generation=generation,
+        stream_epoch=epoch,
+        producer=producer,
+        producer_sequence=seq,
+        observed_at_ns=observed,
+        time_quality="trusted",
+        causal_unit_id=unit,
+        outcome="ok",
+        payload={"blob": payload},
+    )
+
+
+def _batch(
+    label: str, records: tuple[ExecutionRecordInput, ...], *, boot: str = BOOT
+) -> IngestBatch:
+    return IngestBatch(
+        batch_id=_hex(label),
+        camera_id=CAMERA,
+        worker_boot_id=boot,
+        provenance=PROVENANCE,
+        records=records,
+    )
+
+
+def test_budget_requires_explicit_total_bytes() -> None:
+    with pytest.raises(ValueError, match="total_bytes"):
+        RetentionBudget(total_bytes=255)
+    budget = RetentionBudget(total_bytes=256)
+    assert budget.max_record_bytes == 1
+    assert budget.segment_bytes == 4
+    assert budget.control_reserve == 16
+    assert budget.high_water == 240
+    assert budget.low_water == 210
+    assert budget.coverage_rows_per_epoch == 512
+    assert budget.unit_horizon_ns == 60_000_000_000
+
+
+def test_segment_seals_at_segment_bytes(tmp_path: Path) -> None:
+    budget = RetentionBudget(total_bytes=16384, unit_horizon_ns=HORIZON)
+    store, path = _store(tmp_path, budget)
+    # max_record_bytes is segment_bytes / 4 by design, so one segment always
+    # holds at least four admitted records; eight ~41 B records (JSON-wrapped
+    # 30-char blob) must therefore spill from a sealed segment into a new OPEN one.
+    blob = "x" * 30
+    store.ingest_batch(
+        _batch(
+            "s1",
+            tuple(
+                _record(label=f"r{index}", unit="u1", seq=index, observed=10 + index, payload=blob)
+                for index in range(8)
+            ),
+        )
+    )
+    connection = _open(path)
+    try:
+        rows = connection.execute(
+            "SELECT storage_state, record_count, payload_bytes FROM execution_segments "
+            "ORDER BY segment_ordinal"
+        ).fetchall()
+    finally:
+        connection.close()
+    states = [str(row[0]) for row in rows]
+    assert states[0] == SegmentStorageState.SEALED_PENDING
+    assert states[-1] == SegmentStorageState.OPEN
+    assert len(rows) >= 2
+    assert all(int(row[2]) <= budget.segment_bytes for row in rows)
+    assert sum(int(row[1]) for row in rows) == 8
+
+
+def test_unit_terminal_horizon_complete_and_known_gap(tmp_path: Path) -> None:
+    budget = RetentionBudget(total_bytes=2**20, unit_horizon_ns=HORIZON)
+    store, path = _store(tmp_path, budget)
+    store.ingest_batch(
+        _batch("u1", (_record(label="early", unit="early", seq=0, observed=10, payload="a"),))
+    )
+    store.ingest_batch(
+        _batch(
+            "u2",
+            (_record(label="late", unit="late", seq=1, observed=10 + HORIZON + 1, payload="b"),),
+        )
+    )
+    connection = _open(path)
+    try:
+        row = connection.execute(
+            "SELECT terminal, causal_state FROM execution_units WHERE causal_unit_id = ?",
+            ("early",),
+        ).fetchone()
+        assert row == (1, UnitCausalState.COMPLETE)
+        insert_coverage(
+            connection,
+            camera_id=CAMERA,
+            worker_boot_id=BOOT,
+            source_generation=0,
+            stream_epoch=0,
+            kind=CoverageKind.MISSING_NOT_RECORDED,
+            producer="sdk",
+            from_sequence=0,
+            to_sequence=0,
+            from_ns=10,
+            to_ns=10,
+            record_count=1,
+            exact=True,
+            cause="drop",
+            recorded_at_ns=1,
+        )
+        connection.execute(
+            "UPDATE execution_units SET terminal = 0, causal_state = ? WHERE causal_unit_id = ?",
+            (str(UnitCausalState.INCOMPLETE_UNKNOWN), "early"),
+        )
+        refresh_unit_terminals(connection, HORIZON)
+        known = connection.execute(
+            "SELECT terminal, causal_state FROM execution_units WHERE causal_unit_id = ?",
+            ("early",),
+        ).fetchone()
+    finally:
+        connection.close()
+    assert known == (1, UnitCausalState.INCOMPLETE_KNOWN)
+
+
+def test_unit_terminal_by_newer_epoch(tmp_path: Path) -> None:
+    budget = RetentionBudget(total_bytes=2**20, unit_horizon_ns=HORIZON)
+    store, path = _store(tmp_path, budget)
+    store.ingest_batch(
+        _batch("old", (_record(label="old", unit="old-u", seq=0, observed=10, payload="a"),))
+    )
+    store.ingest_batch(
+        _batch(
+            "new",
+            (_record(label="new", unit="new-u", seq=0, observed=11, payload="b", epoch=1),),
+        )
+    )
+    connection = _open(path)
+    try:
+        row = connection.execute(
+            "SELECT terminal, causal_state FROM execution_units WHERE causal_unit_id = ?",
+            ("old-u",),
+        ).fetchone()
+    finally:
+        connection.close()
+    assert row == (1, UnitCausalState.INCOMPLETE_UNKNOWN)
+
+
+def test_prune_removes_whole_units_across_two_segments(tmp_path: Path) -> None:
+    budget = RetentionBudget(total_bytes=16384, unit_horizon_ns=HORIZON)
+    store, path = _store(tmp_path, budget)
+    # 316 records (~41 B each) over many 256 B segments plus their control rows
+    # exceed high_water (15360); the terminal "old" unit must be pruned
+    # coherently even though its records straddle segments.
+    blob = "x" * 30
+    old_records = tuple(
+        _record(
+            label=f"o{index}",
+            unit="old",
+            seq=index,
+            observed=10 + index,
+            payload=blob,
+            producer="sdk" if index % 2 == 0 else "cpu",
+        )
+        for index in range(16)
+    )
+    store.ingest_batch(_batch("old", old_records))
+    keep_records = tuple(
+        _record(
+            label=f"k{index}",
+            unit="keep",
+            seq=index,
+            observed=10 + HORIZON + 5 + index,
+            payload=blob,
+        )
+        for index in range(300)
+    )
+    store.ingest_batch(_batch("keep", keep_records))
+    connection = _open(path)
+    try:
+        units = {
+            str(row[0])
+            for row in connection.execute("SELECT causal_unit_id FROM execution_units").fetchall()
+        }
+        leftover = connection.execute(
+            "SELECT COUNT(*) FROM execution_records WHERE causal_unit_id = 'old'"
+        ).fetchone()
+        deleted = connection.execute(
+            """
+            SELECT producer, from_sequence, to_sequence, exact, coverage_kind
+            FROM execution_coverage WHERE coverage_kind = ?
+            ORDER BY producer
+            """,
+            (str(CoverageKind.DELETED_BY_CAPACITY),),
+        ).fetchall()
+        segments = connection.execute(
+            "SELECT storage_state, record_count FROM execution_segments ORDER BY segment_ordinal"
+        ).fetchall()
+        assert logical_bytes(connection) <= budget.low_water or "old" not in units
+    finally:
+        connection.close()
+    assert "old" not in units
+    assert leftover == (0,)
+    assert deleted
+    assert all(int(row[3]) == 1 for row in deleted)
+    assert all(str(row[4]) == CoverageKind.DELETED_BY_CAPACITY for row in deleted)
+    assert any(
+        int(row[1]) > 0 or str(row[0]) == SegmentStorageState.PRUNED_SUMMARY for row in segments
+    )
+
+
+def test_forced_terminal_when_nothing_terminal(tmp_path: Path) -> None:
+    budget = RetentionBudget(total_bytes=16384, unit_horizon_ns=HORIZON)
+    store, path = _store(tmp_path, budget)
+    blob = "y"
+    for index in range(80):
+        store.ingest_batch(
+            _batch(
+                f"u{index}",
+                (
+                    _record(
+                        label=f"r{index}",
+                        unit=f"live-{index}",
+                        seq=index,
+                        observed=10 + index,
+                        payload=blob,
+                    ),
+                ),
+            )
+        )
+    connection = _open(path)
+    try:
+        remaining = {
+            str(row[0])
+            for row in connection.execute("SELECT causal_unit_id FROM execution_units").fetchall()
+        }
+        kinds = {
+            str(row[0])
+            for row in connection.execute("SELECT coverage_kind FROM execution_coverage").fetchall()
+        }
+        assert logical_bytes(connection) <= budget.high_water
+    finally:
+        connection.close()
+    assert "live-0" not in remaining
+    assert CoverageKind.DELETED_BY_CAPACITY in kinds
+
+
+def test_storage_unavailable_when_control_envelope_cannot_fit(tmp_path: Path) -> None:
+    budget = RetentionBudget(total_bytes=256, unit_horizon_ns=HORIZON)
+    store, path = _store(tmp_path, budget)
+    receipt = store.ingest_batch(
+        _batch("tiny", (_record(label="r", unit="u", seq=0, observed=1, payload="x"),))
+    )
+    assert receipt.storage_state is StorageState.STORAGE_UNAVAILABLE
+    assert receipt.accepted == 0
+    connection = _open(path)
+    try:
+        records = connection.execute("SELECT COUNT(*) FROM execution_records").fetchone()
+        kinds = {
+            str(row[0])
+            for row in connection.execute("SELECT coverage_kind FROM execution_coverage").fetchall()
+        }
+        batches = connection.execute("SELECT COUNT(*) FROM execution_batches").fetchone()
+    finally:
+        connection.close()
+    assert records == (0,)
+    assert CoverageKind.STORAGE_UNAVAILABLE in kinds
+    assert batches == (1,)
+
+
+def test_coarsening_yields_unknown_without_widening_exact_rows(tmp_path: Path) -> None:
+    budget = RetentionBudget(total_bytes=2**20, unit_horizon_ns=HORIZON, coverage_rows_per_epoch=3)
+    store, path = _store(tmp_path, budget)
+    store.ingest_batch(
+        _batch("seed", (_record(label="s", unit="u", seq=0, observed=1, payload="a"),))
+    )
+    connection = _open(path)
+    try:
+        from backend.app.edge_db.connection import write_transaction
+        from backend.app.features.diagnostics.prune import coarsen_coverage
+
+        with write_transaction(connection):
+            for index in range(6):
+                insert_coverage(
+                    connection,
+                    camera_id=CAMERA,
+                    worker_boot_id=BOOT,
+                    source_generation=0,
+                    stream_epoch=0,
+                    kind=CoverageKind.MISSING_NOT_RECORDED,
+                    producer="sdk",
+                    from_sequence=index,
+                    to_sequence=index,
+                    from_ns=100 + index,
+                    to_ns=100 + index,
+                    record_count=1,
+                    exact=True,
+                    cause="gap",
+                    recorded_at_ns=index,
+                )
+            coarsen_coverage(connection, budget.coverage_rows_per_epoch, 99)
+        rows = connection.execute(
+            """
+            SELECT coverage_kind, exact, from_ns, to_ns, record_count
+            FROM execution_coverage
+            WHERE coverage_kind IN (?, ?)
+            ORDER BY from_ns
+            """,
+            (str(CoverageKind.UNKNOWN_COARSENED), str(CoverageKind.MISSING_NOT_RECORDED)),
+        ).fetchall()
+    finally:
+        connection.close()
+    coarsened = [row for row in rows if str(row[0]) == CoverageKind.UNKNOWN_COARSENED]
+    exact = [row for row in rows if str(row[0]) == CoverageKind.MISSING_NOT_RECORDED]
+    assert coarsened
+    assert all(int(row[1]) == 0 for row in coarsened)
+    assert all(int(row[1]) == 1 for row in exact)
+    assert len(coarsened) + len(exact) <= 3
