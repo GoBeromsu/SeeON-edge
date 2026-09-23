@@ -585,8 +585,12 @@ keyframe-aligned stream epoch/configuration without transcoding. Decoded frames
 remain analysis and optional snapshot taps. Transformed derivative publication
 is not a current production surface.
 
-Decision-trace replay stays in the worker process as a bounded in-memory
-replay-trace writer (`worker/pipeline/trace/replay_trace_writer.py`). There is no backend analysis-trace HTTP or SQLite warehouse.
+Decision-trace replay is written by the worker as bounded on-disk JSONL
+(`worker/pipeline/trace/replay_trace_writer.py`), enabled only when a replay
+trace directory is configured. It is a replay-fidelity input, not the
+original-run observability record (that is the execution-record path,
+`docs/runbooks/observability-diagnostics.md`). There is no backend
+analysis-trace HTTP or SQLite warehouse.
 
 ### Replay trace v2
 

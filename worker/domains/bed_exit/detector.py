@@ -21,7 +21,7 @@ from worker.domains.bed_exit.state_machine import (
     BedExitStateDecision,
     BedExitStateMachine,
 )
-from worker.domains.episode import EpisodeAuthority, EpisodeProposal, ProposalDisposition
+from worker.domains.episode import EpisodeAuthority, EpisodeProposal, suppression_reason
 from worker.domains.staleness import DEFAULT_STALE_AFTER_SEC
 from worker.types import (
     BusinessEvent,
@@ -278,7 +278,7 @@ class BedExitMonitor:
             # reason would read as a delivery failure.
             self._mark_suppressed(
                 track_ids={event.person_id for event in frame.events},
-                reason=DecisionTraceReason.OUTSIDE_DETECTION_WINDOW,
+                reason=str(DecisionTraceReason.OUTSIDE_DETECTION_WINDOW),
             )
             return ()
         self._episodes.expire(frame_index=input_value.frame_index, time_sec=event_time)
@@ -302,11 +302,12 @@ class BedExitMonitor:
             )
             emitted.extend(produced)
             if not produced:
-                # The episode authority suppressed this onset; name why.
-                self._mark_suppressed(
-                    track_ids={event.person_id},
-                    reason=_suppression_reason(self._episodes.last_disposition),
-                )
+                # The episode authority declined this onset; name why. A None
+                # mapping means it was not a suppression (cannot follow a
+                # qualifying onset today) and the row keeps its own reason.
+                reason = suppression_reason(self._episodes.last_disposition)
+                if reason is not None:
+                    self._mark_suppressed(track_ids={event.person_id}, reason=reason)
             if event.person_id in self._lost_track_ids:
                 self._episodes.track_lost(
                     camera_id=self._config.camera_id,
@@ -332,7 +333,7 @@ class BedExitMonitor:
             )
         return tuple(emitted)
 
-    def _mark_suppressed(self, *, track_ids: set[int | None], reason: DecisionTraceReason) -> None:
+    def _mark_suppressed(self, *, track_ids: set[int | None], reason: str) -> None:
         """Rewrite this frame's triggered snapshots for ``track_ids`` as suppressed.
 
         Only authoritative rows are rewritten (the shadow tail never triggers).
@@ -682,21 +683,6 @@ class BedExitMonitor:
         snapshots = tuple(item.snapshot for item in decisions) + tuple(extra)
         self.last_shadow_trace_snapshots = snapshots
         return snapshots
-
-
-def _suppression_reason(disposition: ProposalDisposition | None) -> DecisionTraceReason:
-    """Map the episode authority's disposition to a compiled trace reason."""
-    if disposition is ProposalDisposition.ALREADY_OPEN:
-        return DecisionTraceReason.EPISODE_ALREADY_OPEN
-    if disposition is ProposalDisposition.REASSOCIATED:
-        return DecisionTraceReason.EPISODE_REASSOCIATED
-    if disposition is ProposalDisposition.RESOLVED_HOLD:
-        return DecisionTraceReason.EPISODE_RESOLVED_HOLD
-    if disposition is ProposalDisposition.CANDIDATE:
-        return DecisionTraceReason.EPISODE_CANDIDATE
-    # not-qualifying / recovery / None cannot follow a qualifying onset proposal;
-    # if they ever do, say the honest thing rather than invent a cause.
-    return DecisionTraceReason.TRACE_UNAVAILABLE
 
 
 def _bed_region_is_usable(source: BedRegionCacheState) -> bool:
