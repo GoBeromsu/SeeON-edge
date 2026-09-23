@@ -44,25 +44,25 @@ def test_classifier_missing_score_reason_is_current_call_not_cached_probability(
     classifier = FallWindowClassifier(model)
 
     for _ in range(4):
-        assert classifier.update({7: _row(0.5)}, (7,)) == {}
+        assert classifier.update({7: _row()}, (7,)) == {}
         assert dict(classifier.current_call_missing_score_reasons) == {
             7: DecisionTraceMissingReason.CLASSIFIER_STRIDE_NOT_DUE
         }
 
-    assert classifier.update({7: _row(0.5)}, (7,)) == {}
+    assert classifier.update({7: _row()}, (7,)) == {}
     assert dict(classifier.current_call_missing_score_reasons) == {
         7: DecisionTraceMissingReason.CLASSIFIER_WARMUP
     }
 
     for _ in range(24):
-        classifier.update({7: _row(0.5)}, (7,))
+        classifier.update({7: _row()}, (7,))
     expected = FallProbabilities(0.2, 0.7, 0.1)
-    assert classifier.update({7: _row(0.5)}, (7,)) == {7: expected}
+    assert classifier.update({7: _row()}, (7,)) == {7: expected}
     assert dict(classifier.current_call_missing_score_reasons) == {}
     assert classifier.probabilities_for(7) == expected
     assert len(model.inputs) == 1
 
-    assert classifier.update({7: _row(0.5)}, (7,)) == {}
+    assert classifier.update({7: _row()}, (7,)) == {}
     assert dict(classifier.current_call_missing_score_reasons) == {
         7: DecisionTraceMissingReason.CLASSIFIER_STRIDE_NOT_DUE
     }
@@ -121,44 +121,6 @@ def test_classifier_rejects_invalid_model_probabilities(prediction: object) -> N
     classifier = FallWindowClassifier(_Model(prediction))
 
     for _ in range(29):
-        classifier.update({4: _row(0.5)}, (4,))
+        classifier.update({4: _row()}, (4,))
     with pytest.raises(ValueError, match="three finite probabilities"):
-        classifier.update({4: _row(0.5)}, (4,))
-
-
-def test_classifier_id_switch_within_ttl_continues_window_without_warmup() -> None:
-    model = _Model()
-    classifier = FallWindowClassifier(model)
-
-    for _ in range(29):
-        classifier.update({7: _row(0.3)}, (7,))
-
-    # Track 7 vanishes and a brand-new id appears in the very same tick --
-    # the same recency/lowest-id criterion the episode authority uses to
-    # absorb a tracker id switch. The new id must inherit id 7's window
-    # rather than restart a 30-tick warm-up.
-    due = classifier.update({8: _row(0.4)}, (8,))
-
-    assert due == {8: FallProbabilities(0.2, 0.7, 0.1)}
-    assert classifier.generation_for(8) == 0
-    assert classifier.generation_for(7) is None
-    assert classifier.buffer_lineage_adopted_total == 1
-    assert len(model.inputs[0]) == 30
-    assert model.inputs[0][0] == _row(0.3)
-    assert model.inputs[0][-1] == _row(0.4)
-
-
-def test_classifier_new_id_without_a_vanished_donor_still_warms_up() -> None:
-    model = _Model()
-    classifier = FallWindowClassifier(model)
-
-    for _ in range(4):
-        classifier.update({8: _row(0.4)}, (8,))
-    due = classifier.update({8: _row(0.4)}, (8,))
-
-    assert due == {}
-    assert dict(classifier.current_call_missing_score_reasons) == {
-        8: DecisionTraceMissingReason.CLASSIFIER_WARMUP
-    }
-    assert classifier.buffer_lineage_adopted_total == 0
-    assert model.inputs == []
+        classifier.update({4: _row()}, (4,))

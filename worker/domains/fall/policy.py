@@ -387,10 +387,8 @@ class FallDomainDecider:
                 # policy for this source observation.
                 missing_score_reasons = dict(classifier.current_call_missing_score_reasons)
                 continue
-            # No rows: each live track coasts on its own last valid row
-            # (FallWindowClassifier.update already does this for a missing
-            # row) instead of being fed a synthetic (0, 0)-teleport pose.
-            classifier.update({}, input_value.live_track_ids)
+            zero_rows = dict.fromkeys(input_value.live_track_ids, (0.0,) * 56)
+            classifier.update(zero_rows, input_value.live_track_ids)
             self.resample_gap_rows_total += 1
         return self.policy.update(
             probabilities,
@@ -417,13 +415,6 @@ class FallDomainDecider:
     @property
     def track_id_switch_absorbed_total(self) -> int:
         return self.policy.track_id_switch_absorbed_total
-
-    @property
-    def buffer_lineage_adopted_total(self) -> int:
-        classifier = self.classifier
-        if not isinstance(classifier, FallWindowClassifier):
-            raise TypeError("fall classifier must expose buffer_lineage_adopted_total")
-        return classifier.buffer_lineage_adopted_total
 
     def _reset_on_pts_rollback(self, pts_ns: int) -> None:
         if self._last_pts_ns is not None and pts_ns < self._last_pts_ns:

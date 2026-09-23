@@ -267,28 +267,6 @@ def test_bed_exit_trace_distinguishes_live_grace_from_stale_track_exit() -> None
     assert stale_trace.values["grace_threshold"] == 2
 
 
-def test_fall_gap_ticks_never_feed_a_zero_row_to_the_model() -> None:
-    """A PTS gap must make a live track coast on its last real row, never the
-    domain's all-zero "no detection" sentinel -- a gap is not a teleport."""
-    model = _RecordingModel()
-    detector = _classifier_fall(model, camera_id="camera-a")
-    person = BoundingBox(10, 10, 70, 90, 0.9)
-
-    for frame_index in range(30):
-        detector.update(_input(person, frame_index=frame_index, time_sec=frame_index * 0.0667))
-    assert len(model.inputs) == 1
-
-    # Jump forward five cadence buckets in one call: four gap rows plus one
-    # valid row lands exactly on the next stride-due tick.
-    detector.update(_input(person, frame_index=30, time_sec=35 * 0.0667))
-
-    assert detector.resample_gap_rows_total > 0
-    assert len(model.inputs) == 2
-    for window in model.inputs:
-        for row in window:
-            assert any(value != 0.0 for value in row)
-
-
 def test_numeric_decision_trace_is_hardware_neutral_for_equal_inputs() -> None:
     cpu = _traceable_fall(camera_id="camera-a", facility_id="f")
     nvidia = _traceable_fall(camera_id="camera-a", facility_id="f")
