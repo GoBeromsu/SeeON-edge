@@ -1,4 +1,5 @@
-"""Closed decision-trace vocabulary: baseline membership plus additive bed-exit tokens."""
+"""Closed decision-trace vocabulary: baseline membership plus the additive bed-exit,
+fall (classifier dispositions, resample-gap) and episode-suppression tokens."""
 
 from __future__ import annotations
 

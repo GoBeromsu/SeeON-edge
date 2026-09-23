@@ -64,7 +64,8 @@ def decode_replay_trace(payload: object) -> ReplayTrace:
     return ReplayTrace(camera_id, tuple(normalized_frames), truncation)
 
 
-#: Frames a single camera may retain, mirroring `DEFAULT_TRACE_RETENTION_POLICY`.
+#: Frames a single camera may retain in one replay request. This is the replay
+#: wire's own bound; the worker-side trace writer that once mirrored it is gone.
 #: Declared here because both the worker sender and the backend receiver must
 #: agree, and neither may import the other.
 MAX_TRACE_FRAMES: Final = 3_000
@@ -91,4 +92,3 @@ __all__ = [
     "ReplayWireError",
     "decode_replay_trace",
 ]
-

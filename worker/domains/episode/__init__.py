@@ -9,6 +9,7 @@ from worker.domains.episode.authority import (
     EpisodeProposal,
     EpisodeState,
     ProposalDisposition,
+    suppression_reason,
 )
 
 __all__ = [
@@ -16,4 +17,5 @@ __all__ = [
     "EpisodeProposal",
     "EpisodeState",
     "ProposalDisposition",
+    "suppression_reason",
 ]

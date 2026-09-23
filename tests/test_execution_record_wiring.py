@@ -710,8 +710,71 @@ def test_coasted_frame_never_re_emits_previous_snapshots_with_the_new_identity()
         assert record.frame_seq == 1
         assert record.outcome == "coasted"
         assert record.payload["track_id"] is None
-        assert record.payload["missing_values"] == {"fall_transition_probability": "resample-gap"}
+        assert record.payload["missing_values"] == {"decision_state": "resample-gap"}
         assert record.payload["module_qualified_id"] == "fall.v2"
         assert record.payload["decision_trace_id"] is None
     # And no model.score was minted for the coasted frame.
     assert not [r for r in second.records if r.record_kind == "model.score"]
+
+
+def test_window_gate_mirrors_inner_freshness_and_shadow_facts() -> None:
+    """The gate is the snapshot source the aggregator reads, so it must carry
+    the inner decider's freshness/shadow facts in-window and its own
+    (fresh, no shadow) facts outside the window."""
+    from datetime import UTC, datetime
+
+    from worker.domains.detection_window import DetectionWindow
+    from worker.pipeline.decision import EventAggregator
+    from worker.runtime.worker import _WindowGatedDecider
+
+    class _Inner(_SecondDomainDecider):
+        def __init__(self) -> None:
+            super().__init__()
+            self.last_update_evaluated = True
+
+        def update(self, input_value: object) -> tuple[object, ...]:
+            out = super().update(input_value)
+            self.last_update_evaluated = True
+            return out
+
+        def coast(self) -> tuple[object, ...]:
+            self.last_update_evaluated = False
+            return ()
+
+    inner = _Inner()
+    always_open = DetectionWindow(start="00:00", end="23:59", tz="UTC")
+    gate = _WindowGatedDecider(
+        decider=inner, window=always_open, clock=lambda: datetime(2026, 1, 1, 12, tzinfo=UTC)
+    )
+    from test_flow_policy_pump_preview import _fall_input
+
+    gate.update(_fall_input(time_sec=1.0, frame_index=1))
+    assert gate.last_update_evaluated is True
+    assert gate.last_shadow_trace_count == 1  # mirrors the inner's shadow tail
+    aggregator = EventAggregator(deciders=(gate,), incidents=_incidents())
+    roles = [a.authority for a in aggregator.attributed_trace_snapshots()]
+    assert roles == ["authoritative", "shadow"]
+    assert all(a.fresh for a in aggregator.attributed_trace_snapshots())
+
+    # Inner coasts; the gate (in-window) mirrors staleness.
+    inner.coast()
+    gate.update(_fall_input(time_sec=2.0, frame_index=2))  # inner.update sets fresh again
+    inner.last_update_evaluated = False  # simulate a coast reflected after mirroring
+    # Outside the window: the gate's own row is fresh regardless of inner state.
+    closed = DetectionWindow(start="00:00", end="00:00", tz="UTC")
+    gate2 = _WindowGatedDecider(
+        decider=inner, window=closed, clock=lambda: datetime(2026, 1, 1, 12, tzinfo=UTC)
+    )
+    gate2.update(_fall_input(time_sec=3.0, frame_index=3))
+    assert gate2.last_update_evaluated is True
+    assert gate2.last_shadow_trace_count == 0
+    aggregator2 = EventAggregator(deciders=(gate2,), incidents=_incidents())
+    (row,) = aggregator2.attributed_trace_snapshots()
+    assert row.fresh is True and row.authority == "authoritative"
+    assert row.snapshot.reason == "outside-detection-window"
+
+
+def _incidents():  # noqa: ANN202 - test helper
+    from worker.pipeline.decision.incident_manager import IncidentManager
+
+    return IncidentManager()
