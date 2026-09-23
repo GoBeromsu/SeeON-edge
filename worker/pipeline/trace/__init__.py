@@ -5,10 +5,7 @@ from worker.pipeline.trace.models import (
     OptionalNumber,
     RecoveredCameraTrace,
     TraceContractError,
-    TraceFrame,
-    TracePersistenceError,
     TraceTruncation,
-    TraceWriterStats,
 )
 
 __all__ = [
@@ -18,8 +15,5 @@ __all__ = [
     "OptionalNumber",
     "RecoveredCameraTrace",
     "TraceContractError",
-    "TraceFrame",
-    "TracePersistenceError",
     "TraceTruncation",
-    "TraceWriterStats",
 ]

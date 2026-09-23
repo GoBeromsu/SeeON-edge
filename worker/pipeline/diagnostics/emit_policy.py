@@ -22,7 +22,6 @@ from worker.types.trace import (
     DecisionTraceReason,
     DecisionTraceSnapshot,
     DecisionTraceState,
-    DecisionTraceValueName,
 )
 
 
@@ -229,7 +228,8 @@ def policy_coast_record(
 
     Emitted instead of re-stamping the module's previous snapshots when the
     resampler yielded no row (duplicate / non-monotonic / same-cadence PTS).
-    It carries no track and no score; the missing reason names the gap.
+    It carries no track and no score; ``missing_values['decision_state']``
+    names the gap for any module.
     """
     snapshot = DecisionTraceSnapshot(
         reason=str(DecisionTraceReason.SCORE_MISSING),
@@ -238,11 +238,9 @@ def policy_coast_record(
         triggered=False,
         track_id=None,
         bed_id=None,
-        missing_values={
-            str(DecisionTraceValueName.FALL_TRANSITION_PROBABILITY): str(
-                DecisionTraceMissingReason.RESAMPLE_GAP
-            )
-        },
+        # Module-neutral: the gap is about the decision as a whole, not any
+        # domain's score field, so a coasting non-fall module would not lie.
+        missing_values={"decision_state": str(DecisionTraceMissingReason.RESAMPLE_GAP)},
     )
     return make_record(
         record_kind="policy.decision",

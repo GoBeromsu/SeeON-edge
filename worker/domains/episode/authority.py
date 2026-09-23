@@ -245,4 +245,29 @@ class EpisodeAuthority:
         return self._within_values(episode, proposal.frame_index, proposal.time_sec)
 
 
-__all__ = ["EpisodeAuthority", "EpisodeProposal", "EpisodeState", "ProposalDisposition"]
+def suppression_reason(disposition: ProposalDisposition | None) -> str | None:
+    """Compiled trace reason for a QUALIFYING onset the authority declined.
+
+    Returns None for dispositions that are not a suppression of an onset
+    (emitted, recovery, not-qualifying, or no proposal): callers keep the
+    snapshot's ordinary reason. This is the single mapping shared by every
+    domain; do not duplicate it.
+    """
+    if disposition is ProposalDisposition.ALREADY_OPEN:
+        return "episode-already-open"
+    if disposition is ProposalDisposition.REASSOCIATED:
+        return "episode-reassociated"
+    if disposition is ProposalDisposition.RESOLVED_HOLD:
+        return "episode-resolved-hold"
+    if disposition is ProposalDisposition.CANDIDATE:
+        return "episode-candidate"
+    return None
+
+
+__all__ = [
+    "EpisodeAuthority",
+    "EpisodeProposal",
+    "EpisodeState",
+    "ProposalDisposition",
+    "suppression_reason",
+]

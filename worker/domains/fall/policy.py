@@ -12,7 +12,7 @@ from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field, replace
 
 from shared.detection_policies import FallPolicyV2
-from worker.domains.episode import EpisodeAuthority, EpisodeProposal, ProposalDisposition
+from worker.domains.episode import EpisodeAuthority, EpisodeProposal, suppression_reason
 from worker.domains.fall.classifier import FallProbabilities, FallWindowClassifier
 from worker.domains.fall.pose_bbox56 import PoseBbox56Track, pose_bbox56_tracks
 from worker.pipeline.perception.pts_resample import PtsResampler, ResampledRow
@@ -287,24 +287,10 @@ class FallPolicyDecider:
         )
 
     def _suppression_reason_for(self, state: _TrackState) -> str | None:
-        """The compiled reason when this call's onset proposal was suppressed.
-
-        Only meaningful when a proposal happened on this call (the vote deque
-        just reached the confirmation count); otherwise None so an ordinary
-        candidate/active frame keeps its own reason.
-        """
+        """Compiled reason when this call's qualifying onset was declined, else None."""
         if not state.proposed_this_call:
             return None
-        disposition = self._episodes.last_disposition
-        if disposition is ProposalDisposition.ALREADY_OPEN:
-            return "episode-already-open"
-        if disposition is ProposalDisposition.REASSOCIATED:
-            return "episode-reassociated"
-        if disposition is ProposalDisposition.RESOLVED_HOLD:
-            return "episode-resolved-hold"
-        if disposition is ProposalDisposition.CANDIDATE:
-            return "episode-candidate"
-        return None
+        return suppression_reason(self._episodes.last_disposition)
 
     def _trace_snapshot(
         self,
