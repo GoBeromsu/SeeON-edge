@@ -40,7 +40,8 @@ class RelayFailureClass(StrEnum):
 
     TRANSPORT = "transport"  # DNS / connect / timeout -- no HTTP response at all
     CLIENT_ERROR = "client_error"  # 4xx -- our config is wrong; retrying will not fix it
-    SERVER_ERROR = "server_error"  # 5xx (or an unreadable 2xx body) -- the edge API or its downstream failed
+    # 5xx (or an unreadable 2xx body) -- the edge API or its downstream failed.
+    SERVER_ERROR = "server_error"
 
 
 _CLIENT_ERROR_HINTS: Final[dict[int, str]] = {
