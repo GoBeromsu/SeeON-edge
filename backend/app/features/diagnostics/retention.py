@@ -130,6 +130,63 @@ def used_bytes(connection: sqlite3.Connection) -> int:
 #: number: it only shapes latency.
 MAX_UNITS_PER_ENFORCE: Final = 8
 
+#: How long a dbstat measurement may be reused before it is taken again.
+#: Between measurements the meter adds the bytes it has been told were
+#: written, so usage is never reported below what is known. A page walk of a
+#: ~1 GB table costs ~0.4 s; taking it on every ingest call serialised the
+#: writer at ~1 call/s on the reference edge.
+USAGE_REMEASURE_NS: Final = 1_000_000_000
+
+
+class UsageMeter:
+    """Measured on-disk usage with bounded staleness.
+
+    ``value()`` returns the last dbstat measurement plus the bytes accrued
+    since, and re-measures when the measurement is older than
+    ``USAGE_REMEASURE_NS`` or was invalidated by a prune. Accrual scales the
+    payload bytes written by the *measured* on-disk/payload ratio taken at the
+    same instant (rows plus five indexes were 3.8x payload on the reference
+    edge), so the bridge between two measurements is derived from a
+    measurement, not from a constant. The estimate is only ever used to
+    decide WHEN to measure: ``enforce_budget`` re-measures exactly before it
+    prunes anything, and again after pruning. Usage can exceed high_water by
+    at most one interval of accrual error, which is what control_reserve
+    (total minus high_water) exists to absorb.
+    """
+
+    __slots__ = ("_accrued", "_measured", "_measured_at", "_ratio", "_remeasure_ns")
+
+    def __init__(self, *, remeasure_ns: int = USAGE_REMEASURE_NS) -> None:
+        self._remeasure_ns = remeasure_ns
+        self._measured: int | None = None
+        self._measured_at = 0
+        self._ratio = 1.0
+        self._accrued = 0
+
+    def accrue(self, payload_bytes: int) -> None:
+        self._accrued += int(max(0, payload_bytes) * self._ratio)
+
+    def invalidate(self) -> None:
+        self._measured = None
+
+    @property
+    def fresh(self) -> bool:
+        """True when ``value()`` last returned an exact measurement (no accrual)."""
+        return self._measured is not None and self._accrued == 0
+
+    def value(self, connection: sqlite3.Connection, now_ns: int) -> int:
+        stale = self._measured is None or now_ns - self._measured_at >= self._remeasure_ns
+        if stale:
+            self._measured = used_bytes(connection)
+            self._measured_at = now_ns
+            self._accrued = 0
+            payload = connection.execute(
+                "SELECT COALESCE(SUM(payload_bytes), 0) FROM execution_segments"
+            ).fetchone()
+            payload_total = int(payload[0]) if payload else 0
+            self._ratio = self._measured / payload_total if payload_total > 0 else 1.0
+        return self._measured + self._accrued
+
 
 def enforce_budget(
     connection: sqlite3.Connection,
@@ -137,6 +194,7 @@ def enforce_budget(
     now_ns: int,
     *,
     max_units: int = MAX_UNITS_PER_ENFORCE,
+    meter: UsageMeter | None = None,
 ) -> bool:
     """Prune up to ``max_units`` whole units toward ``low_water``.
 
@@ -144,11 +202,19 @@ def enforce_budget(
     or it is over but this call made progress (pruned at least one unit), so
     the envelope converges over the next calls. Returns False only when usage
     is over ``high_water`` and nothing is prunable - the honest
-    STORAGE_UNAVAILABLE case.
+    STORAGE_UNAVAILABLE case. Usage is measured at most twice per call: on
+    entry (or reused from ``meter`` within its staleness bound) and once after
+    pruning, never once per pruned unit.
     """
+    gauge = meter if meter is not None else UsageMeter()
     refresh_unit_terminals(connection, budget.unit_horizon_ns)
     coarsen_coverage(connection, budget.coverage_rows_per_epoch, now_ns)
-    occupied = used_bytes(connection)
+    occupied = gauge.value(connection, now_ns)
+    if occupied > budget.high_water and not gauge.fresh:
+        # The accrued estimate only decides when to pay for a measurement.
+        # Pruning is never driven by an estimate: re-measure exactly first.
+        gauge.invalidate()
+        occupied = gauge.value(connection, now_ns)
     pruned = 0
     while occupied > budget.high_water and pruned < max_units:
         unit_id = next_prunable_unit(connection)
@@ -160,12 +226,11 @@ def enforce_budget(
                 break
         prune_unit(connection, unit_id, now_ns)
         pruned += 1
-        occupied = used_bytes(connection)
-        if occupied <= budget.low_water:
-            break
     if pruned:
         coarsen_coverage(connection, budget.coverage_rows_per_epoch, now_ns)
         drop_orphan_batches(connection)
+        gauge.invalidate()
+        occupied = gauge.value(connection, now_ns)
     return occupied <= budget.high_water or pruned > 0
 
 
@@ -173,7 +238,9 @@ __all__ = [
     "COVERAGE_ROWS_PER_EPOCH",
     "DEFAULT_UNIT_HORIZON_NS",
     "MAX_UNITS_PER_ENFORCE",
+    "USAGE_REMEASURE_NS",
     "RetentionBudget",
+    "UsageMeter",
     "coarsen_coverage",
     "enforce_budget",
     "force_oldest_units_terminal",
