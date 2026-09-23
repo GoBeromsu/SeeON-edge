@@ -9,6 +9,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Protocol
 
+from shared.events.delivery_queue import AdmissionResult
 from worker.interfaces.execution_records import ExecutionRecordSink
 from worker.pipeline.diagnostics.emit_delivery import event_delivery_record
 from worker.pipeline.diagnostics.record_builder import try_emit
@@ -26,7 +27,7 @@ LOGGER = logging.getLogger(__name__)
 class FlowEvidenceStager(Protocol):
     """The durable methods required by the Flow evidence bridge."""
 
-    def stage(self, event: dict[str, object]) -> None: ...
+    def stage(self, event: dict[str, object]) -> AdmissionResult: ...
 
     def complete(self, edge_event_id: str, clip_id: str | None) -> None: ...
 
@@ -59,21 +60,58 @@ class FlowEvidenceBinding:
             raise ValueError("Flow detected_at must be timezone-aware")
         detected_at = detected.isoformat().replace("+00:00", "Z")
         event_ref = str(event.identity)
-        self.stager.stage(
-            {
-                "edge_event_id": event_ref,
-                "event_type": event.event_type,
-                "probability": event.probability,
-                "detected_at": detected_at,
-                "camera_id": event.camera_id,
-                "facility_id": event.facility_id,
-                "evidence": {
-                    "domain": event.domain,
-                    "identity": event_ref,
-                    "time_sec": event.time_sec,
-                },
-            }
-        )
+        payload = {
+            "edge_event_id": event_ref,
+            "event_type": event.event_type,
+            "probability": event.probability,
+            "detected_at": detected_at,
+            "camera_id": event.camera_id,
+            "facility_id": event.facility_id,
+            "evidence": {
+                "domain": event.domain,
+                "identity": event_ref,
+                "time_sec": event.time_sec,
+            },
+        }
+        try:
+            result = self.stager.stage(payload)
+        except Exception as error:
+            try_emit(
+                self.execution_records,
+                event_delivery_record(
+                    camera_id=event.camera_id,
+                    worker_boot_id=trigger.worker_boot_id,
+                    source_generation=trigger.source_generation,
+                    stream_epoch=trigger.stream_epoch,
+                    frame_seq=trigger.seq,
+                    source_pts_ns=trigger.source_pts,
+                    edge_event_id=event_ref,
+                    event_type=event.event_type,
+                    domain=event.domain,
+                    admitted=False,
+                    reason=_admission_reason(error),
+                ),
+            )
+            raise
+        admitted, reason = _admission_from_stage_result(result)
+        if not admitted:
+            try_emit(
+                self.execution_records,
+                event_delivery_record(
+                    camera_id=event.camera_id,
+                    worker_boot_id=trigger.worker_boot_id,
+                    source_generation=trigger.source_generation,
+                    stream_epoch=trigger.stream_epoch,
+                    frame_seq=trigger.seq,
+                    source_pts_ns=trigger.source_pts,
+                    edge_event_id=event_ref,
+                    event_type=event.event_type,
+                    domain=event.domain,
+                    admitted=False,
+                    reason=reason,
+                ),
+            )
+            raise RuntimeError(f"event delivery admission failed: {reason}")
         try_emit(
             self.execution_records,
             event_delivery_record(
@@ -87,6 +125,7 @@ class FlowEvidenceBinding:
                 event_type=event.event_type,
                 domain=event.domain,
                 admitted=True,
+                reason=reason,
             ),
         )
         self._events[event_ref] = event
@@ -120,6 +159,35 @@ class FlowEvidenceBinding:
         published = self.publisher.publish(recovery.sealed, recovery.events)
         for contributor in recovery.sealed.contributors:
             self.stager.complete(contributor.event_ref, str(published.clip_id))
+
+
+def _admission_from_stage_result(result: object) -> tuple[bool, str | None]:
+    """Read try_admit proof from a stager return.
+
+    The stager contract is ``stage() -> AdmissionResult``. Anything else is an
+    unproven admission and is recorded as refused: an "admitted" record must
+    never be emitted without the queue's own proof, so a double that returns
+    ``None`` is a contract violation, not a success.
+    """
+    accepted = getattr(result, "accepted", None)
+    fault = getattr(result, "fault", None)
+    reason = None if fault is None else str(fault)
+    if accepted is True:
+        return True, reason
+    if accepted is False:
+        return False, reason
+    return False, f"unproven-admission:{type(result).__name__}"
+
+
+def _admission_reason(error: BaseException) -> str:
+    text = str(error)
+    marker = "event delivery admission failed: "
+    if text.startswith(marker):
+        fault = text[len(marker) :].strip()
+        if fault and fault != "None":
+            return fault
+    name = type(error).__name__
+    return name if not text else f"{name}: {text}"
 
 
 __all__ = ["FlowEvidenceBinding", "FlowEvidenceStager"]

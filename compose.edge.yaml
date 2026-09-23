@@ -88,6 +88,10 @@ services:
       # RTSP destination policy (shared with worker). Facility LAN cameras need
       # PRIVATE=1. LOCAL is fixture-only and must stay 0 in production.
       ML_RTSP_ALLOW_PRIVATE_DESTINATIONS: ${ML_RTSP_ALLOW_PRIVATE_DESTINATIONS:-0}
+      # Execution-record diagnostics (schema 19). OFF by default; when enabled the
+      # budget is REQUIRED (no default) and the API refuses to boot without it.
+      ML_API_EXECUTION_RECORDS_ENABLED: ${ML_API_EXECUTION_RECORDS_ENABLED:-0}
+      ML_API_EXECUTION_RECORDS_BUDGET_BYTES: ${ML_API_EXECUTION_RECORDS_BUDGET_BYTES:-}
       ML_RTSP_ALLOW_LOCAL_DESTINATIONS: ${ML_RTSP_ALLOW_LOCAL_DESTINATIONS:-0}
       # Facility identity/token and camera roster are intentionally absent:
       # dashboard enrollment + camera_registry are their only authorities.
@@ -223,6 +227,13 @@ services:
       ML_WORKER_FLOW_ONNX_PATH: /app/models/pose/yolo26n-pose.onnx
       ML_WORKER_FLOW_PARSER_LIBRARY: /opt/nvidia/deepstream/deepstream/lib/libnvdsinfer_custom_yolo26_pose.so
       ML_RTSP_ALLOW_PRIVATE_DESTINATIONS: ${ML_RTSP_ALLOW_PRIVATE_DESTINATIONS:-0}
+      # Execution-record export (D0 bounded in-memory lanes). OFF by default; when
+      # enabled all three sizes are REQUIRED (no defaults) and the worker refuses
+      # to start without them or without the relay URL/token.
+      ML_WORKER_EXECUTION_RECORDS_ENABLED: ${ML_WORKER_EXECUTION_RECORDS_ENABLED:-0}
+      ML_WORKER_EXECUTION_RECORDS_LANE_CAPACITY: ${ML_WORKER_EXECUTION_RECORDS_LANE_CAPACITY:-}
+      ML_WORKER_EXECUTION_RECORDS_BATCH_MAX: ${ML_WORKER_EXECUTION_RECORDS_BATCH_MAX:-}
+      ML_WORKER_EXECUTION_RECORDS_FLUSH_MS: ${ML_WORKER_EXECUTION_RECORDS_FLUSH_MS:-}
       ML_RTSP_ALLOW_LOCAL_DESTINATIONS: ${ML_RTSP_ALLOW_LOCAL_DESTINATIONS:-0}
     volumes:
       # Fixed image-adjacent model root, populated by edge-model-fetch.
