@@ -21,6 +21,19 @@ class TraceSnapshotProvider(Decider, Protocol):
 
 
 @runtime_checkable
+class FreshnessProvider(TraceSnapshotProvider, Protocol):
+    """A trace provider that says whether its snapshots came from the last update.
+
+    ``last_update_evaluated`` is False after an update that coasted (no model
+    evaluation, snapshots untouched). A provider without this protocol is
+    assumed to refresh its snapshots on every update.
+    """
+
+    @property
+    def last_update_evaluated(self) -> bool: ...
+
+
+@runtime_checkable
 class ShadowTraceProvider(TraceSnapshotProvider, Protocol):
     """A trace provider whose trailing ``last_shadow_trace_count`` snapshots are
     non-authoritative shadow evaluations (never ``triggered``, never a cause).
@@ -35,6 +48,7 @@ class ShadowTraceProvider(TraceSnapshotProvider, Protocol):
 
 __all__ = [
     "Decider",
+    "FreshnessProvider",
     "ShadowTraceProvider",
     "TraceSnapshotProvider",
 ]

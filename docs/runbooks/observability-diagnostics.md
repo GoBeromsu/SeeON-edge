@@ -3,17 +3,22 @@
 Answer "why was there no alert at 14:03 on camera 7?" from what actually ran,
 not from re-analysing the clip. Issue #545; schema 19.
 
-This runbook has no numbers in it on purpose. The four operator knobs -
-retention budget, lane depth, batch size and flush interval - come from the
-measurement harness (`tests/AGENTS.md`, "Observability load (Gate M/V)"),
-never from a code default, and both sides refuse to boot when enabled without
-them. Five *shape* constants do ship in code and are pre-measurement design
-values, not measured: `unit_horizon_ns` (unit terminal horizon),
-`coverage_rows_per_epoch` (coarsening bound), `max_record_bytes` =
-`total_bytes / 256`, and the per-row control-envelope estimates for coverage,
-batch and unit/segment rows (`backend/app/features/diagnostics/retention.py`).
-Gate M replaces them with measured values; until then they bound behaviour
-but are not deployment budgets.
+This runbook carries no *deployment* numbers on purpose (the API contract
+facts it mentions - the query `limit` range and `PROCESS_SCOPE` - are wire
+constants, not budgets). The four operator knobs - retention budget, lane
+depth, batch size and flush interval - come from the measurement harness
+(`tests/AGENTS.md`, "Observability load (Gate M/V)"), never from a code
+default, and both sides refuse to boot when enabled without them.
+
+Ten pre-measurement *shape* constants do ship in
+`backend/app/features/diagnostics/retention.py` and are design values, not
+measured budgets; Gate M replaces them: `unit_horizon_ns` (unit terminal
+horizon), `coverage_rows_per_epoch` (coarsening bound), and the derived
+fractions of `total_bytes` - `control_reserve` (1/16), `high_water`
+(total minus reserve), `low_water` (7/8 of high-water), `segment_bytes`
+(1/64), `max_record_bytes` (1/256) - plus three per-row control-envelope
+estimates (coverage rows, batch rows, and unit/segment/provenance rows). Until Gate M
+they bound behaviour; they are not deployment numbers.
 
 ## What is recorded
 

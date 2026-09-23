@@ -3,107 +3,35 @@
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass
 from pathlib import Path
 from typing import cast
 
-import numpy as np
-
 from backend.app.features.relay.router import RelayAlertRequest, RelayAuditEnvelope
 from contracts.event import EventEvidence
-from contracts.frame import Frame
-from contracts.observation import (
-    BedRegionCacheState,
-    BedRegionDebugSnapshot,
-    BoundingBox,
-    FrameObservation,
-)
 from shared.events import envelope_limits as limits
 from shared.events.schemas import build_audit_envelope
 from worker.pipeline.output.evidence.event_payload import WorkerEventPayload
 from worker.pipeline.output.evidence.evidence_sender import _payload
 from worker.pipeline.output.evidence.evidence_stager import DurableEvidenceStager
 from worker.pipeline.output.evidence_attacher import AlertEvidenceAttacher
-from worker.pipeline.trace import TraceCapture, TraceIdentity
-from worker.pipeline.trace.writer import BoundedTraceWriter
-from worker.types import BusinessEvent, DecisionInput, DecisionTraceSnapshot, FramePacket
+from worker.types import BusinessEvent, DecisionTraceSnapshot
+from worker.types.trace import decision_trace_id
 
 _RUNTIME_MANIFEST_SHA256 = "a" * 64
-_COMPONENT_SHA256 = "b" * 64
 _POLICY_SHA256 = "c" * 64
-
-
-@dataclass(frozen=True)
-class _TraceResult:
-    module_results: tuple[object, ...]
-    observation: FrameObservation
-    decision_input: DecisionInput
-
-
-class _ImmediateTraceWriter:
-    """Trace persistence seam: this contract only needs capture's emitted event."""
-
-    def submit(self, _frame: object, *, require_persisted: bool = False) -> bool:
-        del require_persisted
-        return True
-
-
-def _packet() -> FramePacket:
-    return FramePacket(
-        camera_id="camera-a",
-        frame=Frame(1, 1.0, np.zeros((4, 4, 3), dtype=np.uint8)),
-        pts=1.0,
-        seq=1,
-        width=4,
-        height=4,
-        decode_time_ms=0.0,
-        worker_boot_id="boot-a",
-        stream_epoch=1,
-    )
-
-
-def _result() -> _TraceResult:
-    observation = FrameObservation(
-        detections=((BoundingBox(0, 0, 2, 3, 0.9),), ()),
-        regions=((BoundingBox(0, 0, 4, 4, 0.8),), ()),
-        track_ids=(5,),
-    )
-    decision_input = DecisionInput(
-        observation=observation,
-        frame_width=4,
-        frame_height=4,
-        live_track_ids=(5,),
-        time_sec=1.0,
-        frame_index=1,
-        bed_region=BedRegionDebugSnapshot(BedRegionCacheState.FRESH),
-    )
-    return _TraceResult((), observation, decision_input)
 
 
 def _wire_payload_from_real_producers(
     tmp_path: Path, *, extra_event_audit: dict[str, object] | None = None
 ) -> tuple[dict[str, object], dict[str, object]]:
     """Run the producer chain through the final relay wire payload."""
-    trace_capture = TraceCapture(
-        identities=(
-            TraceIdentity(
-                module_qualified_id="fall.v1",
-                component_qualified_ids=(f"fall-classifier.sha256.{_COMPONENT_SHA256}",),
-                policy_qualified_id="fall.policy.v1",
-                effective_policy_id=_POLICY_SHA256,
-                runtime_manifest_sha256=_RUNTIME_MANIFEST_SHA256,
-                snapshot_provider=lambda: (
-                    DecisionTraceSnapshot(
-                        reason="fall-onset",
-                        previous_state="clear",
-                        current_state="fall",
-                        triggered=True,
-                        track_id=5,
-                        bed_id=None,
-                    ),
-                ),
-            ),
-        )
+    snapshot = DecisionTraceSnapshot(
+        reason="fall-onset",
+        previous_state="clear",
+        current_state="fall",
+        triggered=True,
+        track_id=5,
+        bed_id=None,
     )
     event = BusinessEvent(
         domain="fall",
@@ -114,16 +42,15 @@ def _wire_payload_from_real_producers(
         time_sec=1.0,
         probability=0.9,
         person_id=5,
-        audit=extra_event_audit,
+        audit={
+            **(extra_event_audit or {}),
+            "decision_trace_id": decision_trace_id(
+                snapshot,
+                module_qualified_id="fall.v1",
+                effective_policy_id=_POLICY_SHA256,
+            ),
+        },
     )
-    traced = trace_capture.capture(
-        cast(BoundedTraceWriter, _ImmediateTraceWriter()),
-        _packet(),
-        _result(),
-        (event,),
-        require_persisted=True,
-    )
-    assert isinstance(traced, tuple)
     domain_audit = build_audit_envelope(
         model_version="lstm-v3",
         detector_version="fall-2026.08",
@@ -132,7 +59,7 @@ def _wire_payload_from_real_producers(
     attached = AlertEvidenceAttacher(
         domain_audit={"fall": domain_audit},
         runtime_manifest_sha256=_RUNTIME_MANIFEST_SHA256,
-    ).attach(traced[0], _packet(), _result().observation)
+    ).attach_native(event, None)
     payload: WorkerEventPayload = {
         "edge_event_id": "a5e15ff2-90fd-4764-be74-a7da4f573cc9",
         "event_type": attached.event_type,

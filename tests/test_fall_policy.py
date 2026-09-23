@@ -306,3 +306,31 @@ def test_policy_requires_immutable_boot_and_epoch_and_binds_onset_identity() -> 
     for frame in range(53, 55):
         _update(first, _probability(0.7), frame)
     assert _update(first, _probability(0.7), 55)[0].identity == "boot-a:epoch-a:fall:none:7:0:1:2"
+
+
+def test_qualifying_frame_after_onset_is_explained_as_episode_already_open() -> None:
+    """TC3-02 (fall): after the onset fires, another qualifying frame proposes
+    again and the episode authority declines. The snapshot must name that
+    suppression rather than read as an ordinary candidate frame."""
+    decider = FallPolicyDecider(
+        camera_id="camera",
+        facility_id="facility",
+        boot_id="boot",
+        source_generation=0,
+        stream_epoch="epoch",
+    )
+    _update(decider, _probability(0.7), 0)
+    _update(decider, _probability(0.7), 1)
+    (event,) = _update(decider, _probability(0.7), 2)
+    assert event.event_type == "fall"
+    (fired,) = decider.last_trace_snapshots
+    assert fired.triggered is True and fired.reason == "transition-confirmed"
+
+    assert _update(decider, _probability(0.9), 3) == ()
+    (suppressed,) = decider.last_trace_snapshots
+    assert suppressed.triggered is False
+    assert suppressed.reason == "episode-already-open"
+    # A frame that does not qualify carries no suppression claim.
+    assert _update(decider, _probability(0.1), 4) == ()
+    (plain,) = decider.last_trace_snapshots
+    assert plain.reason != "episode-already-open"

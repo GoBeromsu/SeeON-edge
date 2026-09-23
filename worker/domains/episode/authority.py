@@ -9,6 +9,18 @@ from enum import StrEnum
 from worker.types import BusinessEvent
 
 
+class ProposalDisposition(StrEnum):
+    """Why the last ``propose`` did or did not emit. Finite, for trace reasons."""
+
+    EMITTED = "emitted"
+    REASSOCIATED = "reassociated"
+    ALREADY_OPEN = "already-open"
+    RESOLVED_HOLD = "resolved-hold"
+    CANDIDATE = "candidate"
+    NOT_QUALIFYING = "not-qualifying"
+    RECOVERY = "recovery"
+
+
 class EpisodeState(StrEnum):
     NORMAL = "normal"
     CANDIDATE = "candidate"
@@ -59,6 +71,7 @@ class EpisodeAuthority:
         self._episodes: dict[tuple[str, str, int | None, int], _Episode] = {}
         self._next_sequence = 1
         self.track_id_switch_absorbed_total = 0
+        self.last_disposition: ProposalDisposition | None = None
 
     def state_for(
         self, *, camera_id: str, event_type: str, bed_id: int | None, track_id: int
@@ -77,6 +90,7 @@ class EpisodeAuthority:
             # Same id returning is re-association, never a second onset.
             if self._within_reassociation(episode, proposal):
                 episode.state = EpisodeState.OPEN
+                self.last_disposition = ProposalDisposition.REASSOCIATED
                 return ()
             episode.state = EpisodeState.RESOLVED
         if episode.state is EpisodeState.RESOLVED:
@@ -84,6 +98,7 @@ class EpisodeAuthority:
                 episode.state = EpisodeState.NORMAL
                 episode.votes.clear()
             else:
+                self.last_disposition = ProposalDisposition.RESOLVED_HOLD
                 return ()
         if episode.state is EpisodeState.OPEN:
             if proposal.confirmed_recovery:
@@ -91,10 +106,14 @@ class EpisodeAuthority:
                 # for unresolved loss/timeout, which must not re-arm.
                 episode.state = EpisodeState.NORMAL
                 episode.votes.clear()
+                self.last_disposition = ProposalDisposition.RECOVERY
+            else:
+                self.last_disposition = ProposalDisposition.ALREADY_OPEN
             return ()
         if not proposal.qualifying:
             episode.state = EpisodeState.NORMAL
             episode.votes.clear()
+            self.last_disposition = ProposalDisposition.NOT_QUALIFYING
             return ()
         if episode.state is EpisodeState.NORMAL:
             episode.state = EpisodeState.CANDIDATE
@@ -102,7 +121,9 @@ class EpisodeAuthority:
         episode.votes.append(True)
         promoted = sum(episode.votes) >= proposal.confirmation_votes
         if not promoted:
+            self.last_disposition = ProposalDisposition.CANDIDATE
             return ()
+        self.last_disposition = ProposalDisposition.EMITTED
         episode.state = EpisodeState.OPEN
         sequence = self._next_sequence
         self._next_sequence += 1
@@ -222,3 +243,6 @@ class EpisodeAuthority:
 
     def _within_reassociation(self, episode: _Episode, proposal: EpisodeProposal) -> bool:
         return self._within_values(episode, proposal.frame_index, proposal.time_sec)
+
+
+__all__ = ["EpisodeAuthority", "EpisodeProposal", "EpisodeState", "ProposalDisposition"]
