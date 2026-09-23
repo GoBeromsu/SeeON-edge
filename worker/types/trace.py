@@ -51,6 +51,10 @@ class DecisionTraceReason(StrEnum):
     ENTERED_ABSENT = "entered-absent"
     POSE_UNAVAILABLE = "pose-unavailable"
     BED_POLYGON_INVALID = "bed-polygon-invalid"
+    EPISODE_ALREADY_OPEN = "episode-already-open"
+    EPISODE_REASSOCIATED = "episode-reassociated"
+    EPISODE_RESOLVED_HOLD = "episode-resolved-hold"
+    EPISODE_CANDIDATE = "episode-candidate"
 
 
 class DecisionTraceState(StrEnum):
@@ -121,6 +125,7 @@ class DecisionTraceMissingReason(StrEnum):
     NO_LIVE_CLASSIFIED_TRACK = "no-live-classified-track"
     CLASSIFIER_WARMUP = "classifier-warmup"
     CLASSIFIER_STRIDE_NOT_DUE = "classifier-stride-not-due"
+    RESAMPLE_GAP = "resample-gap"
     BED_REGION_UNAVAILABLE = "bed-region-unavailable"
     BED_OBSERVATION_MISSING = "bed-observation-missing"
     TRACK_NO_LONGER_LIVE = "track-no-longer-live"
@@ -236,6 +241,10 @@ class AttributedSnapshot:
     authority: AuthorityRole
     #: Index of the producing decider in the aggregator's ``deciders`` tuple.
     producer_index: int
+    #: True when the producing decider evaluated on the update that preceded
+    #: this read; False when it coasted and the snapshot is left over from an
+    #: earlier frame. Stale snapshots must never be recorded as this frame's.
+    fresh: bool
 
 
 def decision_trace_id(

@@ -272,7 +272,8 @@ class RelayAuditEnvelope(BaseModel):
     decision_trace_id: str | None = None
     """Pointer to the decision trace this event was derived from.
 
-    Attached by ``TraceCapture._attach_trace``. This is the third field found to
+    Stamped by ``worker.runtime.flow.policy_pump._with_decision_trace_id`` via
+    ``worker.types.trace.decision_trace_id``. This is the third field found to
     be emitted by the worker and undeclared here, after ``runtime_manifest_sha256``
     and a truncation marker, each producing the same permanent 422 and the same
     silent deletion by the outbox. It is declared rather than stripped because it

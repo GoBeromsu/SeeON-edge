@@ -12,7 +12,7 @@ from contracts.observation import (
     FrameObservation,
 )
 from worker.domains import bed_exit
-from worker.types import BusinessEvent, DecisionInput
+from worker.types import BusinessEvent, DecisionInput, DecisionTraceSnapshot
 
 CAMERA_ID: Final = "camera-bed-exit"
 FACILITY_ID: Final = "facility-bed-exit"
@@ -383,3 +383,65 @@ def test_early_return_resets_shadow_count_so_unavailability_is_authoritative() -
     (attributed,) = aggregator.attributed_trace_snapshots()
     assert attributed.authority == "authoritative"
     assert attributed.snapshot.reason in ("bed-region-unavailable", "bed-observation-missing")
+
+
+def _drive_to_onset(monitor: bed_exit.BedExitMonitor) -> tuple[BusinessEvent, ...]:
+    monitor.update(
+        _input(person_boxes=(IN_BED_A,), bed_boxes=(BED_A,), track_ids=(PERSON_ID,), frame_index=0)
+    )
+    for frame_index in (1, 2):
+        monitor.update(
+            _input(
+                person_boxes=(OUTSIDE_BEDS,),
+                bed_boxes=(BED_A,),
+                track_ids=(PERSON_ID,),
+                frame_index=frame_index,
+            )
+        )
+    return monitor.update(
+        _input(
+            person_boxes=(OUTSIDE_BEDS,), bed_boxes=(BED_A,), track_ids=(PERSON_ID,), frame_index=3
+        )
+    )
+
+
+def _authoritative_rows(monitor: bed_exit.BedExitMonitor) -> tuple[DecisionTraceSnapshot, ...]:
+    cut = len(monitor.last_trace_snapshots) - monitor.last_shadow_trace_count
+    return monitor.last_trace_snapshots[:cut]
+
+
+def test_onset_suppressed_by_open_episode_is_explained_not_silent() -> None:
+    """TC3-02: after the onset fires, the next frame recomputes an onset that the
+    episode authority suppresses. That row must carry triggered=False and the
+    reason episode-already-open, not triggered=True with no event."""
+    monitor = _monitor(grace_frames=2)
+    onset = _drive_to_onset(monitor)
+    assert len(onset) == 1
+    fired = [r for r in _authoritative_rows(monitor) if r.track_id == PERSON_ID]
+    assert any(r.triggered for r in fired), "the onset frame itself keeps triggered=True"
+
+    repeated = monitor.update(
+        _input(
+            person_boxes=(OUTSIDE_BEDS,), bed_boxes=(BED_A,), track_ids=(PERSON_ID,), frame_index=4
+        )
+    )
+    assert repeated == ()
+    rows = [r for r in _authoritative_rows(monitor) if r.track_id == PERSON_ID]
+    assert rows
+    for row in rows:
+        assert row.triggered is False
+        assert row.reason == "episode-already-open"
+
+
+def test_onset_outside_night_window_is_an_explicit_non_event() -> None:
+    """TC3-03: with the clock outside the internal NightWindow the monitor
+    computes the onset but emits nothing. The row must say
+    outside-detection-window with triggered=False."""
+    monitor = _monitor(grace_frames=2)
+    monitor._clock = _clock_at(hour=12)  # noqa: SLF001 - outside 21:00-05:00
+    onset = _drive_to_onset(monitor)
+    assert onset == ()
+    rows = [r for r in _authoritative_rows(monitor) if r.track_id == PERSON_ID]
+    assert rows
+    assert all(r.triggered is False for r in rows)
+    assert any(r.reason == "outside-detection-window" for r in rows)

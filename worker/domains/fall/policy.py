@@ -12,7 +12,7 @@ from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field, replace
 
 from shared.detection_policies import FallPolicyV2
-from worker.domains.episode import EpisodeAuthority, EpisodeProposal
+from worker.domains.episode import EpisodeAuthority, EpisodeProposal, ProposalDisposition
 from worker.domains.fall.classifier import FallProbabilities, FallWindowClassifier
 from worker.domains.fall.pose_bbox56 import PoseBbox56Track, pose_bbox56_tracks
 from worker.pipeline.perception.pts_resample import PtsResampler, ResampledRow
@@ -29,6 +29,8 @@ class _TrackState:
     recovery_streak: int = 0
     fallen: bool = False
     initialized: bool = False
+    #: True when this call proposed a QUALIFYING onset (not a recovery/coast).
+    proposed_this_call: bool = False
 
 
 def _trace_state(state: _TrackState | None, episode_state: str | None = None) -> str:
@@ -87,6 +89,8 @@ class FallPolicyDecider:
     _next_generations: dict[int, int] = field(default_factory=dict, init=False)
     _episodes: EpisodeAuthority = field(init=False)
     last_trace_snapshots: tuple[DecisionTraceSnapshot, ...] = field(default=(), init=False)
+    #: False after coast(): last_trace_snapshots are from an earlier frame.
+    last_update_evaluated: bool = field(default=False, init=False)
 
     def __post_init__(self) -> None:
         if (
@@ -154,10 +158,17 @@ class FallPolicyDecider:
             if event is not None:
                 emitted.append(event)
         self.last_trace_snapshots = tuple(snapshots)
+        self.last_update_evaluated = True
         return tuple(emitted)
 
     def coast(self) -> tuple[BusinessEvent, ...]:
-        """A classifier gap never changes temporal counters or emits an event."""
+        """A classifier gap never changes temporal counters or emits an event.
+
+        The snapshots from the last evaluated frame are left in place for the
+        preview, but are flagged stale so they are never recorded as this
+        frame's decision evidence.
+        """
+        self.last_update_evaluated = False
         return ()
 
     def release_onset(self, event: BusinessEvent) -> None:
@@ -232,6 +243,7 @@ class FallPolicyDecider:
             state.initialized = True
             if probability.fallen >= self.policy.fallen_threshold:
                 state.fallen = True
+                state.proposed_this_call = False
                 return None
 
         transition = proposal.qualifying
@@ -259,6 +271,7 @@ class FallPolicyDecider:
                 recovering and state.recovery_streak >= self.policy.recovery_consecutive
             ),
         )
+        state.proposed_this_call = proposal.qualifying and not proposal.confirmed_recovery
         return next(iter(self._episodes.propose(proposal)), None)
 
     @property
@@ -273,6 +286,26 @@ class FallPolicyDecider:
             )
         )
 
+    def _suppression_reason_for(self, state: _TrackState) -> str | None:
+        """The compiled reason when this call's onset proposal was suppressed.
+
+        Only meaningful when a proposal happened on this call (the vote deque
+        just reached the confirmation count); otherwise None so an ordinary
+        candidate/active frame keeps its own reason.
+        """
+        if not state.proposed_this_call:
+            return None
+        disposition = self._episodes.last_disposition
+        if disposition is ProposalDisposition.ALREADY_OPEN:
+            return "episode-already-open"
+        if disposition is ProposalDisposition.REASSOCIATED:
+            return "episode-reassociated"
+        if disposition is ProposalDisposition.RESOLVED_HOLD:
+            return "episode-resolved-hold"
+        if disposition is ProposalDisposition.CANDIDATE:
+            return "episode-candidate"
+        return None
+
     def _trace_snapshot(
         self,
         track_id: int,
@@ -282,8 +315,13 @@ class FallPolicyDecider:
         event: BusinessEvent | None,
     ) -> DecisionTraceSnapshot:
         current_state = _trace_state(state, self._episode_state(track_id))
+        suppressed = self._suppression_reason_for(state)
         if event is not None:
             reason = "transition-confirmed"
+        elif suppressed is not None:
+            # This call proposed a qualifying onset and the episode authority
+            # declined it. Name why, so the non-event is explained.
+            reason = suppressed
         elif state.fallen and previous_state == "fallen":
             reason = "fall-active"
         elif not state.fallen and previous_state == "fallen":
@@ -348,8 +386,7 @@ class FallDomainDecider:
             # record depend on that fact; a classifier that cannot report it
             # would make "score-missing" indistinguishable from "scored".
             raise TypeError(
-                "fall classifier must provide update() and "
-                "current_call_missing_score_reasons"
+                "fall classifier must provide update() and current_call_missing_score_reasons"
             )
         resampled = self._resample(pts_ns, rows)
         if not resampled:
@@ -384,6 +421,10 @@ class FallDomainDecider:
     @property
     def last_trace_snapshots(self) -> tuple[DecisionTraceSnapshot, ...]:
         return self.policy.last_trace_snapshots
+
+    @property
+    def last_update_evaluated(self) -> bool:
+        return self.policy.last_update_evaluated
 
     @property
     def track_id_switch_absorbed_total(self) -> int:

@@ -9,12 +9,13 @@ from worker.interfaces.execution_records import ExecutionRecordSink
 from worker.pipeline.decision import EventAggregator, unwrap_decider
 from worker.pipeline.diagnostics.emit_policy import (
     model_score_record,
+    policy_coast_record,
     policy_consume_record,
     policy_decision_record,
 )
 from worker.pipeline.diagnostics.record_builder import try_emit
 from worker.types.metadata import MetadataCounters, MetadataFrame
-from worker.types.trace import decision_trace_id
+from worker.types.trace import DecisionIdentity, decision_trace_id
 
 
 def emit_policy_consume(
@@ -63,7 +64,14 @@ def emit_model_and_decision(
     not_scored: Mapping[int, object] = (
         {} if classifier is None else classifier.current_call_missing_score_reasons
     )
+    coasted_modules: dict[int, DecisionIdentity | None] = {}
     for attributed in decision.attributed_trace_snapshots():
+        if not attributed.fresh:
+            # The producing decider coasted on this frame: its snapshots are
+            # from an earlier frame and must not be stamped with this frame's
+            # identity. Record the coast itself once per decider instead.
+            coasted_modules.setdefault(attributed.producer_index, attributed.identity)
+            continue
         snapshot = attributed.snapshot
         module_identity = attributed.identity
         # Structural attribution: the snapshot came from the fall decider itself,
@@ -118,6 +126,22 @@ def emit_model_and_decision(
                 frame_seq=identity.seq,
                 source_pts_ns=pts,
                 generation=generation,
+            ),
+        )
+
+    for module_identity in coasted_modules.values():
+        try_emit(
+            sink,
+            policy_coast_record(
+                camera_id=identity.camera_id,
+                worker_boot_id=identity.worker_boot_id,
+                source_generation=metadata.source_generation,
+                stream_epoch=identity.stream_epoch,
+                frame_seq=identity.seq,
+                source_pts_ns=pts,
+                module_qualified_id=(
+                    None if module_identity is None else module_identity.module_qualified_id
+                ),
             ),
         )
 
