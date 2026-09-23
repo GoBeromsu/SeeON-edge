@@ -406,18 +406,21 @@ class BedExitMonitor:
         }
 
         # NvDCF runs without ReID: median track lifetime measures well under
-        # a typical in_bed_dwell_sec on several cameras, so state keyed
-        # purely by track ID would rarely accumulate enough dwell under any
-        # single ID to arm, even for a resident lying continuously still.
-        # A never-before-assigned live track that, this same frame,
-        # independently re-satisfies the full containment+posture gate for
-        # the identical bed a vanishing track owned is occupancy evidence of
-        # whoever is in the polygon, not of a specific track ID, so its
-        # armed/in-bed-dwell progress hands off instead of resetting to
-        # zero. This is granted only for the in-bed direction and only to a
-        # track that independently re-earns the gate this same frame: a bare
-        # "new ID appeared" is never by itself exit evidence, and outside-
-        # dwell progress is never carried across an identity gap.
+        # a typical in_bed_dwell_sec (and outside_dwell_sec) on several
+        # cameras, so state keyed purely by track ID would rarely accumulate
+        # enough dwell under any single ID to arm, or to complete an exit
+        # already in progress. A never-before-assigned live track that, this
+        # same frame, independently re-satisfies the identical bed's
+        # containment+posture gate is occupancy evidence of whoever is in
+        # the polygon, not of a specific track ID, so its armed/in-bed-dwell
+        # progress hands off instead of resetting to zero. Symmetrically, a
+        # never-before-assigned live track that is *not* contained in that
+        # same bed (and not contained in any other bed either) is evidence
+        # that whoever vacated it is still out, so an armed assignment's
+        # outside_dwell_sec hands off the same way instead of being dropped
+        # on the identity switch. Either hand-off requires the stale
+        # assignment to have owned a bed already: a bare "new ID appeared"
+        # is never by itself exit evidence.
         unclaimed_live = [
             (pid, box)
             for pid, box in zip(person_ids, observation.boxes, strict=True)
@@ -445,6 +448,22 @@ class BedExitMonitor:
                     best_pid = pid
             return best_pid
 
+        def _outside_handoff_recipient(bed_id: int) -> int | None:
+            if bed_id >= len(observation.bed_boxes):
+                return None
+            bed_box = observation.bed_boxes[bed_id]
+            for pid, box in unclaimed_live:
+                if containment_ratio(box, bed_box) >= self._config.min_containment:
+                    continue
+                if any(
+                    other_id != bed_id
+                    and containment_ratio(box, other_box) >= self._config.min_containment
+                    for other_id, other_box in enumerate(observation.bed_boxes)
+                ):
+                    continue
+                return pid
+            return None
+
         # A track can vanish mid-exit (occlusion, tracker drop, walking out of
         # frame). Absence must never emit: an assignment that disappears is
         # simply retired, with no event, regardless of how far its dwell
@@ -458,6 +477,15 @@ class BedExitMonitor:
             assignment = self._assignments[stale_id]
             had_assignment = assignment.bed_id is not None
             recipient = _handoff_recipient(assignment.bed_id) if had_assignment else None
+            carries_in_bed_dwell = recipient is not None
+            if (
+                recipient is None
+                and had_assignment
+                and assignment.armed
+                and assignment.outside_dwell_sec > 0.0
+            ):
+                assert assignment.bed_id is not None
+                recipient = _outside_handoff_recipient(assignment.bed_id)
             if recipient is not None:
                 assert assignment.bed_id is not None
                 successor = _Assignment()
@@ -465,8 +493,12 @@ class BedExitMonitor:
                 successor.candidate_bed_id = assignment.bed_id
                 successor.candidate_frames = self._config.hold_frames
                 successor.armed = assignment.armed
-                successor.in_bed_dwell_sec = assignment.in_bed_dwell_sec
-                successor.outside_dwell_sec = 0.0
+                successor.in_bed_dwell_sec = (
+                    assignment.in_bed_dwell_sec if carries_in_bed_dwell else 0.0
+                )
+                successor.outside_dwell_sec = (
+                    0.0 if carries_in_bed_dwell else assignment.outside_dwell_sec
+                )
                 successor.last_time_sec = assignment.last_time_sec
                 self._assignments[recipient] = successor
                 unclaimed_live = [

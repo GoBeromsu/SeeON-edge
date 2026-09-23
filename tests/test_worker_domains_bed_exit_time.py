@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+from dataclasses import replace
 from datetime import datetime
 from typing import Final
 from zoneinfo import ZoneInfo
@@ -254,3 +255,37 @@ def test_night_window_suppressed_onset_does_not_poison_later_in_window_exit() ->
     assert events[0].event_type == "bed-exit"
     assert events[0].person_id == PERSON_ID
     assert events[0].bed_id == 0
+
+
+def test_none_time_sec_frame_neither_advances_dwell_nor_emits() -> None:
+    """A frame with unresolved pts must coast, never fabricate a timestamp.
+
+    Finding #1: ``policy_pump`` previously collapsed a missing ``source_pts``
+    to ``0.0`` before it ever reached the detector's ``time_missing`` guard,
+    corrupting the dwell math below. This proves the guard itself is correct
+    once a real ``None`` reaches it: the gap frame contributes zero elapsed
+    time and does not move the dwell anchor, so the next real frame still
+    spans the true wall-clock gap rather than the corrupted one a fabricated
+    ``0.0`` would have produced.
+    """
+    # Given: armed after two in-bed, lying frames one second apart. Uses a
+    # clock inside the night window so a real exit is not itself suppressed.
+    monitor = _night_monitor(_clock_at(22), in_bed_dwell_sec=1.0, outside_dwell_sec=3.0)
+    assert monitor.update(_decision_input(IN_BED, BED, 0)) == ()
+    assert monitor.update(_decision_input(IN_BED, BED, 1, bed_pose_features=_lying_pose())) == ()
+
+    # When: 1.0s of real outside evidence, well short of the 3.0s threshold.
+    assert monitor.update(_decision_input(OUTSIDE, BED, 2)) == ()
+    assert monitor._assignments[PERSON_ID].outside_dwell_sec == pytest.approx(1.0)
+
+    # A gap frame with no resolved pts: must not advance dwell or emit.
+    gap = replace(_decision_input(OUTSIDE, BED, 3), time_sec=None)
+    assert monitor.update(gap) == ()
+    assert monitor._assignments[PERSON_ID].outside_dwell_sec == pytest.approx(1.0)
+
+    # Then: the next real frame spans the true 2.0s gap since t=2 (not since
+    # the gap frame), reaching exactly 3.0s and firing once.
+    events = monitor.update(_decision_input(OUTSIDE, BED, 4))
+    assert len(events) == 1
+    assert events[0].event_type == "bed-exit"
+    assert events[0].person_id == PERSON_ID
