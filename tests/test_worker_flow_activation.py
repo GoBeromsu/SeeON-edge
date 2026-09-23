@@ -263,7 +263,10 @@ def test_build_flow_camera_composes_ffmpeg_thumbnail_generator(
     )
     runtime = WorkerRuntime.__new__(WorkerRuntime)
     runtime._execution_record_lanes = None  # noqa: SLF001 - seam default: recording off
-    runtime.config = SimpleNamespace(version=1)
+    runtime.config = SimpleNamespace(
+        version=1,
+        detection_policies=SimpleNamespace(defaults={}),  # no fall policy: no decision identity
+    )
     runtime._state_dir = tmp_path / "state"  # noqa: SLF001
     runtime._flow_media_plane = _MediaPlane()  # noqa: SLF001
     runtime._live_frames = _LiveFrames()  # noqa: SLF001
