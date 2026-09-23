@@ -29,6 +29,7 @@ from dataclasses import dataclass
 from typing import Final
 
 from backend.app.features.diagnostics.prune import (
+    Lane,
     coarsen_coverage,
     drop_orphan_batches,
     next_prunable_unit,
@@ -223,8 +224,8 @@ def enforce_budget(
     """
     gauge = meter if meter is not None else UsageMeter()
     refresh_unit_terminals(connection, budget.unit_horizon_ns)
-    coarsen_coverage(connection, budget.coverage_rows_per_epoch, now_ns)
     occupied = gauge.value(connection, now_ns)
+    touched: set[Lane] = set()
     if occupied > budget.high_water and not gauge.measured_over(budget.high_water):
         # The accrued estimate only decides when to pay for a measurement.
         # Pruning is never driven by an estimate: re-measure exactly first.
@@ -239,7 +240,9 @@ def enforce_budget(
             unit_id = next_prunable_unit(connection)
             if unit_id is None:
                 break
-        freed_payload = prune_unit(connection, unit_id, now_ns)
+        freed_payload, lane = prune_unit(connection, unit_id, now_ns)
+        if lane is not None:
+            touched.add(lane)
         pruned += 1
         # Stop near low_water using the measured ratio for the bytes just
         # freed; stopping early is always safe, the next call re-checks.
@@ -247,7 +250,7 @@ def enforce_budget(
         if occupied <= budget.low_water:
             break
     if pruned:
-        coarsen_coverage(connection, budget.coverage_rows_per_epoch, now_ns)
+        coarsen_coverage(connection, budget.coverage_rows_per_epoch, now_ns, touched)
         drop_orphan_batches(connection)
         return True
     return occupied <= budget.high_water

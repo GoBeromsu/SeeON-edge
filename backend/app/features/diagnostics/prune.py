@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import sqlite3
+from collections.abc import Iterable
 
 from backend.app.features.diagnostics.coverage import insert_coverage
 from backend.app.features.diagnostics.records import (
@@ -26,8 +27,10 @@ def next_prunable_unit(connection: sqlite3.Connection) -> str | None:
     return None if row is None else str(row[0])
 
 
-def prune_unit(connection: sqlite3.Connection, unit_id: str, now_ns: int) -> int:
-    """Delete one whole unit; returns the payload bytes it held (0 if absent)."""
+def prune_unit(
+    connection: sqlite3.Connection, unit_id: str, now_ns: int
+) -> tuple[int, Lane | None]:
+    """Delete one whole unit; returns (payload bytes it held, its lane) or (0, None)."""
     unit = connection.execute(
         """
         SELECT camera_id, worker_boot_id, source_generation, stream_epoch,
@@ -37,7 +40,7 @@ def prune_unit(connection: sqlite3.Connection, unit_id: str, now_ns: int) -> int
         (unit_id,),
     ).fetchone()
     if unit is None:
-        return 0
+        return 0, None
     camera_id, boot, gen, epoch = str(unit[0]), str(unit[1]), int(unit[2]), int(unit[3])
     first_ns, last_ns, record_count = int(unit[4]), int(unit[5]), int(unit[6])
     producers = connection.execute(
@@ -99,7 +102,7 @@ def prune_unit(connection: sqlite3.Connection, unit_id: str, now_ns: int) -> int
             cause="capacity",
             recorded_at_ns=now_ns,
         )
-        return freed
+        return freed, (camera_id, boot, gen, epoch)
     for producer, from_seq, to_seq, from_ns, to_ns, count in producers:
         if _extend_contiguous_deletion(
             connection,
@@ -132,7 +135,7 @@ def prune_unit(connection: sqlite3.Connection, unit_id: str, now_ns: int) -> int
             cause="capacity",
             recorded_at_ns=now_ns,
         )
-    return freed
+    return freed, (camera_id, boot, gen, epoch)
 
 
 def _extend_contiguous_deletion(
@@ -212,18 +215,45 @@ def drop_orphan_batches(connection: sqlite3.Connection) -> None:
         )
 
 
+Lane = tuple[str, str, int, int]
+
+
 def coarsen_coverage(
-    connection: sqlite3.Connection, coverage_rows_per_epoch: int, now_ns: int
+    connection: sqlite3.Connection,
+    coverage_rows_per_epoch: int,
+    now_ns: int,
+    lanes: Iterable[Lane] | None = None,
 ) -> None:
-    groups = connection.execute(
-        """
-        SELECT camera_id, worker_boot_id, source_generation, stream_epoch, COUNT(*)
-        FROM execution_coverage
-        GROUP BY camera_id, worker_boot_id, source_generation, stream_epoch
-        HAVING COUNT(*) > ?
-        """,
-        (coverage_rows_per_epoch,),
-    ).fetchall()
+    """Fold each over-bound (camera, boot, generation, epoch) lane's oldest
+    coverage rows into one UNKNOWN_COARSENED row.
+
+    ``lanes`` restricts the check to lanes that just gained rows; a full
+    GROUP BY over every coverage row on every ingest was a third of each
+    request on the reference edge. ``None`` checks every lane (startup, tests).
+    """
+    if lanes is None:
+        groups = connection.execute(
+            """
+            SELECT camera_id, worker_boot_id, source_generation, stream_epoch, COUNT(*)
+            FROM execution_coverage
+            GROUP BY camera_id, worker_boot_id, source_generation, stream_epoch
+            HAVING COUNT(*) > ?
+            """,
+            (coverage_rows_per_epoch,),
+        ).fetchall()
+    else:
+        groups = []
+        for camera_id, boot, gen, epoch in set(lanes):
+            count = connection.execute(
+                """
+                SELECT COUNT(*) FROM execution_coverage
+                WHERE camera_id = ? AND worker_boot_id = ? AND source_generation = ?
+                  AND stream_epoch = ?
+                """,
+                (camera_id, boot, gen, epoch),
+            ).fetchone()
+            if count is not None and int(count[0]) > coverage_rows_per_epoch:
+                groups.append((camera_id, boot, gen, epoch, int(count[0])))
     for camera_id, boot, gen, epoch, count in groups:
         overflow = int(count) - coverage_rows_per_epoch
         if overflow <= 0:
@@ -265,6 +295,7 @@ def coarsen_coverage(
 
 
 __all__ = [
+    "Lane",
     "coarsen_coverage",
     "next_prunable_unit",
     "prune_unit",
