@@ -6,7 +6,7 @@ from datetime import datetime
 from time import monotonic
 from typing import Protocol
 
-from contracts.observation import BedRegionCacheState
+from contracts.observation import BedRegionCacheState, BoundingBox
 from worker.domains.bed_exit.geometry import best_bed_id, containment_ratio
 from worker.domains.bed_exit.latch import BedExitLatch
 from worker.domains.bed_exit.night_window import NightWindow
@@ -69,6 +69,7 @@ class _Assignment:
         "candidate_bed_id",
         "candidate_frames",
         "in_bed_dwell_sec",
+        "last_box",
         "last_time_sec",
         "outside_dwell_sec",
     )
@@ -87,6 +88,13 @@ class _Assignment:
         self.outside_dwell_sec: float = 0.0
         self.armed: bool = False
         self.last_time_sec: float | None = None
+        # This track's most recently observed box, updated every live frame.
+        # Used only to spatially gate the outside-dwell hand-off: a successor
+        # track must actually overlap where this one was last seen, so an
+        # unrelated body elsewhere (e.g. a caregiver at the door) can never
+        # inherit this assignment's outside-dwell progress just by being the
+        # only other unclaimed live track in frame.
+        self.last_box: BoundingBox | None = None
 
     def update_candidate(self, bed_id: int | None) -> None:
         if bed_id is None:
@@ -448,21 +456,29 @@ class BedExitMonitor:
                     best_pid = pid
             return best_pid
 
-        def _outside_handoff_recipient(bed_id: int) -> int | None:
-            if bed_id >= len(observation.bed_boxes):
+        def _outside_handoff_recipient(bed_id: int, last_box: BoundingBox | None) -> int | None:
+            if last_box is None or bed_id >= len(observation.bed_boxes):
                 return None
             bed_box = observation.bed_boxes[bed_id]
-            for pid, box in unclaimed_live:
-                if containment_ratio(box, bed_box) >= self._config.min_containment:
-                    continue
-                if any(
-                    other_id != bed_id
-                    and containment_ratio(box, other_box) >= self._config.min_containment
-                    for other_id, other_box in enumerate(observation.bed_boxes)
-                ):
-                    continue
-                return pid
-            return None
+            if any(
+                containment_ratio(box, bed_box) >= self._config.min_containment
+                for _, box in unclaimed_live
+            ):
+                # The vacated bed is already re-occupied by some live,
+                # unclaimed track (posture-confirmed or not) -- that alone
+                # disproves the departure was ever an exit, so no one
+                # elsewhere in frame can inherit it.
+                return None
+            candidates = [
+                pid
+                for pid, box in unclaimed_live
+                if containment_ratio(box, last_box) > 0.0
+                and not any(
+                    containment_ratio(box, other_box) >= self._config.min_containment
+                    for other_box in observation.bed_boxes
+                )
+            ]
+            return candidates[0] if len(candidates) == 1 else None
 
         # A track can vanish mid-exit (occlusion, tracker drop, walking out of
         # frame). Absence must never emit: an assignment that disappears is
@@ -485,7 +501,7 @@ class BedExitMonitor:
                 and assignment.outside_dwell_sec > 0.0
             ):
                 assert assignment.bed_id is not None
-                recipient = _outside_handoff_recipient(assignment.bed_id)
+                recipient = _outside_handoff_recipient(assignment.bed_id, assignment.last_box)
             if recipient is not None:
                 assert assignment.bed_id is not None
                 successor = _Assignment()
@@ -560,6 +576,7 @@ class BedExitMonitor:
             if person_id is None or person_id not in live_ids:
                 continue
             assignment = self._assignments.setdefault(person_id, _Assignment())
+            assignment.last_box = person_box
             containments = tuple(
                 containment_ratio(person_box, bed_box) for bed_box in observation.bed_boxes
             )

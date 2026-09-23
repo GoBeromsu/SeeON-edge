@@ -3,6 +3,7 @@ from __future__ import annotations
 import gc
 import json
 import weakref
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -203,6 +204,52 @@ def test_slot_rejects_stale_source_generation() -> None:
         boot_id="boot",
     )
     assert not slot.publish(stale_frame)
+
+
+def test_slot_rejects_a_none_pts_frame_and_accepts_the_next_real_one() -> None:
+    """A frame with unresolved `source_pts` must be rejected, not merged in.
+
+    Production's only publisher (`deepstream/metadata.py:156`) always sets
+    an int `source_pts`; a `None` here can only be a malformed/synthetic
+    frame. Letting it through fabricates a rollback-looking PTS downstream
+    (Finding #1, PR #588 review) and corrupts dwell/window math keyed off
+    real elapsed PTS, so it must be rejected under its own counter, before
+    the high-water logic, and must never poison the high-water mark that
+    gates the very next real frame.
+    """
+    binding = SourceBinding("boot", "child", "camera", 2, 3, "transform")
+    rows = np.zeros((1, 57), dtype=np.float32)
+    rows[0, 4] = 0.9
+    rows[0, :4] = (64, 64, 128, 128)
+    meta = SimpleNamespace(buffer_pts=10, object_items=[_object(7, 10, 10, 10, 10)])
+    converted = convert_frame(
+        meta,
+        rows=rows,
+        inference_tensor_present=True,
+        binding=binding,
+        frame_w=100,
+        frame_h=100,
+        publish_sequence=1,
+        boot_id="boot",
+    )
+    none_pts = replace(
+        converted,
+        frame=replace(converted.frame, identity=replace(converted.frame.identity, source_pts=None)),
+    )
+
+    slot = LatestMetadataSlot()
+    slot.register_source(binding)
+    before = slot.counters()
+
+    assert not slot.publish(none_pts)
+    after_reject = slot.counters()
+    assert after_reject.pts_missing == before.pts_missing + 1
+    assert after_reject.accepted == before.accepted
+    assert slot.peek("camera") is None
+
+    assert slot.publish(converted)
+    assert slot.peek("camera") is converted
+    assert slot.counters().accepted == before.accepted + 1
 
 
 def test_a_frame_without_pose_tensors_is_published_with_every_track_unmatched() -> None:
