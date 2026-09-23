@@ -222,11 +222,10 @@ def _deterministic_file_modes() -> Iterator[None]:
 
 # --- private fall bundle gate -------------------------------------------------
 # The packaged fall bundle (models/fall/pose-bbox56-gru) lives in a private
-# Hugging Face repository. A pull_request run of CI fetches with
-# `fetch_models --public-only` and therefore has no bundle on disk; the test
-# modules below read the real bundle and are skipped there with an explicit
-# reason. The `test-private-bundle` job (never on pull_request) provisions the
-# bundle and runs the full suite, so nothing is silently untested on main.
+# Hugging Face repository and CI downloads no model weights at all. The test
+# modules below read the real bundle and are skipped, with an explicit reason,
+# wherever it is absent; they run wherever models/ has been provisioned by
+# scripts/fetch-models.sh (developer machines, the deployment host).
 _PRIVATE_BUNDLE_SENTINEL = Path("models/fall/pose-bbox56-gru/model.onnx")
 _PRIVATE_BUNDLE_MODULES = frozenset(
     {
