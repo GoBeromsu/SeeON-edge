@@ -13,6 +13,14 @@ from worker.types import BusinessEvent, DecisionInput, DecisionTraceSnapshot
 _MAX_TRACKED_PRODUCERS: Final = 64
 
 
+def unwrap_decider(decider: object) -> object:
+    """Reach through window/policy wrappers to the inner decider."""
+    target: object = decider
+    while hasattr(target, "decider"):
+        target = target.decider
+    return target
+
+
 @dataclass(frozen=True, slots=True)
 class EventAggregator:
     deciders: tuple[Decider, ...]
@@ -108,4 +116,4 @@ def _identity_order(identity: str | int) -> tuple[str, str]:
     return (type(identity).__name__, str(identity))
 
 
-__all__ = ["EventAggregator"]
+__all__ = ["EventAggregator", "unwrap_decider"]

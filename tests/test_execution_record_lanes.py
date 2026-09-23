@@ -6,6 +6,7 @@ from shared.events.execution_records import WireRecord
 from worker.pipeline.diagnostics.lanes import (
     EXPORT_FAILED_CAUSE,
     LANE_OVERFLOW_CAUSE,
+    RECORD_INVALID_CAUSE,
     ExecutionRecordLanes,
 )
 
@@ -84,3 +85,29 @@ def test_overflow_gap_time_range_is_min_max_not_arrival_order() -> None:
     assert gap.record_count == 3
     assert (gap.from_ns, gap.to_ns) == (3_000, 9_000)
     assert gap.from_sequence <= gap.to_sequence
+
+
+def test_invalid_sequenced_record_is_reported_as_record_invalid_gap() -> None:
+    """A contract failure after the sequence was consumed must leave a hole."""
+
+    def _invalid() -> WireRecord:
+        template = _record()
+        broken = object.__new__(WireRecord)
+        for name in WireRecord.__slots__:
+            object.__setattr__(broken, name, getattr(template, name))
+        object.__setattr__(broken, "time_quality", "not-a-quality")
+        return broken
+
+    lanes = ExecutionRecordLanes(lane_capacity=8)
+    assert lanes.try_emit(_record()) is True
+    assert lanes.try_emit(_invalid()) is False
+    assert lanes.try_emit(_record()) is True
+    drained = lanes.drain_for("cam-1", "boot-1", limit=8)
+    assert drained is not None
+    assert [record.producer_sequence for record in drained.records] == [0, 2]
+    assert len(drained.gaps) == 1
+    gap = drained.gaps[0]
+    assert gap.cause == RECORD_INVALID_CAUSE
+    assert gap.from_sequence == 1
+    assert gap.to_sequence == 1
+    assert gap.record_count == 1

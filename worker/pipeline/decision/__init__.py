@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from worker.pipeline.decision.event_aggregator import EventAggregator
+from worker.pipeline.decision.event_aggregator import EventAggregator, unwrap_decider
 from worker.pipeline.decision.incident_manager import (
     CooldownKey,
     IncidentAuditSnapshot,
@@ -16,4 +16,5 @@ __all__ = [
     "IncidentAuditSnapshot",
     "IncidentConfigurationError",
     "IncidentManager",
+    "unwrap_decider",
 ]

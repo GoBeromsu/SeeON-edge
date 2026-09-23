@@ -7,7 +7,8 @@ from dataclasses import dataclass, replace
 from typing import Literal, TypeAlias, final
 
 from worker.interfaces.execution_records import ExecutionRecordSink
-from worker.pipeline.diagnostics.emit import sdk_frame_record, try_emit
+from worker.pipeline.diagnostics.emit_policy import sdk_frame_record
+from worker.pipeline.diagnostics.record_builder import try_emit
 from worker.types.metadata import MetadataCounters, MetadataFrame, SourceBinding
 
 CounterName: TypeAlias = Literal[

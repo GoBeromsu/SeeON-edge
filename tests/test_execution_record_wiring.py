@@ -80,7 +80,6 @@ def test_compose_refuses_when_enabled_without_relay_token() -> None:
         compose_execution_records(
             config,  # type: ignore[arg-type]
             env=env,
-            worker_boot_id="boot",
             build_revision="abc123",
             image_digest="sha256:deadbeef",
             model_digest="model-1",
@@ -100,7 +99,6 @@ def test_compose_off_returns_none_not_a_stub() -> None:
     settings, lanes, exporter = compose_execution_records(
         config,  # type: ignore[arg-type]
         env={},
-        worker_boot_id="boot",
         build_revision="abc123",
         image_digest="digest",
         model_digest="model",
@@ -346,3 +344,140 @@ def test_policy_decision_record_carries_no_trace_id_without_identity() -> None:
     for record in drained.records:
         if record.record_kind == "policy.decision":
             assert record.payload["decision_trace_id"] is None
+
+
+def test_missing_track_or_generation_never_aliases_onto_unit_zero() -> None:
+    from worker.pipeline.diagnostics.record_builder import (
+        NO_GENERATION,
+        NO_TRACK,
+        fall_causal_unit_id,
+    )
+
+    real_zero = fall_causal_unit_id("cam", "boot", 3, 0, 0)
+    no_track = fall_causal_unit_id("cam", "boot", 3, None, 0)
+    no_generation = fall_causal_unit_id("cam", "boot", 3, 0, None)
+    assert real_zero == "cam:boot:3:0:0"
+    assert no_track == f"cam:boot:3:{NO_TRACK}:0"
+    assert no_generation == f"cam:boot:3:0:{NO_GENERATION}"
+    assert len({real_zero, no_track, no_generation}) == 3
+
+
+def test_window_gated_snapshot_without_track_gets_explicit_no_track_unit() -> None:
+    from worker.pipeline.diagnostics.emit_policy import policy_decision_record
+    from worker.pipeline.diagnostics.record_builder import NO_GENERATION, NO_TRACK
+    from worker.types.trace import DecisionTraceSnapshot
+
+    snapshot = DecisionTraceSnapshot(
+        reason="outside-detection-window",
+        previous_state="not-evaluated",
+        current_state="not-evaluated",
+        triggered=False,
+        track_id=None,
+        bed_id=None,
+    )
+    record = policy_decision_record(
+        snapshot,
+        camera_id="cam",
+        worker_boot_id="boot",
+        source_generation=1,
+        stream_epoch=3,
+        frame_seq=7,
+        source_pts_ns=None,
+        generation=None,
+    )
+    assert record is not None
+    assert record.causal_unit_id == f"cam:boot:3:{NO_TRACK}:{NO_GENERATION}"
+    assert record.payload["track_id"] is None
+
+
+def test_model_score_is_not_emitted_for_tracks_the_classifier_skipped_this_call() -> None:
+    """A stride-not-due frame must not re-emit the cached score as a new model call."""
+    lanes = ExecutionRecordLanes(lane_capacity=64)
+    pump = _pump(lanes, identity=None, fall_transition=0.9)
+
+    class _StrideClassifier(_ImmediateClassifier):
+        def __init__(self) -> None:
+            super().__init__(0.9)
+            self.current_call_missing_score_reasons: dict[int, str] = {}
+            self._calls = 0
+
+        def update(self, rows: object, live_track_ids: tuple[int, ...]) -> dict[int, object]:
+            self._calls += 1
+            if self._calls % 2 == 0:
+                # even calls: stride not due, no score this call
+                self.current_call_missing_score_reasons = dict.fromkeys(
+                    live_track_ids, "classifier-stride-not-due"
+                )
+                return {}
+            self.current_call_missing_score_reasons = {}
+            return super().update(rows, live_track_ids)
+
+    stride = _StrideClassifier()
+    pump._decision.deciders[0].classifier = stride  # type: ignore[attr-defined]  # noqa: SLF001
+    for seq in range(4):
+        pump._process(  # noqa: SLF001
+            _metadata(child=pump._child, seq=seq, pts=100 + seq * 66_666_667)  # noqa: SLF001
+        )
+    drained = lanes.drain_for("cam-1", "boot-1", limit=64)
+    assert drained is not None
+    scores = [r for r in drained.records if r.record_kind == "model.score"]
+    decisions = [r for r in drained.records if r.record_kind == "policy.decision"]
+    # 4 frames processed, classifier scored on 2 of them
+    assert len(decisions) >= 4
+    assert len(scores) == 2, [r.frame_seq for r in scores]
+
+
+def test_try_emit_logs_sink_failure_with_camera_and_kind(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    from shared.events.execution_records import WireRecord
+    from worker.pipeline.diagnostics.record_builder import try_emit
+
+    class _Boom:
+        def try_emit(self, record: object) -> bool:
+            raise RuntimeError("sink exploded")
+
+    record = WireRecord(
+        record_kind="sdk.frame",
+        camera_id="cam-log",
+        worker_boot_id="boot-1",
+        source_generation=0,
+        stream_epoch=1,
+        producer="sdk",
+        producer_sequence=0,
+        observed_at_ns=1_000,
+        time_quality="monotonic",
+        causal_unit_id="cam-log:boot-1:1:frame:0",
+        outcome="accepted",
+        payload={},
+    )
+    with caplog.at_level("WARNING", logger="worker.pipeline.diagnostics.record_builder"):
+        assert try_emit(_Boom(), record) is False  # type: ignore[arg-type]
+    message = caplog.records[-1].getMessage()
+    assert "cam-log" in message
+    assert "sdk.frame" in message
+
+
+def test_make_record_logs_contract_error_and_returns_none(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    from worker.pipeline.diagnostics.record_builder import make_record
+
+    with caplog.at_level("WARNING", logger="worker.pipeline.diagnostics.record_builder"):
+        record = make_record(
+            record_kind="not.a.kind",
+            camera_id="cam-bad",
+            worker_boot_id="boot-1",
+            source_generation=0,
+            stream_epoch=1,
+            producer="sdk",
+            observed_at_ns=1_000,
+            time_quality="monotonic",
+            causal_unit_id="cam-bad:boot-1:1:frame:0",
+            outcome="accepted",
+            payload={},
+        )
+    assert record is None
+    message = caplog.records[-1].getMessage()
+    assert "cam-bad" in message
+    assert "not.a.kind" in message

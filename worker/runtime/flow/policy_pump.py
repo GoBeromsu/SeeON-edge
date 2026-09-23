@@ -15,7 +15,7 @@ from contracts.observation import BoundingBox
 from contracts.replay_trace import ReplayRow, ReplaySource, ReplayTrack
 from worker.interfaces.execution_records import ExecutionRecordSink
 from worker.interfaces.media_plane import OnDemandSnapshotUnsupported
-from worker.pipeline.decision import EventAggregator
+from worker.pipeline.decision import EventAggregator, unwrap_decider
 from worker.pipeline.output.evidence_attacher import AlertEvidenceAttacher
 from worker.pipeline.perception import SceneState, build_decision_input, build_frame_observation
 from worker.pipeline.trace.replay_trace_writer import ReplayTraceWriter
@@ -157,7 +157,7 @@ class NativePolicyPump:
         self._observation_coverage.rebind(current)
         if self._recreate_decision is not None:
             # A source rebuild starts a distinct native epoch. Recreate the
-            # camera-local V2 window/policy so no partial 30-row state crosses
+            # camera-local window/policy so no partial 30-row state crosses
             # the boundary and every onset identity names the new generation.
             self._decision = self._recreate_decision(current)
             with self._preview_states_lock:
@@ -596,13 +596,10 @@ def _unit_bbox(
 
 
 def _resample_gap_rows_total(decision: EventAggregator) -> int:
-    """Read the V2 adapter's cumulative count without coupling domains to telemetry."""
+    """Read the fall adapter's cumulative count without coupling domains to telemetry."""
     total = 0
     for decider in decision.deciders:
-        target: object = decider
-        while hasattr(target, "decider"):
-            target = target.decider
-        count = getattr(target, "resample_gap_rows_total", None)
+        count = getattr(unwrap_decider(decider), "resample_gap_rows_total", None)
         if isinstance(count, int):
             total += count
     return total
