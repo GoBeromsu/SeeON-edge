@@ -18,7 +18,6 @@ from worker.runtime.execution_records import compose_execution_records
 from worker.runtime.flow.execution_record_emit import emit_policy_consume
 from worker.runtime.flow.metadata_slot import LatestMetadataSlot
 from worker.runtime.flow.policy_pump import (
-    DecisionIdentity,
     NativePolicyContext,
     NativePolicyPump,
 )
@@ -39,6 +38,7 @@ from worker.types.perception_frame import (
     PersonBox,
     PersonBoxChannel,
 )
+from worker.types.trace import DecisionIdentity
 
 
 def test_settings_default_off_and_refuse_when_enabled_without_capacities() -> None:
@@ -188,7 +188,9 @@ def _pump(
             source_generation=1,
         ),
     )
-    decision = EventAggregator(deciders=(decider,), incidents=IncidentManager())
+    decision = EventAggregator(
+        deciders=(decider,), incidents=IncidentManager(), identities=(identity,)
+    )
 
     class _Control:
         def snapshot(self, camera_id: str) -> bytes:
@@ -248,7 +250,6 @@ def _pump(
             1,
             track_id_switch_absorbed_total=lambda _decision: 0,
             execution_records=sink,
-            decision_identity=identity,
         ),
     )
     pump._slot = slot  # noqa: SLF001
@@ -388,6 +389,8 @@ def test_window_gated_snapshot_without_track_gets_explicit_no_track_unit() -> No
         frame_seq=7,
         source_pts_ns=None,
         generation=None,
+        module_qualified_id="fall.v2",
+        authority_role="authoritative",
     )
     assert record is not None
     assert record.causal_unit_id == f"cam:boot:3:{NO_TRACK}:{NO_GENERATION}"
@@ -485,3 +488,196 @@ def test_make_record_logs_contract_error_and_returns_none(
     message = caplog.records[-1].getMessage()
     assert "cam-bad" in message
     assert "not.a.kind" in message
+
+
+class _SecondDomainDecider:
+    """A non-fall TraceSnapshotProvider with an authoritative + shadow tail.
+
+    Stands in for the bed-exit monitor: it exposes snapshots for a track and
+    declares that the trailing one is a shadow evaluation.
+    """
+
+    def __init__(self) -> None:
+        self.last_trace_snapshots: tuple[object, ...] = ()
+        self.last_shadow_trace_count = 0
+
+    def update(self, input_value: object) -> tuple[object, ...]:
+        from worker.types.trace import DecisionTraceSnapshot
+
+        del input_value
+        authoritative = DecisionTraceSnapshot(
+            reason="contained",
+            previous_state="in-bed",
+            current_state="in-bed",
+            triggered=False,
+            track_id=1,
+            bed_id=7,
+        )
+        shadow = DecisionTraceSnapshot(
+            reason="bed-observation-missing",
+            previous_state="unknown",
+            current_state="unknown",
+            triggered=False,
+            track_id=1,
+            bed_id=None,
+        )
+        self.last_trace_snapshots = (authoritative, shadow)
+        self.last_shadow_trace_count = 1
+        return ()
+
+    def coast(self) -> tuple[object, ...]:
+        return ()
+
+    def release_onset(self, event: object) -> None:
+        del event
+
+
+def test_non_fall_snapshots_are_attributed_to_their_own_module_not_fall() -> None:
+    """Bed-exit-style snapshots must never become fall records.
+
+    They carry their own module id and authority role, get a module-scoped
+    causal unit (never a fall track unit), a decision_trace_id computed with
+    THEIR identity, and never produce a fall model.score even though the
+    fall classifier scored the same track this call.
+    """
+    from worker.domains.registry import FALL_MODULE_QUALIFIED_ID
+    from worker.types.trace import decision_trace_id
+
+    lanes = ExecutionRecordLanes(lane_capacity=64)
+    fall_identity = DecisionIdentity(FALL_MODULE_QUALIFIED_ID, "a" * 64)
+    bed_identity = DecisionIdentity("bed_exit.v1", "b" * 64)
+    pump = _pump(lanes, identity=fall_identity, fall_transition=0.9)
+    second = _SecondDomainDecider()
+    # Rebuild the aggregator with a second, identified decider.
+    from worker.pipeline.decision import EventAggregator
+
+    original = pump._decision  # noqa: SLF001
+    pump._decision = EventAggregator(  # noqa: SLF001
+        deciders=(*original.deciders, second),
+        incidents=original.incidents,
+        identities=(fall_identity, bed_identity),
+    )
+    pump._process(_metadata(child=pump._child, seq=0))  # noqa: SLF001
+
+    drained = lanes.drain_for("cam-1", "boot-1", limit=64)
+    assert drained is not None
+    decisions = [r for r in drained.records if r.record_kind == "policy.decision"]
+    bed = [r for r in decisions if r.payload["module_qualified_id"] == "bed_exit.v1"]
+    fall = [r for r in decisions if r.payload["module_qualified_id"] == FALL_MODULE_QUALIFIED_ID]
+    assert len(bed) == 2 and fall, "both modules must be present and labelled"
+    roles = sorted(r.payload["authority_role"] for r in bed)
+    assert roles == ["authoritative", "shadow"]
+    for record in bed:
+        assert ":bed_exit.v1:" in record.causal_unit_id
+        assert (
+            ":1:" not in record.causal_unit_id.split(":bed_exit.v1:")[0][-4:]
+        )  # not a fall track unit
+        snapshot_reason = record.payload["reason"]
+        assert record.payload["decision_trace_id"] != decision_trace_id(
+            next(s for s in second.last_trace_snapshots if s.reason == snapshot_reason),  # type: ignore[attr-defined]
+            module_qualified_id=FALL_MODULE_QUALIFIED_ID,
+            effective_policy_id="a" * 64,
+        ), "a bed-exit id must not be computed with the fall identity"
+    # No fall model.score was minted for the bed-exit snapshots' track via the
+    # second decider: model.score count equals the fall decider's own scoring.
+    scores = [r for r in drained.records if r.record_kind == "model.score"]
+    assert len(scores) == len(
+        {s.track_id for s in original.deciders[0].last_trace_snapshots if s.track_id is not None}
+    )  # type: ignore[attr-defined]
+
+
+def test_unidentified_decider_snapshots_carry_no_module_claim_and_no_trace_id() -> None:
+    lanes = ExecutionRecordLanes(lane_capacity=64)
+    pump = _pump(lanes, identity=None, fall_transition=0.1)
+    second = _SecondDomainDecider()
+    from worker.pipeline.decision import EventAggregator
+
+    original = pump._decision  # noqa: SLF001
+    pump._decision = EventAggregator(  # noqa: SLF001
+        deciders=(*original.deciders, second),
+        incidents=original.incidents,
+        identities=(None, None),
+    )
+    pump._process(_metadata(child=pump._child, seq=0))  # noqa: SLF001
+    drained = lanes.drain_for("cam-1", "boot-1", limit=64)
+    assert drained is not None
+    from worker.pipeline.diagnostics.record_builder import NO_MODULE
+
+    decisions = [r for r in drained.records if r.record_kind == "policy.decision"]
+    assert decisions
+    for record in decisions:
+        assert record.payload["module_qualified_id"] is None
+        assert record.payload["decision_trace_id"] is None
+    # The fall decider's own snapshots still use the fall track unit (structural
+    # attribution); the unidentified second decider's use the no-module unit.
+    second_reasons = {s.reason for s in second.last_trace_snapshots}  # type: ignore[attr-defined]
+    for record in decisions:
+        if record.payload["reason"] in second_reasons and record.payload["bed_id"] is not None:
+            assert f":{NO_MODULE}:" in record.causal_unit_id
+
+
+def test_alert_from_second_decider_is_stamped_with_its_own_identity() -> None:
+    """The alert audit id is computed with the PRODUCING decider's identity."""
+    from worker.domains.registry import FALL_MODULE_QUALIFIED_ID
+    from worker.pipeline.decision import EventAggregator
+    from worker.runtime.flow.policy_pump import _with_decision_trace_id
+    from worker.types import BusinessEvent
+    from worker.types.trace import DecisionTraceSnapshot, decision_trace_id
+
+    class _TriggeringSecond(_SecondDomainDecider):
+        def update(self, input_value: object) -> tuple[object, ...]:
+            del input_value
+            triggered = DecisionTraceSnapshot(
+                reason="live-grace-exit",
+                previous_state="in-bed",
+                current_state="out-of-bed",
+                triggered=True,
+                track_id=1,
+                bed_id=7,
+            )
+            self.last_trace_snapshots = (triggered,)
+            self.last_shadow_trace_count = 0
+            return (self._event,)
+
+        _event = BusinessEvent(
+            domain="bed_exit",
+            event_type="bed-exit",
+            identity="evt-bed-1",  # type: ignore[arg-type]
+            camera_id="cam-1",
+            facility_id="facility-a",
+            time_sec=1.0,
+            probability=1.0,
+            person_id=1,
+            bed_id=7,
+        )
+
+    fall_identity = DecisionIdentity(FALL_MODULE_QUALIFIED_ID, "a" * 64)
+    bed_identity = DecisionIdentity("bed_exit.v1", "b" * 64)
+    lanes = ExecutionRecordLanes(lane_capacity=8)
+    pump = _pump(lanes, identity=fall_identity, fall_transition=0.1)
+    second = _TriggeringSecond()
+    original = pump._decision  # noqa: SLF001
+    aggregator = EventAggregator(
+        deciders=(*original.deciders, second),
+        incidents=original.incidents,
+        identities=(fall_identity, bed_identity),
+    )
+    # Drive one update so the aggregator records the producer of the event.
+    from test_flow_policy_pump_preview import _fall_input
+
+    del pump
+    events = aggregator.update(_fall_input(time_sec=1.0, frame_index=1))
+    (event,) = [e for e in events if e.domain == "bed_exit"]
+    stamped = _with_decision_trace_id(event, aggregator)
+    assert stamped.audit is not None
+    expected = decision_trace_id(
+        second.last_trace_snapshots[0],  # type: ignore[arg-type]
+        module_qualified_id="bed_exit.v1",
+        effective_policy_id="b" * 64,
+    )
+    assert stamped.audit["decision_trace_id"] == expected
+    assert stamped.audit["decision_trace_id"] != decision_trace_id(
+        second.last_trace_snapshots[0],  # type: ignore[arg-type]
+        module_qualified_id=FALL_MODULE_QUALIFIED_ID,
+        effective_policy_id="a" * 64,
+    )

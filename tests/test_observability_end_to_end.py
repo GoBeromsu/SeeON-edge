@@ -22,8 +22,8 @@ from worker.pipeline.output.evidence.flow_sealed_sidecar import FlowSealedSideca
 from worker.pipeline.output.evidence.smart_record_actor import SmartRecordActor
 from worker.runtime.flow.evidence import FlowEvidenceBinding
 from worker.runtime.flow.execution_record_emit import emit_policy_consume
-from worker.runtime.flow.policy_pump import DecisionIdentity
 from worker.types.metadata import MetadataCounters, MetadataFrame
+from worker.types.trace import DecisionIdentity
 
 _CAMERA = "cam-1"
 _RELAY_TOKEN = "obs-relay-token"

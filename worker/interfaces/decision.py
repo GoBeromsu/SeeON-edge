@@ -20,4 +20,17 @@ class TraceSnapshotProvider(Decider, Protocol):
     def last_trace_snapshots(self) -> tuple[DecisionTraceSnapshot, ...]: ...
 
 
+@runtime_checkable
+class ShadowTraceProvider(TraceSnapshotProvider, Protocol):
+    """A trace provider whose trailing ``last_shadow_trace_count`` snapshots are
+    non-authoritative shadow evaluations (never ``triggered``, never a cause).
+
+    A provider that does not implement this has no shadow path; every
+    snapshot it exposes is authoritative.
+    """
+
+    @property
+    def last_shadow_trace_count(self) -> int: ...
+
+
 __all__ = ["Decider", "TraceSnapshotProvider"]

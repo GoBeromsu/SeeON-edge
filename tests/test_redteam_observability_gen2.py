@@ -65,6 +65,8 @@ def _policy_record(snapshot: DecisionTraceSnapshot, *, generation: int | None) -
         frame_seq=7,
         source_pts_ns=None,
         generation=generation,
+        module_qualified_id="fall.v2",
+        authority_role="authoritative",
         observed_at_ns=1_000,
     )
     assert record is not None

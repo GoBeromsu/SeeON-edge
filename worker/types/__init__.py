@@ -46,12 +46,20 @@ from worker.types.temporal_profile import (
     TemporalProfile,
     TemporalProfileError,
 )
-from worker.types.trace import DecisionTraceSnapshot, NumericTraceValue
+from worker.types.trace import (
+    AttributedSnapshot,
+    AuthorityRole,
+    DecisionIdentity,
+    DecisionTraceSnapshot,
+    NumericTraceValue,
+)
 
 __all__ = [
     "CURRENT_TEMPORAL_PROFILE",
     "EMPTY_FRAME_BED_POSE_FEATURES",
     "AssociationResult",
+    "AttributedSnapshot",
+    "AuthorityRole",
     "BedPoseFeatures",
     "BedRegion",
     "BedRegionChannel",
@@ -60,6 +68,7 @@ __all__ = [
     "ConverterCapabilities",
     "CopyMetrics",
     "CopyMetricsSnapshot",
+    "DecisionIdentity",
     "DecisionInput",
     "DecisionTraceSnapshot",
     "EvidenceTrigger",

@@ -3,10 +3,17 @@
 Answer "why was there no alert at 14:03 on camera 7?" from what actually ran,
 not from re-analysing the clip. Issue #545; schema 19.
 
-This runbook has no numbers in it on purpose. Retention budget, lane depth,
-batch size and flush interval come from the measurement harness
-(`tests/AGENTS.md`, "Observability load (Gate M/V)"), never from a code default.
-Both sides refuse to boot when enabled without their values.
+This runbook has no numbers in it on purpose. The four operator knobs -
+retention budget, lane depth, batch size and flush interval - come from the
+measurement harness (`tests/AGENTS.md`, "Observability load (Gate M/V)"),
+never from a code default, and both sides refuse to boot when enabled without
+them. Five *shape* constants do ship in code and are pre-measurement design
+values, not measured: `unit_horizon_ns` (unit terminal horizon),
+`coverage_rows_per_epoch` (coarsening bound), `max_record_bytes` =
+`total_bytes / 256`, and the per-row control-envelope estimates for coverage,
+batch and unit/segment rows (`backend/app/features/diagnostics/retention.py`).
+Gate M replaces them with measured values; until then they bound behaviour
+but are not deployment budgets.
 
 ## What is recorded
 
@@ -19,8 +26,8 @@ producer_sequence)`. Producers never wait on each other or on the Backend.
 | `sdk.frame` | Flow metadata slot, after an accepted publish | SDK frame/source ids, whether an inference tensor was present, raw/eligible/matched row counts | that the policy consumed the frame |
 | `policy.consume` | policy pump, per processed frame | slot counter delta (accepted/overwritten/late) | that a decision was made |
 | `model.score` | policy pump, only when the classifier actually scored on this call | raw logit, applied temperature, class origins, calibrated score, track, window facts | a native three-class output (`fallen` is a synthetic zero) |
-| `policy.decision` | policy pump, per snapshot | reason, previous/current state, triggered, values, missing reasons (`classifier-warmup`, `classifier-stride-not-due`, ...), `decision_trace_id` | that the event was delivered |
-| `event.delivery` | Flow evidence binding (admission) and the evidence sender (every non-success attempt outcome) | `admitted` / `refused`; then `retry-transient`, `retry-counted`, `refused-retained`, `refused-retention-full`, `exhausted-retained`, `exhausted-retention-full`, `ack-removal-deferred` (and `operator-blocked`, reserved: never emitted for events today), with attempt counts and failure class. A successful delivery emits no `event.delivery` row - only `backend.acceptance` | that the Hub accepted anything |
+| `policy.decision` | policy pump, one per snapshot from **every** decider | `module_qualified_id` (`fall.v2`, `bed_exit.v1`, or `null` when composition gave that decider no policy), `authority_role` (`authoritative` or `shadow` - a shadow evaluation is never a cause), reason, previous/current state, triggered, values, missing reasons (`classifier-warmup`, `classifier-stride-not-due`, ...), `decision_trace_id` computed with that module's own identity | that the event was delivered; that a `shadow` row influenced anything |
+| `event.delivery` | Flow evidence binding (admission) and the evidence sender (every non-success attempt outcome) | `admitted` / `refused`; then `retry-transient`, `retry-counted`, `refused-retained`, `refused-retention-full`, `exhausted-retained`, `exhausted-retention-full`, `ack-removal-deferred` (and `operator-blocked`, reserved: never emitted for events today), with attempt counts and failure class. A successful delivery adds no *sender* `event.delivery` row - the admission row from the Flow binding is the only `event.delivery` for that event, and `backend.acceptance` records the result | that the Hub accepted anything |
 | `backend.acceptance` | evidence sender, when a relay receipt is observed | `accepted_local` (persisted on the edge Backend) **or** `hub-accepted` (Hub receipt), never both | delivery to a phone or pager |
 
 `accepted_local` is terminal local persistence. It is **not** Hub acceptance
@@ -68,7 +75,13 @@ Absence of evidence is never rendered as a negative observation.
 
 ### Reading a non-event
 
-1. Find `policy.decision` rows for the track around the time in question.
+Filter on `module_qualified_id` first. A fall question reads `fall.v2` rows; a
+bed-exit question reads `bed_exit.v1` rows. Ignore `authority_role == shadow`
+rows when asking *why* something did or did not fire - they are evaluations
+that never trigger. A row with `module_qualified_id: null` came from a decider
+that was composed without an effective policy; it has no `decision_trace_id`.
+
+1. Find `policy.decision` rows for the module and track around the time in question.
    `reason` and `missing_values` say why nothing fired: `below-threshold`,
    `outside-detection-window`, `classifier-warmup`, `classifier-stride-not-due`,
    `score-missing`, ...

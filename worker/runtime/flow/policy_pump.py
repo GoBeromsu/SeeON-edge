@@ -64,14 +64,6 @@ class NativeDiagnostics(Protocol):
 
 
 @dataclass(frozen=True, slots=True)
-class DecisionIdentity:
-    """Module + effective policy that every fall decision is attributed to."""
-
-    module_qualified_id: str
-    effective_policy_id: str
-
-
-@dataclass(frozen=True, slots=True)
 class NativePolicyContext:
     metadata: LatestMetadataSlot
     control: NativeSnapshotControl
@@ -87,7 +79,6 @@ class NativePolicyContext:
     recreate_decision: Callable[[SourceBinding], EventAggregator] | None = None
     track_id_switch_absorbed_total: Callable[[EventAggregator], int] | None = None
     execution_records: ExecutionRecordSink | None = None
-    decision_identity: DecisionIdentity | None = None
 
 
 @final
@@ -112,7 +103,6 @@ class NativePolicyPump:
             raise ValueError("native policy pump requires an absorbed-switch reader")
         self._track_id_switch_absorbed_total = context.track_id_switch_absorbed_total
         self._execution_records = context.execution_records
-        self._decision_identity = context.decision_identity
         self._stop = threading.Event()
         self._fps: deque[float] = deque()
         self.processed_count = 0
@@ -307,9 +297,7 @@ class NativePolicyPump:
         self._capture_replay_row(metadata, boxes, resolved_track_ids)
         gap_rows_before = _resample_gap_rows_total(self._decision)
         events = self._decision.update(decision_input)
-        emit_model_and_decision(
-            self._execution_records, metadata, self._decision, self._decision_identity
-        )
+        emit_model_and_decision(self._execution_records, metadata, self._decision)
         self._refresh_preview_states()
         self._diagnostics.record_track_id_switch_absorbed_total(
             self.camera_id, self._track_id_switch_absorbed_total(self._decision)
@@ -327,7 +315,7 @@ class NativePolicyPump:
             metadata.source_time_ns / 1_000_000_000,
         )
         for position, event in enumerate(events):
-            event = _with_decision_trace_id(event, self._decision, self._decision_identity)
+            event = _with_decision_trace_id(event, self._decision)
             try:
                 snapshot = self._control.snapshot(self.camera_id)
             except OnDemandSnapshotUnsupported as error:
@@ -605,22 +593,31 @@ def _resample_gap_rows_total(decision: EventAggregator) -> int:
     return total
 
 
-def _with_decision_trace_id(
-    event: BusinessEvent,
-    decision: EventAggregator,
-    identity: DecisionIdentity | None,
-) -> BusinessEvent:
+def _with_decision_trace_id(event: BusinessEvent, decision: EventAggregator) -> BusinessEvent:
     """Stamp the triggering snapshot's decision_trace_id into the alert audit.
 
-    The same id is stamped on the policy.decision execution record by
-    execution_record_emit, computed by worker.types.trace.decision_trace_id.
-    An event whose triggering snapshot cannot be identified keeps its audit
-    untouched; nothing is fabricated.
+    The id is computed with the identity of the decider that PRODUCED this
+    event (the aggregator records the producer per event id), so a bed-exit
+    alert is never stamped with the fall module's identity. The same id is
+    stamped on the matching policy.decision record by execution_record_emit.
+    An event whose producer or triggering snapshot cannot be identified keeps
+    its audit untouched; nothing is fabricated.
     """
-    if identity is None:
+    producer = decision.producer_for(str(event.identity))
+    if producer is None:
         return event
-    for snapshot in decision.last_trace_snapshots:
-        if snapshot.triggered and snapshot.track_id == event.person_id:
+    producer_index = decision.index_of(producer)
+    identity = decision.identity_for(producer)
+    if producer_index is None or identity is None:
+        return event
+    for attributed in decision.attributed_trace_snapshots():
+        snapshot = attributed.snapshot
+        if (
+            attributed.producer_index == producer_index
+            and attributed.authority == "authoritative"
+            and snapshot.triggered
+            and snapshot.track_id == event.person_id
+        ):
             audit = dict(event.audit or {})
             audit["decision_trace_id"] = decision_trace_id(
                 snapshot,
@@ -631,4 +628,4 @@ def _with_decision_trace_id(
     return event
 
 
-__all__ = ["DecisionIdentity", "NativeEventSink", "NativePolicyContext", "NativePolicyPump"]
+__all__ = ["NativeEventSink", "NativePolicyContext", "NativePolicyPump"]
