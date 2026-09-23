@@ -608,12 +608,11 @@ def test_unidentified_decider_snapshots_carry_no_module_claim_and_no_trace_id() 
     for record in decisions:
         assert record.payload["module_qualified_id"] is None
         assert record.payload["decision_trace_id"] is None
-    # The fall decider's own snapshots still use the fall track unit (structural
-    # attribution); the unidentified second decider's use the no-module unit.
-    second_reasons = {s.reason for s in second.last_trace_snapshots}  # type: ignore[attr-defined]
+    # The causal unit is keyed by module id, so EVERY unidentified decider -
+    # including the fall decider itself - uses the no-module unit. Structural
+    # attribution only decides model.score, never a unit claim.
     for record in decisions:
-        if record.payload["reason"] in second_reasons and record.payload["bed_id"] is not None:
-            assert f":{NO_MODULE}:" in record.causal_unit_id
+        assert f":{NO_MODULE}:" in record.causal_unit_id
 
 
 def test_alert_from_second_decider_is_stamped_with_its_own_identity() -> None:
