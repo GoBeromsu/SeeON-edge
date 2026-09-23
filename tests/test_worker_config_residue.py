@@ -91,7 +91,10 @@ def test_camera_runtime_config_defaults_to_opencv_decode_backend() -> None:
     config = CameraRuntimeConfig(**_camera())
 
     assert config.decode_backend is None
-    assert config.fps == 15.0
+    # Production ingest runs ~30fps (worker/types/temporal_profile.py); the
+    # bed-exit dwell redesign fixed CURRENT_TEMPORAL_PROFILE's previously
+    # wrong 15.0 ingest fps, which this default is sourced from.
+    assert config.fps == 30.0
     assert config.inference_rtsp_url == "rtsp://camera.local/trackID=2"
     assert config.main_rtsp_url is None
 
