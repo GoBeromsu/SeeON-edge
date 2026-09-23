@@ -3,8 +3,8 @@
 from __future__ import annotations
 
 from shared.events.execution_records import WireRecord
+from worker.domains.fall.classifier import FALL_WINDOW_FRAMES
 from worker.pipeline.diagnostics.record_builder import (
-    FRAME_UNIT_WINDOW,
     PRODUCER_MODEL,
     PRODUCER_POLICY,
     PRODUCER_SDK,
@@ -102,7 +102,7 @@ def model_score_record(
         "fall_transition": getattr(probability, "fall_transition", None),
         "background": getattr(probability, "background", None),
         "fallen": getattr(probability, "fallen", None),
-        "window_frames": FRAME_UNIT_WINDOW,
+        "window_frames": FALL_WINDOW_FRAMES,
     }
     if evidence is not None:
         payload["raw_logit"] = evidence.raw_logit

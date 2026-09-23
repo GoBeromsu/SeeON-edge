@@ -85,9 +85,10 @@ schema-18 image after extension requires stopping the stack and restoring
 extension. There is no in-process downgrade path. Never run `down -v`, never
 delete the `edge-state` volume, and never repair `edge.sqlite3` with direct
 SQL. See
-[`docs/runbooks/edge-database-schema-19.md`](runbooks/edge-database-schema-19.md)
-and
-[`docs/runbooks/edge-redeploy-identity-continuity.md`](runbooks/edge-redeploy-identity-continuity.md).
+[`docs/runbooks/edge-database-schema-19.md`](runbooks/edge-database-schema-19.md),
+[`docs/runbooks/edge-redeploy-identity-continuity.md`](runbooks/edge-redeploy-identity-continuity.md),
+and for querying and interpreting execution records
+[`docs/runbooks/observability-diagnostics.md`](runbooks/observability-diagnostics.md).
 
 ## Layers
 
