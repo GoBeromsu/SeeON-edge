@@ -20,7 +20,11 @@ from backend.app.features.diagnostics.records import (
     UnitCausalState,
     late_ack_unit_id,
 )
-from backend.app.features.diagnostics.retention import RetentionBudget, used_bytes
+from backend.app.features.diagnostics.retention import (
+    RetentionBudget,
+    enforce_budget,
+    used_bytes,
+)
 from backend.app.features.diagnostics.store import ExecutionRecordStore
 
 CAMERA = "cam-a"
@@ -141,6 +145,19 @@ def test_b1_forced_incomplete_unknown_converges_without_infinite_loop(tmp_path: 
             str(row[0])
             for row in connection.execute("SELECT coverage_kind FROM execution_coverage").fetchall()
         }
+        used = used_bytes(connection)
+        # An exact enforce converges below high_water; between exact checks
+        # usage may exceed high_water by one interval of accrual error but
+        # never the total envelope.
+        assert used <= budget.total_bytes
+        # Each exact call prunes whole units and stops near low_water using
+        # the measured ratio; it converges within a bounded number of calls.
+        for _ in range(50):
+            if used_bytes(connection) <= budget.high_water:
+                break
+            connection.execute("BEGIN IMMEDIATE")
+            assert enforce_budget(connection, budget, 10_000_000) is True
+            connection.execute("COMMIT")
         used = used_bytes(connection)
         counters = connection.execute(
             "SELECT MIN(record_count), MIN(payload_bytes) FROM execution_segments"

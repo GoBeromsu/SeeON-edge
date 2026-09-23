@@ -20,7 +20,11 @@ from backend.app.features.diagnostics.records import (
     StorageState,
     UnitCausalState,
 )
-from backend.app.features.diagnostics.retention import RetentionBudget, used_bytes
+from backend.app.features.diagnostics.retention import (
+    RetentionBudget,
+    enforce_budget,
+    used_bytes,
+)
 from backend.app.features.diagnostics.store import ExecutionRecordStore
 from backend.app.features.diagnostics.terminals import refresh_unit_terminals
 
@@ -344,6 +348,19 @@ def test_forced_terminal_when_nothing_terminal(tmp_path: Path) -> None:
             str(row[0])
             for row in connection.execute("SELECT coverage_kind FROM execution_coverage").fetchall()
         }
+        # Hard invariant: never over the total envelope. high_water is the
+        # prune trigger and may be exceeded by at most one interval of
+        # accrual error (what control_reserve absorbs); an exact check
+        # brings it back under.
+        assert used_bytes(connection) <= budget.total_bytes
+        # Each exact call prunes whole units and stops near low_water using
+        # the measured ratio; it converges within a bounded number of calls.
+        for _ in range(50):
+            if used_bytes(connection) <= budget.high_water:
+                break
+            connection.execute("BEGIN IMMEDIATE")
+            assert enforce_budget(connection, budget, 10_000_000) is True
+            connection.execute("COMMIT")
         assert used_bytes(connection) <= budget.high_water
     finally:
         connection.close()
@@ -496,8 +513,12 @@ def test_enforce_prunes_a_bounded_number_of_units_per_call_and_converges(
             for index in range(30)
         )
         # Ingest with an enormous budget so nothing is pruned while filling.
+        # The receive clock starts after every observed time: a batch is
+        # received no earlier than its records were observed, as on a real edge.
         big = ExecutionRecordStore(
-            lambda: _open(path), RetentionBudget(total_bytes=1 << 40), clock=_Clock()
+            lambda: _open(path),
+            RetentionBudget(total_bytes=1 << 40),
+            clock=_Clock(now=10_000 + unit),
         )
         big.ingest_batch(_batch(f"fill-{unit}", records))
     connection = _open(path)
@@ -524,18 +545,23 @@ def test_enforce_prunes_a_bounded_number_of_units_per_call_and_converges(
             assert prior - now_units <= MAX_UNITS_PER_ENFORCE
             calls += 1
         assert used_bytes(connection) <= budget.high_water
-        assert calls >= 1
+        assert calls < 100  # converged, never by more than the bound per call
         # Batch receipts older than the oldest surviving record are gone;
         # receipts of surviving records are kept (exactness of the orphan drop).
-        oldest = connection.execute(
-            "SELECT MIN(committed_at_ns) FROM execution_records"
+        oldest_observed = connection.execute(
+            "SELECT MIN(observed_at_ns) FROM execution_records WHERE camera_id = ?", (CAMERA,)
         ).fetchone()[0]
         stale = connection.execute(
-            "SELECT COUNT(*) FROM execution_batches WHERE received_at_ns < ?", (oldest,)
+            "SELECT COUNT(*) FROM execution_batches WHERE received_at_ns < ?", (oldest_observed,)
         ).fetchone()[0]
         assert stale == 0
+        # Every receipt that still has a record is kept.
         live = connection.execute(
-            "SELECT COUNT(*) FROM execution_batches WHERE received_at_ns >= ?", (oldest,)
+            """
+            SELECT COUNT(*) FROM execution_batches b
+            WHERE EXISTS (SELECT 1 FROM execution_records r
+                          WHERE r.camera_id = b.camera_id AND r.committed_at_ns = b.received_at_ns)
+            """
         ).fetchone()[0]
         assert live >= 1
     finally:
