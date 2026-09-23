@@ -467,3 +467,76 @@ def test_coarsening_yields_unknown_without_widening_exact_rows(tmp_path: Path) -
     assert all(int(row[1]) == 0 for row in coarsened)
     assert all(int(row[1]) == 1 for row in exact)
     assert len(coarsened) + len(exact) <= 3
+
+
+def test_enforce_prunes_a_bounded_number_of_units_per_call_and_converges(
+    tmp_path: Path,
+) -> None:
+    """Live regression: a 4x-over backlog made one ingest request prune for
+    minutes on the event loop. Each enforce call now prunes at most
+    MAX_UNITS_PER_ENFORCE whole units, commits (progress was made), and the
+    envelope converges over the following calls."""
+    from backend.app.features.diagnostics.retention import (
+        MAX_UNITS_PER_ENFORCE,
+        enforce_budget,
+    )
+
+    budget = RetentionBudget(total_bytes=DISK_BUDGET, unit_horizon_ns=HORIZON)
+    _store_unused, path = _store(tmp_path, budget)
+    # Forty small terminal units, well over high_water together.
+    for unit in range(40):
+        records = tuple(
+            _record(
+                label=f"u{unit}-{index}",
+                unit=f"unit-{unit:02d}",
+                seq=unit * 100 + index,
+                observed=10 + unit * 5 + index,
+                payload=PAYLOAD_BLOB,
+            )
+            for index in range(30)
+        )
+        # Ingest with an enormous budget so nothing is pruned while filling.
+        big = ExecutionRecordStore(
+            lambda: _open(path), RetentionBudget(total_bytes=1 << 40), clock=_Clock()
+        )
+        big.ingest_batch(_batch(f"fill-{unit}", records))
+    connection = _open(path)
+    try:
+        before = connection.execute("SELECT COUNT(*) FROM execution_units").fetchone()[0]
+        assert used_bytes(connection) > budget.high_water
+        now = 10 + 40 * 5 + HORIZON + 1
+        connection.execute("BEGIN IMMEDIATE")
+        ok = enforce_budget(connection, budget, now)
+        connection.execute("COMMIT")
+        after_one = connection.execute("SELECT COUNT(*) FROM execution_units").fetchone()[0]
+        assert ok is True  # progress made, ingest may commit
+        assert before - after_one <= MAX_UNITS_PER_ENFORCE
+        assert before - after_one >= 1
+        # Keep calling: it must converge to <= high_water without ever pruning
+        # more than the bound in one call.
+        calls = 0
+        while used_bytes(connection) > budget.high_water and calls < 100:
+            prior = connection.execute("SELECT COUNT(*) FROM execution_units").fetchone()[0]
+            connection.execute("BEGIN IMMEDIATE")
+            assert enforce_budget(connection, budget, now) is True
+            connection.execute("COMMIT")
+            now_units = connection.execute("SELECT COUNT(*) FROM execution_units").fetchone()[0]
+            assert prior - now_units <= MAX_UNITS_PER_ENFORCE
+            calls += 1
+        assert used_bytes(connection) <= budget.high_water
+        assert calls >= 1
+        # Batch receipts older than the oldest surviving record are gone;
+        # receipts of surviving records are kept (exactness of the orphan drop).
+        oldest = connection.execute(
+            "SELECT MIN(committed_at_ns) FROM execution_records"
+        ).fetchone()[0]
+        stale = connection.execute(
+            "SELECT COUNT(*) FROM execution_batches WHERE received_at_ns < ?", (oldest,)
+        ).fetchone()[0]
+        assert stale == 0
+        live = connection.execute(
+            "SELECT COUNT(*) FROM execution_batches WHERE received_at_ns >= ?", (oldest,)
+        ).fetchone()[0]
+        assert live >= 1
+    finally:
+        connection.close()

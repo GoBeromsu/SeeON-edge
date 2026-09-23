@@ -128,7 +128,6 @@ def prune_unit(connection: sqlite3.Connection, unit_id: str, now_ns: int) -> Non
             cause="capacity",
             recorded_at_ns=now_ns,
         )
-    drop_orphan_batches(connection)
 
 
 def _extend_contiguous_deletion(
@@ -183,21 +182,20 @@ def _extend_contiguous_deletion(
 
 
 def drop_orphan_batches(connection: sqlite3.Connection) -> None:
-    """Delete batch receipts whose records are all gone.
+    """Delete batch receipts none of whose records can still exist.
 
-    A receipt exists so a retried batch is answered idempotently. Once every
-    record it contributed has been pruned, a retry would only re-insert data
-    that capacity already removed, so the receipt has no remaining purpose and
-    must not pin control bytes forever.
+    A receipt exists so a retried batch is answered idempotently. A batch's
+    records all carry ``committed_at_ns == received_at_ns``, so a receipt
+    older than the oldest surviving record has no records left and only pins
+    control bytes. One MIN() instead of a correlated NOT EXISTS per receipt:
+    exact, and O(records) once per prune cycle rather than O(receipts x
+    records) per pruned unit.
     """
     connection.execute(
         """
         DELETE FROM execution_batches
-        WHERE NOT EXISTS (
-            SELECT 1 FROM execution_records r
-            WHERE r.camera_id = execution_batches.camera_id
-              AND r.worker_boot_id = execution_batches.worker_boot_id
-              AND r.committed_at_ns = execution_batches.received_at_ns
+        WHERE received_at_ns < (
+            SELECT COALESCE(MIN(committed_at_ns), 0) FROM execution_records
         )
         """
     )
