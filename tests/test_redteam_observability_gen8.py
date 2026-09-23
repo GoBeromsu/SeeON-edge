@@ -319,7 +319,7 @@ def test_g8_2_identities_length_mismatch_raises_valueerror() -> None:
         )
 
 
-def test_g8_3_empty_identities_leave_rows_unattributed_except_fall_units() -> None:
+def test_g8_3_empty_identities_leave_every_row_unattributed_on_no_module_units() -> None:
     lanes = ExecutionRecordLanes(lane_capacity=64)
     pump = _pump(lanes, identity=None, fall_transition=0.1)
     monitor = _night_monitor()
