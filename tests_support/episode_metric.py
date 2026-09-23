@@ -18,7 +18,7 @@ from shared.detection_policies import (
 )
 from tests_support.golden_episodes import GoldenEpisode, load_golden_episodes
 from worker.adapters.model.fall_family_registry import DEFAULT_FALL_MODEL_FAMILY_REGISTRY
-from worker.interfaces.fall_model import FallV2ModelProtocol
+from worker.interfaces.fall_model import FallModelProtocol
 from worker.replay.engine import replay
 from worker.runtime.config.errors import WorkerConfigError
 from worker.runtime.config.local_env import fall_model_config_from_environment
@@ -47,7 +47,7 @@ def _default_fall_policy() -> EffectivePolicy:
     )
 
 
-def _resolve_fall_model() -> FallV2ModelProtocol:
+def _resolve_fall_model() -> FallModelProtocol:
     """Use the worker's packaged-default config and registered CPU loader."""
     try:
         config = fall_model_config_from_environment()
@@ -146,7 +146,7 @@ def evaluate(
     goldens: tuple[GoldenEpisode, ...],
     policy: EffectivePolicy | None = None,
     *,
-    fall_model: FallV2ModelProtocol | None = None,
+    fall_model: FallModelProtocol | None = None,
 ) -> dict[str, object]:
     """Run canonical replay then compare admitted alerts to labelled windows."""
     episodes = tuple(item for item in goldens if item.resolved == "real")

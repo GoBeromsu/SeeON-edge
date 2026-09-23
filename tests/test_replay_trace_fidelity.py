@@ -3,8 +3,8 @@ from pathlib import Path
 
 from contracts.replay_trace import decode_document
 from shared.detection_policies import BedExitPolicyV1, FallPolicyV2, make_effective_policy
-from worker.domains.fall import FallPolicyDeciderV2, FallV2DomainDecider, FallV2Probabilities
-from worker.domains.fall.classifier_v2 import FallWindowClassifierV2
+from worker.domains.fall import FallDomainDecider, FallPolicyDecider, FallProbabilities
+from worker.domains.fall.classifier import FallWindowClassifier
 from worker.replay.engine import replay, replay_trace_frames
 from worker.replay.inputs import replay_trace_to_decision_input
 
@@ -147,9 +147,9 @@ class _RecordingFallModel:
     def __init__(self) -> None:
         self.windows: list[tuple[tuple[float, ...], ...]] = []
 
-    def predict(self, window: tuple[tuple[float, ...], ...]) -> FallV2Probabilities:
+    def predict(self, window: tuple[tuple[float, ...], ...]) -> FallProbabilities:
         self.windows.append(window)
-        return FallV2Probabilities(0.1, 0.1, 0.8)
+        return FallProbabilities(0.1, 0.1, 0.8)
 
 
 def _fall_policy():
@@ -174,9 +174,9 @@ def test_fall_replay_feeds_production_byte_identical_windows_including_gaps() ->
         for index in range(32)
     )
     production_model = _RecordingFallModel()
-    production = FallV2DomainDecider(
-        classifier=FallWindowClassifierV2(production_model),
-        policy=FallPolicyDeciderV2(
+    production = FallDomainDecider(
+        classifier=FallWindowClassifier(production_model),
+        policy=FallPolicyDecider(
             camera_id="fixture",
             facility_id="replay",
             boot_id="boot-0",
@@ -203,9 +203,9 @@ def test_fall_replay_feeds_production_byte_identical_windows_including_gaps() ->
 def test_fall_pts_rollback_resets_the_partial_classifier_window() -> None:
     template = _rows("gap-control-v2")[0]
     model = _RecordingFallModel()
-    decider = FallV2DomainDecider(
-        classifier=FallWindowClassifierV2(model),
-        policy=FallPolicyDeciderV2(
+    decider = FallDomainDecider(
+        classifier=FallWindowClassifier(model),
+        policy=FallPolicyDecider(
             camera_id="fixture",
             facility_id="replay",
             boot_id="boot-0",

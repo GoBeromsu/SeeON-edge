@@ -27,7 +27,7 @@ from worker.domains.bed_exit import (
 )
 from worker.domains.bed_exit.geometry import containment_ratio
 from worker.domains.detection_window import DetectionWindow
-from worker.domains.fall import FallPolicyDeciderV2, FallV2DomainDecider, FallWindowClassifierV2
+from worker.domains.fall import FallDomainDecider, FallPolicyDecider, FallWindowClassifier
 from worker.domains.module_compiler import compile_detection_module_registry
 from worker.domains.module_definition import (
     RUNTIME_RESOLVED_ARTIFACT_DIGEST,
@@ -40,7 +40,7 @@ from worker.domains.module_definition import (
 )
 from worker.domains.tracker import GreedyIouTracker
 from worker.interfaces.decision import Decider
-from worker.interfaces.fall_model import FallV2ModelProtocol
+from worker.interfaces.fall_model import FallModelProtocol
 from worker.pipeline.analytics.merge import result_merger_names
 from worker.types import CURRENT_TEMPORAL_PROFILE
 
@@ -181,9 +181,9 @@ def _build_bed_exit_compat(dependencies: object) -> BedExitMonitor:
     )
 
 
-def _fall_v2_compat(dependencies: object) -> FallV2DomainDecider:
+def _fall_compat(dependencies: object) -> FallDomainDecider:
     if not isinstance(dependencies, Mapping):
-        raise TypeError("fall.v2 compatibility dependencies must be a mapping")
+        raise TypeError("fall compatibility dependencies must be a mapping")
     model = dependencies.get("model")
     camera_id = dependencies.get("camera_id")
     facility_id = dependencies.get("facility_id")
@@ -191,17 +191,17 @@ def _fall_v2_compat(dependencies: object) -> FallV2DomainDecider:
     stream_epoch = dependencies.get("stream_epoch")
     source_generation = dependencies.get("source_generation")
     if (
-        not isinstance(model, FallV2ModelProtocol)
+        not isinstance(model, FallModelProtocol)
         or not isinstance(camera_id, str)
         or not isinstance(facility_id, str)
         or not isinstance(boot_id, str)
         or not isinstance(stream_epoch, str)
         or not isinstance(source_generation, int)
     ):
-        raise TypeError("fall.v2 compatibility dependencies are invalid")
-    return FallV2DomainDecider(
-        classifier=FallWindowClassifierV2(model),
-        policy=FallPolicyDeciderV2(
+        raise TypeError("fall compatibility dependencies are invalid")
+    return FallDomainDecider(
+        classifier=FallWindowClassifier(model),
+        policy=FallPolicyDecider(
             camera_id=camera_id,
             facility_id=facility_id,
             boot_id=boot_id,
@@ -218,10 +218,10 @@ def _audit_snapshot_compat(context: object) -> DomainAuditSnapshot:
     return DomainAuditSnapshot(context.model_version, context.operating_threshold)
 
 
-def _shared_fall_model(context: CameraModuleContext) -> FallV2ModelProtocol:
+def _shared_fall_model(context: CameraModuleContext) -> FallModelProtocol:
     model = context.shared_components.get("fall-classifier")
-    if not isinstance(model, FallV2ModelProtocol):
-        raise TypeError("fall.v2 requires a FallV2ModelProtocol fall-classifier binding")
+    if not isinstance(model, FallModelProtocol):
+        raise TypeError("fall requires a FallModelProtocol fall-classifier binding")
     return model
 
 
@@ -236,25 +236,25 @@ def _bed_exit_policy(context: CameraModuleContext) -> BedExitPolicyV1:
     return policy
 
 
-def _fall_v2(context: CameraModuleContext) -> FallV2DomainDecider:
+def _fall(context: CameraModuleContext) -> FallDomainDecider:
     resolved = None if context.policy is None else context.policy.values
     if not isinstance(resolved, FallPolicyV2):
-        raise TypeError("fall.v2 requires a typed fall.policy.v2 effective policy")
+        raise TypeError("fall requires a typed fall.policy.v2 effective policy")
     model = _shared_fall_model(context)
     effective = _effective_transition_threshold(model, context.policy)
     identity = context.camera_components.get("episode-identity")
     if not isinstance(identity, tuple) or len(identity) != 3:
-        raise TypeError("fall.v2 requires runtime boot and source identities")
+        raise TypeError("fall requires runtime boot and source identities")
     boot_id, stream_epoch, source_generation = identity
     if (
         not isinstance(boot_id, str)
         or not isinstance(stream_epoch, str)
         or not isinstance(source_generation, int)
     ):
-        raise TypeError("fall.v2 received invalid runtime source identities")
-    return FallV2DomainDecider(
-        classifier=FallWindowClassifierV2(model),
-        policy=FallPolicyDeciderV2(
+        raise TypeError("fall received invalid runtime source identities")
+    return FallDomainDecider(
+        classifier=FallWindowClassifier(model),
+        policy=FallPolicyDecider(
             camera_id=context.camera_id,
             facility_id=context.facility_id,
             boot_id=boot_id,
@@ -276,7 +276,7 @@ def _effective_transition_threshold(
     """Resolve receipt operating parameters under one precedence rule."""
     policy = effective_policy.values
     if not isinstance(policy, FallPolicyV2):
-        raise TypeError("fall.v2 requires a typed fall.policy.v2 effective policy")
+        raise TypeError("fall requires a typed fall.policy.v2 effective policy")
     receipt_threshold = model.receipt_threshold if isinstance(model, _ThresholdReceipt) else None
     receipt_votes = (
         model.receipt_transition_votes if isinstance(model, _ConfirmationRuleReceipt) else None
@@ -374,7 +374,7 @@ def _audit_snapshot(context: CameraModuleContext) -> DomainAuditSnapshot:
     model_version = model.artifact_digest if isinstance(model, _ArtifactProvenance) else None
     effective_policy = context.policy
     if effective_policy is None or not isinstance(effective_policy.values, FallPolicyV2):
-        raise TypeError("fall.v2 requires a typed fall.policy.v2 effective policy")
+        raise TypeError("fall requires a typed fall.policy.v2 effective policy")
     effective = _effective_transition_threshold(model, effective_policy)
     return DomainAuditSnapshot(
         model_version=model_version,
@@ -425,7 +425,7 @@ _FALL_V2 = DetectionModuleDefinition(
         _extractor("pose", "yolo-pose"),
         _camera_component("person-tracker", _person_tracker),
         _fall_classifier_binding(),
-        _camera_component("fall-v2", _fall_v2),
+        _camera_component("fall-v2", _fall),
     ),
     schedule_rules=(ScheduleRule("pose", "camera-frame-stride"),),
     policy_schema=PolicySchemaIdentity("fall.policy", 2),
@@ -438,7 +438,7 @@ _FALL_V2 = DetectionModuleDefinition(
     input_view="fall_window",
     window_mode="external",
     requires=frozenset({"pose"}),
-    compatibility_factory=_fall_v2_compat,
+    compatibility_factory=_fall_compat,
 )
 
 _BED_EXIT_V1 = DetectionModuleDefinition(

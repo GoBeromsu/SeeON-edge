@@ -6,7 +6,7 @@ from zoneinfo import ZoneInfo
 from worker.domains import DOMAIN_REGISTRY, BedExitDomainDependencies
 from worker.domains.bed_exit import BedExitConfig
 from worker.interfaces.decision import Decider
-from worker.interfaces.fall_model import FallV2Probabilities
+from worker.interfaces.fall_model import FallProbabilities
 
 # Membership guarantee (DOMAIN_REGISTRY == {"fall", "bed_exit"}, no disabled
 # scaffolds via list_domains(enabled=False)) is superseded 1:1 by
@@ -43,9 +43,9 @@ from worker.interfaces.fall_model import FallV2Probabilities
 
 
 class _FallModel:
-    def predict(self, window: object) -> FallV2Probabilities:
+    def predict(self, window: object) -> FallProbabilities:
         del window
-        return FallV2Probabilities(background=1.0, fall_transition=0.0, fallen=0.0)
+        return FallProbabilities(background=1.0, fall_transition=0.0, fallen=0.0)
 
 
 def test_domain_detectors_no_longer_require_an_enabled_attribute() -> None:
