@@ -48,7 +48,6 @@ from worker.types.temporal_profile import (
 )
 from worker.types.trace import (
     AttributedSnapshot,
-    AuthorityRole,
     DecisionIdentity,
     DecisionTraceSnapshot,
     NumericTraceValue,
@@ -59,7 +58,6 @@ __all__ = [
     "EMPTY_FRAME_BED_POSE_FEATURES",
     "AssociationResult",
     "AttributedSnapshot",
-    "AuthorityRole",
     "BedPoseFeatures",
     "BedRegion",
     "BedRegionChannel",
