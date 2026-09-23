@@ -54,7 +54,6 @@ from worker.domains.fall.pose_bbox56 import (
     COCO17_KEYPOINT_ORDER,
     POSE_BBOX56_CONFIDENCE_GATE,
 )
-from worker.domains.registry import FALL_MODULE_QUALIFIED_ID
 from worker.domains.tracker import GreedyIouTracker
 from worker.interfaces.clip_analysis import ClipAnalysisDisabledError
 from worker.interfaces.clip_analysis import ClipAnalysisSupervisor as ClipAnalysisControl
@@ -110,7 +109,6 @@ from worker.runtime.flow.media_plane import (
     FlowMediaPlaneConfig,
 )
 from worker.runtime.flow.policy_pump import (
-    DecisionIdentity,
     NativePolicyContext,
     NativePolicyPump,
 )
@@ -157,6 +155,7 @@ from worker.types import (
     TemporalProfile,
 )
 from worker.types.preview import FallPreviewState
+from worker.types.trace import DecisionIdentity
 
 LOGGER: Final = logging.getLogger(__name__)
 HEARTBEAT_TIMEOUT_SEC: Final = 0.5
@@ -409,17 +408,21 @@ class _WindowGatedDecider:
         return events
 
 
-def _fall_decision_identity(config: WorkerConfig) -> DecisionIdentity | None:
-    """Identity every fall decision is stamped with (alert audit + policy.decision).
+def _decision_identity_for(
+    config: WorkerConfig, module_qualified_id: str
+) -> DecisionIdentity | None:
+    """Identity a module's decisions are stamped with: its compiled id + policy.
 
-    None only when no effective fall policy is configured, in which case the
-    fall module is not composed either.
+    None when no effective policy is configured for that module; the decider
+    is then composed without an identity and its records carry no module claim
+    and no decision_trace_id. Never borrows another module's policy.
     """
-    policy = config.detection_policies.defaults.get("fall")
+    module_id = module_qualified_id.split(".v", 1)[0]
+    policy = config.detection_policies.defaults.get(module_id)
     if policy is None:
         return None
     return DecisionIdentity(
-        module_qualified_id=FALL_MODULE_QUALIFIED_ID,
+        module_qualified_id=module_qualified_id,
         effective_policy_id=str(policy.effective_policy_id),
     )
 
@@ -1623,7 +1626,6 @@ class WorkerRuntime:
                 ),
                 track_id_switch_absorbed_total=_absorbed_track_id_switch_total,
                 execution_records=self._execution_record_lanes,
-                decision_identity=_fall_decision_identity(self.config),
             ),
         )
         self._native_policy_pumps_by_camera[camera.camera_id] = pump
@@ -1793,6 +1795,8 @@ class WorkerRuntime:
             camera_component_values["person-tracker"] = tracker
         camera_components: Mapping[str, object] = MappingProxyType(camera_component_values)
         domain_deciders: dict[str, Decider] = {}
+
+        domain_identities: dict[str, DecisionIdentity | None] = {}
         domain_audit: dict[str, Mapping[str, object]] = {}
         definitions: dict[str, DetectionModuleDefinition] = {}
         detection_windows: dict[str, DetectionWindow | None] = {}
@@ -1823,6 +1827,9 @@ class WorkerRuntime:
             if definition.window_mode == "external" and window is not None:
                 decider = _WindowGatedDecider(decider, window, clock=lambda: datetime.now(UTC))
             domain_deciders[definition.module_id] = decider
+            domain_identities[definition.module_id] = _decision_identity_for(
+                self.config, definition.qualified_id
+            )
             definitions[definition.module_id] = definition
             if definition.audit_adapter is not None:
                 audit_context = replace(context, camera_components=camera_components)
@@ -1865,7 +1872,11 @@ class WorkerRuntime:
             incidents = IncidentManager(
                 identity_path=event_identity_path(camera.camera_id, self._state_dir)
             )
-        aggregator = EventAggregator(deciders=tuple(domain_deciders.values()), incidents=incidents)
+        aggregator = EventAggregator(
+            deciders=tuple(domain_deciders.values()),
+            incidents=incidents,
+            identities=tuple(domain_identities[name] for name in domain_deciders),
+        )
         self.diagnostics.register_incident_manager(camera.camera_id, incidents)
         if _is_confirmed_cpu_fall_runner(self.fall_model):
             self.diagnostics.record_fall_inference_device(camera.camera_id, "cpu")

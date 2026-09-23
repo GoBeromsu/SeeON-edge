@@ -7,7 +7,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 from enum import StrEnum
 from types import MappingProxyType
-from typing import Final, TypeAlias, TypeVar, overload
+from typing import Final, Literal, TypeAlias, TypeVar, overload
 
 NumericTraceValue: TypeAlias = int | float
 TRACE_FLOAT_DECIMAL_PLACES: Final = 6
@@ -211,6 +211,33 @@ class DecisionTraceSnapshot:
         object.__setattr__(self, "missing_values", MappingProxyType(missing))
 
 
+@dataclass(frozen=True, slots=True)
+class DecisionIdentity:
+    """Which compiled module and effective policy a decision is attributed to."""
+
+    module_qualified_id: str
+    effective_policy_id: str
+
+
+AuthorityRole = Literal["authoritative", "shadow"]
+
+
+@dataclass(frozen=True, slots=True)
+class AttributedSnapshot:
+    """One trace snapshot with the decider it came from and its authority role.
+
+    ``identity`` is None when composition supplied no identity for that
+    decider; consumers must then record the snapshot without a module claim
+    and without a decision_trace_id, never borrow another decider's identity.
+    """
+
+    snapshot: DecisionTraceSnapshot
+    identity: DecisionIdentity | None
+    authority: AuthorityRole
+    #: Index of the producing decider in the aggregator's ``deciders`` tuple.
+    producer_index: int
+
+
 def decision_trace_id(
     snapshot: DecisionTraceSnapshot,
     *,
@@ -244,6 +271,9 @@ def decision_trace_id(
 
 __all__ = [
     "TRACE_FLOAT_DECIMAL_PLACES",
+    "AttributedSnapshot",
+    "AuthorityRole",
+    "DecisionIdentity",
     "DecisionTraceMissingReason",
     "DecisionTraceReason",
     "DecisionTraceSnapshot",
