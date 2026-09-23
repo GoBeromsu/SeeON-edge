@@ -128,7 +128,7 @@ class _RecordingModel:
         return _probability(0.0)
 
 
-def test_missing_live_coasts_until_exact_ttl_then_reconnect_zero_fills_fresh_window() -> None:
+def test_missing_live_coasts_until_exact_ttl_then_reconnect_replicates_first_row() -> None:
     model = _RecordingModel()
     classifier = FallWindowClassifier(model)
     row = (0.25,) * 56
@@ -149,11 +149,13 @@ def test_missing_live_coasts_until_exact_ttl_then_reconnect_zero_fills_fresh_win
         classifier.update({}, ())
     assert classifier.probabilities_for(7) is None
 
-    # The reused number has no row history. Its new window is zero-filled and
-    # therefore cannot carry a stale transition onset from the prior resident.
+    # The reused number has no row history. Its window is rebuilt by
+    # replicating its own first real row -- never zeros -- so a fresh
+    # detection cannot look like a teleport from the origin.
+    reused_row = (0.6,) * 56
     for _ in range(30):
-        classifier.update({7: None}, (7,))
-    assert model.windows[-1] == ((0.0,) * 56,) * 30
+        classifier.update({7: reused_row}, (7,))
+    assert model.windows[-1] == (reused_row,) * 30
 
 
 def test_committed_reconnect_after_eviction_case_preloads_a_fresh_generation_window() -> None:
@@ -181,8 +183,9 @@ def test_committed_reconnect_after_eviction_case_preloads_a_fresh_generation_win
     assert classifier.generation_for(7) == 1
     assert due[7] == _probability(0.0)
     assert len(model.windows[-1]) == 30
-    assert model.windows[-1][:29] == ((0.0,) * 56,) * 29
-    assert model.windows[-1][-1] == reconnect_row
+    # Replicate padding: the reconnect window is the track's own first real
+    # row repeated, never a zero-filled prefix.
+    assert model.windows[-1] == (reconnect_row,) * 30
 
 
 def test_release_reopens_only_the_exact_failed_onset() -> None:
