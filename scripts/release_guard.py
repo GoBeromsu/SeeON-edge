@@ -44,7 +44,7 @@ JSON_CARRIERS: tuple[str, ...] = ("front/package.json",)
 #
 #   front/src/shared/releaseIdentity.ts
 #       EDGE_DATABASE_FORMAT_IDENTITY = 'seeon-edge-v1' is the on-disk DATABASE
-#       FORMAT identity, paired with EDGE_DATABASE_SCHEMA_VERSION = 18. It only
+#       FORMAT identity, paired with EDGE_DATABASE_SCHEMA_VERSION = 19. It only
 #       coincidentally spells like the tag. It moves when the SQLite format
 #       lineage changes, never when the product ships; bumping it to track a
 #       release would tell every edge device its existing database belongs to a

@@ -5,8 +5,8 @@ import {
 } from '@/shared/releaseIdentity';
 
 describe('release identity', () => {
-  it('advertises schema 18 for the baked dashboard', () => {
-    expect(EDGE_DATABASE_SCHEMA_VERSION).toBe(18);
+  it('advertises schema 19 for the baked dashboard', () => {
+    expect(EDGE_DATABASE_SCHEMA_VERSION).toBe(19);
     expect(EDGE_DATABASE_FORMAT_IDENTITY).toBe('seeon-edge-v1');
   });
 });

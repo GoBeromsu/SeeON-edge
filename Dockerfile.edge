@@ -57,7 +57,7 @@ RUN mkdir -p \
         /var/cache/seeon/tensorrt \
         /var/lib/seeon-records
 
-ARG EDGE_DATABASE_SCHEMA_VERSION=18
+ARG EDGE_DATABASE_SCHEMA_VERSION=19
 ARG SOURCE_REVISION=db09fc12c1dcf1f04fb735706ae80c4e498e2ab0
 RUN if [ "$SOURCE_REVISION" = "0000000000000000000000000000000000000000" ] \
       || [ "${#SOURCE_REVISION}" -ne 40 ] \

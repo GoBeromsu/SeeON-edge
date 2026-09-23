@@ -9,7 +9,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from backend.app.edge_db.bootstrap import bootstrap_database
-from backend.app.edge_db.compact_schema import COMPACT_APPLICATION_TABLES
+from backend.app.edge_db.compact_schema import APPLICATION_TABLES
 from backend.app.main import create_app
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -105,7 +105,7 @@ def test_reintroducing_status_sqlite_fails_this_named_boundary() -> None:
     assert kinds == frozenset()
 
 
-def test_schema18_runtime_has_no_telemetry_qa_or_listing_tables(tmp_path: Path) -> None:
+def test_schema19_runtime_has_no_telemetry_qa_or_listing_tables(tmp_path: Path) -> None:
     database = tmp_path / "edge.sqlite3"
     bootstrap_database(database)
     with sqlite3.connect(database) as connection:
@@ -115,7 +115,7 @@ def test_schema18_runtime_has_no_telemetry_qa_or_listing_tables(tmp_path: Path) 
                 "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'"
             )
         }
-    assert tables == COMPACT_APPLICATION_TABLES
+    assert tables == APPLICATION_TABLES
     assert tables.isdisjoint(RETIRED_TABLES)
 
 
