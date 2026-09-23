@@ -12,38 +12,49 @@ from backend.app.features.diagnostics.records import (
 
 
 def refresh_unit_terminals(connection: sqlite3.Connection, unit_horizon_ns: int) -> None:
-    units = connection.execute(
+    """Mark units terminal by horizon or by a newer (boot, epoch) on the camera.
+
+    Only non-terminal units are candidates (a terminal unit never changes),
+    and the per-lane successor lookup is one window query in SQLite rather
+    than a Python pass over every unit per candidate: the previous shape was
+    O(units^2) per ingest and cost half of every request on a 50k-unit DB.
+    """
+    lanes = connection.execute(
         """
-        SELECT causal_unit_id, camera_id, worker_boot_id, source_generation, stream_epoch,
-               first_observed_ns, last_observed_ns, causal_state
-        FROM execution_units
+        SELECT DISTINCT camera_id, worker_boot_id, stream_epoch FROM execution_units
         """
     ).fetchall()
-    if not units:
+    if not lanes:
         return
     newest: dict[str, tuple[str, int]] = {}
-    later_first: dict[tuple[object, ...], list[int]] = {}
-    for row in units:
-        camera_id, boot, epoch = str(row[1]), str(row[2]), int(row[4])
-        current = newest.get(camera_id)
-        if current is None or (boot, epoch) > current:
-            newest[camera_id] = (boot, epoch)
-        later_first.setdefault((row[1], row[2], row[3], row[4]), []).append(int(row[5]))
-    for values in later_first.values():
-        values.sort()
-    for row in units:
-        unit_id = str(row[0])
-        camera_id = str(row[1])
-        boot = str(row[2])
-        gen = int(row[3])
-        epoch = int(row[4])
-        first_ns = int(row[5])
-        last_ns = int(row[6])
-        state = str(row[7])
-        successors = [
-            value for value in later_first[(row[1], row[2], row[3], row[4])] if value > first_ns
-        ]
-        by_horizon = bool(successors) and min(successors) > first_ns + unit_horizon_ns
+    for camera_id_raw, boot_raw, epoch_raw in lanes:
+        key = (str(boot_raw), int(epoch_raw))
+        current = newest.get(str(camera_id_raw))
+        if current is None or key > current:
+            newest[str(camera_id_raw)] = key
+    candidates = connection.execute(
+        """
+        WITH ordered AS (
+            SELECT causal_unit_id, camera_id, worker_boot_id, source_generation, stream_epoch,
+                   first_observed_ns, last_observed_ns, causal_state, terminal,
+                   LEAD(first_observed_ns) OVER (
+                       PARTITION BY camera_id, worker_boot_id, source_generation, stream_epoch
+                       ORDER BY first_observed_ns
+                   ) AS next_first_ns
+            FROM execution_units
+        )
+        SELECT causal_unit_id, camera_id, worker_boot_id, source_generation, stream_epoch,
+               first_observed_ns, last_observed_ns, causal_state, next_first_ns
+        FROM ordered
+        WHERE terminal = 0
+        """
+    ).fetchall()
+    for row in candidates:
+        unit_id, camera_id, boot = str(row[0]), str(row[1]), str(row[2])
+        gen, epoch = int(row[3]), int(row[4])
+        first_ns, last_ns, state = int(row[5]), int(row[6]), str(row[7])
+        next_first = None if row[8] is None else int(row[8])
+        by_horizon = next_first is not None and next_first > first_ns + unit_horizon_ns
         by_epoch = (boot, epoch) < newest[camera_id]
         if not by_horizon and not by_epoch:
             continue
