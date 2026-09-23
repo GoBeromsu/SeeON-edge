@@ -20,7 +20,11 @@ from typing import Protocol, TypeGuard
 from fastapi import FastAPI
 
 from backend.app.core.config import get_settings, reject_retired_backend_environment
-from backend.app.edge_db import EDGE_DATABASE_PATH, RuntimeActor, open_runtime_database
+from backend.app.edge_db import (
+    DIAGNOSTICS_DATABASE_FILENAME,
+    EDGE_DATABASE_PATH,
+    open_diagnostics_database,
+)
 from backend.app.features.audit.startup import (
     close_audit_session,
     configure_audit_readiness,
@@ -209,8 +213,14 @@ def _configure_execution_record_store(app: FastAPI) -> None:
     if isinstance(getattr(app.state, "execution_record_store", None), ExecutionRecordStore):
         return
     app.state.execution_record_store = ExecutionRecordStore(
-        lambda: open_runtime_database(
-            EDGE_DATABASE_PATH, actor=RuntimeActor.API, check_same_thread=False
+        # Its own SQLite file, not edge.sqlite3: execution-record telemetry is
+        # written on every worker flush and pruned on that same hot path, and
+        # must never share a writer lock with alerts/incidents/policy writes.
+        # EDGE_DATABASE_PATH is read fresh inside the lambda (not captured
+        # into a module-level constant) so tests that monkeypatch it also
+        # redirect this file.
+        lambda: open_diagnostics_database(
+            EDGE_DATABASE_PATH.parent / DIAGNOSTICS_DATABASE_FILENAME
         ),
         RetentionBudget(total_bytes=budget_bytes),
     )

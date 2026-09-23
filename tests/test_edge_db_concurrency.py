@@ -18,6 +18,10 @@ from backend.app.edge_db.connection import (
     open_runtime_database,
     write_transaction,
 )
+from backend.app.edge_db.diagnostics_connection import (
+    DIAGNOSTICS_DATABASE_FILENAME,
+    open_diagnostics_database,
+)
 
 
 def _hold_worker_write(database: str, channel: Connection) -> None:
@@ -60,6 +64,19 @@ def _hold_runtime_open(database: str, actor: str, channel: Connection) -> None:
     finally:
         connection.close()
         channel.send("CLOSED")
+        channel.close()
+
+
+def _hold_diagnostics_write(database: str, channel: Connection) -> None:
+    connection = open_diagnostics_database(Path(database))
+    try:
+        connection.execute("BEGIN IMMEDIATE")
+        channel.send("LOCKED")
+        assert channel.recv() == "COMMIT"
+        connection.commit()
+        channel.send("COMMITTED")
+    finally:
+        connection.close()
         channel.close()
 
 
@@ -210,5 +227,51 @@ def test_fatal_fault_best_effort_write_returns_without_waiting_for_writer(tmp_pa
         assert connection.execute(
             "SELECT runtime_settings_version FROM edge_site WHERE id=1"
         ).fetchone() == (0,)
+    finally:
+        connection.close()
+
+
+def test_diagnostics_writer_never_blocks_the_product_database_writer(tmp_path: Path) -> None:
+    """The telemetry file's writer lock must never delay the product database.
+
+    Separate SQLite files have independent writer locks, so this holds
+    structurally once execution-record telemetry lives in its own file next
+    to edge.sqlite3 (see backend/app/edge_db/diagnostics_connection.py):
+    alerts, incidents, and policy acknowledgement never wait behind it.
+    """
+    database_path = tmp_path / "edge" / "edge.sqlite3"
+    diagnostics_path = database_path.parent / DIAGNOSTICS_DATABASE_FILENAME
+    _prepare_database(database_path)
+    open_diagnostics_database(diagnostics_path).close()
+
+    context = multiprocessing.get_context("spawn")
+    holder_parent, holder_child = context.Pipe()
+    holder = context.Process(
+        target=_hold_diagnostics_write,
+        args=(os.fspath(diagnostics_path), holder_child),
+    )
+    holder.start()
+    assert holder_parent.poll(10), "diagnostics writer did not acquire its write lock"
+    assert holder_parent.recv() == "LOCKED"
+
+    try:
+        connection = open_runtime_database(database_path, actor=RuntimeActor.API)
+        try:
+            with write_transaction(connection):
+                connection.execute("UPDATE edge_site SET clip_export_enabled = 1 WHERE id = 1")
+        finally:
+            connection.close()
+    finally:
+        holder_parent.send("COMMIT")
+        assert holder_parent.poll(10), "diagnostics writer did not commit"
+        assert holder_parent.recv() == "COMMITTED"
+        holder.join(10)
+    assert holder.exitcode == 0
+
+    connection = sqlite3.connect(database_path)
+    try:
+        assert connection.execute(
+            "SELECT clip_export_enabled FROM edge_site WHERE id=1"
+        ).fetchone() == (1,)
     finally:
         connection.close()
