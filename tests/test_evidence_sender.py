@@ -4,6 +4,8 @@ import json
 from dataclasses import dataclass, field
 from pathlib import Path
 
+import pytest
+
 from shared.events.delivery_queue import (
     DeliveryQueue,
     EventEntry,
@@ -183,3 +185,161 @@ def test_delivered_event_emits_process_scoped_acceptance_record(tmp_path: Path) 
     assert payload["accepted_local"] is True
     assert payload["hub_accepted"] is False
     assert payload["origin_boot_id"] is None
+
+
+def _sender_with_sink(
+    directory: Path, transport: Transport, sink: _CollectingSink
+) -> EvidenceSender:
+    return EvidenceSender(
+        directory,
+        SenderConfig("http://relay.test", "token", "camera-a"),
+        transport=transport,
+        execution_records=sink,
+        observing_boot_id="boot-observer",
+    )
+
+
+def _only_delivery(sink: _CollectingSink) -> object:
+    assert len(sink.records) == 1
+    record = sink.records[0]
+    assert record.record_kind == "event.delivery"  # type: ignore[attr-defined]
+    return record
+
+
+def test_happy_path_emits_acceptance_and_zero_delivery_records(tmp_path: Path) -> None:
+    queue = DeliveryQueue(tmp_path)
+    assert queue.try_admit(_event()).accepted
+    sink = _CollectingSink()
+    sender = _sender_with_sink(tmp_path, Transport(), sink)
+    assert sender.run_once() is SenderStep.EVENT_ACKED
+    kinds = [record.record_kind for record in sink.records]  # type: ignore[attr-defined]
+    assert kinds == ["backend.acceptance"]
+
+
+def test_transient_retry_emits_retry_transient_without_consuming_attempt(
+    tmp_path: Path,
+) -> None:
+    queue = DeliveryQueue(tmp_path)
+    assert queue.try_admit(_event()).accepted
+    sink = _CollectingSink()
+    transport = Transport(event_result=DeliveryFailure(DeliveryDisposition.RETRY, "TEMPORARY", 503))
+    sender = _sender_with_sink(tmp_path, transport, sink)
+    assert sender.run_once() is SenderStep.RETRY_SCHEDULED
+    record = _only_delivery(sink)
+    assert record.outcome == "retry-transient"  # type: ignore[attr-defined]
+    assert record.payload["attempt"] == 0  # type: ignore[attr-defined]
+    assert record.payload["failure_class"] == "RETRY"  # type: ignore[attr-defined]
+    assert sender._attempts.get("event-event-a", 0) == 0  # noqa: SLF001
+    assert [entry["entry_id"] for entry in DeliveryQueue(tmp_path).entries()] == ["event-event-a"]
+
+
+def test_send_exception_emits_retry_counted(tmp_path: Path) -> None:
+    class _Raising(Transport):
+        def send_event(self, payload_json: str, edge_event_id: str) -> EventReceipt:
+            del payload_json, edge_event_id
+            raise RuntimeError("entry payload is corrupt")
+
+    queue = DeliveryQueue(tmp_path)
+    assert queue.try_admit(_event()).accepted
+    sink = _CollectingSink()
+    sender = _sender_with_sink(tmp_path, _Raising(), sink)
+    assert sender.run_once() is SenderStep.RETRY_SCHEDULED
+    record = _only_delivery(sink)
+    assert record.outcome == "retry-counted"  # type: ignore[attr-defined]
+    assert record.payload["attempt"] == 1  # type: ignore[attr-defined]
+    assert record.payload["failure_class"] == "exception"  # type: ignore[attr-defined]
+
+
+def test_permanent_422_retained_emits_refused_retained(tmp_path: Path) -> None:
+    queue = DeliveryQueue(tmp_path)
+    assert queue.try_admit(_event()).accepted
+    sink = _CollectingSink()
+    transport = Transport(
+        event_result=DeliveryFailure(DeliveryDisposition.PERMANENT, "UNPROCESSABLE", 422)
+    )
+    sender = _sender_with_sink(tmp_path, transport, sink)
+    assert sender.run_once() is SenderStep.RETRY_SCHEDULED
+    record = _only_delivery(sink)
+    assert record.outcome == "refused-retained"  # type: ignore[attr-defined]
+    assert record.payload["retained"] is True  # type: ignore[attr-defined]
+    assert record.payload["status_code"] == 422  # type: ignore[attr-defined]
+    assert record.payload["dead_letter_dir"] == f"{tmp_path.name}-dead-letter"  # type: ignore[attr-defined]
+    assert not tuple(DeliveryQueue(tmp_path).entries())
+
+
+def test_permanent_422_retention_full_emits_refused_retention_full(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from shared.events import delivery_queue as module
+
+    queue = DeliveryQueue(tmp_path)
+    assert queue.try_admit(_event()).accepted
+    monkeypatch.setattr(module, "MAX_DEAD_LETTERED_ENTRIES", 0)
+    sink = _CollectingSink()
+    transport = Transport(
+        event_result=DeliveryFailure(DeliveryDisposition.PERMANENT, "UNPROCESSABLE", 422)
+    )
+    sender = _sender_with_sink(tmp_path, transport, sink)
+    assert sender.run_once() is SenderStep.RETRY_SCHEDULED
+    record = _only_delivery(sink)
+    assert record.outcome == "refused-retention-full"  # type: ignore[attr-defined]
+    assert record.payload["retained"] is False  # type: ignore[attr-defined]
+    assert [entry["entry_id"] for entry in DeliveryQueue(tmp_path).entries()] == ["event-event-a"]
+
+
+def test_exhausted_after_max_attempts_emits_exhausted_retained(tmp_path: Path) -> None:
+    queue = DeliveryQueue(tmp_path)
+    assert queue.try_admit(_event()).accepted
+    sink = _CollectingSink()
+    sender = _sender_with_sink(
+        tmp_path,
+        Transport(event_result=DeliveryFailure(DeliveryDisposition.PERMANENT, "HTTP_500")),
+        sink,
+    )
+    sender._attempts["event-event-a"] = 10  # noqa: SLF001
+    assert sender.run_once() is SenderStep.RETRY_SCHEDULED
+    record = _only_delivery(sink)
+    assert record.outcome == "exhausted-retained"  # type: ignore[attr-defined]
+    assert record.payload["attempt"] == 10  # type: ignore[attr-defined]
+    assert record.payload["retained"] is True  # type: ignore[attr-defined]
+    assert not tuple(DeliveryQueue(tmp_path).entries())
+
+
+def test_edge_event_id_mismatch_emits_retry_counted(tmp_path: Path) -> None:
+    queue = DeliveryQueue(tmp_path)
+    assert queue.try_admit(_event()).accepted
+    sink = _CollectingSink()
+    sender = _sender_with_sink(
+        tmp_path,
+        Transport(event_result=EventReceipt("accepted", "other-event", "backend-event")),
+        sink,
+    )
+    assert sender.run_once() is SenderStep.RETRY_SCHEDULED
+    record = _only_delivery(sink)
+    assert record.outcome == "retry-counted"  # type: ignore[attr-defined]
+    assert record.payload["failure_class"] == "edge_event_id_mismatch"  # type: ignore[attr-defined]
+    assert record.payload["attempt"] == 1  # type: ignore[attr-defined]
+
+
+def test_acknowledge_failure_emits_ack_removal_deferred(tmp_path: Path) -> None:
+    import errno
+    from unittest.mock import patch
+
+    import shared.events.delivery_queue as queue_module
+
+    queue = DeliveryQueue(tmp_path)
+    assert queue.try_admit(_event()).accepted
+    sink = _CollectingSink()
+    sender = _sender_with_sink(tmp_path, Transport(), sink)
+    real_unlink = queue_module.Path.unlink
+
+    def _failing_unlink(self: Path, *args: object, **kwargs: object) -> None:
+        if self.parent == tmp_path:
+            raise OSError(errno.EIO, "io error")
+        real_unlink(self, *args, **kwargs)
+
+    with patch.object(queue_module.Path, "unlink", _failing_unlink):
+        assert sender.run_once() is SenderStep.RETRY_SCHEDULED
+    record = _only_delivery(sink)
+    assert record.outcome == "ack-removal-deferred"  # type: ignore[attr-defined]
+    assert record.payload["failure_class"] == "acknowledge"  # type: ignore[attr-defined]

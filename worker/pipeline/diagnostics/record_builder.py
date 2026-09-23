@@ -8,13 +8,13 @@ from collections.abc import Mapping
 from typing import Final
 
 from shared.events.execution_records import ExecutionRecordContractError, WireRecord
+from worker.domains.fall.classifier import FALL_WINDOW_FRAMES
 from worker.interfaces.execution_records import ExecutionRecordSink
 from worker.types.metadata import MetadataFrame
 
 LOGGER = logging.getLogger(__name__)
 
 
-FRAME_UNIT_WINDOW: Final = 30
 PRODUCER_SDK = "sdk"
 PRODUCER_MODEL = "model"
 PRODUCER_POLICY = "policy"
@@ -38,7 +38,7 @@ def try_emit(sink: ExecutionRecordSink | None, record: WireRecord | None) -> boo
 
 def frame_causal_unit_id(camera_id: str, worker_boot_id: str, stream_epoch: int, seq: int) -> str:
     """Pre-Gate-R placeholder: bucket frames by the deployed 30-frame window."""
-    return f"{camera_id}:{worker_boot_id}:{stream_epoch}:frame:{seq // FRAME_UNIT_WINDOW}"
+    return f"{camera_id}:{worker_boot_id}:{stream_epoch}:frame:{seq // FALL_WINDOW_FRAMES}"
 
 
 NO_TRACK: Final = "no-track"
@@ -123,7 +123,6 @@ def make_record(
 
 
 __all__ = [
-    "FRAME_UNIT_WINDOW",
     "NO_GENERATION",
     "NO_TRACK",
     "PRODUCER_BACKEND",

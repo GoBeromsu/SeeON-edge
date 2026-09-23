@@ -11,6 +11,7 @@ import pytest
 
 from contracts.event import EventEvidence
 from contracts.frame import Frame
+from shared.events.delivery_queue import AdmissionResult
 from tests_support.clip_analysis import no_op_ready_hook
 from tests_support.thumbnail import DeterministicThumbnailGenerator
 from worker.interfaces.output import EventSink
@@ -37,8 +38,9 @@ class _RecordingStager:
     attached: list[tuple[str, EventEvidence]] = field(default_factory=list)
     dispositions: list[tuple[str, str, str, str]] = field(default_factory=list)
 
-    def stage(self, event: WorkerEventPayload) -> None:
+    def stage(self, event: WorkerEventPayload) -> AdmissionResult:
         self.staged.append(event)
+        return AdmissionResult(True)
 
     def attach_snapshot(self, edge_event_id: str, snapshot: EventEvidence) -> None:
         self.attached.append((edge_event_id, snapshot))
