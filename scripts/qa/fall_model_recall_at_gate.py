@@ -23,6 +23,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from contracts.replay_trace import ReplayRow, decode_jsonl
 from shared.detection_policies import FallPolicyV2, make_effective_policy
 from worker.adapters.model.ort_pose_bbox56 import OrtPoseBbox56Runner
+from worker.domains.registry import _effective_transition_threshold
 from worker.replay.engine import ReplayRun, replay
 
 DEFAULT_HIT_WINDOW_SEC = 10.0
@@ -39,8 +40,17 @@ def _read_frame_rows(path: Path) -> tuple[str, tuple[ReplayRow, ...]]:
 
 
 def _duration_hours(rows: tuple[ReplayRow, ...]) -> float:
-    pts = [row.pts_ns for row in rows]
-    return (max(pts) - min(pts)) / 1_000_000_000 / 3600
+    """Sum each stream epoch's own span rather than max-min across all rows.
+
+    A reconnect starts a new epoch; the dead time between the old epoch's
+    last row and the new epoch's first is not camera-exposed time, so a
+    single trace-wide max-min would inflate the false-positive-per-camera-hour
+    denominator by counting it anyway.
+    """
+    pts_by_epoch: dict[int, list[int]] = {}
+    for row in rows:
+        pts_by_epoch.setdefault(row.epoch, []).append(row.pts_ns)
+    return sum((max(pts) - min(pts)) / 1_000_000_000 / 3600 for pts in pts_by_epoch.values())
 
 
 def _fall_event_offsets_sec(run: ReplayRun, t0_ns: int) -> list[float]:
@@ -117,6 +127,9 @@ def score_traces(
 
     runner = runner_factory(bundle)
     policy = _build_policy()
+    # The same resolution worker.domains.registry._fall() applies live: a
+    # promotion-eligible receipt threshold wins, otherwise the policy default.
+    effective = _effective_transition_threshold(runner, policy)
 
     owner_fall_hits: list[dict[str, Any]] = []
     false_positive_events = 0
@@ -124,7 +137,6 @@ def score_traces(
     scored_total = 0
     warmup_total = 0
     gap_rows_total = 0
-    lineage_adopted_total = 0
     per_trace: list[dict[str, Any]] = []
 
     for path in trace_files:
@@ -139,7 +151,6 @@ def score_traces(
         scored_total += scored
         warmup_total += warmup
         gap_rows_total += run.resample_gap_rows_total
-        lineage_adopted_total += run.buffer_lineage_adopted_total
 
         is_positive = path.name == positive_trace
         if is_positive:
@@ -177,12 +188,13 @@ def score_traces(
                 "fall_event_offsets_sec": fall_offsets,
                 "false_positive_episode_count": trace_false_positives,
                 "resample_gap_rows_total": run.resample_gap_rows_total,
-                "buffer_lineage_adopted_total": run.buffer_lineage_adopted_total,
                 "track_id_switch_total": run.track_id_switch_total,
             }
         )
 
     scored_denominator = scored_total + warmup_total
+    hit_count = sum(1 for hit in owner_fall_hits if hit["hit"])
+    label_count = len(owner_fall_offsets_sec)
     return {
         "receipt_version": 1,
         "status": "measured",
@@ -194,11 +206,19 @@ def score_traces(
         "bundle": str(bundle),
         "model_receipt_threshold": getattr(runner, "receipt_threshold", None),
         "model_promotion_eligible": getattr(runner, "promotion_eligible", None),
+        "effective_policy": {
+            "operating_threshold": effective.transition_threshold,
+            "threshold_source": effective.threshold_source,
+            "transition_votes": effective.transition_votes,
+            "transition_window": effective.transition_window,
+            "confirmation_rule_source": effective.confirmation_rule_source,
+        },
         "traces_dir": str(traces_dir),
         "positive_trace": positive_trace,
         "hit_window_sec": hit_window_sec,
         "exclusion_window_sec": exclusion_window_sec,
         "owner_fall_hits": owner_fall_hits,
+        "recall_ratio": hit_count / label_count if label_count else None,
         "false_positive_episode_count": false_positive_events,
         "exposed_camera_hours": exposed_hours,
         "false_positive_episodes_per_camera_hour": (
@@ -210,7 +230,6 @@ def score_traces(
             scored_total / scored_denominator if scored_denominator else None
         ),
         "resample_gap_rows_total": gap_rows_total,
-        "buffer_lineage_adopted_total": lineage_adopted_total,
         "per_trace": per_trace,
         "scope_note": (
             "False-positive exposure on the positive trace excludes the "

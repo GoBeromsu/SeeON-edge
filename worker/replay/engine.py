@@ -66,9 +66,6 @@ class FallReplayDiagnostics(ReplayDiagnostics, Protocol):
     @property
     def resample_gap_rows_total(self) -> int: ...
 
-    @property
-    def buffer_lineage_adopted_total(self) -> int: ...
-
 
 @dataclass(frozen=True, slots=True)
 class ReplayFrameResult:
@@ -100,7 +97,6 @@ class ReplayRun:
     track_id_switch_total: int = 0
     track_id_switch_absorbed_total: int = 0
     resample_gap_rows_total: int = 0
-    buffer_lineage_adopted_total: int = 0
 
     @property
     def event_count(self) -> int:
@@ -314,14 +310,12 @@ def replay(
     current_identity: tuple[int, int] | None = None
     absorbed_total = 0
     gap_total = 0
-    lineage_total = 0
     for frame in replay_trace_frames(rows):
         identity = (frame.boot_segment, frame.stream_epoch)
         if current_identity != identity:
             if decider is not None:
                 absorbed_total += _absorbed_switches(decider)
                 gap_total += _resample_gap_rows(decider, module_id)
-                lineage_total += _buffer_lineage_adopted(decider, module_id)
             # Domain modules are camera- and epoch-local. Incident admission is
             # boot-scoped: source rebuilds replace deciders but retain cooldown.
             decider = new_decider(frame.boot_segment, frame.stream_epoch)
@@ -369,7 +363,6 @@ def replay(
     if decider is not None:
         absorbed_total += _absorbed_switches(decider)
         gap_total += _resample_gap_rows(decider, module_id)
-        lineage_total += _buffer_lineage_adopted(decider, module_id)
     return ReplayRun(
         camera_id=camera_id,
         module_qualified_id=definition.qualified_id,
@@ -383,7 +376,6 @@ def replay(
         # machine held inside one episode instead of raising a second alert.
         track_id_switch_absorbed_total=absorbed_total,
         resample_gap_rows_total=gap_total,
-        buffer_lineage_adopted_total=lineage_total,
     )
 
 
@@ -404,14 +396,6 @@ def _resample_gap_rows(decider: Decider, module_id: str) -> int:
     if not isinstance(decider, FallReplayDiagnostics):
         raise TypeError("fall replay decider must implement FallReplayDiagnostics")
     return decider.resample_gap_rows_total
-
-
-def _buffer_lineage_adopted(decider: Decider, module_id: str) -> int:
-    if module_id == "bed_exit":
-        return 0
-    if not isinstance(decider, FallReplayDiagnostics):
-        raise TypeError("fall replay decider must implement FallReplayDiagnostics")
-    return decider.buffer_lineage_adopted_total
 
 
 def _admit_events(
@@ -467,7 +451,6 @@ def replay_run_json(run: ReplayRun) -> str:
         {
             "incident_cooldown_suppressed_total": run.incident_cooldown_suppressed_total,
             "resample_gap_rows_total": run.resample_gap_rows_total,
-            "buffer_lineage_adopted_total": run.buffer_lineage_adopted_total,
             "frames": [
                 {
                     "pts_ns": (

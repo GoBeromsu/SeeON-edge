@@ -7,6 +7,7 @@ from types import ModuleType
 import pytest
 
 from contracts.replay_trace import ReplayRow, ReplayTraceHeader, ReplayTrack, encode_jsonl
+from shared.detection_policies import FALL_POLICY_V2_DEFAULT
 from worker.replay.engine import ReplayFrameResult, ReplayRun
 from worker.types import BusinessEvent, DecisionTraceSnapshot
 
@@ -30,12 +31,12 @@ def _track() -> ReplayTrack:
     )
 
 
-def _row(camera_id: str, seq: int, pts_sec: int) -> ReplayRow:
+def _row(camera_id: str, seq: int, pts_sec: int, *, epoch: int = 0) -> ReplayRow:
     return ReplayRow(
         camera_id=camera_id,
         seq=seq,
         pts_ns=pts_sec * 1_000_000_000,
-        epoch=0,
+        epoch=epoch,
         source_event="frame",
         source="nvdcf",
         tracks=(_track(),),
@@ -139,7 +140,6 @@ def test_owner_fall_hits_false_positive_rate_and_window_fraction(
             _frame(40, camera_id="cam-positive", event_prob=0.7, snapshot_score=0.6),
         ),
         resample_gap_rows_total=3,
-        buffer_lineage_adopted_total=1,
     )
     negative_run = ReplayRun(
         camera_id="cam-negative",
@@ -151,7 +151,6 @@ def test_owner_fall_hits_false_positive_rate_and_window_fraction(
             _frame(15, camera_id="cam-negative", event_prob=0.8, snapshot_score=None),
         ),
         resample_gap_rows_total=2,
-        buffer_lineage_adopted_total=0,
     )
 
     receipt = recall_script.score_traces(
@@ -182,9 +181,21 @@ def test_owner_fall_hits_false_positive_rate_and_window_fraction(
     assert receipt["live_track_frames_classifier_warmup"] == 2
     assert receipt["fraction_live_track_frames_with_full_window"] == pytest.approx(3 / 5)
     assert receipt["resample_gap_rows_total"] == 5
-    assert receipt["buffer_lineage_adopted_total"] == 1
     assert receipt["model_receipt_threshold"] == 0.42
     assert receipt["model_promotion_eligible"] is True
+    # Both labels hit, so recall_ratio is hits/labels = 2/2.
+    assert receipt["recall_ratio"] == pytest.approx(1.0)
+    # _FakeRunner is promotion-eligible with a receipt threshold, so the
+    # effective threshold is the receipt's, exactly as _fall() resolves it
+    # live; _FakeRunner carries no confirmation-rule receipt, so votes/window
+    # fall back to the policy default.
+    assert receipt["effective_policy"] == {
+        "operating_threshold": 0.42,
+        "threshold_source": "receipt",
+        "transition_votes": FALL_POLICY_V2_DEFAULT.transition_votes,
+        "transition_window": FALL_POLICY_V2_DEFAULT.transition_window,
+        "confirmation_rule_source": "default",
+    }
 
 
 def test_missing_positive_trace_is_rejected(tmp_path: Path, recall_script: ModuleType) -> None:
@@ -207,3 +218,18 @@ def test_write_receipt_round_trips_json(tmp_path: Path, recall_script: ModuleTyp
     out = tmp_path / "receipt.json"
     recall_script.write_receipt(out, {"status": "measured"})
     assert '"status": "measured"' in out.read_text(encoding="utf-8")
+
+
+def test_duration_hours_sums_per_stream_epoch_not_trace_wide_span(
+    recall_script: ModuleType,
+) -> None:
+    rows = (
+        _row("cam", 0, 0, epoch=0),
+        _row("cam", 1, 10, epoch=0),
+        # A reconnect an hour later starts a new epoch. A trace-wide max-min
+        # would count that dead hour as camera-exposed duration; summing each
+        # epoch's own span must not.
+        _row("cam", 2, 3600, epoch=1),
+        _row("cam", 3, 3605, epoch=1),
+    )
+    assert recall_script._duration_hours(rows) == pytest.approx((10 + 5) / 3600)
