@@ -10,7 +10,6 @@ from typing import Final
 from shared.events.execution_records import ExecutionRecordContractError, WireRecord
 from worker.domains.fall.classifier import FALL_WINDOW_FRAMES
 from worker.interfaces.execution_records import ExecutionRecordSink
-from worker.types.metadata import MetadataFrame
 
 LOGGER = logging.getLogger(__name__)
 
@@ -85,17 +84,18 @@ def module_causal_unit_id(
     return f"{camera_id}:{worker_boot_id}:{stream_epoch}:{module}:{frame_seq // FALL_WINDOW_FRAMES}"
 
 
-def observed_time(metadata: MetadataFrame, observed_at_ns: int | None) -> tuple[str, int]:
-    if observed_at_ns is not None:
-        return "monotonic", observed_at_ns
-    pts = metadata.identity.source_pts
-    if pts is not None:
-        return "pts", pts
-    return "monotonic", time.monotonic_ns()
+def wall_or(observed_at_ns: int | None) -> int:
+    """UTC epoch nanoseconds when this record was observed.
+
+    Every record is stamped on the wall clock so the Backend query can answer
+    "camera 7 at 14:03" with epoch ns. Stream time stays in ``source_pts_ns``
+    and per-producer order in ``producer_sequence``; a monotonic stamp would
+    make the query surface unanswerable (its base differs per process).
+    """
+    return time.time_ns() if observed_at_ns is None else observed_at_ns
 
 
-def monotonic_or(observed_at_ns: int | None) -> int:
-    return time.monotonic_ns() if observed_at_ns is None else observed_at_ns
+WALL: Final = "wall"
 
 
 def make_record(
@@ -150,11 +150,11 @@ __all__ = [
     "PRODUCER_MODEL",
     "PRODUCER_POLICY",
     "PRODUCER_SDK",
+    "WALL",
     "fall_causal_unit_id",
     "frame_causal_unit_id",
     "make_record",
     "module_causal_unit_id",
-    "monotonic_or",
-    "observed_time",
     "try_emit",
+    "wall_or",
 ]

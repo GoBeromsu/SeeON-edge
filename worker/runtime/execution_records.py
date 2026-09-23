@@ -5,6 +5,12 @@ from __future__ import annotations
 import hashlib
 import json
 from collections.abc import Mapping
+from dataclasses import fields, is_dataclass
+from datetime import date, datetime
+from enum import Enum
+from pathlib import PurePath
+
+from pydantic import SecretBytes, SecretStr
 
 from shared.events.execution_records_client import ExecutionRecordsClient
 from worker.pipeline.diagnostics.exporter import ExecutionRecordExporter
@@ -64,9 +70,38 @@ def compose_execution_records(
 
 
 def _config_digest(config: WorkerConfig) -> str:
-    payload = config.model_dump(mode="json")
-    encoded = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
+    """Stable content digest of the effective worker config.
+
+    ``model_dump(mode="python")`` keeps nested frozen dataclasses and their
+    ``MappingProxyType`` fields (``PulledWorkerConfig.detection_windows``) as
+    Python objects; pydantic's JSON mode cannot serialize those, and that only
+    shows up with a real pulled config. ``_jsonable`` maps every such value to
+    a deterministic JSON shape instead.
+    """
+    payload = config.model_dump(mode="python")
+    encoded = json.dumps(payload, sort_keys=True, separators=(",", ":"), default=_jsonable).encode()
     return hashlib.sha256(encoded).hexdigest()
+
+
+def _jsonable(value: object) -> object:
+    """JSON shape for the non-JSON values a worker config can carry."""
+    if is_dataclass(value) and not isinstance(value, type):
+        return {f.name: getattr(value, f.name) for f in fields(value)}
+    if isinstance(value, Mapping):
+        return dict(value)
+    if isinstance(value, (set, frozenset)):
+        return sorted(value, key=repr)
+    if isinstance(value, tuple):
+        return list(value)
+    if isinstance(value, Enum):
+        return value.value
+    if isinstance(value, (PurePath, datetime, date)):
+        return str(value)
+    if isinstance(value, (SecretStr, SecretBytes)):
+        # Secrets never enter a digest: neither their value nor anything
+        # derived from it. A rotated token must not look like a config change.
+        return "<secret>"
+    raise TypeError(f"config value of type {type(value).__name__} has no digest shape")
 
 
 __all__ = ["compose_execution_records"]

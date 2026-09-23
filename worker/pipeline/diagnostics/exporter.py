@@ -91,6 +91,17 @@ class ExecutionRecordExporter:
         if isinstance(result, DeliveryFailure):
             with self._lock:
                 self._failures.append(result)
+            # Operator-visible: the gap row says WHAT was lost, this says WHY.
+            # camera_id is in the message string (worker/__main__ renders
+            # %(message)s only).
+            LOGGER.warning(
+                "execution-record export failed for camera %s: %s %s (%d records "
+                "recorded as export-failed)",
+                drained.camera_id,
+                result.disposition.name,
+                result.code,
+                len(drained.records),
+            )
             self._lanes.note_export_failure(drained)
             return
         with self._lock:

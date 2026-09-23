@@ -54,7 +54,7 @@ class _Sample:
     cpu_system_sec: float
     accepted_records: int
     gap_rows: int
-    logical_bytes: int | None
+    used_bytes: int | None
     queryable_min_ns: int | None
     queryable_max_ns: int | None
     exporter_exception: str | None
@@ -324,7 +324,7 @@ def _document(
         "exporter_receipts": 0 if last is None else last.receipts,
         "exporter_failures": 0 if last is None else last.failures,
         "exporter_exceptions": list(exceptions),
-        "logical_bytes_last": None if last is None else last.logical_bytes,
+        "used_bytes_last": None if last is None else last.used_bytes,
         "queryable_range": {
             "min_observed_at_ns": None if last is None else last.queryable_min_ns,
             "max_observed_at_ns": None if last is None else last.queryable_max_ns,
@@ -338,7 +338,7 @@ def _document(
                 "failures": sample.failures,
                 "accepted_records": sample.accepted_records,
                 "gap_rows": sample.gap_rows,
-                "logical_bytes": sample.logical_bytes,
+                "used_bytes": sample.used_bytes,
             }
             for sample in samples
         ],
@@ -425,7 +425,7 @@ def run_measurement(
                             cpu_system_sec=system_sec,
                             accepted_records=accepted,
                             gap_rows=gaps,
-                            logical_bytes=logical,
+                            used_bytes=logical,
                             queryable_min_ns=qmin,
                             queryable_max_ns=qmax,
                             exporter_exception=timed.exceptions[-1] if timed.exceptions else None,

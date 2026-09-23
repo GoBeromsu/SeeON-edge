@@ -10,9 +10,12 @@ constants, not deployment numbers.
     max_record_bytes = total_bytes // 256
     coverage_rows_per_epoch = 512  (design constant; RetentionBudget field)
 
-Minimum ``total_bytes`` is 256 because ``max_record_bytes = total_bytes // 256``
-must be at least 1. Deployments must choose ``total_bytes`` large enough that
-``control_reserve`` can hold live control rows; that is not a baked default.
+``total_bytes`` is the on-disk byte envelope of the execution_* tables and
+their indexes (not the whole edge.sqlite3 file, not the WAL). Empty b-trees
+already occupy pages, so the smallest meaningful budget is a few MiB; the
+integer floor ``total_bytes >= 256`` exists only so
+``max_record_bytes = total_bytes // 256`` is at least 1 and is not a
+deployment size.
 
 ``unit_horizon_ns`` defaults to 60_000_000_000 (60 s): documented as 2x the
 deployed 30-frame/15fps window bound, to be replaced by a measured Gate M
@@ -37,13 +40,21 @@ from backend.app.features.diagnostics.terminals import (
 
 COVERAGE_ROWS_PER_EPOCH: Final = 512
 DEFAULT_UNIT_HORIZON_NS: Final = 60_000_000_000
-_COVERAGE_ROW_BYTES: Final = 256
-_BATCH_ROW_BYTES: Final = 256
-_CONTROL_ROW_BYTES: Final = 128
+_DBSTAT_MISSING: Final = (
+    "dbstat is unavailable; SQLite must be compiled with SQLITE_ENABLE_DBSTAT_VTAB"
+)
 
 
 @dataclass(frozen=True, slots=True)
 class RetentionBudget:
+    """On-disk capacity envelope for the execution_* tables and indexes.
+
+    ``total_bytes`` is compared against ``used_bytes`` (dbstat page sizes of
+    every execution_* table and every index whose ``tbl_name`` is an
+    execution_* table). It is not the size of edge.sqlite3 and does not
+    include the WAL.
+    """
+
     total_bytes: int
     unit_horizon_ns: int = DEFAULT_UNIT_HORIZON_NS
     coverage_rows_per_epoch: int = COVERAGE_ROWS_PER_EPOCH
@@ -52,7 +63,9 @@ class RetentionBudget:
         if type(self.total_bytes) is not int or self.total_bytes < 256:
             raise ValueError(
                 "total_bytes must be an explicit integer >= 256 "
-                "(max_record_bytes = total_bytes // 256 must be >= 1)"
+                "(max_record_bytes = total_bytes // 256 must be >= 1; "
+                "this floor is not a deployment size — empty execution_* "
+                "b-trees already occupy pages, so a meaningful budget is a few MiB)"
             )
         if type(self.unit_horizon_ns) is not int or self.unit_horizon_ns <= 0:
             raise ValueError("unit_horizon_ns must be a positive integer")
@@ -80,31 +93,42 @@ class RetentionBudget:
         return self.total_bytes // 256
 
 
-def logical_bytes(connection: sqlite3.Connection) -> int:
-    payload = connection.execute(
-        "SELECT COALESCE(SUM(payload_bytes), 0) FROM execution_records"
-    ).fetchone()
-    return int(payload[0]) + control_envelope_bytes(connection)
+def _execution_object_names(connection: sqlite3.Connection) -> tuple[str, ...]:
+    rows = connection.execute(
+        """
+        SELECT name FROM sqlite_master
+        WHERE type IN ('table', 'index')
+          AND (name LIKE 'execution_%' OR tbl_name LIKE 'execution_%')
+        """
+    ).fetchall()
+    return tuple(str(row[0]) for row in rows)
 
 
-def control_envelope_bytes(connection: sqlite3.Connection) -> int:
-    coverage = connection.execute("SELECT COUNT(*) FROM execution_coverage").fetchone()
-    batches = connection.execute("SELECT COUNT(*) FROM execution_batches").fetchone()
-    units = connection.execute("SELECT COUNT(*) FROM execution_units").fetchone()
-    segments = connection.execute("SELECT COUNT(*) FROM execution_segments").fetchone()
-    provenance = connection.execute("SELECT COUNT(*) FROM execution_provenance").fetchone()
-    return (
-        int(coverage[0]) * _COVERAGE_ROW_BYTES
-        + int(batches[0]) * _BATCH_ROW_BYTES
-        + (int(units[0]) + int(segments[0]) + int(provenance[0])) * _CONTROL_ROW_BYTES
-    )
+def used_bytes(connection: sqlite3.Connection) -> int:
+    """Exact on-disk bytes of every execution_* table and its indexes."""
+    names = _execution_object_names(connection)
+    if not names:
+        return 0
+    placeholders = ",".join("?" * len(names))
+    try:
+        row = connection.execute(
+            f"SELECT COALESCE(SUM(pgsize), 0) FROM dbstat "
+            f"WHERE aggregate = TRUE AND name IN ({placeholders})",
+            names,
+        ).fetchone()
+    except sqlite3.OperationalError as error:
+        if "no such table: dbstat" in str(error).lower():
+            raise RuntimeError(_DBSTAT_MISSING) from error
+        raise
+    return 0 if row is None else int(row[0])
 
 
 def enforce_budget(connection: sqlite3.Connection, budget: RetentionBudget, now_ns: int) -> bool:
     """Prune whole units until <= low_water. False when the envelope still fails."""
     refresh_unit_terminals(connection, budget.unit_horizon_ns)
     coarsen_coverage(connection, budget.coverage_rows_per_epoch, now_ns)
-    while logical_bytes(connection) > budget.high_water:
+    occupied = used_bytes(connection)
+    while occupied > budget.high_water:
         unit_id = next_prunable_unit(connection)
         if unit_id is None:
             if force_oldest_units_terminal(connection, 1) == 0:
@@ -114,9 +138,10 @@ def enforce_budget(connection: sqlite3.Connection, budget: RetentionBudget, now_
                 break
         prune_unit(connection, unit_id, now_ns)
         coarsen_coverage(connection, budget.coverage_rows_per_epoch, now_ns)
-        if logical_bytes(connection) <= budget.low_water:
+        occupied = used_bytes(connection)
+        if occupied <= budget.low_water:
             break
-    return logical_bytes(connection) <= budget.high_water
+    return occupied <= budget.high_water
 
 
 __all__ = [
@@ -124,11 +149,10 @@ __all__ = [
     "DEFAULT_UNIT_HORIZON_NS",
     "RetentionBudget",
     "coarsen_coverage",
-    "control_envelope_bytes",
     "enforce_budget",
     "force_oldest_units_terminal",
-    "logical_bytes",
     "next_prunable_unit",
     "prune_unit",
     "refresh_unit_terminals",
+    "used_bytes",
 ]

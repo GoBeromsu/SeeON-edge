@@ -20,12 +20,14 @@ from backend.app.features.diagnostics.records import (
     UnitCausalState,
     late_ack_unit_id,
 )
-from backend.app.features.diagnostics.retention import RetentionBudget, logical_bytes
+from backend.app.features.diagnostics.retention import RetentionBudget, used_bytes
 from backend.app.features.diagnostics.store import ExecutionRecordStore
 
 CAMERA = "cam-a"
 BOOT = "boot-1"
 HORIZON = 1_000
+DISK_BUDGET = 512 * 1024
+PAYLOAD_BLOB = "x" * 200
 PROVENANCE = Provenance(
     worker_build_revision="worker-rev",
     worker_image_digest="sha256:worker",
@@ -107,10 +109,10 @@ def _batch(
 
 
 def test_b1_forced_incomplete_unknown_converges_without_infinite_loop(tmp_path: Path) -> None:
-    budget = RetentionBudget(total_bytes=16384, unit_horizon_ns=HORIZON)
+    budget = RetentionBudget(total_bytes=DISK_BUDGET, unit_horizon_ns=HORIZON)
     store, path = _store(tmp_path, budget)
-    blob = "y"
-    for index in range(80):
+    blob = PAYLOAD_BLOB
+    for index in range(500):
         store.ingest_batch(
             _batch(
                 f"u{index}",
@@ -139,7 +141,7 @@ def test_b1_forced_incomplete_unknown_converges_without_infinite_loop(tmp_path: 
             str(row[0])
             for row in connection.execute("SELECT coverage_kind FROM execution_coverage").fetchall()
         }
-        used = logical_bytes(connection)
+        used = used_bytes(connection)
         counters = connection.execute(
             "SELECT MIN(record_count), MIN(payload_bytes) FROM execution_segments"
         ).fetchone()
@@ -155,9 +157,9 @@ def test_b1_forced_incomplete_unknown_converges_without_infinite_loop(tmp_path: 
 
 
 def test_b2_prune_unit_straddling_segments_leaves_no_survivors(tmp_path: Path) -> None:
-    budget = RetentionBudget(total_bytes=16384, unit_horizon_ns=HORIZON)
+    budget = RetentionBudget(total_bytes=DISK_BUDGET, unit_horizon_ns=HORIZON)
     store, path = _store(tmp_path, budget)
-    blob = "x" * 30
+    blob = PAYLOAD_BLOB
     old_records = tuple(
         _record(
             label=f"o{index}",
@@ -167,7 +169,7 @@ def test_b2_prune_unit_straddling_segments_leaves_no_survivors(tmp_path: Path) -
             payload=blob,
             producer="sdk" if index % 2 == 0 else "cpu",
         )
-        for index in range(16)
+        for index in range(200)
     )
     store.ingest_batch(_batch("old", old_records))
     keep_records = tuple(
@@ -178,7 +180,7 @@ def test_b2_prune_unit_straddling_segments_leaves_no_survivors(tmp_path: Path) -
             observed=10 + HORIZON + 5 + index,
             payload=blob,
         )
-        for index in range(300)
+        for index in range(800)
     )
     store.ingest_batch(_batch("keep", keep_records))
     connection = _open(path)
