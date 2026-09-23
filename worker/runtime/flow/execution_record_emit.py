@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
-from typing import TYPE_CHECKING
 
 from worker.domains.fall import FallDomainDecider
 from worker.interfaces.execution_records import ExecutionRecordSink
@@ -16,9 +15,6 @@ from worker.pipeline.diagnostics.emit_policy import (
 from worker.pipeline.diagnostics.record_builder import try_emit
 from worker.types.metadata import MetadataCounters, MetadataFrame
 from worker.types.trace import decision_trace_id
-
-if TYPE_CHECKING:
-    from worker.runtime.flow.policy_pump import DecisionIdentity
 
 
 def emit_policy_consume(
@@ -44,28 +40,44 @@ def emit_model_and_decision(
     sink: ExecutionRecordSink | None,
     metadata: MetadataFrame,
     decision: EventAggregator,
-    decision_identity: DecisionIdentity | None = None,
 ) -> None:
+    """Emit model.score and policy.decision for this frame, per producing decider.
+
+    Every snapshot is attributed to the decider that produced it (identity and
+    authority role come from the aggregator, never borrowed across deciders).
+    model.score is emitted only for snapshots of the fall decider whose track
+    the classifier actually scored on this call; bed-exit and window-gated
+    snapshots never yield a fall model record.
+    """
     if sink is None:
         return
     identity = metadata.identity
     pts = identity.source_pts
     fall = _fall_decider(decision)
+    fall_index = None if fall is None else decision.index_of(fall)
     classifier = None if fall is None else getattr(fall, "classifier", None)
-    # Tracks the classifier deliberately did not score on this call (stride
-    # not due, window warming). probabilities_for() would return the cached
-    # score from an earlier call for them; a model.score record must mean
-    # "this CPU model call", so those tracks get no record here. The policy
-    # snapshot still carries the missing reason.
     # FallDomainDecider enforces that every classifier reports which live
     # tracks it deliberately did not score on this call; read it plainly.
+    # probabilities_for() would return the cached score for those tracks, and
+    # a model.score record must mean "this CPU model call".
     not_scored: Mapping[int, object] = (
         {} if classifier is None else classifier.current_call_missing_score_reasons
     )
-    for snapshot in decision.last_trace_snapshots:
+    for attributed in decision.attributed_trace_snapshots():
+        snapshot = attributed.snapshot
+        module_identity = attributed.identity
+        # Structural attribution: the snapshot came from the fall decider itself,
+        # whether or not composition supplied it an identity.
+        is_fall = fall_index is not None and attributed.producer_index == fall_index
         track_id = snapshot.track_id
-        generation = _generation(fall, classifier, track_id)
-        if track_id is not None and classifier is not None and track_id not in not_scored:
+        generation = _generation(fall, classifier, track_id) if is_fall else None
+        if (
+            is_fall
+            and attributed.authority == "authoritative"
+            and track_id is not None
+            and classifier is not None
+            and track_id not in not_scored
+        ):
             probability = classifier.probabilities_for(track_id)
             if probability is not None:
                 try_emit(
@@ -86,13 +98,17 @@ def emit_model_and_decision(
             sink,
             policy_decision_record(
                 snapshot,
+                module_qualified_id=(
+                    None if module_identity is None else module_identity.module_qualified_id
+                ),
+                authority_role=attributed.authority,
                 decision_trace_id=(
                     None
-                    if decision_identity is None
+                    if module_identity is None
                     else decision_trace_id(
                         snapshot,
-                        module_qualified_id=decision_identity.module_qualified_id,
-                        effective_policy_id=decision_identity.effective_policy_id,
+                        module_qualified_id=module_identity.module_qualified_id,
+                        effective_policy_id=module_identity.effective_policy_id,
                     )
                 ),
                 camera_id=identity.camera_id,

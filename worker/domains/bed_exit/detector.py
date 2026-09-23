@@ -128,6 +128,7 @@ class BedExitMonitor:
         self._lost_track_ids: list[int] = []
         self.last_debug_snapshot: BedExitDebugSnapshot | None = None
         self.last_trace_snapshots: tuple[DecisionTraceSnapshot, ...] = ()
+        self.last_shadow_trace_count: int = 0
         self.last_shadow_trace_snapshots: tuple[DecisionTraceSnapshot, ...] = ()
         self.last_shadow_decisions: tuple[BedExitStateDecision, ...] = ()
         self._scoring_recorder = scoring_recorder
@@ -590,6 +591,9 @@ class BedExitMonitor:
         # Shadow snapshots are appended, never replace the containment path,
         # and never carry triggered=True in this todo.
         self.last_trace_snapshots = tuple(traces) + shadow_traces
+        # Consumers attribute the trailing shadow snapshots as non-authoritative;
+        # they never carry triggered=True and never replace the containment path.
+        self.last_shadow_trace_count = len(shadow_traces)
         return BedExitFrame(statuses=statuses, events=tuple(events))
 
     def _record_shadow(
