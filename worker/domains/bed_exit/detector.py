@@ -217,6 +217,9 @@ class BedExitMonitor:
                     },
                 ),
             )
+            # No shadow path ran on this early return: every snapshot here is
+            # authoritative, so the trailing-shadow count must be zero.
+            self.last_shadow_trace_count = 0
             self.last_shadow_trace_snapshots = ()
             self.last_shadow_decisions = ()
             self.last_debug_snapshot = BedExitDebugSnapshot(
@@ -589,7 +592,7 @@ class BedExitMonitor:
             )
         # Legacy snapshots stay first so existing [0] assertions keep working.
         # Shadow snapshots are appended, never replace the containment path,
-        # and never carry triggered=True in this todo.
+        # and never carry triggered=True.
         self.last_trace_snapshots = tuple(traces) + shadow_traces
         # Consumers attribute the trailing shadow snapshots as non-authoritative;
         # they never carry triggered=True and never replace the containment path.

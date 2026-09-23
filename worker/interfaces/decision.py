@@ -33,4 +33,8 @@ class ShadowTraceProvider(TraceSnapshotProvider, Protocol):
     def last_shadow_trace_count(self) -> int: ...
 
 
-__all__ = ["Decider", "TraceSnapshotProvider"]
+__all__ = [
+    "Decider",
+    "ShadowTraceProvider",
+    "TraceSnapshotProvider",
+]
