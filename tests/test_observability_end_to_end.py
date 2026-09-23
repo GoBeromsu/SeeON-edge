@@ -134,7 +134,7 @@ class _NoClipPublisher:
         raise FlowClipPublicationError("clip publication unused in hermetic e2e")
 
 
-def test_alert_joins_record_with_four_kinds_provenance_and_availability(tmp_path) -> None:
+def test_alert_joins_record_with_five_kinds_provenance_and_availability(tmp_path) -> None:
     """Five kinds plus decision -> delivery -> acceptance.
 
     decision->delivery is by frame identity (camera, boot, epoch, frame_seq)

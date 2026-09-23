@@ -20,7 +20,7 @@ producer_sequence)`. Producers never wait on each other or on the Backend.
 | `policy.consume` | policy pump, per processed frame | slot counter delta (accepted/overwritten/late) | that a decision was made |
 | `model.score` | policy pump, only when the classifier actually scored on this call | raw logit, applied temperature, class origins, calibrated score, track, window facts | a native three-class output (`fallen` is a synthetic zero) |
 | `policy.decision` | policy pump, per snapshot | reason, previous/current state, triggered, values, missing reasons (`classifier-warmup`, `classifier-stride-not-due`, ...), `decision_trace_id` | that the event was delivered |
-| `event.delivery` | Flow evidence binding (admission) and the evidence sender (every attempt outcome) | admitted/refused; retry-transient / retry-counted / refused-retained / exhausted / ack-removal-deferred, with attempt counts and failure class | that the Hub accepted anything |
+| `event.delivery` | Flow evidence binding (admission) and the evidence sender (every non-success attempt outcome) | `admitted` / `refused`; then `retry-transient`, `retry-counted`, `refused-retained`, `refused-retention-full`, `exhausted-retained`, `exhausted-retention-full`, `ack-removal-deferred` (and `operator-blocked`, reserved: never emitted for events today), with attempt counts and failure class. A successful delivery emits no `event.delivery` row - only `backend.acceptance` | that the Hub accepted anything |
 | `backend.acceptance` | evidence sender, when a relay receipt is observed | `accepted_local` (persisted on the edge Backend) **or** `hub-accepted` (Hub receipt), never both | delivery to a phone or pager |
 
 `accepted_local` is terminal local persistence. It is **not** Hub acceptance
@@ -38,7 +38,10 @@ and the alert is never forwarded later.
 - Records written by the durable-queue drainer are **process-scoped**: they
   stamp the boot that observed the outcome and `PROCESS_SCOPE` (0) for
   generation/epoch, because the queue outlives the boot that staged the event.
-  That is declared vocabulary, not a missing value.
+  For `backend.acceptance` the wire contract enforces this
+  (`PROCESS_SCOPED_KINDS`); for the sender's `event.delivery` rows it is a
+  documented convention, because the same kind is also produced stream-scoped
+  by the Flow binding at admission. Either way it is not a missing value.
 
 ## Querying
 
@@ -117,7 +120,7 @@ the worker composes no lanes and the hot path reads nothing extra.
 
 ## Measuring before enabling
 
-`uv run pytest -m real_stack -k observability` on the DeepStream host with
+`uv run pytest -m real_stack -k observability_real_stack` on the DeepStream host with
 `OBS_STREAM_PATH` set writes `obs-<N>.json` (offered fps, records/s, gap
 rows/s, lane high-water, backlog slope, exporter batch p50/p95, CPU delta).
 Those numbers, and only those, become the four keys above. A backlog slope

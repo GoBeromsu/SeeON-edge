@@ -164,19 +164,16 @@ class FlowEvidenceBinding:
 def _admission_from_stage_result(result: object) -> tuple[bool, str | None]:
     """Read try_admit proof from a stager return.
 
-    The stager contract is ``stage() -> AdmissionResult``. Anything else is an
-    unproven admission and is recorded as refused: an "admitted" record must
-    never be emitted without the queue's own proof, so a double that returns
-    ``None`` is a contract violation, not a success.
+    The stager contract is ``stage() -> AdmissionResult``. Only a real
+    ``AdmissionResult`` with ``accepted`` True proves admission; anything else
+    (``None``, a duck with an ``accepted`` attribute, an unrelated object) is an
+    unproven admission and is recorded as refused. An "admitted" record must
+    never be emitted without the queue's own proof.
     """
-    accepted = getattr(result, "accepted", None)
-    fault = getattr(result, "fault", None)
-    reason = None if fault is None else str(fault)
-    if accepted is True:
-        return True, reason
-    if accepted is False:
-        return False, reason
-    return False, f"unproven-admission:{type(result).__name__}"
+    if not isinstance(result, AdmissionResult):
+        return False, f"unproven-admission:{type(result).__name__}"
+    reason = None if result.fault is None else str(result.fault)
+    return bool(result.accepted), reason
 
 
 def _admission_reason(error: BaseException) -> str:

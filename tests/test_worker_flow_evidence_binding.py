@@ -281,3 +281,62 @@ def test_refusing_queue_emits_refused_with_admission_fault(tmp_path: Path) -> No
     assert record.outcome == "refused"  # type: ignore[attr-defined]
     assert record.payload["reason"] == "entry_capacity"  # type: ignore[attr-defined]
     assert plane.starts == []
+
+
+@pytest.mark.parametrize(
+    ("stage_result", "type_name"),
+    [
+        (None, "NoneType"),
+        (object(), "object"),
+    ],
+)
+def test_unproven_stage_result_is_recorded_refused_not_admitted(
+    tmp_path: Path, stage_result: object, type_name: str
+) -> None:
+    """A stager that does not return an AdmissionResult proves nothing."""
+    plane, now = _Plane(), [0.0]
+    _actor, binding, _, _ = _binding(plane, now, [datetime(2026, 1, 1, tzinfo=UTC)], tmp_path)
+
+    class _UnprovenStager:
+        def stage(self, event: dict[str, object]) -> object:
+            del event
+            return stage_result
+
+        def complete(self, edge_event_id: str, clip_id: str | None) -> None:
+            del edge_event_id, clip_id
+
+    binding.stager = _UnprovenStager()  # type: ignore[assignment]
+    sink = _CollectingSink()
+    binding.execution_records = sink
+    with pytest.raises(RuntimeError, match="unproven-admission"):
+        binding.emit_for_frame(_event("one"), _trigger())
+    (record,) = sink.records
+    assert record.outcome == "refused"  # type: ignore[attr-defined]
+    assert record.payload["reason"] == f"unproven-admission:{type_name}"  # type: ignore[attr-defined]
+    assert plane.starts == []
+
+
+def test_duck_with_accepted_true_is_not_proof_of_admission(tmp_path: Path) -> None:
+    """Only a real AdmissionResult proves admission; a look-alike does not."""
+    plane, now = _Plane(), [0.0]
+    _actor, binding, _, _ = _binding(plane, now, [datetime(2026, 1, 1, tzinfo=UTC)], tmp_path)
+
+    class _Duck:
+        accepted = True
+        fault = None
+
+    class _DuckStager:
+        def stage(self, event: dict[str, object]) -> object:
+            del event
+            return _Duck()
+
+        def complete(self, edge_event_id: str, clip_id: str | None) -> None:
+            del edge_event_id, clip_id
+
+    binding.stager = _DuckStager()  # type: ignore[assignment]
+    sink = _CollectingSink()
+    binding.execution_records = sink
+    with pytest.raises(RuntimeError, match="unproven-admission:_Duck"):
+        binding.emit_for_frame(_event("one"), _trigger())
+    (record,) = sink.records
+    assert record.outcome == "refused"  # type: ignore[attr-defined]

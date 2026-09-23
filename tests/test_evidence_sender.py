@@ -343,3 +343,27 @@ def test_acknowledge_failure_emits_ack_removal_deferred(tmp_path: Path) -> None:
     record = _only_delivery(sink)
     assert record.outcome == "ack-removal-deferred"  # type: ignore[attr-defined]
     assert record.payload["failure_class"] == "acknowledge"  # type: ignore[attr-defined]
+
+
+def test_exhausted_with_full_retention_emits_exhausted_retention_full_and_keeps_entry(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from shared.events import delivery_queue as module
+
+    queue = DeliveryQueue(tmp_path)
+    assert queue.try_admit(_event()).accepted
+    monkeypatch.setattr(module, "MAX_DEAD_LETTERED_ENTRIES", 0)
+    sink = _CollectingSink()
+    sender = _sender_with_sink(
+        tmp_path,
+        Transport(event_result=DeliveryFailure(DeliveryDisposition.PERMANENT, "HTTP_500")),
+        sink,
+    )
+    sender._attempts["event-event-a"] = 10  # noqa: SLF001
+    assert sender.run_once() is SenderStep.RETRY_SCHEDULED
+    record = _only_delivery(sink)
+    assert record.outcome == "exhausted-retention-full"  # type: ignore[attr-defined]
+    assert record.payload["retained"] is False  # type: ignore[attr-defined]
+    # Still queued and deferred: nothing was delivered and nothing was dropped.
+    assert [entry["entry_id"] for entry in DeliveryQueue(tmp_path).entries()] == ["event-event-a"]
+    assert "event-event-a" in sender._deferred  # noqa: SLF001
