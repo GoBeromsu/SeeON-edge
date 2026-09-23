@@ -242,6 +242,34 @@ def test_disabled_feature_answers_503(tmp_path: Path) -> None:
     assert query.json()["detail"] == "execution records disabled"
 
 
+def test_missing_diagnostics_database_answers_503(tmp_path: Path, enabled_settings: None) -> None:
+    """edge-diagnostics.sqlite3 missing (bootstrap never ran) must not leak an
+    opaque 500 -- EdgeDatabaseError is mapped to a clear 503 (#579/#580, round 2)."""
+    app = create_app(lifespan=no_lifespan)
+    app.state.edge_relay_token = _RELAY_TOKEN
+    app.state.backend_build_revision = _BUILD_REVISION
+    missing = tmp_path / "edge-diagnostics.sqlite3"
+    app.state.execution_record_store = ExecutionRecordStore(
+        lambda: open_diagnostics_database(missing),
+        RetentionBudget(total_bytes=_BUDGET_BYTES),
+    )
+    client = TestClient(app)
+    ingest = client.post(
+        _PATH,
+        json=_batch(_record(0)).to_json(),
+        headers={RELAY_TOKEN_HEADER: _RELAY_TOKEN},
+    )
+    assert ingest.status_code == 503
+    assert ingest.json()["detail"] == "diagnostics store unavailable: run edge-db bootstrap"
+    _login(client)
+    query = client.get(
+        _QUERY,
+        params={"camera_id": "cam-1", "from_ns": 0, "to_ns": 10},
+    )
+    assert query.status_code == 503
+    assert query.json()["detail"] == "diagnostics store unavailable: run edge-db bootstrap"
+
+
 def test_query_requires_dashboard_session(tmp_path: Path, enabled_settings: None) -> None:
     client = _enabled_client(tmp_path)
     response = client.get(
@@ -328,7 +356,7 @@ def test_lifespan_constructs_store_when_enabled(
         assert client.app.state.backend_build_revision == _BUILD_REVISION
 
 
-def test_lifespan_wired_diagnostics_query_and_product_write_do_not_block_on_a_pending_diagnostics_write(
+def test_lifespan_diagnostics_query_and_product_write_skip_a_pending_diagnostics_write(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, enabled_settings: None
 ) -> None:
     """Through the real lifespan wiring: while another process holds
@@ -391,8 +419,6 @@ def test_lifespan_wired_diagnostics_query_and_product_write_do_not_block_on_a_pe
 
     connection = sqlite3.connect(database)
     try:
-        assert connection.execute(
-            "SELECT id FROM edge_site WHERE id=1"
-        ).fetchone() == (1,)
+        assert connection.execute("SELECT id FROM edge_site WHERE id=1").fetchone() == (1,)
     finally:
         connection.close()

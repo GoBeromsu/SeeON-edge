@@ -83,7 +83,7 @@ WAL are per-file, so this telemetry's writer lock, WAL, and checkpoint
 pressure can never be shared with alerts, incidents, or policy writes in
 `edge.sqlite3` (#579/#580). The product database's own six `execution_*`
 tables are left in place untouched (no destructive migration); retiring them
-is a later ops step (tracked separately).
+is a later ops step (tracked separately in #583).
 
 Its schema ledger is intentionally simpler than `edge.sqlite3`'s: a flat
 `PRAGMA user_version` stamp (currently `1`), with no `schema_migrations` table

@@ -695,13 +695,13 @@ def test_two_operator_rollback_race_requires_cas_token(tmp_path: Path) -> None:
     assert loser.status_code == 409
 
 
-def test_mark_applied_skips_write_transaction_when_nothing_pending(
+def test_acknowledge_applied_skips_write_transaction_when_nothing_pending(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     database = tmp_path / "edge.sqlite3"
     bootstrap_database(database)
     store = DetectionPolicyStore(database)
-    activated = store.apply(
+    store.apply(
         facility_id=FACILITY_ID,
         module_id="fall",
         module_version=2,
@@ -721,23 +721,19 @@ def test_mark_applied_skips_write_transaction_when_nothing_pending(
 
     monkeypatch.setattr(policy_store, "write_transaction", _spy)
 
-    # Nothing pending at or below generation - 1: mark_applied must not open a
-    # write transaction, and the pending row must be untouched.
-    store.mark_applied(FACILITY_ID, activated.activation_generation - 1)
-    assert calls == []
-    with sqlite3.connect(database) as connection:
-        assert connection.execute(
-            "SELECT status FROM policies WHERE facility_id=?", (FACILITY_ID,)
-        ).fetchone() == ("pending",)
-
-    # The pending row is within range: it still gets applied, through exactly
-    # one write transaction.
-    store.mark_applied(FACILITY_ID, activated.activation_generation)
+    # The pending row is at or below the latest generation: it gets applied,
+    # through exactly one write transaction.
+    store.acknowledge_applied(FACILITY_ID)
     assert len(calls) == 1
     with sqlite3.connect(database) as connection:
         assert connection.execute(
             "SELECT status FROM policies WHERE facility_id=?", (FACILITY_ID,)
         ).fetchone() == ("applied",)
+
+    # Nothing pending any more: acknowledge_applied must not open a write
+    # transaction.
+    store.acknowledge_applied(FACILITY_ID)
+    assert len(calls) == 1
 
 
 def test_policy_authority_writes_only_the_compact_policy_table(tmp_path: Path) -> None:

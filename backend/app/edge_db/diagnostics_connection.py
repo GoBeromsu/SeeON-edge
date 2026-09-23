@@ -7,7 +7,8 @@ the product database (``EDGE_DATABASE_PATH``) means its writer lock, WAL, and
 checkpoint pressure can never be shared with incidents, alerts, or policy
 writes in ``edge.sqlite3`` -- SQLite's writer lock and WAL are per-file. The
 product database's six ``execution_*`` tables are left in place untouched (no
-destructive migration); retiring them (VACUUM/drop) is a later ops step.
+destructive migration); retiring them (VACUUM/drop) is a later ops step,
+tracked separately in #583.
 
 This file is created and stamped (``PRAGMA user_version``) only by the
 one-shot ``python -m backend.app.edge_db`` bootstrap
