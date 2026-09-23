@@ -76,31 +76,13 @@ def _interleave_two_boots(lanes: ExecutionRecordLanes) -> None:
     assert lanes.try_emit(_lane_record(boot=_BOOT_OVERFLOW, seq=2, observed=2_000)) is False
 
 
-def _leave_only_overflow(lanes: ExecutionRecordLanes) -> None:
-    """Drop queued records after overflow so the lane holds loss only.
-
-    ``try_emit`` cannot overflow an empty deque (capacity >= 1 admits first).
-    Clearing the admitted record after a real overflow is the public-loss
-    state ``cameras_with_work`` / the exporter must still flush.
-    """
-    with lanes._condition:  # noqa: SLF001
-        found = False
-        for lane in lanes._lanes.values():  # noqa: SLF001
-            if lane.overflow:
-                lane.records.clear()
-                found = True
-        assert found, "expected a lane-overflow to remain after clearing records"
-
-
 class _AlwaysWarmupClassifier:
     def __init__(self) -> None:
         self.current_call_missing_score_reasons: dict[int, str] = {}
 
     def update(self, rows: object, live_track_ids: tuple[int, ...]) -> dict[int, object]:
         del rows
-        self.current_call_missing_score_reasons = dict.fromkeys(
-            live_track_ids, "classifier-warmup"
-        )
+        self.current_call_missing_score_reasons = dict.fromkeys(live_track_ids, "classifier-warmup")
         return {}
 
     def probabilities_for(self, track_id: int) -> object | None:
@@ -203,11 +185,20 @@ def test_g3_1_interleaved_boots_isolate_overflow_and_restart_sequences(tmp_path)
                 exporter.stop()
 
 
-def test_g3_2_overflow_only_lane_exports_within_flush_ms(tmp_path) -> None:
-    lanes = ExecutionRecordLanes(lane_capacity=1)
+def test_g3_2_loss_only_lane_is_exported_without_a_later_valid_record(tmp_path) -> None:
+    """A lane holding only loss (records-empty) still reaches the Backend.
+
+    The public way to a records-empty loss lane is an export failure: the
+    drained batch is handed back via note_export_failure, leaving an
+    export-failed gap with nothing queued. The exporter must then offer and
+    deliver that gap on its own, with no further try_emit for the boot.
+    This proves eventual delivery bounded by wait_until, not a latency bound.
+    """
+    lanes = ExecutionRecordLanes(lane_capacity=4)
     assert lanes.try_emit(_lane_record(seq=0, observed=1_000)) is True
-    assert lanes.try_emit(_lane_record(seq=1, observed=2_000)) is False
-    _leave_only_overflow(lanes)
+    drained = lanes.drain_for(_CAMERA, _BOOT_OVERFLOW, limit=8)
+    assert drained is not None and len(drained.records) == 1 and drained.gaps == ()
+    lanes.note_export_failure(drained)
     assert lanes.queued() == 0
     assert (_CAMERA, _BOOT_OVERFLOW) in lanes.cameras_with_work()
 
@@ -219,29 +210,24 @@ def test_g3_2_overflow_only_lane_exports_within_flush_ms(tmp_path) -> None:
             )
             exporter.start()
 
-            def _overflow_coverage() -> bool:
+            def _export_failed_coverage() -> bool:
                 body = _query(backend)
                 return any(
                     row["coverage_kind"] == "MISSING_NOT_RECORDED"
-                    and row["cause"] == LANE_OVERFLOW_CAUSE
-                    and row["from_sequence"] is not None
+                    and row["cause"] == "export-failed"
+                    and row["from_sequence"] == 0
+                    and row["to_sequence"] == 0
                     for row in body.get("coverage", ())
                 )
 
             wait_until(
-                _overflow_coverage,
-                timeout=(_FLUSH_MS / 1000.0) + 2.0,
-                what="overflow-only gap on Backend within FLUSH_MS bound",
+                _export_failed_coverage,
+                timeout=5.0,
+                what="records-empty export-failed gap delivered to the Backend",
             )
             body = _query(backend)
             assert body["records"] == []
-            overflow = [
-                row
-                for row in body["coverage"]
-                if row["coverage_kind"] == "MISSING_NOT_RECORDED"
-                and row["cause"] == LANE_OVERFLOW_CAUSE
-            ]
-            assert overflow
+            assert (_CAMERA, _BOOT_OVERFLOW) not in lanes.cameras_with_work()
         finally:
             if exporter is not None:
                 exporter.stop()
