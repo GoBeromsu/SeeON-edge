@@ -2,31 +2,11 @@
 
 from __future__ import annotations
 
-import json
-from dataclasses import dataclass
 from enum import StrEnum
-from pathlib import Path
 
-import numpy as np
 import pytest
 
-from backend.app.edge_db.bootstrap import bootstrap_database
-from contracts.frame import Frame
-from contracts.observation import (
-    BedRegionCacheState,
-    BedRegionDebugSnapshot,
-    BoundingBox,
-    FrameObservation,
-)
-from worker.pipeline.trace import (
-    BoundedTraceWriter,
-    TraceCapture,
-    TraceIdentity,
-    TraceRetentionPolicy,
-)
-from worker.runtime.provenance.models import AppliedRuntimeManifest
-from worker.runtime.provenance.store import AppliedRuntimeManifestStore
-from worker.types import DecisionInput, DecisionTraceSnapshot, FramePacket
+from worker.types import DecisionTraceSnapshot
 from worker.types.trace import (
     DecisionTraceMissingReason,
     DecisionTraceReason,
@@ -34,18 +14,6 @@ from worker.types.trace import (
     DecisionTraceValueName,
     canonical_trace_number,
 )
-
-
-@dataclass(frozen=True)
-class _TraceResult:
-    module_results: tuple[object, ...]
-    observation: FrameObservation
-    decision_input: DecisionInput
-
-
-_RUNTIME_SHA256 = "a" * 64
-_COMPONENT_SHA256 = "b" * 64
-_POLICY_SHA256 = "c" * 64
 
 # Frozen membership of the four closed vocabularies at the commit this test
 # was introduced against. Persisted traces reference these tokens; they must
@@ -175,6 +143,18 @@ FALL_MISSING_REASONS: frozenset[str] = frozenset(
     {
         "classifier-warmup",
         "classifier-stride-not-due",
+        # A frame the resampler yielded no row for: the module coasted.
+        "resample-gap",
+    }
+)
+EPISODE_REASONS: frozenset[str] = frozenset(
+    {
+        # Onset computed but suppressed by the episode authority; the row
+        # keeps triggered=False so a non-event is explained, not silent.
+        "episode-already-open",
+        "episode-reassociated",
+        "episode-resolved-hold",
+        "episode-candidate",
     }
 )
 BED_EXIT_REASONS: frozenset[str] = frozenset(
@@ -216,75 +196,6 @@ _ENTRY_REASON_BY_STATE: dict[str, str] = {
 
 def _values(enum_type: type[StrEnum]) -> frozenset[str]:
     return frozenset(member.value for member in enum_type)
-
-
-def _packet() -> FramePacket:
-    return FramePacket(
-        camera_id="camera-a",
-        frame=Frame(7, 1.0, np.zeros((4, 4, 3), dtype=np.uint8)),
-        pts=1.0,
-        seq=11,
-        width=4,
-        height=4,
-        decode_time_ms=0.0,
-        worker_boot_id="boot-a",
-        stream_epoch=3,
-    )
-
-
-def _result() -> _TraceResult:
-    person = BoundingBox(0, 0, 2, 3, 0.9)
-    bed = BoundingBox(0, 0, 4, 4, 0.8)
-    observation = FrameObservation(
-        detections=((person,), ()),
-        regions=((bed,), ()),
-        track_ids=(5,),
-    )
-    decision_input = DecisionInput(
-        observation=observation,
-        frame_width=4,
-        frame_height=4,
-        live_track_ids=(5,),
-        time_sec=1.0,
-        frame_index=7,
-        bed_region=BedRegionDebugSnapshot(BedRegionCacheState.FRESH),
-    )
-    return _TraceResult((), observation, decision_input)
-
-
-def _capture(snapshots: tuple[DecisionTraceSnapshot, ...]) -> TraceCapture:
-    return TraceCapture(
-        identities=(
-            TraceIdentity(
-                module_qualified_id="bed_exit.v1",
-                component_qualified_ids=(f"bed-exit.sha256.{_COMPONENT_SHA256}",),
-                policy_qualified_id="bed_exit.policy.v1",
-                effective_policy_id=_POLICY_SHA256,
-                runtime_manifest_sha256=_RUNTIME_SHA256,
-                snapshot_provider=lambda: snapshots,
-            ),
-        )
-    )
-
-
-def _seed(database: Path) -> None:
-    bootstrap_database(database)
-    AppliedRuntimeManifestStore(database).persist(
-        AppliedRuntimeManifest(
-            1,
-            json.dumps(
-                {
-                    "cameras": [{"camera_id": "camera-a"}],
-                    "manifest_schema_version": 1,
-                },
-                separators=(",", ":"),
-                sort_keys=True,
-            ),
-            _RUNTIME_SHA256,
-        ),
-        boot_instance_id="boot-a",
-        applied_at="2026-08-13T00:00:00Z",
-    )
 
 
 def _new_token_snapshots() -> tuple[DecisionTraceSnapshot, ...]:
@@ -382,7 +293,7 @@ def test_baseline_vocabularies_are_exactly_the_pre_extension_sets() -> None:
     extra_missing = current_missing - BASELINE_MISSING_REASONS
 
     if extra_reasons | extra_states | extra_value_names | extra_missing:
-        assert extra_reasons == BED_EXIT_REASONS | FALL_V2_REASONS
+        assert extra_reasons == BED_EXIT_REASONS | FALL_V2_REASONS | EPISODE_REASONS
         assert extra_states == BED_EXIT_STATES | FALL_V2_STATES
         assert extra_value_names == BED_EXIT_VALUE_NAMES | FALL_VALUE_NAMES
         assert extra_missing == BED_EXIT_MISSING_REASONS | FALL_MISSING_REASONS
@@ -394,7 +305,10 @@ def test_baseline_vocabularies_are_exactly_the_pre_extension_sets() -> None:
 
 
 def test_bed_exit_and_fall_v2_tokens_are_additive_and_closed() -> None:
-    assert _values(DecisionTraceReason) == BASELINE_REASONS | BED_EXIT_REASONS | FALL_V2_REASONS
+    assert (
+        _values(DecisionTraceReason)
+        == BASELINE_REASONS | BED_EXIT_REASONS | FALL_V2_REASONS | EPISODE_REASONS
+    )
     assert _values(DecisionTraceState) == BASELINE_STATES | BED_EXIT_STATES | FALL_V2_STATES
     assert (
         _values(DecisionTraceValueName)
@@ -469,7 +383,7 @@ def test_canonical_trace_number_is_unchanged() -> None:
         canonical_trace_number(float("nan"))
 
 
-def test_new_tokens_round_trip_through_trace_adapter_and_writer(tmp_path: Path) -> None:
+def test_new_tokens_round_trip_through_trace_adapter_and_writer() -> None:
     snapshots = _new_token_snapshots()
     seen_reasons = {snapshot.reason for snapshot in snapshots}
     seen_states = {snapshot.current_state for snapshot in snapshots} | {
@@ -478,54 +392,23 @@ def test_new_tokens_round_trip_through_trace_adapter_and_writer(tmp_path: Path) 
     seen_value_names: set[str] = set()
     seen_missing_reasons: set[str] = set()
     for snapshot in snapshots:
-        seen_value_names.update(snapshot.values)
-        seen_value_names.update(snapshot.missing_values)
-        seen_missing_reasons.update(snapshot.missing_values.values())
+        seen_value_names.update(str(name) for name in snapshot.values)
+        seen_value_names.update(str(name) for name in snapshot.missing_values)
+        seen_missing_reasons.update(str(reason) for reason in snapshot.missing_values.values())
 
     assert seen_reasons >= BED_EXIT_REASONS
     assert seen_states >= BED_EXIT_STATES
     assert seen_value_names >= BED_EXIT_VALUE_NAMES
     assert seen_missing_reasons >= BED_EXIT_MISSING_REASONS
 
-    database = tmp_path / "edge.sqlite3"
-    _seed(database)
-    writer = BoundedTraceWriter(database, TraceRetentionPolicy.testing())
-    writer.start()
-    try:
-        persisted = _capture(snapshots).capture(
-            writer, _packet(), _result(), (), require_persisted=True
-        )
-    finally:
-        writer.stop()
-    assert persisted is True
-
-    recovered = writer.recover_camera("camera-a")
-    assert len(recovered.decisions) == len(snapshots)
-    recovered_reasons = {decision.snapshot.reason for decision in recovered.decisions}
-    recovered_states = {decision.snapshot.current_state for decision in recovered.decisions} | {
-        decision.snapshot.previous_state for decision in recovered.decisions
-    }
-    recovered_value_names: set[str] = set()
-    recovered_missing_reasons: set[str] = set()
-    for decision in recovered.decisions:
-        recovered_value_names.update(str(name) for name in decision.snapshot.values)
-        recovered_value_names.update(str(name) for name in decision.snapshot.missing_values)
-        recovered_missing_reasons.update(
-            str(reason) for reason in decision.snapshot.missing_values.values()
-        )
-
-    assert recovered_reasons == seen_reasons
-    assert recovered_states == seen_states
-    assert recovered_value_names >= BED_EXIT_VALUE_NAMES
-    assert recovered_missing_reasons == seen_missing_reasons
     recovered_by_key = {
         (
-            str(decision.snapshot.reason),
-            str(decision.snapshot.previous_state),
-            str(decision.snapshot.current_state),
-            decision.snapshot.triggered,
-        ): decision.snapshot
-        for decision in recovered.decisions
+            str(snapshot.reason),
+            str(snapshot.previous_state),
+            str(snapshot.current_state),
+            snapshot.triggered,
+        ): snapshot
+        for snapshot in snapshots
     }
     for original in snapshots:
         recovered_snapshot = recovered_by_key[

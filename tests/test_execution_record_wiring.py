@@ -680,3 +680,38 @@ def test_alert_from_second_decider_is_stamped_with_its_own_identity() -> None:
         module_qualified_id=FALL_MODULE_QUALIFIED_ID,
         effective_policy_id="a" * 64,
     )
+
+
+def test_coasted_frame_never_re_emits_previous_snapshots_with_the_new_identity() -> None:
+    """TC3-01: a duplicate-PTS frame yields no resampled row, the fall decider
+    coasts, and its snapshots are left over from the previous frame. Those
+    must not be recorded as this frame's evidence; the coast itself must be."""
+    lanes = ExecutionRecordLanes(lane_capacity=64)
+    pump = _pump(
+        lanes,
+        identity=DecisionIdentity("fall.v2", "a" * 64),
+        fall_transition=0.9,
+    )
+    first = _metadata(child=pump._child, seq=0, pts=100)  # noqa: SLF001
+    pump._process(first)  # noqa: SLF001
+    first_batch = lanes.drain_for("cam-1", "boot-1", limit=64)
+    assert first_batch is not None
+    first_decisions = [r for r in first_batch.records if r.record_kind == "policy.decision"]
+    assert first_decisions and all(r.frame_seq == 0 for r in first_decisions)
+    assert all(r.outcome != "coasted" for r in first_decisions)
+
+    # Same PTS again: the resampler yields no row and the decider coasts.
+    pump._process(_metadata(child=pump._child, seq=1, pts=100))  # noqa: SLF001
+    second = lanes.drain_for("cam-1", "boot-1", limit=64)
+    assert second is not None
+    second_decisions = [r for r in second.records if r.record_kind == "policy.decision"]
+    assert second_decisions, "the coast must be visible, not silent"
+    for record in second_decisions:
+        assert record.frame_seq == 1
+        assert record.outcome == "coasted"
+        assert record.payload["track_id"] is None
+        assert record.payload["missing_values"] == {"fall_transition_probability": "resample-gap"}
+        assert record.payload["module_qualified_id"] == "fall.v2"
+        assert record.payload["decision_trace_id"] is None
+    # And no model.score was minted for the coasted frame.
+    assert not [r for r in second.records if r.record_kind == "model.score"]

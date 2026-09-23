@@ -586,7 +586,7 @@ remain analysis and optional snapshot taps. Transformed derivative publication
 is not a current production surface.
 
 Decision-trace replay stays in the worker process as a bounded in-memory
-writer. There is no backend analysis-trace HTTP or SQLite warehouse.
+replay-trace writer (`worker/pipeline/trace/replay_trace_writer.py`). There is no backend analysis-trace HTTP or SQLite warehouse.
 
 ### Replay trace v2
 

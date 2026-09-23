@@ -17,7 +17,13 @@ from worker.pipeline.diagnostics.record_builder import (
     observed_time,
 )
 from worker.types.metadata import MetadataCounters, MetadataFrame, NativeObservationEvidence
-from worker.types.trace import DecisionTraceSnapshot
+from worker.types.trace import (
+    DecisionTraceMissingReason,
+    DecisionTraceReason,
+    DecisionTraceSnapshot,
+    DecisionTraceState,
+    DecisionTraceValueName,
+)
 
 
 def sdk_frame_record(
@@ -208,8 +214,70 @@ def _sdk_payload(evidence: NativeObservationEvidence | None) -> dict[str, object
     }
 
 
+def policy_coast_record(
+    *,
+    camera_id: str,
+    worker_boot_id: str,
+    source_generation: int,
+    stream_epoch: int,
+    frame_seq: int,
+    source_pts_ns: int | None,
+    module_qualified_id: str | None,
+    observed_at_ns: int | None = None,
+) -> WireRecord | None:
+    """One truthful policy.decision for a frame the module did not evaluate.
+
+    Emitted instead of re-stamping the module's previous snapshots when the
+    resampler yielded no row (duplicate / non-monotonic / same-cadence PTS).
+    It carries no track and no score; the missing reason names the gap.
+    """
+    snapshot = DecisionTraceSnapshot(
+        reason=str(DecisionTraceReason.SCORE_MISSING),
+        previous_state=str(DecisionTraceState.NOT_EVALUATED),
+        current_state=str(DecisionTraceState.NOT_EVALUATED),
+        triggered=False,
+        track_id=None,
+        bed_id=None,
+        missing_values={
+            str(DecisionTraceValueName.FALL_TRANSITION_PROBABILITY): str(
+                DecisionTraceMissingReason.RESAMPLE_GAP
+            )
+        },
+    )
+    return make_record(
+        record_kind="policy.decision",
+        camera_id=camera_id,
+        worker_boot_id=worker_boot_id,
+        source_generation=source_generation,
+        stream_epoch=stream_epoch,
+        producer=PRODUCER_POLICY,
+        observed_at_ns=monotonic_or(observed_at_ns),
+        time_quality="monotonic",
+        causal_unit_id=module_causal_unit_id(
+            camera_id, worker_boot_id, stream_epoch, module_qualified_id, frame_seq
+        ),
+        outcome="coasted",
+        payload={
+            "reason": snapshot.reason,
+            "previous_state": snapshot.previous_state,
+            "current_state": snapshot.current_state,
+            "triggered": False,
+            "track_id": None,
+            "bed_id": None,
+            "values": {},
+            "missing_values": dict(snapshot.missing_values),
+            "module_qualified_id": module_qualified_id,
+            "authority_role": "authoritative",
+            "decision_trace_id": None,
+        },
+        frame_seq=frame_seq,
+        source_pts_ns=source_pts_ns,
+    )
+
+
 __all__ = [
     "model_score_record",
+    "policy_coast_record",
     "policy_consume_record",
     "policy_decision_record",
     "sdk_frame_record",

@@ -57,7 +57,12 @@ from worker.domains.fall.pose_bbox56 import (
 from worker.domains.tracker import GreedyIouTracker
 from worker.interfaces.clip_analysis import ClipAnalysisDisabledError
 from worker.interfaces.clip_analysis import ClipAnalysisSupervisor as ClipAnalysisControl
-from worker.interfaces.decision import Decider, TraceSnapshotProvider
+from worker.interfaces.decision import (
+    Decider,
+    FreshnessProvider,
+    ShadowTraceProvider,
+    TraceSnapshotProvider,
+)
 from worker.interfaces.fall_model import FallModelProtocol
 from worker.interfaces.serving import ServingClient
 from worker.pipeline.analytics.merge import result_merger_names
@@ -379,9 +384,13 @@ class _WindowGatedDecider:
     window: DetectionWindow
     clock: Callable[[], datetime]
     last_trace_snapshots: tuple[DecisionTraceSnapshot, ...] = ()
+    last_update_evaluated: bool = True
+    last_shadow_trace_count: int = 0
 
     def update(self, input_value: DecisionInput) -> tuple[BusinessEvent, ...]:
         if not self.window.contains(self.clock()):
+            # The gate itself evaluated this frame: one fresh, authoritative
+            # outside-window snapshot, no shadow tail.
             object.__setattr__(
                 self,
                 "last_trace_snapshots",
@@ -397,13 +406,31 @@ class _WindowGatedDecider:
                     ),
                 ),
             )
+            object.__setattr__(self, "last_update_evaluated", True)
+            object.__setattr__(self, "last_shadow_trace_count", 0)
             return ()
         events = self.decider.update(input_value)
         if isinstance(self.decider, TraceSnapshotProvider):
+            # Mirror the inner decider's snapshots AND its freshness / shadow
+            # facts, so the aggregator reads a consistent view off this wrapper.
+            object.__setattr__(self, "last_trace_snapshots", self.decider.last_trace_snapshots)
             object.__setattr__(
                 self,
-                "last_trace_snapshots",
-                self.decider.last_trace_snapshots,
+                "last_update_evaluated",
+                (
+                    self.decider.last_update_evaluated
+                    if isinstance(self.decider, FreshnessProvider)
+                    else True
+                ),
+            )
+            object.__setattr__(
+                self,
+                "last_shadow_trace_count",
+                (
+                    self.decider.last_shadow_trace_count
+                    if isinstance(self.decider, ShadowTraceProvider)
+                    else 0
+                ),
             )
         return events
 
