@@ -148,13 +148,19 @@ def _gaps_for_records(
     grouped: dict[str, list[WireRecord]] = {}
     for record in records:
         grouped.setdefault(record.producer, []).append(record)
+    # Sequence bounds are lane-assigned and monotonic per producer, so
+    # first/last are correct. observed_at_ns is producer-supplied and may not
+    # be monotonic across the dropped items (PTS-derived vs process-monotonic
+    # producers, reordered publishes), so the time range must be min/max: a
+    # WireGap with from_ns > to_ns is a contract error that would kill the
+    # exporter thread and silently hide the very loss it is meant to report.
     return [
         WireGap(
             producer=producer,
             from_sequence=items[0].producer_sequence,
             to_sequence=items[-1].producer_sequence,
-            from_ns=items[0].observed_at_ns,
-            to_ns=items[-1].observed_at_ns,
+            from_ns=min(item.observed_at_ns for item in items),
+            to_ns=max(item.observed_at_ns for item in items),
             record_count=len(items),
             cause=cause,
         )
