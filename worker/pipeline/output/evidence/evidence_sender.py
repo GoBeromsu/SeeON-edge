@@ -327,14 +327,6 @@ class EvidenceSender:
                 # instead of re-sending it on every tick.
                 self._deferred.add(entry_id)
                 self._blocked_until[entry_id] = self._clock() + _OPERATOR_BLOCKED_RETRY_SECONDS
-                self._emit_event_delivery(
-                    entry,
-                    outcome="operator-blocked",
-                    attempt=attempts,
-                    failure_class=str(result.code),
-                    status_code=result.status_code,
-                    retained=False,
-                )
                 return SenderStep.RETRY_SCHEDULED
             if (
                 result.disposition is DeliveryDisposition.PERMANENT

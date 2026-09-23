@@ -17,7 +17,7 @@ from worker.types.trace import (
 )
 
 # Frozen membership of the four closed vocabularies at the commit this test
-# was introduced against. Persisted traces reference these tokens; they must
+# was introduced against. Live snapshots reference these tokens; they must
 # remain a subset of whatever the enums grow into.
 BASELINE_REASONS: frozenset[str] = frozenset(
     {

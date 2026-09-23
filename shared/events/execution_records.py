@@ -29,14 +29,11 @@ MAX_EXECUTION_RECORD_BODY_BYTES: Final = 1024 * 1024
 RECORD_KINDS: Final = frozenset(
     {
         "sdk.frame",
-        "cpu.projection",
-        "handoff.slot",
         "policy.consume",
         "model.score",
         "policy.decision",
         "event.delivery",
         "backend.acceptance",
-        "coverage.gap",
     }
 )
 TIME_QUALITIES: Final = frozenset({"monotonic", "wall", "pts", "unknown"})

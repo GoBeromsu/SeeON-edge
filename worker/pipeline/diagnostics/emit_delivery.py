@@ -25,9 +25,6 @@ from worker.pipeline.diagnostics.record_builder import (
 #: refused-retention-full: PERMANENT 4xx but the retention area is full; the
 #:     entry stays queued.
 #: exhausted-retained / exhausted-retention-full: attempt budget spent.
-#: operator-blocked: CAMERA_MAPPING_MISSING. EvidenceSender.run_once applies
-#:     that wait only to CLIP entries, so EVENT entries never take this
-#:     outcome today; the builder still accepts it if an EVENT path hits it.
 #: ack-removal-deferred: delivered but queue.acknowledge failed.
 DELIVERY_ATTEMPT_OUTCOMES: Final = (
     "retry-transient",
@@ -36,7 +33,6 @@ DELIVERY_ATTEMPT_OUTCOMES: Final = (
     "refused-retention-full",
     "exhausted-retained",
     "exhausted-retention-full",
-    "operator-blocked",
     "ack-removal-deferred",
 )
 
