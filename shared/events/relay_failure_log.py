@@ -48,7 +48,7 @@ _CLIENT_ERROR_HINTS: Final[dict[int, str]] = {
     403: "check runtime enrollment / auth",
 }
 _DEFAULT_CLIENT_HINT: Final = "check worker relay config"
-_DEFAULT_SERVER_HINT: Final = "upstream relay is down; will keep retrying"
+_DEFAULT_SERVER_HINT: Final = "edge API (ml-api) returned a server error; will keep retrying"
 _DEFAULT_TRANSPORT_HINT: Final = "cannot reach relay host; will keep retrying"
 
 
