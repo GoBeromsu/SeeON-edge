@@ -10,6 +10,8 @@ Backend↔worker wire: outbound event shape, Event API client, evidence HTTP, re
 - `evidence_export_contract.py`: `DeliveryFailure`, receipts, capabilities, `RETRY` / `PERMANENT` / `COMPATIBILITY`.
 - `evidence_http_transport.py`: bounded HTTP, receipt parse, status classification.
 - `relay_failure_log.py`: rate-limited, classified relay failure reporter.
+- `execution_records.py`: Worker -> Backend diagnostics wire contract.
+- `execution_records_client.py`: relay HTTP client posting `WireBatch`.
 
 ## Schemas
 

@@ -3,6 +3,9 @@
 Own load, pull, LKG, restart identity, and typed models. YAML is a developer hatch.
 Production authority is the backend relay pull plus numeric policies.
 No env roster.
+`ML_WORKER_EXECUTION_RECORDS_*` is local overlay: off unless
+`ML_WORKER_EXECUTION_RECORDS_ENABLED=1`, then lane/batch/flush integers are
+required with no defaults.
 `ML_WORKER_PROFILE=flow` is infrastructure selection only. Its DeepStream
 artifact paths are image-owned wiring, never camera/config authority.
 

@@ -13,11 +13,13 @@ from typing import Protocol, final, runtime_checkable
 
 from contracts.observation import BoundingBox
 from contracts.replay_trace import ReplayRow, ReplaySource, ReplayTrack
+from worker.interfaces.execution_records import ExecutionRecordSink
 from worker.interfaces.media_plane import OnDemandSnapshotUnsupported
 from worker.pipeline.decision import EventAggregator
 from worker.pipeline.output.evidence_attacher import AlertEvidenceAttacher
 from worker.pipeline.perception import SceneState, build_decision_input, build_frame_observation
 from worker.pipeline.trace.replay_trace_writer import ReplayTraceWriter
+from worker.runtime.flow.execution_record_emit import emit_model_and_decision, emit_policy_consume
 from worker.runtime.flow.metadata_slot import AcceptanceToken, LatestMetadataSlot
 from worker.runtime.flow.observation_coverage import ObservationCoverage
 from worker.types import BusinessEvent, ChannelState, NativeEvidenceTrigger
@@ -76,6 +78,7 @@ class NativePolicyContext:
     night_window_active: Callable[[], bool] | None = None
     recreate_decision: Callable[[SourceBinding], EventAggregator] | None = None
     track_id_switch_absorbed_total: Callable[[EventAggregator], int] | None = None
+    execution_records: ExecutionRecordSink | None = None
 
 
 @final
@@ -99,6 +102,7 @@ class NativePolicyPump:
             # ADR-0002: a missing seam refuses at wiring time, never mid-stream.
             raise ValueError("native policy pump requires an absorbed-switch reader")
         self._track_id_switch_absorbed_total = context.track_id_switch_absorbed_total
+        self._execution_records = context.execution_records
         self._stop = threading.Event()
         self._fps: deque[float] = deque()
         self.processed_count = 0
@@ -172,8 +176,20 @@ class NativePolicyPump:
             token = AcceptanceToken(self._binding, frame.native_publish_sequence)
             self._observation_coverage.observe(frame)
             self._diagnostics.record_native_detection_attempt(self.camera_id)
+            # Only read slot counters when a sink is wired: the seam default
+            # (None) must leave the hot path byte-for-byte as before.
+            sink = self._execution_records
+            before = None if sink is None else self._metadata.counters()
             try:
                 self._process(frame)
+                if sink is not None and before is not None:
+                    emit_policy_consume(
+                        sink,
+                        frame,
+                        before=before,
+                        after=self._metadata.counters(),
+                        processed_count=self.processed_count + 1,
+                    )
             except (OSError, ValueError, RuntimeError):
                 self.failure_count += 1
                 LOGGER.warning(
@@ -281,6 +297,7 @@ class NativePolicyPump:
         self._capture_replay_row(metadata, boxes, resolved_track_ids)
         gap_rows_before = _resample_gap_rows_total(self._decision)
         events = self._decision.update(decision_input)
+        emit_model_and_decision(self._execution_records, metadata, self._decision)
         self._refresh_preview_states()
         self._diagnostics.record_track_id_switch_absorbed_total(
             self.camera_id, self._track_id_switch_absorbed_total(self._decision)

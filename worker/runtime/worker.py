@@ -97,6 +97,7 @@ from worker.runtime.config import (
     WorkerModelsConfig,
     replay_trace_directory_from_environment,
 )
+from worker.runtime.execution_records import compose_execution_records
 from worker.runtime.faults.handler import FATAL_ACCELERATOR_EXIT_CODE, FaultHandler
 from worker.runtime.faults.record import make_fault_record
 from worker.runtime.flow.cold_start import FlowWarmupTimeout, verify_flow_boot_inputs
@@ -757,6 +758,8 @@ class WorkerRuntime:
         self._native_policy_pumps_by_camera: dict[str, NativePolicyPump] = {}
         self._policy_pump_threads: tuple[threading.Thread, ...] = ()
         self._selected_bundle_admission: ModelBundleProof | None = None
+        self._execution_record_lanes = None
+        self._execution_record_exporter = None
 
     def _stop_flow_media_plane(self) -> None:
         """Stop the Flow and let it go, without touching its roster.
@@ -848,6 +851,8 @@ class WorkerRuntime:
                 )
             )
             self._start_export_sender()
+            if self._execution_record_exporter is not None:
+                self._execution_record_exporter.start()
             self._start_runtime_status_sender()
             self._start_live_view_server()
             while not self._max_frames_completion_check() and (
@@ -868,6 +873,8 @@ class WorkerRuntime:
             self.watchdog.stop()
         if self._evidence_export_runtime is not None:
             self._evidence_export_runtime.stop_sender()
+        if self._execution_record_exporter is not None:
+            self._execution_record_exporter.stop()
         if self._runtime_status_sender is not None:
             self._runtime_status_sender.stop()
         if self._mjpeg_server is not None:
@@ -1150,6 +1157,7 @@ class WorkerRuntime:
         self._shared_graph = graph
         self.fall_model = fall_model
         self._warmed_component_ids = frozenset(graph.components)
+        self._compose_execution_records()
         return graph
 
     def _packaged_fall_member_digest(self) -> str:
@@ -1326,6 +1334,10 @@ class WorkerRuntime:
                 probe_camera_id=probe_camera_id,
                 clip_export_enabled=self._clip_export_policy.enabled,
                 flow_sealed_sidecar_directory=self._state_dir / "flow-sealed",
+                execution_records=self._execution_record_lanes,
+                observing_boot_id=(
+                    None if self._execution_record_lanes is None else str(self._worker_boot_uuid)
+                ),
             )
             with ClipStoreLock.acquire(self._resolved_clip_store_dir()):
                 runtime.initialize_under_lock()
@@ -1352,6 +1364,50 @@ class WorkerRuntime:
             self._evidence_export_runtime.start_sender()
         except Exception as exc:  # noqa: BLE001 - delivery startup is required
             raise EvidenceDeliveryError("evidence export sender failed to start") from exc
+
+    def _compose_execution_records(self) -> None:
+        from worker.runtime.config.execution_records import (
+            execution_records_settings_from_environment,
+        )
+
+        if execution_records_settings_from_environment(self._env) is None:
+            self._execution_record_lanes = None
+            self._execution_record_exporter = None
+            return
+        bundle = self._loaded_fall_bundle
+        identity = getattr(self, "_flow_engine_identity", None)
+        image_digest = identity.get("image_digest") if isinstance(identity, Mapping) else None
+        policy = self.config.detection_policies.defaults.get("fall")
+        _settings, lanes, exporter = compose_execution_records(
+            self.config,
+            env=self._env,
+            worker_boot_id=str(self._worker_boot_uuid),
+            build_revision=self._build_revision,
+            image_digest=image_digest if isinstance(image_digest, str) else None,
+            model_digest=None if bundle is None else bundle.published_weights_digest,
+            calibration_digest=self._fall_calibration_digest(),
+            preprocessing_identity=None if bundle is None else bundle.preprocessing_identity,
+            policy_identity=None if policy is None else policy.effective_policy_id,
+        )
+        self._execution_record_lanes = lanes
+        self._execution_record_exporter = exporter
+        plane = self._flow_media_plane
+        if plane is not None:
+            plane.metadata.set_execution_record_sink(lanes)
+
+    def _fall_calibration_digest(self) -> str | None:
+        models = self._fall_models()
+        root = None if models.fall is None else models.fall.artifact_dir
+        if root is None and models.selected is not None:
+            root = models.selected.models_root / "bundles" / models.selected.desired.bundle_sha256
+        if root is None:
+            return None
+        try:
+            from worker.adapters.model.pose_bbox56_bundle_support import member_digest, read_json
+
+            return member_digest(read_json(root / "bundle-manifest.json"), "calibration.json")
+        except Exception:  # noqa: BLE001 - missing identity refuses by name at compose
+            return None
 
     @staticmethod
     def _replay_sealed_clips(bindings: Sequence[FlowEvidenceBinding]) -> int:
@@ -1517,6 +1573,7 @@ class WorkerRuntime:
             ),
             sidecars=FlowSealedSidecars(self._state_dir / "flow-sealed"),
             camera_id=camera.camera_id,
+            execution_records=self._execution_record_lanes,
         )
         sealed_binding.append(sink)
         sealed_bindings.append(sink)
@@ -1549,6 +1606,7 @@ class WorkerRuntime:
                     ).decision
                 ),
                 track_id_switch_absorbed_total=_absorbed_track_id_switch_total,
+                execution_records=self._execution_record_lanes,
             ),
         )
         self._native_policy_pumps_by_camera[camera.camera_id] = pump

@@ -7,6 +7,7 @@ from pathlib import Path
 import pytest
 
 from backend.app.edge_db.bootstrap import bootstrap_database
+from backend.app.edge_db.compact_schema import APPLICATION_TABLES
 from backend.app.edge_db.configuration import open_configuration_database
 from backend.app.features.cameras.bed_zone_store import BedZoneRegion, BedZoneStore
 from backend.app.features.cameras.edge_topology_sync_state import EdgeTopologySyncStateStore
@@ -43,18 +44,7 @@ CAMERA_STORE_EXPORTS = [
     "utc_now_iso",
 ]
 
-COMPACT_TABLES = {
-    "artifacts",
-    "audit_events",
-    "cameras",
-    "clips",
-    "credentials",
-    "edge_site",
-    "incidents",
-    "locations",
-    "policies",
-    "schema_migrations",
-}
+COMPACT_TABLES = set(APPLICATION_TABLES)
 
 
 def _database(tmp_path: Path) -> Path:

@@ -32,6 +32,14 @@ from worker.runtime.config.domain_models import (
     NightWindowConfig,
 )
 from worker.runtime.config.errors import ConfigValidationError, WorkerConfigError
+from worker.runtime.config.execution_records import (
+    ML_WORKER_EXECUTION_RECORDS_BATCH_MAX_ENV,
+    ML_WORKER_EXECUTION_RECORDS_ENABLED_ENV,
+    ML_WORKER_EXECUTION_RECORDS_FLUSH_MS_ENV,
+    ML_WORKER_EXECUTION_RECORDS_LANE_CAPACITY_ENV,
+    ExecutionRecordsSettings,
+    execution_records_settings_from_environment,
+)
 from worker.runtime.config.live_settings import LiveClipExportPolicy
 from worker.runtime.config.lkg_store import (
     CONFIG_HISTORY_RETENTION_COUNT,
@@ -94,6 +102,10 @@ __all__ = [
     "ML_WORKER_DEV_MJPEG_ENV",
     "ML_WORKER_DEV_MJPEG_HOST_ENV",
     "ML_WORKER_DEV_MJPEG_PORT_ENV",
+    "ML_WORKER_EXECUTION_RECORDS_BATCH_MAX_ENV",
+    "ML_WORKER_EXECUTION_RECORDS_ENABLED_ENV",
+    "ML_WORKER_EXECUTION_RECORDS_FLUSH_MS_ENV",
+    "ML_WORKER_EXECUTION_RECORDS_LANE_CAPACITY_ENV",
     "ML_WORKER_FALL_MODEL_ARCHITECTURE_ENV",
     "ML_WORKER_FALL_MODEL_ARTIFACT_DIR_ENV",
     "ML_WORKER_FALL_MODEL_OPERATING_THRESHOLD_ENV",
@@ -125,6 +137,7 @@ __all__ = [
     "DevMjpegConfig",
     "DomainConfig",
     "DomainsConfig",
+    "ExecutionRecordsSettings",
     "FallDomainConfig",
     "FallModelConfig",
     "JsonObject",
@@ -144,6 +157,7 @@ __all__ = [
     "WorkerModelsConfig",
     "WorkerRuntimeConfig",
     "clip_recording_config_from_environment",
+    "execution_records_settings_from_environment",
     "fall_model_config_from_environment",
     "load_worker_config",
     "load_worker_config_from_relay",

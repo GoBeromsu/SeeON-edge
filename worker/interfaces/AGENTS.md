@@ -14,6 +14,7 @@ live in adapters or pipeline and are constructed by `worker.runtime`.
 - `output.py`: event and evidence publication seam.
 - `source_packet.py`: source-packet identity used by clip evidence.
 - `frame.py`: host-frame materialization boundary.
+- `execution_records.py`: non-blocking `ExecutionRecordSink.try_emit`.
 
 A new seam is a Protocol plus two implementations, or one implementation plus
 a test double. Do not let a vendor type, a config resolver, or a runtime object
