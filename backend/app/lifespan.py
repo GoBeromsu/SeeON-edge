@@ -19,14 +19,16 @@ from typing import Protocol, TypeGuard
 
 from fastapi import FastAPI
 
-from backend.app.core.config import reject_retired_backend_environment
-from backend.app.edge_db import EDGE_DATABASE_PATH
+from backend.app.core.config import get_settings, reject_retired_backend_environment
+from backend.app.edge_db import EDGE_DATABASE_PATH, RuntimeActor, open_runtime_database
 from backend.app.features.audit.startup import (
     close_audit_session,
     configure_audit_readiness,
 )
 from backend.app.features.cameras.store import CameraRegistryStore
 from backend.app.features.clips.catalog import CatalogStore
+from backend.app.features.diagnostics.retention import RetentionBudget
+from backend.app.features.diagnostics.store import ExecutionRecordStore
 from backend.app.features.status.backend_heartbeat_relay import (
     effective_relay_interval_sec,
     get_heartbeat_relay_state,
@@ -57,6 +59,7 @@ API_BACKEND_INGEST_TIMEOUT_SEC_ENV = "API_BACKEND_INGEST_TIMEOUT_SEC"
 API_HEARTBEAT_STALE_AFTER_SEC_ENV = "API_HEARTBEAT_STALE_AFTER_SEC"
 API_BACKEND_CONFIG_REFRESH_SEC_ENV = "API_BACKEND_CONFIG_REFRESH_SEC"
 API_BACKEND_HEARTBEAT_RELAY_SEC_ENV = "API_BACKEND_HEARTBEAT_RELAY_SEC"
+ML_API_BUILD_REVISION_ENV = "ML_API_BUILD_REVISION"
 
 BACKEND_CONFIG_SHUTDOWN_WAIT_SEC = 1.0
 BACKEND_HEARTBEAT_RELAY_SHUTDOWN_WAIT_SEC = 1.0
@@ -85,6 +88,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
     if not isinstance(getattr(app.state, "camera_registry", None), CameraRegistryStore):
         app.state.camera_registry = CameraRegistryStore.from_env()
+    _configure_execution_record_store(app)
     _configure_backend_ingest(app)
     bundle = backend_client_bundle(app)
     app.state.backend_configured = bundle is not None
@@ -181,6 +185,35 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         catalog_store = getattr(app.state, "catalog_store", None)
         if isinstance(catalog_store, CatalogStore):
             catalog_store.close()
+
+
+def _configure_execution_record_store(app: FastAPI) -> None:
+    """Construct the diagnostics store only when the feature is explicitly enabled."""
+    settings = get_settings()
+    if not settings.execution_records_enabled:
+        if hasattr(app.state, "execution_record_store"):
+            delattr(app.state, "execution_record_store")
+        return
+    budget_bytes = settings.execution_records_budget_bytes
+    if budget_bytes is None:
+        raise ValueError(
+            "ML_API_EXECUTION_RECORDS_BUDGET_BYTES is required when "
+            "ML_API_EXECUTION_RECORDS_ENABLED is true"
+        )
+    revision = os.environ.get(ML_API_BUILD_REVISION_ENV, "").strip()
+    if not revision:
+        raise ValueError(
+            "ML_API_BUILD_REVISION is required when ML_API_EXECUTION_RECORDS_ENABLED is true"
+        )
+    app.state.backend_build_revision = revision
+    if isinstance(getattr(app.state, "execution_record_store", None), ExecutionRecordStore):
+        return
+    app.state.execution_record_store = ExecutionRecordStore(
+        lambda: open_runtime_database(
+            EDGE_DATABASE_PATH, actor=RuntimeActor.API, check_same_thread=False
+        ),
+        RetentionBudget(total_bytes=budget_bytes),
+    )
 
 
 def _configure_backend_ingest(app: FastAPI) -> None:

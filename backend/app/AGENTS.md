@@ -22,8 +22,9 @@ One capability per `features/<slice>/`. The slice owns its router and store. Ext
 - `clips`: listing, media, storage, catalog. Owns compact `clips` / `artifacts` access, `catalog_store`, and `clip_storage_location_store`.
 - `connection`: enrollment, Hub URL, roster sync, topology confirm. Owns `ConnectionSettingsStore`.
 - `detection_settings`: settings + policy apply/rollback. Owns `detection_settings_store`, `detection_policy_store`.
+- `diagnostics`: original-run execution records. Owns `execution_record_store`. Routes: `POST /relay/execution-records`, `GET /diagnostics/executions`.
 - `evidence`: worker clip ingest under `/relay` plus operator incidents.
-- `relay`: `/relay/{config,restart,alerts,heartbeat,runtime-status}`. No store; consumes cameras / status / clips via deps.
+- `relay`: `/relay/{config,restart,alerts,heartbeat,runtime-status,execution-records}`. No store; consumes cameras / status / clips via deps. Execution-record body cap is registered here (`BoundedBodyRoute`); the handler lives in `diagnostics`.
 - `runtime_settings`: operator knobs. Owns `RuntimeSettingsStore`.
 - `status`: `/status` and `/system` from relay-derived liveness. Owns `heartbeat_store`, `runtime_status_store`.
 - `qa`: retired. No QA/replay table is a runtime owner.
@@ -48,13 +49,14 @@ HTTP schemas are Pydantic `BaseModel`, never `dataclass`. They live in the slice
 - clips: compact clip/artifact stores, `catalog_store`, `clip_storage_location_store`
 - status: `heartbeat_store`, `runtime_status_store`
 - detection_settings: `detection_settings_store`, `detection_policy_store`
+- diagnostics: `execution_record_store` (schema-19 execution_* tables; constructed in lifespan when `ML_API_EXECUTION_RECORDS_ENABLED`)
 
 Connection and runtime settings load through their slice `from_env()` helpers. API writes remaining compact authorities and the six schema-19 execution-record tables as `RuntimeActor.API`. Do not open worker table families. `shared/sqlite_bootstrap.py` may connect; it must not import feature stores.
 
 ## Focused tests
 
 - Factory: `tests/test_serving_health.py`, `tests/test_serving_status.py`, `tests/test_serving_models.py`, `tests/test_serving_boundary_contract.py`
-- Relay: `tests/test_api_ingest_relay.py`, `tests/test_relay_body_auth_ordering.py`, `tests/test_api_heartbeat_store.py`, `tests/test_api_runtime_status.py`, `tests/test_backend_heartbeat_relay.py`, `tests/test_ml_api_config_pull.py`
+- Relay: `tests/test_api_ingest_relay.py`, `tests/test_relay_body_auth_ordering.py`, `tests/test_api_heartbeat_store.py`, `tests/test_api_runtime_status.py`, `tests/test_backend_heartbeat_relay.py`, `tests/test_ml_api_config_pull.py`, `tests/test_api_execution_records.py`
 - Slices: `tests/test_api_*.py`, `tests/test_connection_*.py`, `tests/test_auth_login_throttle.py`, `tests/test_dashboard_auth.py`
 - Import direction: `uv run --group lint lint-imports`
 
