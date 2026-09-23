@@ -15,6 +15,7 @@ from backend.app.features.diagnostics.ingest import (
     payload_text_and_bytes,
     upsert_provenance,
 )
+from backend.app.features.diagnostics.prune import coarsen_coverage
 from backend.app.features.diagnostics.query import (
     QueryResult,
     execute_query,
@@ -166,6 +167,13 @@ class ExecutionRecordStore:
                 exact=True,
                 cause=gap.cause,
                 recorded_at_ns=now_ns,
+            )
+        if batch.gaps:
+            coarsen_coverage(
+                connection,
+                self.budget.coverage_rows_per_epoch,
+                now_ns,
+                ((batch.camera_id, batch.worker_boot_id, epoch_ns[0], epoch_ns[1]),),
             )
         receipt = BatchReceipt(
             batch_id=batch.batch_id,

@@ -566,3 +566,41 @@ def test_enforce_prunes_a_bounded_number_of_units_per_call_and_converges(
         assert live >= 1
     finally:
         connection.close()
+
+
+def test_newer_boot_is_decided_by_observation_time_not_boot_id_text(tmp_path: Path) -> None:
+    """Live regression: boot ids are UUIDs. The worker restarted with a boot id
+    that sorted LOWER than the dead boot's, the string comparison called the
+    live boot "older", every new unit was marked terminal on arrival and pruned
+    first, and 5,300 dead-boot units were kept. Newest is by observation."""
+    budget = RetentionBudget(total_bytes=2**20, unit_horizon_ns=HORIZON)
+    store, path = _store(tmp_path, budget)
+    dead_boot, live_boot = "f0437fa1-dead", "91a6a31d-live"  # live sorts lower
+    assert live_boot < dead_boot
+    store.ingest_batch(
+        _batch(
+            "dead",
+            (_record(label="d0", unit="dead-u", seq=0, observed=10, payload="a", boot=dead_boot),),
+            boot=dead_boot,
+        )
+    )
+    store.ingest_batch(
+        _batch(
+            "live",
+            (
+                _record(
+                    label="l0", unit="live-u", seq=0, observed=1_000, payload="b", boot=live_boot
+                ),
+            ),
+            boot=live_boot,
+        )
+    )
+    connection = _open(path)
+    try:
+        rows = dict(
+            connection.execute("SELECT causal_unit_id, terminal FROM execution_units").fetchall()
+        )
+    finally:
+        connection.close()
+    assert rows["dead-u"] == 1, "the superseded boot's unit is terminal"
+    assert rows["live-u"] == 0, "the live boot's unit must stay open"
