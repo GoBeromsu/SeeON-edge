@@ -111,17 +111,29 @@ that was composed without an effective policy; it has no `decision_trace_id`.
 
 ## Retention
 
-Total-capacity, not per-kind TTL. Records belong to a logical causal unit
-(one fall decision and its inputs; one event and its delivery/acceptance).
-Units become terminal by horizon, by a newer boot/epoch, or when forced by
-capacity. Pruning removes a whole unit atomically and writes an exact
-`DELETED_BY_CAPACITY` row; it never leaves a child with a deleted parent.
-The budget is on-disk bytes of the execution_* tables and their indexes,
-measured exactly via `dbstat` (`used_bytes`); it is not the whole
-`edge.sqlite3` file and not the WAL. Enforce prunes whole units until
-`used_bytes` is at or below low-water. On the reference 8-camera edge the
-rows-plus-indexes occupied 3.8x the summed `payload_bytes`; do not size
-the envelope from payload alone.
+Total-capacity, not per-kind TTL. `ML_API_EXECUTION_RECORDS_BUDGET_BYTES` is
+the **on-disk** size of the six `execution_*` tables plus their indexes,
+measured exactly with SQLite's `dbstat` (not the whole `edge.sqlite3`, not
+the WAL). Rows plus five indexes were 3.8x the payload bytes on the
+reference edge, so never size the budget by payload.
+
+Records belong to a logical causal unit (one fall decision and its inputs;
+one event and its delivery/acceptance). Units become terminal by horizon, by
+a newer boot/epoch, or when forced by capacity. Pruning removes whole units
+atomically, oldest-terminal first, and writes an exact `DELETED_BY_CAPACITY`
+row; it never leaves a child with a deleted parent.
+
+How the limit is enforced: `high_water` (total minus a 1/16 control reserve)
+is the prune trigger; each ingest prunes at most a bounded number of whole
+units toward `low_water` (7/8 of high-water) so a backlog drains across
+requests instead of one request blocking. Usage is measured at most once per
+second; between measurements the store accrues what it wrote, scaled by the
+ratio it measured. That estimate only decides *when* to measure - pruning
+happens only on an exact measurement. Usage can therefore sit above
+`high_water` by at most one second of writes, which is what the control
+reserve absorbs; the total envelope is the hard limit. Measured on the
+reference edge with 8 cameras: a 2 GB backlog drained at ~2 MB/s with
+`/health` unaffected.
 
 ## Restart and rollback
 
