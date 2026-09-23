@@ -71,11 +71,11 @@ by hand. The optional `HF_TOKEN` in `.env.edge.prod` reaches this service
 only; leave it empty for the public pins. There is no host `./models` bind
 mount any more.
 
-Pull-request CI provisions only public model artifacts with
-`python -m worker.tools.fetch_models --public-only`; it deliberately treats all
-Hugging Face sources as private and reports each skipped path. The full fall
-bundle fetch runs only in the non-pull-request `test-private-bundle` job, where
-`HF_TOKEN` is scoped to that job and is never available to fork-authored code.
+CI downloads no model weights. Tests that need a real model file skip with
+an explicit reason when `models/` is absent; they run on developer machines
+and the deployment host, where `scripts/fetch-models.sh` provisions the
+directory from the sealed manifest (`--public-only` skips Hugging Face
+sources; the full fetch needs `HF_TOKEN`). No CI job holds `HF_TOKEN`.
 
 ## Pose ONNX export and engine rebuild
 
