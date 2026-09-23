@@ -299,8 +299,8 @@ def test_a10_conflicting_record_keeps_original(tmp_path: Path, enabled_settings:
 def test_a11_payload_over_max_record_bytes_writes_rejected_oversize(
     tmp_path: Path, enabled_settings: None
 ) -> None:
-    client = _enabled_client(tmp_path, budget_bytes=8192)
-    budget = RetentionBudget(total_bytes=8192)
+    client = _enabled_client(tmp_path, budget_bytes=512 * 1024)
+    budget = RetentionBudget(total_bytes=512 * 1024)
     record = _record(0, payload={"blob": "x" * (budget.max_record_bytes + 8)})
     response = client.post(
         _PATH, json=_batch(record).to_json(), headers={RELAY_TOKEN_HEADER: _RELAY_TOKEN}

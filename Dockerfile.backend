@@ -57,7 +57,11 @@ LABEL org.opencontainers.image.revision="${SOURCE_REVISION}" \
       org.opencontainers.image.source="SeniorAILab/eldercare-fall-ml-v2" \
       seeon.edge.database.schema-version="${EDGE_DATABASE_SCHEMA_VERSION}"
 
+# The execution-record provenance identity (#545). The worker image bakes
+# ML_WORKER_BUILD_REVISION the same way; the API refuses to enable execution
+# records without this, so it must come from the image, not the operator.
 ENV HOST=127.0.0.1 \
-    PORT=8000
+    PORT=8000 \
+    ML_API_BUILD_REVISION="${SOURCE_REVISION}"
 EXPOSE 8000
 CMD ["sh", "-c", "uvicorn backend.app.main:app --host ${HOST} --port ${PORT}"]

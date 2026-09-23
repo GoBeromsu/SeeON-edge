@@ -9,8 +9,9 @@ from shared.events.execution_records import PROCESS_SCOPE, WireRecord
 from worker.pipeline.diagnostics.record_builder import (
     PRODUCER_BACKEND,
     PRODUCER_EVENT,
+    WALL,
     make_record,
-    monotonic_or,
+    wall_or,
 )
 
 #: Closed vocabulary for the sender's own event.delivery dispositions.
@@ -64,8 +65,8 @@ def event_delivery_record(
         source_generation=source_generation,
         stream_epoch=stream_epoch,
         producer=PRODUCER_EVENT,
-        observed_at_ns=monotonic_or(observed_at_ns),
-        time_quality="monotonic",
+        observed_at_ns=wall_or(observed_at_ns),
+        time_quality=WALL,
         causal_unit_id=edge_event_id,
         outcome="admitted" if admitted else "refused",
         payload={
@@ -120,8 +121,8 @@ def delivery_attempt_record(
         source_generation=PROCESS_SCOPE,
         stream_epoch=PROCESS_SCOPE,
         producer=PRODUCER_EVENT,
-        observed_at_ns=monotonic_or(observed_at_ns),
-        time_quality="monotonic",
+        observed_at_ns=wall_or(observed_at_ns),
+        time_quality=WALL,
         causal_unit_id=edge_event_id,
         outcome=outcome,
         payload={
@@ -170,8 +171,8 @@ def backend_acceptance_record(
         source_generation=PROCESS_SCOPE,
         stream_epoch=PROCESS_SCOPE,
         producer=PRODUCER_BACKEND,
-        observed_at_ns=monotonic_or(observed_at_ns),
-        time_quality="monotonic",
+        observed_at_ns=wall_or(observed_at_ns),
+        time_quality=WALL,
         causal_unit_id=edge_event_id,
         outcome=outcome,
         payload={

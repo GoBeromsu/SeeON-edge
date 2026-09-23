@@ -162,7 +162,7 @@ def test_duplicate_and_conflict_record_dispositions(tmp_path: Path) -> None:
 
 
 def test_oversize_rejection_writes_coverage(tmp_path: Path) -> None:
-    store, path = _store(tmp_path, total_bytes=8192)
+    store, path = _store(tmp_path, total_bytes=512 * 1024)
     huge = _record(label="huge", payload={"blob": "x" * store.budget.max_record_bytes})
     receipt = store.ingest_batch(_batch("oversize", (huge,)))
     assert receipt.accepted == 0
@@ -283,3 +283,62 @@ def test_late_ack_uses_new_unit_and_ack_coverage(tmp_path: Path) -> None:
         CoverageKind.ACK_OBSERVED_PARENT_UNKNOWN_COARSENED in kinds
     )
     assert stored_unit == (expected_unit,)
+
+
+def test_availability_is_a_span_between_contiguous_records_not_instants(tmp_path: Path) -> None:
+    """Live rollout regression: a 120 s window with ~3,000 records painted
+    10,241 ranges - each record a zero-length AVAILABLE with UNKNOWN between
+    neighbours 3 ms apart. Adjacent producer_sequence in one lane proves nothing
+    was lost between two records, so the interval is AVAILABLE. A sequence
+    discontinuity without a gap row, or a lane boundary, ends the span."""
+    store, _path = _store(tmp_path)
+    contiguous = tuple(
+        _record(label=f"s{index}", seq=index, observed=1_000 + index * 33) for index in range(5)
+    )
+    # seq 5 is missing and no gap row was reported: 6 starts a new span.
+    resumed = tuple(
+        _record(label=f"r{index}", seq=index, observed=1_000 + index * 33) for index in (6, 7)
+    )
+    store.ingest_batch(_batch("spans", contiguous + resumed))
+
+    page = store.query(CAMERA, 900, 1_400, limit=10)
+    painted = [(item.kind, item.from_ns, item.to_ns) for item in page.availability]
+    assert len(painted) <= 5, painted
+    assert painted[0][0] is AvailabilityKind.UNKNOWN  # before the earliest evidence
+    available = [item for item in page.availability if item.kind is AvailabilityKind.AVAILABLE]
+    assert [(item.from_ns, item.to_ns) for item in available] == [
+        (1_000, 1_000 + 4 * 33),  # seq 0..4 as ONE span
+        (1_000 + 6 * 33, 1_000 + 7 * 33),  # seq 6..7
+    ]
+    between = [
+        item
+        for item in page.availability
+        if item.from_ns > 1_000 + 4 * 33 and item.to_ns < 1_000 + 6 * 33
+    ]
+    assert between and all(item.kind is AvailabilityKind.UNKNOWN for item in between)
+
+
+def test_availability_lane_boundary_ends_a_span(tmp_path: Path) -> None:
+    """A new boot restarts producer_sequence at 0; that boundary is not proof of
+    continuity even when the timestamps abut, so the two boots are two spans
+    (they may still merge if their time ranges touch, which is honest)."""
+    store, _path = _store(tmp_path)
+    first_boot = tuple(
+        _record(label=f"a{index}", seq=index, observed=1_000 + index * 10, boot="boot-a")
+        for index in range(3)
+    )
+    second_boot = tuple(
+        _record(label=f"b{index}", seq=index, observed=5_000 + index * 10, boot="boot-b")
+        for index in range(3)
+    )
+    store.ingest_batch(_batch("boot-a", first_boot, boot="boot-a"))
+    store.ingest_batch(_batch("boot-b", second_boot, boot="boot-b"))
+    page = store.query(CAMERA, 900, 5_100, limit=10)
+    available = [
+        (item.from_ns, item.to_ns)
+        for item in page.availability
+        if item.kind is AvailabilityKind.AVAILABLE
+    ]
+    assert available == [(1_000, 1_020), (5_000, 5_020)]
+    gap = [item for item in page.availability if item.from_ns > 1_020 and item.to_ns < 5_000]
+    assert gap and all(item.kind is AvailabilityKind.UNKNOWN for item in gap)
