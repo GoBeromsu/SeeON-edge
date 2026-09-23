@@ -85,7 +85,7 @@ def test_full_verification_rejects_same_name_wrong_trigger_definition() -> None:
         )
 
     # When/Then: fresh full verification rejects names-only impersonation.
-    with pytest.raises(AuditVerificationError, match="canonical|schema 18 contract"):
+    with pytest.raises(AuditVerificationError, match="canonical|schema 19 contract"):
         audit.verify()
 
 
@@ -97,7 +97,7 @@ def test_incremental_verification_rejects_missing_trigger() -> None:
         connection.execute("DROP TRIGGER audit_events_immutable_delete")
 
     # When/Then: incremental verification refuses the incomplete contract.
-    with pytest.raises(AuditVerificationError, match="canonical|schema 18 contract"):
+    with pytest.raises(AuditVerificationError, match="canonical|schema 19 contract"):
         audit.verify(checkpoint)
 
 

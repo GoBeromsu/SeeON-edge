@@ -413,6 +413,7 @@ def test_policy_pump_records_observation_before_processing_failure() -> None:
     )
     pump.failure_count = 0
     pump.processed_count = 0
+    pump._execution_records = None  # noqa: SLF001 - seam default: recording off
 
     class OneFrameSlot:
         def subscribe(self, binding: SourceBinding) -> AcceptanceToken:

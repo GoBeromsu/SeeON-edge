@@ -62,6 +62,7 @@ class _Reporter:
 
 def _runtime(plane: _Plane, announced: list[str] | None = None) -> WorkerRuntime:
     runtime = WorkerRuntime.__new__(WorkerRuntime)
+    runtime._execution_record_lanes = None  # noqa: SLF001 - seam default: recording off
     cameras = tuple(
         SimpleNamespace(camera_id=camera_id) for camera_id in sorted(plane.metadata._bindings)
     )
@@ -126,6 +127,7 @@ def test_warmup_times_out_typed_when_no_source_publishes(monkeypatch: pytest.Mon
 
 def test_flow_status_tick_reads_actor_and_plane_counters() -> None:
     runtime = WorkerRuntime.__new__(WorkerRuntime)
+    runtime._execution_record_lanes = None  # noqa: SLF001 - seam default: recording off
     runtime.diagnostics = WorkerDiagnostics()
     lifecycle_ticks: list[str] = []
     runtime._flow_media_plane = SimpleNamespace(
@@ -173,6 +175,7 @@ def test_flow_composes_and_starts_the_evidence_sender(
             calls.append("unlocked")
 
     runtime = WorkerRuntime.__new__(WorkerRuntime)
+    runtime._execution_record_lanes = None  # noqa: SLF001 - seam default: recording off
     runtime.config = SimpleNamespace(
         cameras=(SimpleNamespace(camera_id="camera-a"),),
         relay=SimpleNamespace(
@@ -259,6 +262,7 @@ def test_build_flow_camera_composes_ffmpeg_thumbnail_generator(
         schedule={},
     )
     runtime = WorkerRuntime.__new__(WorkerRuntime)
+    runtime._execution_record_lanes = None  # noqa: SLF001 - seam default: recording off
     runtime.config = SimpleNamespace(version=1)
     runtime._state_dir = tmp_path / "state"  # noqa: SLF001
     runtime._flow_media_plane = _MediaPlane()  # noqa: SLF001

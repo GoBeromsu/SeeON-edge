@@ -135,3 +135,51 @@ def test_terminal_disposition_is_delivered_without_event_mutation(tmp_path: Path
     assert _sender(tmp_path, transport).run_once() is SenderStep.EVENT_ACKED
     assert _sender(tmp_path, transport).run_once() is SenderStep.CLIP_ACKED
     assert transport.calls == ["event:event-a", "disposition:snapshot-missing"]
+
+
+class _CollectingSink:
+    def __init__(self) -> None:
+        self.records: list[object] = []
+
+    def try_emit(self, record: object) -> bool:
+        self.records.append(record)
+        return True
+
+
+def test_sink_without_observing_boot_id_refuses_at_construction(tmp_path: Path) -> None:
+    import pytest
+
+    with pytest.raises(ValueError, match="observing boot id"):
+        EvidenceSender(
+            tmp_path,
+            SenderConfig("http://relay.test", "token", "camera-a"),
+            transport=Transport(),
+            execution_records=_CollectingSink(),
+        )
+
+
+def test_delivered_event_emits_process_scoped_acceptance_record(tmp_path: Path) -> None:
+    from shared.events.execution_records import PROCESS_SCOPE
+
+    queue = DeliveryQueue(tmp_path)
+    assert queue.try_admit(_event()).accepted
+    sink = _CollectingSink()
+    sender = EvidenceSender(
+        tmp_path,
+        SenderConfig("http://relay.test", "token", "camera-a"),
+        transport=Transport(event_result=EventReceipt("accepted_local", "event-a", "")),
+        execution_records=sink,
+        observing_boot_id="boot-observer",
+    )
+    assert sender.run_once() is SenderStep.EVENT_ACKED
+    (record,) = sink.records
+    assert record.record_kind == "backend.acceptance"  # type: ignore[attr-defined]
+    assert record.worker_boot_id == "boot-observer"  # type: ignore[attr-defined]
+    assert record.source_generation == PROCESS_SCOPE  # type: ignore[attr-defined]
+    assert record.stream_epoch == PROCESS_SCOPE  # type: ignore[attr-defined]
+    assert record.causal_unit_id == "event-a"  # type: ignore[attr-defined]
+    assert record.outcome == "accepted_local"  # type: ignore[attr-defined]
+    payload = record.payload  # type: ignore[attr-defined]
+    assert payload["accepted_local"] is True
+    assert payload["hub_accepted"] is False
+    assert payload["origin_boot_id"] is None
