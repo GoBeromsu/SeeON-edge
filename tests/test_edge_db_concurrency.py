@@ -218,5 +218,5 @@ def test_fatal_fault_best_effort_write_returns_without_waiting_for_writer(tmp_pa
 # edge-diagnostics.sqlite3 never blocking edge.sqlite3) is now exercised
 # through the real production wiring instead -- see
 # tests/test_api_execution_records.py::
-# test_lifespan_wired_diagnostics_query_and_product_write_do_not_block_on_a_pending_diagnostics_write
+# test_lifespan_diagnostics_query_and_product_write_skip_a_pending_diagnostics_write
 # (#579/#580, S4).
