@@ -9,6 +9,13 @@ from typing import Final
 EDGE_STATE_DIRECTORY: Final = Path("/var/lib/seeon-state")
 EDGE_DATABASE_PATH: Final = EDGE_STATE_DIRECTORY / "edge.sqlite3"
 
+# Bare filename only, not a derived absolute path: every consumer resolves it
+# against whatever EDGE_DATABASE_PATH currently is (``EDGE_DATABASE_PATH.parent
+# / DIAGNOSTICS_DATABASE_FILENAME``) so the test fixture that monkeypatches
+# EDGE_DATABASE_PATH per-module also redirects this sibling file, with no
+# separate patch target (#579/#580, N2).
+DIAGNOSTICS_DATABASE_FILENAME: Final = "edge-diagnostics.sqlite3"
+
 
 def schema18_backup_path(database: Path) -> Path:
     """Sibling backup taken immediately before a schema-18 extension."""
@@ -40,6 +47,7 @@ def secure_database_files(path: Path) -> None:
 
 
 __all__ = [
+    "DIAGNOSTICS_DATABASE_FILENAME",
     "EDGE_DATABASE_PATH",
     "EDGE_STATE_DIRECTORY",
     "prepare_database_path",

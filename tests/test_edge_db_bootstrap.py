@@ -39,7 +39,7 @@ from backend.app.edge_db.connection import (
     write_transaction,
 )
 from backend.app.edge_db.ownership import APPLICATION_TABLES, writer_for_table
-from backend.app.edge_db.paths import schema18_backup_path
+from backend.app.edge_db.paths import DIAGNOSTICS_DATABASE_FILENAME, schema18_backup_path
 from shared.release_identity import EDGE_DATABASE_SCHEMA_VERSION
 
 _PROVENANCE_ID = "ab" * 32
@@ -442,9 +442,11 @@ def test_bootstrap_cli_is_the_only_schema_entrypoint(database_path: Path) -> Non
         text=True,
     )
 
+    diagnostics_path = database_path.parent / DIAGNOSTICS_DATABASE_FILENAME
     assert completed.returncode == 0, completed.stderr
     assert completed.stdout == (
         f"EDGE_DB_BOOTSTRAP_OK path={database_path} schema=19 created=true extended=false\n"
+        f"EDGE_DIAGNOSTICS_DB_BOOTSTRAP_OK path={diagnostics_path} schema=1 created=true\n"
     )
 
 

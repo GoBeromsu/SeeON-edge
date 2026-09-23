@@ -1,4 +1,4 @@
-"""Connection and create-if-missing bootstrap for the standalone diagnostics database.
+"""Connection for the standalone, pre-bootstrapped diagnostics database.
 
 Execution-record telemetry (the six schema-19 ``execution_*`` tables) is
 written on every worker flush (~250 ms) and pruned toward its retention
@@ -9,51 +9,38 @@ writes in ``edge.sqlite3`` -- SQLite's writer lock and WAL are per-file. The
 product database's six ``execution_*`` tables are left in place untouched (no
 destructive migration); retiring them (VACUUM/drop) is a later ops step.
 
-This file has exactly one table family and no other feature to protect, so
-unlike ``edge_db.connection`` it installs no per-table write authorizer.
+This file is created and stamped (``PRAGMA user_version``) only by the
+one-shot ``python -m backend.app.edge_db`` bootstrap
+(``backend/app/edge_db/bootstrap.py:bootstrap_diagnostics_database``), under
+the same exclusive ``deployment.lock`` as ``edge.sqlite3``. This module only
+opens and verifies it, exactly like ``edge_db.connection.open_runtime_database``
+does for the product database -- it never creates the file or its schema
+(#579/#580, S1/S2). It has exactly one table family and no other feature to
+protect, so unlike ``edge_db.connection`` it installs no per-table write
+authorizer.
 """
 
 from __future__ import annotations
 
 import sqlite3
 from pathlib import Path
-from typing import Final
 
 from backend.app.edge_db.compatibility import EdgeDatabaseError
-from backend.app.edge_db.connection import NORMAL_BUSY_TIMEOUT_MS, write_transaction
-from backend.app.edge_db.execution_records_ddl import EXECUTION_RECORD_CREATE_STATEMENTS
-from backend.app.edge_db.paths import prepare_database_path, secure_database_files
-
-DIAGNOSTICS_DATABASE_FILENAME: Final = "edge-diagnostics.sqlite3"
-
-# Any one of the six tables proves the file was already bootstrapped; creation
-# below runs inside one write transaction, so partial creation never happens.
-_BOOTSTRAP_PROBE_TABLE: Final = "execution_provenance"
-
-
-def _require_wal(journal_row: tuple[object, ...] | None) -> None:
-    if journal_row != ("wal",):
-        raise EdgeDatabaseError("diagnostics database could not enter WAL mode")
-
-
-def _bootstrap_if_empty(connection: sqlite3.Connection) -> None:
-    with write_transaction(connection):
-        exists = connection.execute(
-            "SELECT 1 FROM sqlite_schema WHERE type='table' AND name=?",
-            (_BOOTSTRAP_PROBE_TABLE,),
-        ).fetchone()
-        if exists is None:
-            for statement in EXECUTION_RECORD_CREATE_STATEMENTS:
-                connection.execute(statement)
+from backend.app.edge_db.connection import NORMAL_BUSY_TIMEOUT_MS, _require_wal
+from backend.app.edge_db.paths import secure_database_files
 
 
 def open_diagnostics_database(path: Path) -> sqlite3.Connection:
-    """Open the standalone execution-record database, creating it on first use.
+    """Open the already-bootstrapped standalone execution-record database.
 
-    Its own file: an unbounded telemetry writer or a slow retention prune
-    here holds only this file's writer lock, never the product database's.
+    Raises ``EdgeDatabaseError`` if ``path`` does not exist or is not yet in
+    WAL mode -- the one-shot bootstrap must run first.
     """
-    prepare_database_path(path)
+    if not path.is_file():
+        raise EdgeDatabaseError(
+            f"diagnostics database {path} does not exist; "
+            "run the edge_db bootstrap before starting the runtime"
+        )
     connection = sqlite3.connect(
         path,
         timeout=NORMAL_BUSY_TIMEOUT_MS / 1000,
@@ -64,8 +51,7 @@ def open_diagnostics_database(path: Path) -> sqlite3.Connection:
         connection.execute(f"PRAGMA busy_timeout = {NORMAL_BUSY_TIMEOUT_MS}")
         connection.execute("PRAGMA foreign_keys = ON")
         connection.execute("PRAGMA synchronous = FULL")
-        _require_wal(connection.execute("PRAGMA journal_mode = WAL").fetchone())
-        _bootstrap_if_empty(connection)
+        _require_wal(connection.execute("PRAGMA journal_mode").fetchone())
         secure_database_files(path)
     except (OSError, sqlite3.Error, EdgeDatabaseError):
         connection.close()
@@ -73,4 +59,4 @@ def open_diagnostics_database(path: Path) -> sqlite3.Connection:
     return connection
 
 
-__all__ = ["DIAGNOSTICS_DATABASE_FILENAME", "open_diagnostics_database"]
+__all__ = ["open_diagnostics_database"]

@@ -73,6 +73,34 @@ Schema compatibility is an explicit inclusive range, `19..19`:
 | 19 | open read/write with ownership guard, no DDL |
 | above maximum | refuse; binary is too old |
 
+### `edge-diagnostics.sqlite3`: an isolated sibling file for execution-record telemetry
+
+Execution-record telemetry (the six `execution_*` tables) is written on every
+worker flush (~250 ms) and pruned toward its retention budget on that same hot
+path. It lives in its own SQLite file, `edge-diagnostics.sqlite3`, next to
+`edge.sqlite3` in the same `edge-state` directory -- SQLite's writer lock and
+WAL are per-file, so this telemetry's writer lock, WAL, and checkpoint
+pressure can never be shared with alerts, incidents, or policy writes in
+`edge.sqlite3` (#579/#580). The product database's own six `execution_*`
+tables are left in place untouched (no destructive migration); retiring them
+is a later ops step (tracked separately).
+
+Its schema ledger is intentionally simpler than `edge.sqlite3`'s: a flat
+`PRAGMA user_version` stamp (currently `1`), with no `schema_migrations` table
+and no migration path -- there is exactly one version this file will ever
+hold. The same one-shot `python -m backend.app.edge_db` bootstrap creates or
+verifies it, under the same exclusive `deployment.lock` as `edge.sqlite3`
+(`DeploymentLock.require_for` only checks that the database's containing
+directory matches the locked directory, so one lock legitimately covers both
+sibling files). It prints a second line,
+`EDGE_DIAGNOSTICS_DB_BOOTSTRAP_OK path=... schema=1 created=<bool>`.
+
+At runtime, `backend/app/edge_db/diagnostics_connection.py` only opens and
+verifies this file (mirroring `open_runtime_database` for the product
+database) -- it never creates the file or its schema. It installs no
+per-table write authorizer, since it has exactly one table family and no
+other feature to protect.
+
 ### Image rollback preserves the state volume
 
 Rollback is binary-only and image-digest based. Pin the previous `@sha256:`

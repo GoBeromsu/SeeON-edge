@@ -40,6 +40,19 @@ EdgeEventId = str
 PayloadValue = TypeVar("PayloadValue")
 MAX_LOCAL_EVENT_PAYLOAD_BYTES: Final = 512 * 1024
 
+# A 503 from the edge API's alert-relay route can be the local SQLite writer
+# busy-waiting up to its full busy_timeout before it can even respond, and
+# the edge API's own outbound call to the backend ingest API can then take
+# up to its own configured timeout on top of that. A client-side timeout
+# shorter than "edge busy_timeout + backend ingest timeout" fires before the
+# edge API could ever have answered, turning a slow-but-successful delivery
+# into a spurious client timeout and a retry (see #579/#580): 5s (edge
+# NORMAL_BUSY_TIMEOUT_MS) + 10s (API_BACKEND_INGEST_TIMEOUT_SEC default) + 1s
+# margin. Alert delivery and heartbeat acks both run off the frame hot path
+# (durable delivery queue + dedicated sender/heartbeat threads), so waiting
+# this long here never stalls fall detection.
+ALERT_DELIVERY_TIMEOUT_SEC: Final = 16.0
+
 
 class ClaimedClipRequest(Protocol):
     @property
@@ -164,7 +177,7 @@ def _snapshot_disposition_failure_log() -> RelayFailureLog:
 class RelayEvidenceClient:
     base_url: str
     relay_token: str = field(repr=False)
-    timeout_sec: float = 2.0
+    timeout_sec: float = ALERT_DELIVERY_TIMEOUT_SEC
     _capabilities_failures: RelayFailureLog = field(
         init=False, repr=False, compare=False, default_factory=_capabilities_failure_log
     )
@@ -310,7 +323,7 @@ class RelayEvidenceClient:
 class BackendEvidenceClient:
     events_url: str
     bearer_token: str | None = field(default=None, repr=False)
-    timeout_sec: float = 2.0
+    timeout_sec: float = ALERT_DELIVERY_TIMEOUT_SEC
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "events_url", normalize_http_base(self.events_url))

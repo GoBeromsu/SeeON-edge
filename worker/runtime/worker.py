@@ -163,7 +163,7 @@ from worker.types.preview import FallPreviewState
 from worker.types.trace import DecisionIdentity
 
 LOGGER: Final = logging.getLogger(__name__)
-HEARTBEAT_TIMEOUT_SEC: Final = 0.5
+HEARTBEAT_TIMEOUT_SEC: Final = 6.0  # off the hot path; covers the 5s local SQLite busy_timeout + margin (#579/#580, S6)
 # Matches edge/runtime/edge_worker.py's DETECTOR_VERSION -- same domain-detector
 # generation, ported wholesale rather than re-derived per worker/AGENTS.md.
 DETECTOR_VERSION: Final = "worker-domain-detectors-v1"

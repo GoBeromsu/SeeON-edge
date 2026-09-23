@@ -3,10 +3,10 @@
 Every worker -> relay call site (heartbeat, runtime-status, evidence
 alerts/clips/capabilities) used to log an identical bare line on every failed
 attempt -- no status code, no endpoint, no way to tell "DNS/connection
-refused" apart from "our config is wrong" (4xx) or "upstream is down" (5xx),
-and no way to tell when it started working again. On an unhealthy relay this
-produced several identical lines per second that drowned out every other
-worker log line (#184).
+refused" apart from "our config is wrong" (4xx) or "the edge API failed to
+fulfill it" (5xx), and no way to tell when it started working again. On an
+unhealthy relay this produced several identical lines per second that
+drowned out every other worker log line (#184).
 
 ``RelayFailureLog`` is the shared reporter each call site owns one instance
 of (one per logical channel: heartbeat is per camera, runtime-status is
@@ -14,8 +14,8 @@ process-wide, evidence delivery is one per operation kind). It logs full
 detail on the first failure of a kind and on every failure-class change,
 folds repeats into a periodic summary line, and logs recovery exactly once.
 
-Never logs response bodies or request headers -- only the status code (or
-transport exception class already reduced to ``DeliveryFailure`` by
+Never logs the full response body or request headers -- only the status
+code (or transport exception class already reduced to ``DeliveryFailure`` by
 ``shared.events.evidence_http_transport``), a static per-status hint, and the
 caller-supplied endpoint path. Secrets (relay tokens, auth headers) never
 reach this module.
@@ -40,7 +40,7 @@ class RelayFailureClass(StrEnum):
 
     TRANSPORT = "transport"  # DNS / connect / timeout -- no HTTP response at all
     CLIENT_ERROR = "client_error"  # 4xx -- our config is wrong; retrying will not fix it
-    SERVER_ERROR = "server_error"  # 5xx (or an unreadable 2xx body) -- upstream problem
+    SERVER_ERROR = "server_error"  # 5xx (or an unreadable 2xx body) -- the edge API or its downstream failed
 
 
 _CLIENT_ERROR_HINTS: Final[dict[int, str]] = {
@@ -48,8 +48,17 @@ _CLIENT_ERROR_HINTS: Final[dict[int, str]] = {
     403: "check runtime enrollment / auth",
 }
 _DEFAULT_CLIENT_HINT: Final = "check worker relay config"
-_DEFAULT_SERVER_HINT: Final = "edge API (ml-api) returned a server error; will keep retrying"
 _DEFAULT_TRANSPORT_HINT: Final = "cannot reach relay host; will keep retrying"
+
+
+def _server_error_hint(status: int | None) -> str:
+    # Neutral and status-specific on purpose: a fast 5xx here can originate
+    # from the edge API's own local contention (e.g. a SQLite writer lock)
+    # just as easily as from something genuinely "upstream" -- naming a side
+    # we have not confirmed misleads whoever reads this log (#579).
+    if status is None:
+        return "edge API rejected the request; will keep retrying"
+    return f"edge API returned {status}; will keep retrying"
 
 
 @dataclass(frozen=True, slots=True)
@@ -75,7 +84,7 @@ def classify_relay_failure(failure: DeliveryFailure) -> RelayFailureOutcome:
     status = failure.status_code
     if status is None:
         return RelayFailureOutcome(
-            RelayFailureClass.SERVER_ERROR, failure.code, _DEFAULT_SERVER_HINT
+            RelayFailureClass.SERVER_ERROR, failure.code, _server_error_hint(status)
         )
     if 400 <= status <= 499:
         return RelayFailureOutcome(
@@ -83,7 +92,9 @@ def classify_relay_failure(failure: DeliveryFailure) -> RelayFailureOutcome:
             str(status),
             _CLIENT_ERROR_HINTS.get(status, _DEFAULT_CLIENT_HINT),
         )
-    return RelayFailureOutcome(RelayFailureClass.SERVER_ERROR, str(status), _DEFAULT_SERVER_HINT)
+    return RelayFailureOutcome(
+        RelayFailureClass.SERVER_ERROR, str(status), _server_error_hint(status)
+    )
 
 
 @dataclass(slots=True)
