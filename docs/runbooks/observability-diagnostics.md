@@ -31,7 +31,7 @@ producer_sequence)`. Producers never wait on each other or on the Backend.
 | `sdk.frame` | Flow metadata slot, after an accepted publish | SDK frame/source ids, whether an inference tensor was present, raw/eligible/matched row counts | that the policy consumed the frame |
 | `policy.consume` | policy pump, per processed frame | slot counter delta (accepted/overwritten/late) | that a decision was made |
 | `model.score` | policy pump, only when the classifier actually scored on this call | raw logit, applied temperature, class origins, calibrated score, track, window facts | a native three-class output (`fallen` is a synthetic zero) |
-| `policy.decision` | policy pump, one per snapshot from **every** decider | `module_qualified_id` (`fall.v2`, `bed_exit.v1`, or `null` when composition gave that decider no policy), `authority_role` (`authoritative` or `shadow` - a shadow evaluation is never a cause), reason, previous/current state, triggered, values, missing reasons (`classifier-warmup`, `classifier-stride-not-due`, ...), `decision_trace_id` computed with that module's own identity | that the event was delivered; that a `shadow` row influenced anything |
+| `policy.decision` | policy pump, one per snapshot from **every** decider | `module_qualified_id` (`fall.v2`, `bed_exit.v1`, or `null` when composition gave that decider no policy), `authority_role` (`authoritative` or `shadow` - a shadow evaluation is never a cause), reason (incl. the suppression reasons `episode-already-open`, `episode-reassociated`, `episode-resolved-hold`, `episode-candidate`, and `outside-detection-window`), previous/current state, triggered, values, missing reasons (`classifier-warmup`, `classifier-stride-not-due`, `resample-gap`, ...), `decision_trace_id` computed with that module's own identity. A frame the module did not evaluate (resampler yielded no row) is one row with `outcome: coasted` and `missing_values.decision_state: resample-gap` - never the previous frame's rows re-stamped | that the event was delivered; that a `shadow` row influenced anything; that a `coasted` row saw a person |
 | `event.delivery` | Flow evidence binding (admission) and the evidence sender (every non-success attempt outcome) | `admitted` / `refused`; then `retry-transient`, `retry-counted`, `refused-retained`, `refused-retention-full`, `exhausted-retained`, `exhausted-retention-full`, `ack-removal-deferred` (and `operator-blocked`, reserved: never emitted for events today), with attempt counts and failure class. A successful delivery adds no *sender* `event.delivery` row - the admission row from the Flow binding is the only `event.delivery` for that event, and `backend.acceptance` records the result | that the Hub accepted anything |
 | `backend.acceptance` | evidence sender, when a relay receipt is observed | `accepted_local` (persisted on the edge Backend) **or** `hub-accepted` (Hub receipt), never both | delivery to a phone or pager |
 
@@ -95,7 +95,13 @@ that was composed without an effective policy; it has no `decision_trace_id`.
    `transition_threshold` in the decision values.
 3. If there is no `model.score` for a frame where you expected one, the
    `policy.decision.missing_values` row says whether the classifier skipped it
-   (warmup / stride) or the score was missing for another reason.
+   (warmup / stride), the module coasted on that frame (`coasted` /
+   `resample-gap`), or the score was missing for another reason.
+   A `triggered: false` row whose reason starts with `episode-` means the
+   onset fired but the episode authority declined it (already open,
+   re-associated, on hold, or still a candidate) - it is a suppressed onset,
+   not a missed one. `outside-detection-window` means the same for the
+   detection window.
 4. If a decision *did* trigger, follow `causal_unit_id == edge_event_id`
    into `event.delivery` (was it admitted? how many attempts? retained for an
    operator?) and `backend.acceptance` (`accepted_local` vs `hub-accepted`).

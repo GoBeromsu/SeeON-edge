@@ -334,3 +334,19 @@ def test_qualifying_frame_after_onset_is_explained_as_episode_already_open() -> 
     assert _update(decider, _probability(0.1), 4) == ()
     (plain,) = decider.last_trace_snapshots
     assert plain.reason != "episode-already-open"
+
+
+def test_non_suppression_dispositions_never_rewrite_a_reason() -> None:
+    """suppression_reason maps only genuine onset suppressions; the recovery and
+    not-qualifying dispositions (and no proposal) yield None so the row keeps
+    its ordinary reason."""
+    from worker.domains.episode import ProposalDisposition, suppression_reason
+
+    assert suppression_reason(ProposalDisposition.EMITTED) is None
+    assert suppression_reason(ProposalDisposition.RECOVERY) is None
+    assert suppression_reason(ProposalDisposition.NOT_QUALIFYING) is None
+    assert suppression_reason(None) is None
+    assert suppression_reason(ProposalDisposition.ALREADY_OPEN) == "episode-already-open"
+    assert suppression_reason(ProposalDisposition.REASSOCIATED) == "episode-reassociated"
+    assert suppression_reason(ProposalDisposition.RESOLVED_HOLD) == "episode-resolved-hold"
+    assert suppression_reason(ProposalDisposition.CANDIDATE) == "episode-candidate"
