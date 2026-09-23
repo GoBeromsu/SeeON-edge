@@ -73,48 +73,9 @@ class FlowEvidenceBinding:
                 "time_sec": event.time_sec,
             },
         }
-        try:
-            result = self.stager.stage(payload)
-        except Exception as error:
-            try_emit(
-                self.execution_records,
-                event_delivery_record(
-                    camera_id=event.camera_id,
-                    worker_boot_id=trigger.worker_boot_id,
-                    source_generation=trigger.source_generation,
-                    stream_epoch=trigger.stream_epoch,
-                    frame_seq=trigger.seq,
-                    source_pts_ns=trigger.source_pts,
-                    edge_event_id=event_ref,
-                    event_type=event.event_type,
-                    domain=event.domain,
-                    admitted=False,
-                    reason=_admission_reason(error),
-                ),
-            )
-            raise
-        admitted, reason = _admission_from_stage_result(result)
-        if not admitted:
-            try_emit(
-                self.execution_records,
-                event_delivery_record(
-                    camera_id=event.camera_id,
-                    worker_boot_id=trigger.worker_boot_id,
-                    source_generation=trigger.source_generation,
-                    stream_epoch=trigger.stream_epoch,
-                    frame_seq=trigger.seq,
-                    source_pts_ns=trigger.source_pts,
-                    edge_event_id=event_ref,
-                    event_type=event.event_type,
-                    domain=event.domain,
-                    admitted=False,
-                    reason=reason,
-                ),
-            )
-            raise RuntimeError(f"event delivery admission failed: {reason}")
-        try_emit(
-            self.execution_records,
-            event_delivery_record(
+
+        def _delivery_record(admitted: bool, reason: str | None):
+            return event_delivery_record(
                 camera_id=event.camera_id,
                 worker_boot_id=trigger.worker_boot_id,
                 source_generation=trigger.source_generation,
@@ -124,9 +85,28 @@ class FlowEvidenceBinding:
                 edge_event_id=event_ref,
                 event_type=event.event_type,
                 domain=event.domain,
-                admitted=True,
+                admitted=admitted,
                 reason=reason,
-            ),
+            )
+
+        try:
+            result = self.stager.stage(payload)
+        except Exception as error:
+            try_emit(
+                self.execution_records,
+                _delivery_record(False, _admission_reason(error)),
+            )
+            raise
+        admitted, reason = _admission_from_stage_result(result)
+        if not admitted:
+            try_emit(
+                self.execution_records,
+                _delivery_record(False, reason),
+            )
+            raise RuntimeError(f"event delivery admission failed: {reason}")
+        try_emit(
+            self.execution_records,
+            _delivery_record(True, reason),
         )
         self._events[event_ref] = event
         self.actor.admit(event_ref, detected_at)

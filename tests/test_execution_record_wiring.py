@@ -733,13 +733,11 @@ def test_window_gate_mirrors_inner_freshness_and_shadow_facts() -> None:
             self.last_update_evaluated = True
 
         def update(self, input_value: object) -> tuple[object, ...]:
+            if not self.last_update_evaluated:
+                return ()
             out = super().update(input_value)
             self.last_update_evaluated = True
             return out
-
-        def coast(self) -> tuple[object, ...]:
-            self.last_update_evaluated = False
-            return ()
 
     inner = _Inner()
     always_open = DetectionWindow(start="00:00", end="23:59", tz="UTC")
@@ -751,15 +749,14 @@ def test_window_gate_mirrors_inner_freshness_and_shadow_facts() -> None:
     gate.update(_fall_input(time_sec=1.0, frame_index=1))
     assert gate.last_update_evaluated is True
     assert gate.last_shadow_trace_count == 1  # mirrors the inner's shadow tail
-    aggregator = EventAggregator(deciders=(gate,), incidents=_incidents())
+    aggregator = EventAggregator(deciders=(gate,), incidents=IncidentManager())
     roles = [a.authority for a in aggregator.attributed_trace_snapshots()]
     assert roles == ["authoritative", "shadow"]
     assert all(a.fresh for a in aggregator.attributed_trace_snapshots())
 
-    # Inner coasts; the gate (in-window) mirrors staleness.
-    inner.coast()
-    gate.update(_fall_input(time_sec=2.0, frame_index=2))  # inner.update sets fresh again
-    inner.last_update_evaluated = False  # simulate a coast reflected after mirroring
+    inner.last_update_evaluated = False
+    gate.update(_fall_input(time_sec=2.0, frame_index=2))
+    assert gate.last_update_evaluated is False
     # Outside the window: the gate's own row is fresh regardless of inner state.
     closed = DetectionWindow(start="00:00", end="00:00", tz="UTC")
     gate2 = _WindowGatedDecider(
@@ -768,13 +765,7 @@ def test_window_gate_mirrors_inner_freshness_and_shadow_facts() -> None:
     gate2.update(_fall_input(time_sec=3.0, frame_index=3))
     assert gate2.last_update_evaluated is True
     assert gate2.last_shadow_trace_count == 0
-    aggregator2 = EventAggregator(deciders=(gate2,), incidents=_incidents())
+    aggregator2 = EventAggregator(deciders=(gate2,), incidents=IncidentManager())
     (row,) = aggregator2.attributed_trace_snapshots()
     assert row.fresh is True and row.authority == "authoritative"
     assert row.snapshot.reason == "outside-detection-window"
-
-
-def _incidents():  # noqa: ANN202 - test helper
-    from worker.pipeline.decision.incident_manager import IncidentManager
-
-    return IncidentManager()

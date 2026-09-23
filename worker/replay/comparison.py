@@ -1,10 +1,10 @@
 """Structured, machine-consumed comparison between two deterministic replays.
 
 Compares event count/onset/probability, containment/state transitions, and
-per-frame decision snapshots between an original captured run (persisted
-``DecisionTrace`` rows) and a replayed run, or between two replayed runs (A/B
-across policy/module/profile revisions). Every difference carries an explicit,
-finite reason -- never a free-text diff.
+per-frame decision snapshots between an original captured run and a replayed
+run, or between two replayed runs (A/B across policy/module/profile
+revisions). Every difference carries an explicit, finite reason -- never a
+free-text diff.
 """
 
 from __future__ import annotations
