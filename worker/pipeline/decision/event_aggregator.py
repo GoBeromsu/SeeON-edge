@@ -13,11 +13,23 @@ from worker.types import BusinessEvent, DecisionInput, DecisionTraceSnapshot
 _MAX_TRACKED_PRODUCERS: Final = 64
 
 
+_MAX_WRAPPER_DEPTH = 8
+
+
 def unwrap_decider(decider: object) -> object:
-    """Reach through window/policy wrappers to the inner decider."""
+    """Reach through window/policy wrappers to the inner decider.
+
+    Bounded like ``EventAggregator.release``'s walk: a cyclic wrapper chain
+    stops at the depth cap instead of spinning. ``release`` keeps its own
+    walk because it stops at the first object exposing ``release_onset``,
+    not at the innermost object.
+    """
     target: object = decider
-    while hasattr(target, "decider"):
-        target = target.decider
+    for _ in range(_MAX_WRAPPER_DEPTH):
+        inner = getattr(target, "decider", None)
+        if inner is None:
+            return target
+        target = inner
     return target
 
 
