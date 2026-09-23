@@ -42,6 +42,7 @@ class _TraceResult:
     observation: FrameObservation
     decision_input: DecisionInput
 
+
 _RUNTIME_SHA256 = "a" * 64
 _COMPONENT_SHA256 = "b" * 64
 _POLICY_SHA256 = "c" * 64
@@ -168,6 +169,12 @@ FALL_V2_VALUE_NAMES: frozenset[str] = frozenset(
         "transition_threshold",
         "transition_votes",
         "transition_window",
+    }
+)
+FALL_V2_MISSING_REASONS: frozenset[str] = frozenset(
+    {
+        "classifier-warmup",
+        "classifier-stride-not-due",
     }
 )
 BED_EXIT_REASONS: frozenset[str] = frozenset(
@@ -378,7 +385,7 @@ def test_baseline_vocabularies_are_exactly_the_pre_extension_sets() -> None:
         assert extra_reasons == BED_EXIT_REASONS | FALL_V2_REASONS
         assert extra_states == BED_EXIT_STATES | FALL_V2_STATES
         assert extra_value_names == BED_EXIT_VALUE_NAMES | FALL_V2_VALUE_NAMES
-        assert extra_missing == BED_EXIT_MISSING_REASONS
+        assert extra_missing == BED_EXIT_MISSING_REASONS | FALL_V2_MISSING_REASONS
     else:
         assert current_reasons == BASELINE_REASONS
         assert current_states == BASELINE_STATES
@@ -394,7 +401,8 @@ def test_bed_exit_and_fall_v2_tokens_are_additive_and_closed() -> None:
         == BASELINE_VALUE_NAMES | BED_EXIT_VALUE_NAMES | FALL_V2_VALUE_NAMES
     )
     assert (
-        _values(DecisionTraceMissingReason) == BASELINE_MISSING_REASONS | BED_EXIT_MISSING_REASONS
+        _values(DecisionTraceMissingReason)
+        == BASELINE_MISSING_REASONS | BED_EXIT_MISSING_REASONS | FALL_V2_MISSING_REASONS
     )
 
 

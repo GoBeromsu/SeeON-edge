@@ -13,7 +13,7 @@ from worker.interfaces.association import (
     AssociationObservation,
     TrackedObject,
 )
-from worker.types.metadata import MetadataFrame, SourceBinding
+from worker.types.metadata import MetadataFrame, NativeObservationEvidence, SourceBinding
 from worker.types.perception_frame import (
     AssociationResult,
     BedRegionChannel,
@@ -35,6 +35,11 @@ _IOU_GATE = 0.5
 class AssociationPass:
     observation: AssociationObservation
     matched_rows: tuple[int, ...]
+
+
+def _optional_sdk_int(frame_meta: Any, name: str) -> int | None:
+    value = getattr(frame_meta, name, None)
+    return None if value is None else int(value)
 
 
 def _iou(a: tuple[float, float, float, float], b: tuple[float, float, float, float]) -> float:
@@ -133,6 +138,7 @@ def convert_frame(
     frame_meta: Any,
     *,
     rows: NDArray[np.float32],
+    inference_tensor_present: bool,
     binding: SourceBinding,
     frame_w: int,
     frame_h: int,
@@ -140,6 +146,8 @@ def convert_frame(
     boot_id: str,
 ) -> MetadataFrame:
     """Build one accepted P1a-compatible frame from a Flow frame item."""
+    sdk_frame_number = _optional_sdk_int(frame_meta, "frame_number")
+    source_id = _optional_sdk_int(frame_meta, "source_id")
     identity = PerceptionFrameIdentity(
         worker_boot_id=boot_id,
         camera_id=binding.camera_id,
@@ -197,6 +205,14 @@ def convert_frame(
         source_width=frame_w,
         source_height=frame_h,
         source_time_ns=int(frame_meta.buffer_pts),
+        native_observation_evidence=NativeObservationEvidence(
+            sdk_frame_number=sdk_frame_number,
+            source_id=source_id,
+            inference_tensor_present=inference_tensor_present,
+            raw_output_row_count=int(rows.shape[0]),
+            eligible_row_count=linked.observation.rows_available,
+            matched_row_count=len(linked.matched_rows),
+        ),
     )
 
 

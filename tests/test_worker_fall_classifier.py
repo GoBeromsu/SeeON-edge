@@ -6,6 +6,7 @@ import pytest
 
 from worker.domains.fall.classifier_v2 import FallWindowClassifierV2
 from worker.interfaces.fall_model import FallV2Probabilities
+from worker.types.trace import DecisionTraceMissingReason
 
 
 @dataclass(slots=True)
@@ -36,6 +37,62 @@ def test_classifier_windows_exactly_30_pose_bbox56_rows_on_five_frame_stride() -
     assert all(len(row) == 56 for row in model.inputs[0])
     assert model.inputs[0][0] == _row(0.25)
     assert model.inputs[0][-1] == _row(0.75)
+
+
+def test_classifier_missing_score_reason_is_current_call_not_cached_probability() -> None:
+    model = _Model()
+    classifier = FallWindowClassifierV2(model)
+
+    for _ in range(4):
+        assert classifier.update({7: _row()}, (7,)) == {}
+        assert dict(classifier.current_call_missing_score_reasons) == {
+            7: DecisionTraceMissingReason.CLASSIFIER_STRIDE_NOT_DUE
+        }
+
+    assert classifier.update({7: _row()}, (7,)) == {}
+    assert dict(classifier.current_call_missing_score_reasons) == {
+        7: DecisionTraceMissingReason.CLASSIFIER_WARMUP
+    }
+
+    for _ in range(24):
+        classifier.update({7: _row()}, (7,))
+    expected = FallV2Probabilities(0.2, 0.7, 0.1)
+    assert classifier.update({7: _row()}, (7,)) == {7: expected}
+    assert dict(classifier.current_call_missing_score_reasons) == {}
+    assert classifier.probabilities_for(7) == expected
+    assert len(model.inputs) == 1
+
+    assert classifier.update({7: _row()}, (7,)) == {}
+    assert dict(classifier.current_call_missing_score_reasons) == {
+        7: DecisionTraceMissingReason.CLASSIFIER_STRIDE_NOT_DUE
+    }
+    assert classifier.probabilities_for(7) == expected
+    assert len(model.inputs) == 1
+
+    assert classifier.update({}, ()) == {}
+    assert dict(classifier.current_call_missing_score_reasons) == {}
+
+
+def test_classifier_missing_score_reasons_are_isolated_per_track() -> None:
+    model = _Model()
+    classifier = FallWindowClassifierV2(model)
+
+    for _ in range(29):
+        classifier.update({1: _row(0.1)}, (1,))
+    due = classifier.update({1: _row(0.2), 2: _row(0.3)}, (1, 2))
+
+    assert due == {1: FallV2Probabilities(0.2, 0.7, 0.1)}
+    assert dict(classifier.current_call_missing_score_reasons) == {
+        2: DecisionTraceMissingReason.CLASSIFIER_WARMUP
+    }
+    assert classifier.probabilities_for(1) is not None
+    assert classifier.probabilities_for(2) is None
+
+    assert classifier.update({1: _row(), 2: _row()}, (1, 2)) == {}
+    assert dict(classifier.current_call_missing_score_reasons) == {
+        1: DecisionTraceMissingReason.CLASSIFIER_STRIDE_NOT_DUE,
+        2: DecisionTraceMissingReason.CLASSIFIER_STRIDE_NOT_DUE,
+    }
 
 
 def test_classifier_coasts_missing_rows_with_last_valid_pose_bbox_row() -> None:
