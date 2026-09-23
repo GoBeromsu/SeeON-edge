@@ -7,9 +7,8 @@ Flat pytest tree. Contracts, slice coverage, and boundary guards live here as
 
 - `conftest.py`: autouse hermetic isolation.
 - `edge_worker_fixtures.py`: typed worker config payloads.
-- `e2e_worker_relay_fixtures.py`: MediaMTX, ffmpeg, in-process backend, scripted serving, `wait_until`.
-- `fanout_benchmark_harness.py` + `fanout_benchmark_metrics.py`: recorded-stream fan-out. Product code stays unpatched.
-- `clip_listing_reader_concurrency_fixtures.py`: listing-reader concurrency.
+- `observability_stack_fixtures.py`: in-process Backend over real uvicorn, `wait_until`, honest `mediamtx`/`ffmpeg`/`pyservicemaker` probes.
+- `observability_load_harness.py` + `fanout_benchmark_metrics.py`: recorded-stream load measurements. Product code stays unpatched.
 - `test_contract_symbol_exports.py`: contracts keep exporting runner, tracker, and worker_config symbols. Import direction is `lint-imports`, not a walker.
 - `test_*.py`: named after the slice or seam under test.
 
@@ -46,7 +45,7 @@ CI runs `uv run pytest -q -m "not real_stack and not heavy and not integration"`
 
 ## Fan-out benchmark
 
-`test_fanout_benchmark.py` is `real_stack` and operator-gated. A local `mediamtx` serves N looping recorded streams. A real `WorkerRuntime` loads `models/`. Output is `bench-<N>.json` under `BENCH_OUTPUT_DIR` (default `.omo/evidence/bench`). N is in `{1,2,4,8,13}`. `BENCH_STREAMS` selects which run (default `1,2`). Leave extra N unset so a bare suite doesn't burn minutes. Other knobs: `BENCH_DURATION_SEC`, `BENCH_PROFILE`, `BENCH_LABEL`, `BENCH_VIEWERS`, `BENCH_CAMERA_FPS`. Timing and relay stubs wrap test-side only.
+`fanout_benchmark_metrics.py` is the recorded-stream fan-out reducer. A local `mediamtx` serves N looping recorded streams. A real `WorkerRuntime` loads `models/`. Output is `bench-<N>.json` under `BENCH_OUTPUT_DIR` (default `.omo/evidence/bench`). N is in `{1,2,4,8,13}`. `BENCH_STREAMS` selects which run (default `1,2`). Leave extra N unset so a bare suite doesn't burn minutes. Other knobs: `BENCH_DURATION_SEC`, `BENCH_PROFILE`, `BENCH_LABEL`, `BENCH_VIEWERS`, `BENCH_CAMERA_FPS`. Timing and relay stubs wrap test-side only.
 
 ```bash
 uv run pytest -m real_stack -k fanout_benchmark
@@ -55,6 +54,16 @@ BENCH_STREAMS=1,2,4,8,13 uv run pytest -m real_stack -k fanout_benchmark
 # (PR #356); BENCH_CAMERA_FPS is the fps owner until that contract lands.
 BENCH_STREAMS=13 BENCH_CAMERA_FPS=15 BENCH_DURATION_SEC=300 BENCH_VIEWERS=0 \
   BENCH_LABEL=13x15 uv run pytest -m real_stack -k 'test_fanout_benchmark['
+```
+
+## Observability load (Gate M/V)
+
+`test_observability_real_stack.py` is `real_stack` and operator-gated. `observability_load_harness.py` starts a local `mediamtx` serving N looping copies of `OBS_STREAM_PATH`, a Backend via `serve_backend()`, and a real `WorkerRuntime` with `ML_WORKER_EXECUTION_RECORDS_ENABLED=1`. Output is `obs-<N>.json` under `OBS_OUTPUT_DIR` (default `.omo/evidence/observability`). The harness records measurements only: offered fps, records/sec accepted, gap rows/sec, lane high-water, backlog slope, p50/p95 exporter batch latency, CPU delta. It never asserts a numeric threshold. Those numbers are the ONLY source for deployment budgets (Gate M/V); never bake them as defaults in product code. Skip, don't error, when `mediamtx`/`ffmpeg`/`pyservicemaker` or `OBS_STREAM_PATH` are missing. Knobs: `OBS_STREAMS` (default `1`), `OBS_DURATION_SEC` (default `30`), `OBS_CAMERA_FPS` (default `15`), `OBS_OUTPUT_DIR`, `OBS_STREAM_PATH`.
+
+```bash
+uv run pytest -m real_stack -k observability_real_stack
+OBS_STREAMS=1 OBS_DURATION_SEC=30 OBS_CAMERA_FPS=15 \
+  OBS_STREAM_PATH=/path/to/recorded.ts uv run pytest -m real_stack -k observability_real_stack
 ```
 
 ## Commands
