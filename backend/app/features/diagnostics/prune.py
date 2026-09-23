@@ -12,19 +12,22 @@ from backend.app.features.diagnostics.records import (
 
 
 def next_prunable_unit(connection: sqlite3.Connection) -> str | None:
+    """Oldest terminal unit by last observation - the order execution_units_prune_order
+    indexes, so this is a single index seek rather than a sort of every
+    terminal unit on each ingest."""
     row = connection.execute(
         """
         SELECT causal_unit_id FROM execution_units
         WHERE terminal = 1
-        ORDER BY first_observed_ns, camera_id, worker_boot_id,
-                 source_generation, stream_epoch
+        ORDER BY last_observed_ns, causal_unit_id
         LIMIT 1
         """
     ).fetchone()
     return None if row is None else str(row[0])
 
 
-def prune_unit(connection: sqlite3.Connection, unit_id: str, now_ns: int) -> None:
+def prune_unit(connection: sqlite3.Connection, unit_id: str, now_ns: int) -> int:
+    """Delete one whole unit; returns the payload bytes it held (0 if absent)."""
     unit = connection.execute(
         """
         SELECT camera_id, worker_boot_id, source_generation, stream_epoch,
@@ -34,7 +37,7 @@ def prune_unit(connection: sqlite3.Connection, unit_id: str, now_ns: int) -> Non
         (unit_id,),
     ).fetchone()
     if unit is None:
-        return
+        return 0
     camera_id, boot, gen, epoch = str(unit[0]), str(unit[1]), int(unit[2]), int(unit[3])
     first_ns, last_ns, record_count = int(unit[4]), int(unit[5]), int(unit[6])
     producers = connection.execute(
@@ -54,6 +57,7 @@ def prune_unit(connection: sqlite3.Connection, unit_id: str, now_ns: int) -> Non
         """,
         (unit_id,),
     ).fetchall()
+    freed = sum(int(row[2]) for row in segment_deltas)
     connection.execute("DELETE FROM execution_units WHERE causal_unit_id = ?", (unit_id,))
     for segment_id, count, bytes_removed in segment_deltas:
         connection.execute(
@@ -95,7 +99,7 @@ def prune_unit(connection: sqlite3.Connection, unit_id: str, now_ns: int) -> Non
             cause="capacity",
             recorded_at_ns=now_ns,
         )
-        return
+        return freed
     for producer, from_seq, to_seq, from_ns, to_ns, count in producers:
         if _extend_contiguous_deletion(
             connection,
@@ -128,6 +132,7 @@ def prune_unit(connection: sqlite3.Connection, unit_id: str, now_ns: int) -> Non
             cause="capacity",
             recorded_at_ns=now_ns,
         )
+    return freed
 
 
 def _extend_contiguous_deletion(
@@ -184,21 +189,27 @@ def _extend_contiguous_deletion(
 def drop_orphan_batches(connection: sqlite3.Connection) -> None:
     """Delete batch receipts none of whose records can still exist.
 
-    A receipt exists so a retried batch is answered idempotently. A batch's
-    records all carry ``committed_at_ns == received_at_ns``, so a receipt
-    older than the oldest surviving record has no records left and only pins
-    control bytes. One MIN() instead of a correlated NOT EXISTS per receipt:
-    exact, and O(records) once per prune cycle rather than O(receipts x
-    records) per pruned unit.
+    A receipt exists so a retried batch is answered idempotently. Every record
+    of a batch was observed no later than the batch was received
+    (``observed_at_ns <= committed_at_ns == received_at_ns``), so a receipt
+    received before the camera's oldest surviving observation has no records
+    left and only pins control bytes. Per camera so the
+    (camera_id, observed_at_ns) index answers the MIN in O(log n); slightly
+    conservative (keeps a receipt a little longer than strictly needed),
+    never wrong.
     """
-    connection.execute(
-        """
-        DELETE FROM execution_batches
-        WHERE received_at_ns < (
-            SELECT COALESCE(MIN(committed_at_ns), 0) FROM execution_records
+    cameras = connection.execute("SELECT DISTINCT camera_id FROM execution_batches").fetchall()
+    for (camera_id,) in cameras:
+        connection.execute(
+            """
+            DELETE FROM execution_batches
+            WHERE camera_id = ? AND received_at_ns < (
+                SELECT COALESCE(MIN(observed_at_ns), 0) FROM execution_records
+                WHERE camera_id = ?
+            )
+            """,
+            (camera_id, camera_id),
         )
-        """
-    )
 
 
 def coarsen_coverage(
