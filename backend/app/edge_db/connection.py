@@ -168,7 +168,7 @@ def open_runtime_database(
     busy_policy: BusyPolicy = BusyPolicy.BOUNDED_WAIT,
     check_same_thread: bool = True,
 ) -> sqlite3.Connection:
-    """Open an already-bootstrapped schema-18 database without touching its schema."""
+    """Open an already-bootstrapped schema-19 database without touching its schema."""
     if not path.is_file():
         raise MigrationRequiredError(found=0, minimum=compatibility.minimum)
     timeout_ms = 0 if busy_policy is BusyPolicy.ZERO_WAIT else NORMAL_BUSY_TIMEOUT_MS

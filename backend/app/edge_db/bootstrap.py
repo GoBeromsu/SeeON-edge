@@ -1,16 +1,25 @@
-"""Create-only schema-18 bootstrap: the sole DDL owner of the local edge database.
+"""Create-or-extend schema-19 bootstrap: the sole DDL owner of the local edge database.
 
-There is exactly one schema (18, the compact ten-table contract) and no
-migration ledger. On an empty database this module creates schema 18 in one
-transaction under the exclusive deployment lock; on an existing database it
-verifies that the schema already *is* 18 and refuses anything else. Nothing is
-ever upgraded, drained, imported, or repaired here.
+On an empty database this module creates schema 19 in one BEGIN IMMEDIATE
+transaction under the exclusive deployment lock (ledger row 19 only). On an
+exact schema-18 database it EXTENDS: take a consistent sqlite3 backup, then in
+one BEGIN IMMEDIATE create the six execution-record tables and indexes, insert
+ledger row 19 with source_schema_version=18 and source_db_sha256 of the backup,
+and set PRAGMA user_version=19. Schema-18 tables and rows are never ALTER/DROP
+rewritten. Any other version is refused.
+
+Rolling back to a schema-18 image after extension requires stopping the stack
+and restoring ``<database name>.schema18-backup.sqlite3`` over the live
+database (remove -wal/-shm). That restore discards every application write
+made after the extension. A schema-18 image refuses a schema-19 database by
+design. There is no in-process downgrade path.
 """
 
 from __future__ import annotations
 
 import argparse
 import fcntl
+import hashlib
 import os
 import sqlite3
 import sys
@@ -20,30 +29,35 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Final
 
-from backend.app.edge_db.compact_schema import SCHEMA_18_STATEMENTS
+from backend.app.edge_db.compact_schema import SCHEMA_19_STATEMENTS
 from backend.app.edge_db.compatibility import (
-    SCHEMA_18_IDENTITY,
+    SCHEMA_19_IDENTITY,
     EdgeDatabaseError,
     NewerSchemaError,
     SchemaLedgerError,
     verify_runtime_schema,
+    verify_schema18_contract,
 )
+from backend.app.edge_db.execution_records_ddl import EXECUTION_RECORD_CREATE_STATEMENTS
 from backend.app.edge_db.functions import register_edge_db_functions
 from backend.app.edge_db.paths import (
     EDGE_DATABASE_PATH,
     prepare_database_path,
+    schema18_backup_path,
     secure_database_files,
 )
 from shared.release_identity import EDGE_DATABASE_SCHEMA_VERSION
 
 BOOTSTRAP_BUSY_TIMEOUT_MS: Final = 5_000
 DEPLOYMENT_LOCK_NAME: Final = "deployment.lock"
+SCHEMA_18_VERSION: Final = 18
 
 
 @dataclass(frozen=True, slots=True)
 class BootstrapResult:
     path: Path
     created: bool
+    extended: bool
     schema_version: int
 
 
@@ -53,14 +67,15 @@ class DeploymentLockError(EdgeDatabaseError):
 
 @dataclass(slots=True)
 class UnsupportedSchemaError(EdgeDatabaseError):
-    """The database exists at a schema other than 18; there is no migration path."""
+    """The database exists at a schema other than 18 or 19; there is no migration path."""
 
     found: int
 
     def __str__(self) -> str:
         return (
             f"edge database schema {self.found} is not schema "
-            f"{EDGE_DATABASE_SCHEMA_VERSION}; bootstrap is create-only and never migrates"
+            f"{EDGE_DATABASE_SCHEMA_VERSION}; bootstrap creates 19 or extends 18 "
+            "and never migrates any other version"
         )
 
 
@@ -135,19 +150,80 @@ def _require_still_empty(connection: sqlite3.Connection) -> None:
         raise SchemaLedgerError("edge database changed underneath the bootstrap")
 
 
-def _create_schema_18(connection: sqlite3.Connection) -> None:
-    """Create every schema-18 object and the ledger row in one transaction."""
+def _create_schema_19(connection: sqlite3.Connection) -> None:
+    """Create every schema-19 object and ledger row 19 in one transaction."""
     connection.execute("BEGIN IMMEDIATE")
     try:
         _require_still_empty(connection)
-        for statement in SCHEMA_18_STATEMENTS:
+        for statement in SCHEMA_19_STATEMENTS:
             connection.execute(statement)
         connection.execute(
             """
             INSERT INTO schema_migrations (version, name, checksum, applied_at)
             VALUES (?, ?, ?, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
             """,
-            SCHEMA_18_IDENTITY,
+            SCHEMA_19_IDENTITY,
+        )
+        connection.execute(f"PRAGMA user_version = {EDGE_DATABASE_SCHEMA_VERSION}")
+        connection.commit()
+    except BaseException:
+        connection.rollback()
+        raise
+
+
+def _sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        while True:
+            chunk = handle.read(1024 * 1024)
+            if not chunk:
+                break
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _backup_schema18(source: sqlite3.Connection, backup_path: Path) -> str:
+    """Take a consistent SQLite backup; refuse if the destination already exists."""
+    if backup_path.exists():
+        raise SchemaLedgerError(
+            f"schema-18 backup already exists at {backup_path}; move it aside before extending"
+        )
+    descriptor = os.open(backup_path, os.O_CREAT | os.O_EXCL | os.O_RDWR, 0o600)
+    os.close(descriptor)
+    backup_path.chmod(0o600)
+    destination = sqlite3.connect(backup_path)
+    try:
+        source.backup(destination)
+    finally:
+        destination.close()
+    backup_path.chmod(0o600)
+    return _sha256_file(backup_path)
+
+
+def _require_still_schema_18(connection: sqlite3.Connection) -> None:
+    if _user_version(connection) != SCHEMA_18_VERSION:
+        raise SchemaLedgerError("edge database changed underneath the schema-18 extension")
+
+
+def _extend_schema_18_to_19(connection: sqlite3.Connection, database: Path) -> None:
+    """Verify exact schema 18, backup, then add the six execution tables in one txn."""
+    verify_schema18_contract(connection)
+    backup_path = schema18_backup_path(database)
+    source_sha256 = _backup_schema18(connection, backup_path)
+    connection.execute("BEGIN IMMEDIATE")
+    try:
+        _require_still_schema_18(connection)
+        for statement in EXECUTION_RECORD_CREATE_STATEMENTS:
+            connection.execute(statement)
+        connection.execute(
+            """
+            INSERT INTO schema_migrations (
+                version, name, checksum, applied_at,
+                source_schema_version, source_db_sha256
+            )
+            VALUES (?, ?, ?, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'), ?, ?)
+            """,
+            (*SCHEMA_19_IDENTITY, SCHEMA_18_VERSION, source_sha256),
         )
         connection.execute(f"PRAGMA user_version = {EDGE_DATABASE_SCHEMA_VERSION}")
         connection.commit()
@@ -161,10 +237,17 @@ def bootstrap_database(
     *,
     lock: DeploymentLock | None = None,
 ) -> BootstrapResult:
-    """Create schema 18 on an empty database, or verify an existing one is schema 18.
+    """Create schema 19 on an empty database, extend exact schema 18, or verify 19.
 
-    Raises ``UnsupportedSchemaError`` for any other version marker and
+    Raises ``NewerSchemaError`` when ``user_version`` is greater than 19,
+    ``UnsupportedSchemaError`` for any other non-18 version marker, and
     ``SchemaLedgerError`` for a version-less database that already holds tables.
+
+    Rolling back to a schema-18 image after extension requires stopping the
+    stack and restoring the schema18-backup file over the live database
+    (remove -wal/-shm). That restore discards every application write made
+    after the extension. A schema-18 image refuses a schema-19 database by
+    design. There is no in-process downgrade path.
     """
     if lock is None:
         with deployment_lock(path.parent) as ownership:
@@ -184,22 +267,31 @@ def bootstrap_database(
         register_edge_db_functions(connection)
         version = _user_version(connection)
         created = False
+        extended = False
         if version == 0:
             if _has_any_table(connection):
                 raise SchemaLedgerError(
                     "edge database has tables but no schema version; refusing to bootstrap over it"
                 )
-            _create_schema_18(connection)
+            _create_schema_19(connection)
             created = True
         elif version > EDGE_DATABASE_SCHEMA_VERSION:
             raise NewerSchemaError(found=version, maximum=EDGE_DATABASE_SCHEMA_VERSION)
+        elif version == SCHEMA_18_VERSION:
+            _extend_schema_18_to_19(connection, path)
+            extended = True
         elif version != EDGE_DATABASE_SCHEMA_VERSION:
             raise UnsupportedSchemaError(found=version)
         current = verify_runtime_schema(connection)
         integrity = connection.execute("PRAGMA integrity_check").fetchone()
         if integrity != ("ok",):
             raise SchemaLedgerError(f"edge database integrity check failed: {integrity!r}")
-        return BootstrapResult(path=path, created=created, schema_version=current)
+        return BootstrapResult(
+            path=path,
+            created=created,
+            extended=extended,
+            schema_version=current,
+        )
     finally:
         connection.close()
         secure_database_files(path)
@@ -207,7 +299,10 @@ def bootstrap_database(
 
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="Create schema 18 on an empty SeeON edge database or verify an existing one"
+        description=(
+            "Create schema 19 on an empty SeeON edge database, extend an exact "
+            "schema-18 database, or verify an existing schema-19 database"
+        )
     )
     parser.add_argument("--database", type=Path, default=EDGE_DATABASE_PATH)
     return parser
@@ -222,7 +317,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 1
     print(
         f"EDGE_DB_BOOTSTRAP_OK path={result.path} "
-        f"schema={result.schema_version} created={str(result.created).lower()}"
+        f"schema={result.schema_version} created={str(result.created).lower()} "
+        f"extended={str(result.extended).lower()}"
     )
     return 0
 

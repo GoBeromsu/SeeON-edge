@@ -43,7 +43,7 @@ COPY --from=front-build /src/front/dist /app/front
 # compose.edge.yaml attaches a named volume at this same path instead.
 RUN mkdir -p /root/.local/state/ml-api
 
-ARG EDGE_DATABASE_SCHEMA_VERSION=18
+ARG EDGE_DATABASE_SCHEMA_VERSION=19
 RUN install -d -m 0755 /opt/seeon \
     && printf '%s\n' "${EDGE_DATABASE_SCHEMA_VERSION}" > /opt/seeon/edge-database-schema-version \
     && chmod 0444 /opt/seeon/edge-database-schema-version
