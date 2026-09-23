@@ -6,6 +6,7 @@ import json
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
+from starlette.concurrency import run_in_threadpool
 
 from backend.app.features.diagnostics.schemas import (
     ExecutionQueryParams,
@@ -63,7 +64,9 @@ async def ingest_execution_records(
             detail=str(error),
         ) from error
     ingest = ingest_batch_from_wire(batch, backend_build_revision=backend_build_revision(request))
-    receipt = store.ingest_batch(ingest)
+    # SQLite work (including bounded capacity pruning) never runs on the event
+    # loop: a busy ingest must not stall /health or the dashboard.
+    receipt = await run_in_threadpool(store.ingest_batch, ingest)
     return wire_receipt_from_store(receipt).to_json()
 
 
