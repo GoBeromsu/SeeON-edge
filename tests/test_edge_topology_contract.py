@@ -667,3 +667,15 @@ def test_clip_export_is_not_managed_by_topology_environment() -> None:
     assert not any("EVENT_CLIP_EXPORT_ENABLED" in key for key in api_env)
     assert not any("EVENT_CLIP_EXPORT_ENABLED" in key for key in worker_env)
     assert "EVENT_CLIP_EXPORT_ENABLED" not in env_examples
+
+
+def test_edge_api_execution_records_seam_environment_contract() -> None:
+    """ml-api's execution-record seam: OFF by default, budget has no compose default."""
+    services = _compose_services(EDGE_COMPOSE_FILE)
+    api_environment = _mapping_field(services["ml-api"], "environment")
+    assert api_environment["ML_API_EXECUTION_RECORDS_ENABLED"] == (
+        "${ML_API_EXECUTION_RECORDS_ENABLED:-0}"
+    )
+    assert api_environment["ML_API_EXECUTION_RECORDS_BUDGET_BYTES"] == (
+        "${ML_API_EXECUTION_RECORDS_BUDGET_BYTES:-}"
+    )

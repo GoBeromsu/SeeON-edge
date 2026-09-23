@@ -59,7 +59,7 @@ def event_delivery_record(
     """Stream-scoped queue admission observed against the triggering frame.
 
     ``admitted`` must be the durable queue's proof (try_admit.accepted, or
-    stage() returning without a refusal). Never pass True without that proof.
+    the queue's AdmissionResult.accepted being True). Never pass True without that proof.
     """
     return make_record(
         record_kind="event.delivery",
