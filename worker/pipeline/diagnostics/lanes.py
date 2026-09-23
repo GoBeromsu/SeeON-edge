@@ -45,7 +45,7 @@ class DrainedLane:
 
 
 class ExecutionRecordLanes:
-    """Per-(camera, producer) deques. ``try_emit`` is a short-lock append-or-drop."""
+    """Per-(camera, boot, producer) deques. ``try_emit`` is a short-lock append-or-drop."""
 
     def __init__(self, *, lane_capacity: int) -> None:
         if lane_capacity < 1:
