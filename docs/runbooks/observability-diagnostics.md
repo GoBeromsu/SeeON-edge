@@ -10,15 +10,16 @@ depth, batch size and flush interval - come from the measurement harness
 (`tests/AGENTS.md`, "Observability load (Gate M/V)"), never from a code
 default, and both sides refuse to boot when enabled without them.
 
-Ten pre-measurement *shape* constants do ship in
+Seven pre-measurement *shape* constants do ship in
 `backend/app/features/diagnostics/retention.py` and are design values, not
 measured budgets; Gate M replaces them: `unit_horizon_ns` (unit terminal
 horizon), `coverage_rows_per_epoch` (coarsening bound), and the derived
 fractions of `total_bytes` - `control_reserve` (1/16), `high_water`
 (total minus reserve), `low_water` (7/8 of high-water), `segment_bytes`
-(1/64), `max_record_bytes` (1/256) - plus three per-row control-envelope
-estimates (coverage rows, batch rows, and unit/segment/provenance rows). Until Gate M
-they bound behaviour; they are not deployment numbers.
+(1/64), `max_record_bytes` (1/256). The three per-row control-envelope
+estimates are gone; the budget is measured on disk with `dbstat` (execution_*
+tables and their indexes). Until Gate M they bound behaviour; they are not
+deployment numbers.
 
 ## What is recorded
 
@@ -115,8 +116,12 @@ Total-capacity, not per-kind TTL. Records belong to a logical causal unit
 Units become terminal by horizon, by a newer boot/epoch, or when forced by
 capacity. Pruning removes a whole unit atomically and writes an exact
 `DELETED_BY_CAPACITY` row; it never leaves a child with a deleted parent.
-The budget envelope includes coverage/receipt rows and SQLite WAL headroom,
-not just payload bytes.
+The budget is on-disk bytes of the execution_* tables and their indexes,
+measured exactly via `dbstat` (`used_bytes`); it is not the whole
+`edge.sqlite3` file and not the WAL. Enforce prunes whole units until
+`used_bytes` is at or below low-water. On the reference 8-camera edge the
+rows-plus-indexes occupied 3.8x the summed `payload_bytes`; do not size
+the envelope from payload alone.
 
 ## Restart and rollback
 

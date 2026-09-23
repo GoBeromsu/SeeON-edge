@@ -9,12 +9,12 @@ from worker.pipeline.diagnostics.record_builder import (
     PRODUCER_MODEL,
     PRODUCER_POLICY,
     PRODUCER_SDK,
+    WALL,
     fall_causal_unit_id,
     frame_causal_unit_id,
     make_record,
     module_causal_unit_id,
-    monotonic_or,
-    observed_time,
+    wall_or,
 )
 from worker.types.metadata import MetadataCounters, MetadataFrame, NativeObservationEvidence
 from worker.types.trace import (
@@ -35,7 +35,7 @@ def sdk_frame_record(
     payload["seq"] = identity.seq
     payload["source_generation"] = metadata.source_generation
     payload["native_publish_sequence"] = metadata.native_publish_sequence
-    time_quality, observed = observed_time(metadata, observed_at_ns)
+    observed = wall_or(observed_at_ns)
     return make_record(
         record_kind="sdk.frame",
         camera_id=identity.camera_id,
@@ -44,7 +44,7 @@ def sdk_frame_record(
         stream_epoch=identity.stream_epoch,
         producer=PRODUCER_SDK,
         observed_at_ns=observed,
-        time_quality=time_quality,
+        time_quality=WALL,
         causal_unit_id=frame_causal_unit_id(
             identity.camera_id, identity.worker_boot_id, identity.stream_epoch, identity.seq
         ),
@@ -64,7 +64,7 @@ def policy_consume_record(
     observed_at_ns: int | None = None,
 ) -> WireRecord | None:
     identity = metadata.identity
-    time_quality, observed = observed_time(metadata, observed_at_ns)
+    observed = wall_or(observed_at_ns)
     return make_record(
         record_kind="policy.consume",
         camera_id=identity.camera_id,
@@ -73,7 +73,7 @@ def policy_consume_record(
         stream_epoch=identity.stream_epoch,
         producer=PRODUCER_POLICY,
         observed_at_ns=observed,
-        time_quality=time_quality,
+        time_quality=WALL,
         causal_unit_id=frame_causal_unit_id(
             identity.camera_id, identity.worker_boot_id, identity.stream_epoch, identity.seq
         ),
@@ -122,8 +122,8 @@ def model_score_record(
         source_generation=source_generation,
         stream_epoch=stream_epoch,
         producer=PRODUCER_MODEL,
-        observed_at_ns=monotonic_or(observed_at_ns),
-        time_quality="monotonic",
+        observed_at_ns=wall_or(observed_at_ns),
+        time_quality=WALL,
         causal_unit_id=fall_causal_unit_id(
             camera_id, worker_boot_id, stream_epoch, track_id, generation
         ),
@@ -166,8 +166,8 @@ def policy_decision_record(
         source_generation=source_generation,
         stream_epoch=stream_epoch,
         producer=PRODUCER_POLICY,
-        observed_at_ns=monotonic_or(observed_at_ns),
-        time_quality="monotonic",
+        observed_at_ns=wall_or(observed_at_ns),
+        time_quality=WALL,
         causal_unit_id=(
             fall_causal_unit_id(
                 camera_id, worker_boot_id, stream_epoch, snapshot.track_id, generation
@@ -249,8 +249,8 @@ def policy_coast_record(
         source_generation=source_generation,
         stream_epoch=stream_epoch,
         producer=PRODUCER_POLICY,
-        observed_at_ns=monotonic_or(observed_at_ns),
-        time_quality="monotonic",
+        observed_at_ns=wall_or(observed_at_ns),
+        time_quality=WALL,
         causal_unit_id=module_causal_unit_id(
             camera_id, worker_boot_id, stream_epoch, module_qualified_id, frame_seq
         ),

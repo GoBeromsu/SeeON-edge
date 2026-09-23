@@ -769,3 +769,111 @@ def test_window_gate_mirrors_inner_freshness_and_shadow_facts() -> None:
     (row,) = aggregator2.attributed_trace_snapshots()
     assert row.fresh is True and row.authority == "authoritative"
     assert row.snapshot.reason == "outside-detection-window"
+
+
+def test_config_digest_survives_a_real_pulled_config_with_detection_windows() -> None:
+    """Live rollout regression: a pulled config carries detection_windows as a
+    MappingProxyType inside a frozen dataclass. pydantic's JSON-mode dump cannot
+    serialize that, and the worker refused to boot with execution records on.
+    The digest must be computed from python-mode values with an explicit shape."""
+    from pydantic import SecretStr
+
+    from contracts.worker_config import PulledWorkerConfig
+    from worker.runtime.execution_records import _config_digest
+
+    pulled = PulledWorkerConfig.from_dict(
+        {
+            "config_version": 3,
+            "restart_epoch": 1,
+            "cameras": [],
+            "detection_windows": {
+                "bed_exit": {"start": "21:00", "end": "05:00", "tz": "Asia/Seoul"}
+            },
+        }
+    )
+    assert type(pulled.detection_windows).__name__ == "mappingproxy"
+
+    class _Config:
+        def model_dump(self, mode: str = "json") -> dict[str, object]:
+            if mode == "json":
+                # What pydantic does on the real WorkerConfig: it cannot.
+                raise ValueError("Unable to serialize unknown type: <class 'mappingproxy'>")
+            return {"version": 1, "pulled": pulled, "relay": {"token": SecretStr("t-1")}}
+
+    digest = _config_digest(_Config())  # type: ignore[arg-type]
+    assert len(digest) == 64
+    # Deterministic and content-sensitive.
+    assert digest == _config_digest(_Config())  # type: ignore[arg-type]
+    other = PulledWorkerConfig.from_dict(
+        {
+            "config_version": 3,
+            "restart_epoch": 1,
+            "cameras": [],
+            "detection_windows": {
+                "bed_exit": {"start": "22:00", "end": "05:00", "tz": "Asia/Seoul"}
+            },
+        }
+    )
+
+    class _Other(_Config):
+        def model_dump(self, mode: str = "json") -> dict[str, object]:
+            return {"version": 1, "pulled": other}
+
+    assert _config_digest(_Other()) != digest  # type: ignore[arg-type]
+
+    class _RotatedToken(_Config):
+        def model_dump(self, mode: str = "json") -> dict[str, object]:
+            return {"version": 1, "pulled": pulled, "relay": {"token": SecretStr("t-2")}}
+
+    # A rotated secret is not a config change and never enters the digest.
+    assert _config_digest(_RotatedToken()) == digest  # type: ignore[arg-type]
+
+
+def test_every_producer_stamps_wall_clock_so_the_query_is_answerable_by_epoch_time() -> None:
+    """Live rollout regression: producers stamped monotonic nanoseconds, so a
+    GET /diagnostics/executions with epoch from_ns/to_ns returned nothing and
+    queryable_range mixed clock bases. Every record must be wall-stamped."""
+    import time
+
+    from worker.pipeline.diagnostics.emit_delivery import (
+        backend_acceptance_record,
+        delivery_attempt_record,
+    )
+    from worker.pipeline.diagnostics.emit_policy import policy_coast_record, sdk_frame_record
+
+    before = time.time_ns()
+    records = [
+        sdk_frame_record(_metadata(seq=1)),
+        policy_coast_record(
+            camera_id="cam-1",
+            worker_boot_id="boot-1",
+            source_generation=1,
+            stream_epoch=1,
+            frame_seq=1,
+            source_pts_ns=None,
+            module_qualified_id="fall.v2",
+        ),
+        delivery_attempt_record(
+            camera_id="cam-1",
+            observing_boot_id="boot-1",
+            edge_event_id="e1",
+            outcome="retry-transient",
+            attempt=1,
+            max_attempts=10,
+            failure_class="RETRY",
+            status_code=503,
+            retained=None,
+        ),
+        backend_acceptance_record(
+            camera_id="cam-1",
+            observing_boot_id="boot-1",
+            edge_event_id="e1",
+            status="accepted_local",
+            hub_event_id=None,
+        ),
+    ]
+    after = time.time_ns()
+    for record in records:
+        assert record is not None
+        assert record.time_quality == "wall"
+        assert before <= record.observed_at_ns <= after

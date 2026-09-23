@@ -20,13 +20,18 @@ from backend.app.features.diagnostics.records import (
     StorageState,
     UnitCausalState,
 )
-from backend.app.features.diagnostics.retention import RetentionBudget, logical_bytes
+from backend.app.features.diagnostics.retention import RetentionBudget, used_bytes
 from backend.app.features.diagnostics.store import ExecutionRecordStore
 from backend.app.features.diagnostics.terminals import refresh_unit_terminals
 
 CAMERA = "cam-a"
 BOOT = "boot-1"
 HORIZON = 1_000
+# Empty schema-19 execution_* b-trees already occupy ~70 KiB of pages; a
+# 512 KiB envelope is the smallest budget that still admits a few hundred
+# ~211 B payloads before high_water.
+DISK_BUDGET = 512 * 1024
+PAYLOAD_BLOB = "x" * 200
 PROVENANCE = Provenance(
     worker_build_revision="worker-rev",
     worker_image_digest="sha256:worker",
@@ -105,6 +110,26 @@ def _batch(
     )
 
 
+def _dbstat_execution_sum(connection) -> int:
+    names = [
+        str(row[0])
+        for row in connection.execute(
+            """
+            SELECT name FROM sqlite_master
+            WHERE type IN ('table', 'index')
+              AND (name LIKE 'execution_%' OR tbl_name LIKE 'execution_%')
+            """
+        ).fetchall()
+    ]
+    placeholders = ",".join("?" * len(names))
+    row = connection.execute(
+        f"SELECT COALESCE(SUM(pgsize), 0) FROM dbstat "
+        f"WHERE aggregate = TRUE AND name IN ({placeholders})",
+        names,
+    ).fetchone()
+    return int(row[0])
+
+
 def test_budget_requires_explicit_total_bytes() -> None:
     with pytest.raises(ValueError, match="total_bytes"):
         RetentionBudget(total_bytes=255)
@@ -119,18 +144,22 @@ def test_budget_requires_explicit_total_bytes() -> None:
 
 
 def test_segment_seals_at_segment_bytes(tmp_path: Path) -> None:
-    budget = RetentionBudget(total_bytes=16384, unit_horizon_ns=HORIZON)
+    budget = RetentionBudget(total_bytes=DISK_BUDGET, unit_horizon_ns=HORIZON)
     store, path = _store(tmp_path, budget)
     # max_record_bytes is segment_bytes / 4 by design, so one segment always
-    # holds at least four admitted records; eight ~41 B records (JSON-wrapped
-    # 30-char blob) must therefore spill from a sealed segment into a new OPEN one.
-    blob = "x" * 30
+    # holds at least four admitted records; eight ~211 B records must therefore
+    # spill from a sealed segment into a new OPEN one once the 8 KiB segment
+    # envelope fills (eight records still fit one OPEN segment at 512 KiB —
+    # ingest enough copies of the same-size payload to force a seal).
+    blob = PAYLOAD_BLOB
+    per_record = 211
+    needed = (budget.segment_bytes // per_record) + 2
     store.ingest_batch(
         _batch(
             "s1",
             tuple(
                 _record(label=f"r{index}", unit="u1", seq=index, observed=10 + index, payload=blob)
-                for index in range(8)
+                for index in range(needed)
             ),
         )
     )
@@ -147,7 +176,7 @@ def test_segment_seals_at_segment_bytes(tmp_path: Path) -> None:
     assert states[-1] == SegmentStorageState.OPEN
     assert len(rows) >= 2
     assert all(int(row[2]) <= budget.segment_bytes for row in rows)
-    assert sum(int(row[1]) for row in rows) == 8
+    assert sum(int(row[1]) for row in rows) == needed
 
 
 def test_unit_terminal_horizon_complete_and_known_gap(tmp_path: Path) -> None:
@@ -224,12 +253,12 @@ def test_unit_terminal_by_newer_epoch(tmp_path: Path) -> None:
 
 
 def test_prune_removes_whole_units_across_two_segments(tmp_path: Path) -> None:
-    budget = RetentionBudget(total_bytes=16384, unit_horizon_ns=HORIZON)
+    budget = RetentionBudget(total_bytes=DISK_BUDGET, unit_horizon_ns=HORIZON)
     store, path = _store(tmp_path, budget)
-    # 316 records (~41 B each) over many 256 B segments plus their control rows
-    # exceed high_water (15360); the terminal "old" unit must be pruned
-    # coherently even though its records straddle segments.
-    blob = "x" * 30
+    # ~800 records (~211 B payload each) over many 8 KiB segments plus their
+    # indexes exceed high_water (~480 KiB on disk); the terminal "old" unit
+    # must be pruned coherently even though its records straddle segments.
+    blob = PAYLOAD_BLOB
     old_records = tuple(
         _record(
             label=f"o{index}",
@@ -239,7 +268,7 @@ def test_prune_removes_whole_units_across_two_segments(tmp_path: Path) -> None:
             payload=blob,
             producer="sdk" if index % 2 == 0 else "cpu",
         )
-        for index in range(16)
+        for index in range(200)
     )
     store.ingest_batch(_batch("old", old_records))
     keep_records = tuple(
@@ -250,7 +279,7 @@ def test_prune_removes_whole_units_across_two_segments(tmp_path: Path) -> None:
             observed=10 + HORIZON + 5 + index,
             payload=blob,
         )
-        for index in range(300)
+        for index in range(800)
     )
     store.ingest_batch(_batch("keep", keep_records))
     connection = _open(path)
@@ -273,7 +302,7 @@ def test_prune_removes_whole_units_across_two_segments(tmp_path: Path) -> None:
         segments = connection.execute(
             "SELECT storage_state, record_count FROM execution_segments ORDER BY segment_ordinal"
         ).fetchall()
-        assert logical_bytes(connection) <= budget.low_water or "old" not in units
+        assert used_bytes(connection) <= budget.low_water or "old" not in units
     finally:
         connection.close()
     assert "old" not in units
@@ -287,10 +316,10 @@ def test_prune_removes_whole_units_across_two_segments(tmp_path: Path) -> None:
 
 
 def test_forced_terminal_when_nothing_terminal(tmp_path: Path) -> None:
-    budget = RetentionBudget(total_bytes=16384, unit_horizon_ns=HORIZON)
+    budget = RetentionBudget(total_bytes=DISK_BUDGET, unit_horizon_ns=HORIZON)
     store, path = _store(tmp_path, budget)
-    blob = "y"
-    for index in range(80):
+    blob = PAYLOAD_BLOB
+    for index in range(500):
         store.ingest_batch(
             _batch(
                 f"u{index}",
@@ -315,14 +344,17 @@ def test_forced_terminal_when_nothing_terminal(tmp_path: Path) -> None:
             str(row[0])
             for row in connection.execute("SELECT coverage_kind FROM execution_coverage").fetchall()
         }
-        assert logical_bytes(connection) <= budget.high_water
+        assert used_bytes(connection) <= budget.high_water
     finally:
         connection.close()
     assert "live-0" not in remaining
     assert CoverageKind.DELETED_BY_CAPACITY in kinds
 
 
-def test_storage_unavailable_when_control_envelope_cannot_fit(tmp_path: Path) -> None:
+def test_storage_unavailable_when_nothing_prunable(tmp_path: Path) -> None:
+    # Empty execution_* b-trees already occupy more pages than a 256-byte
+    # envelope's high_water, so the first ingest cannot prune its way under
+    # the line and must refuse with STORAGE_UNAVAILABLE.
     budget = RetentionBudget(total_bytes=256, unit_horizon_ns=HORIZON)
     store, path = _store(tmp_path, budget)
     receipt = store.ingest_batch(
@@ -343,6 +375,48 @@ def test_storage_unavailable_when_control_envelope_cannot_fit(tmp_path: Path) ->
     assert records == (0,)
     assert CoverageKind.STORAGE_UNAVAILABLE in kinds
     assert batches == (1,)
+
+
+def test_used_bytes_matches_dbstat_and_exceeds_payload(tmp_path: Path) -> None:
+    budget = RetentionBudget(total_bytes=2**20, unit_horizon_ns=HORIZON)
+    store, path = _store(tmp_path, budget)
+    connection = _open(path)
+    try:
+        empty = used_bytes(connection)
+        assert empty == _dbstat_execution_sum(connection)
+        assert empty > 0
+        assert empty < DISK_BUDGET
+    finally:
+        connection.close()
+
+    count = 300
+    receipt = store.ingest_batch(
+        _batch(
+            "pin",
+            tuple(
+                _record(
+                    label=f"p{index}",
+                    unit="u",
+                    seq=index,
+                    observed=10 + index,
+                    payload=PAYLOAD_BLOB,
+                )
+                for index in range(count)
+            ),
+        )
+    )
+    assert receipt.accepted == count
+    connection = _open(path)
+    try:
+        occupied = used_bytes(connection)
+        payload = connection.execute(
+            "SELECT COALESCE(SUM(payload_bytes), 0) FROM execution_records"
+        ).fetchone()
+        assert occupied == _dbstat_execution_sum(connection)
+        assert int(payload[0]) > 0
+        assert occupied >= int(payload[0]) * 2
+    finally:
+        connection.close()
 
 
 def test_coarsening_yields_unknown_without_widening_exact_rows(tmp_path: Path) -> None:
