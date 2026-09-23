@@ -30,6 +30,7 @@ from typing import Final
 
 from backend.app.features.diagnostics.prune import (
     coarsen_coverage,
+    drop_orphan_batches,
     next_prunable_unit,
     prune_unit,
 )
@@ -123,12 +124,33 @@ def used_bytes(connection: sqlite3.Connection) -> int:
     return 0 if row is None else int(row[0])
 
 
-def enforce_budget(connection: sqlite3.Connection, budget: RetentionBudget, now_ns: int) -> bool:
-    """Prune whole units until <= low_water. False when the envelope still fails."""
+#: Whole units pruned per enforce_budget call. Bounds the work one ingest
+#: request can do so a large backlog is drained across requests instead of
+#: one request pruning for minutes while the loop is blocked. Not a budget
+#: number: it only shapes latency.
+MAX_UNITS_PER_ENFORCE: Final = 8
+
+
+def enforce_budget(
+    connection: sqlite3.Connection,
+    budget: RetentionBudget,
+    now_ns: int,
+    *,
+    max_units: int = MAX_UNITS_PER_ENFORCE,
+) -> bool:
+    """Prune up to ``max_units`` whole units toward ``low_water``.
+
+    Returns True when the ingest may commit: usage is within ``high_water``,
+    or it is over but this call made progress (pruned at least one unit), so
+    the envelope converges over the next calls. Returns False only when usage
+    is over ``high_water`` and nothing is prunable - the honest
+    STORAGE_UNAVAILABLE case.
+    """
     refresh_unit_terminals(connection, budget.unit_horizon_ns)
     coarsen_coverage(connection, budget.coverage_rows_per_epoch, now_ns)
     occupied = used_bytes(connection)
-    while occupied > budget.high_water:
+    pruned = 0
+    while occupied > budget.high_water and pruned < max_units:
         unit_id = next_prunable_unit(connection)
         if unit_id is None:
             if force_oldest_units_terminal(connection, 1) == 0:
@@ -137,16 +159,20 @@ def enforce_budget(connection: sqlite3.Connection, budget: RetentionBudget, now_
             if unit_id is None:
                 break
         prune_unit(connection, unit_id, now_ns)
-        coarsen_coverage(connection, budget.coverage_rows_per_epoch, now_ns)
+        pruned += 1
         occupied = used_bytes(connection)
         if occupied <= budget.low_water:
             break
-    return occupied <= budget.high_water
+    if pruned:
+        coarsen_coverage(connection, budget.coverage_rows_per_epoch, now_ns)
+        drop_orphan_batches(connection)
+    return occupied <= budget.high_water or pruned > 0
 
 
 __all__ = [
     "COVERAGE_ROWS_PER_EPOCH",
     "DEFAULT_UNIT_HORIZON_NS",
+    "MAX_UNITS_PER_ENFORCE",
     "RetentionBudget",
     "coarsen_coverage",
     "enforce_budget",
