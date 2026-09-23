@@ -334,3 +334,52 @@ def test_missing_bed_roi_produces_zero_alerts_and_preserves_assignment() -> None
     assert len(fresh_roi) == 1
     assert monitor.last_debug_snapshot is not None
     assert monitor.last_debug_snapshot.events == (bed_exit.BedExitEvent(PERSON_ID, 0),)
+
+
+def test_early_return_resets_shadow_count_so_unavailability_is_authoritative() -> None:
+    """A stale shadow count would label the real 'bed unavailable' reason as a
+    shadow row, which the runbook tells operators to ignore. After a frame that
+    produced a shadow trace, the unusable-bed early return must report zero
+    shadow snapshots, and the aggregator must attribute its single snapshot as
+    authoritative."""
+    from dataclasses import replace as dc_replace
+
+    from worker.pipeline.decision import EventAggregator
+    from worker.pipeline.decision.incident_manager import IncidentManager
+    from worker.types.bed_pose_features import BedPoseFeatures, FrameBedPoseFeatures
+
+    monitor = _monitor()
+    person = BoundingBox(10, 10, 30, 40, 0.9)
+    bed = BoundingBox(0, 0, 80, 100, 0.9)
+    # Frame with a bed AND an invalid-polygon pose feature: the shadow path
+    # records one bed-polygon-invalid snapshot, so the count becomes 1.
+    invalid = BedPoseFeatures(
+        track_id=1,
+        bed_id=0,
+        torso_in_frac=0.0,
+        lower_in_frac=0.0,
+        keypoint_in_frac=0.0,
+        hip_depth=0.0,
+        torso_angle=0.0,
+        centroid_displacement=0.0,
+        hip_x_rel=0.0,
+        hip_y_rel=0.0,
+        observability=0.0,
+        bed_polygon_valid=False,
+    )
+    first = dc_replace(
+        _input(person_boxes=(person,), bed_boxes=(bed,), track_ids=(1,), frame_index=1),
+        bed_pose_features=FrameBedPoseFeatures(items=(invalid,)),
+    )
+    monitor.update(first)
+    assert monitor.last_shadow_trace_count == 1
+    assert monitor.last_trace_snapshots[-1].reason == "bed-polygon-invalid"
+    # Frame with no bed boxes: early return. The count must be zero now, or the
+    # single authoritative unavailability row would be labelled shadow.
+    monitor.update(_input(person_boxes=(person,), bed_boxes=(), track_ids=(1,), frame_index=2))
+    assert monitor.last_shadow_trace_count == 0
+    assert len(monitor.last_trace_snapshots) == 1
+    aggregator = EventAggregator(deciders=(monitor,), incidents=IncidentManager())
+    (attributed,) = aggregator.attributed_trace_snapshots()
+    assert attributed.authority == "authoritative"
+    assert attributed.snapshot.reason in ("bed-region-unavailable", "bed-observation-missing")
