@@ -179,7 +179,7 @@ def test_pose_vector_contract_and_negative_cases() -> None:
     assert len(reconnect_rows[-1]) == 56
 
 
-def test_policy_fixture_freezes_fall_v2_surface_and_state_transitions() -> None:
+def test_policy_fixture_freezes_fall_policy_surface_and_state_transitions() -> None:
     payload, fixture = _load(_POLICY_FIXTURE)
 
     assert payload == _canonical_bytes(fixture)

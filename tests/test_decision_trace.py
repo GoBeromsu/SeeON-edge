@@ -116,7 +116,7 @@ def _input(
     )
 
 
-def test_fall_trace_records_v2_transition_confirmation() -> None:
+def test_fall_trace_records_transition_confirmation() -> None:
     detector = _traceable_fall(camera_id="camera-a", facility_id="facility-a")
 
     # transition_votes=1: the first qualifying frame confirms the transition.

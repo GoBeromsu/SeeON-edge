@@ -18,6 +18,7 @@ from worker.interfaces import (
     DecodeSession,
     EncoderSession,
     EventSink,
+    ExecutionRecordSink,
     Extractor,
     FrameBus,
     FrameSubscription,
@@ -301,3 +302,18 @@ def test_single_frame_serving_client_does_not_claim_deferred_batching() -> None:
     assert isinstance(_ServingClient(), ServingClient)
     assert not isinstance(_ServingClient(), BatchServingClient)
     assert isinstance(_BatchServingClient(), BatchServingClient)
+
+
+def test_execution_record_sink_is_runtime_checkable_and_requires_try_emit() -> None:
+    class _Ok:
+        def try_emit(self, record: object) -> bool:
+            return bool(record)
+
+    class _Missing:
+        def emit(self, record: object) -> bool:
+            return bool(record)
+
+    assert ExecutionRecordSink.__module__ == "worker.interfaces.execution_records"
+    assert isinstance(_Ok(), ExecutionRecordSink)
+    assert not isinstance(_Missing(), ExecutionRecordSink)
+    assert not isinstance(object(), ExecutionRecordSink)

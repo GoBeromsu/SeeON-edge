@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import time
 from collections.abc import Mapping
 from typing import Final
@@ -9,6 +10,9 @@ from typing import Final
 from shared.events.execution_records import ExecutionRecordContractError, WireRecord
 from worker.interfaces.execution_records import ExecutionRecordSink
 from worker.types.metadata import MetadataFrame
+
+LOGGER = logging.getLogger(__name__)
+
 
 FRAME_UNIT_WINDOW: Final = 30
 PRODUCER_SDK = "sdk"
@@ -24,6 +28,11 @@ def try_emit(sink: ExecutionRecordSink | None, record: WireRecord | None) -> boo
     try:
         return bool(sink.try_emit(record))
     except Exception:  # noqa: BLE001 - producers must never raise
+        LOGGER.warning(
+            "execution-record sink.try_emit failed camera_id=%s record_kind=%s",
+            record.camera_id,
+            record.record_kind,
+        )
         return False
 
 
@@ -32,14 +41,29 @@ def frame_causal_unit_id(camera_id: str, worker_boot_id: str, stream_epoch: int,
     return f"{camera_id}:{worker_boot_id}:{stream_epoch}:frame:{seq // FRAME_UNIT_WINDOW}"
 
 
+NO_TRACK: Final = "no-track"
+NO_GENERATION: Final = "no-generation"
+
+
 def fall_causal_unit_id(
     camera_id: str,
     worker_boot_id: str,
     stream_epoch: int,
-    track_id: int,
-    generation: int,
+    track_id: int | None,
+    generation: int | None,
 ) -> str:
-    return f"{camera_id}:{worker_boot_id}:{stream_epoch}:{track_id}:{generation}"
+    """Logical unit of one fall decision: camera, boot, epoch, track, generation.
+
+    A snapshot with no track (window-gated, outside-detection-window) or a
+    track the classifier has not yet given a generation carries explicit
+    NO_TRACK / NO_GENERATION tokens. 0 is a real NVDCF track id and the real
+    first generation, so coercing absence to 0 would alias those records onto
+    a live unit and hide the absence in the join key. Pre-Gate-R placeholder
+    membership rule; see worker/pipeline/diagnostics/AGENTS.md.
+    """
+    track = NO_TRACK if track_id is None else str(track_id)
+    gen = NO_GENERATION if generation is None else str(generation)
+    return f"{camera_id}:{worker_boot_id}:{stream_epoch}:{track}:{gen}"
 
 
 def observed_time(metadata: MetadataFrame, observed_at_ns: int | None) -> tuple[str, int]:
@@ -88,12 +112,20 @@ def make_record(
             frame_seq=frame_seq,
             source_pts_ns=source_pts_ns,
         )
-    except ExecutionRecordContractError:
+    except ExecutionRecordContractError as error:
+        LOGGER.warning(
+            "execution-record contract rejected camera_id=%s record_kind=%s %s",
+            camera_id,
+            record_kind,
+            error,
+        )
         return None
 
 
 __all__ = [
     "FRAME_UNIT_WINDOW",
+    "NO_GENERATION",
+    "NO_TRACK",
     "PRODUCER_BACKEND",
     "PRODUCER_EVENT",
     "PRODUCER_MODEL",
