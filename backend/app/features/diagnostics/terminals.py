@@ -19,19 +19,26 @@ def refresh_unit_terminals(connection: sqlite3.Connection, unit_horizon_ns: int)
     than a Python pass over every unit per candidate: the previous shape was
     O(units^2) per ingest and cost half of every request on a 50k-unit DB.
     """
+    # The newest (boot, epoch) lane per camera is the one observed most
+    # recently. Boot ids are opaque (UUIDs): comparing them as strings marked
+    # a NEWER boot's units terminal whenever its id happened to sort lower,
+    # so live data was pruned first and a dead boot's units were kept.
     lanes = connection.execute(
         """
-        SELECT DISTINCT camera_id, worker_boot_id, stream_epoch FROM execution_units
+        SELECT camera_id, worker_boot_id, stream_epoch, MAX(last_observed_ns)
+        FROM execution_units
+        GROUP BY camera_id, worker_boot_id, stream_epoch
         """
     ).fetchall()
     if not lanes:
         return
     newest: dict[str, tuple[str, int]] = {}
-    for camera_id_raw, boot_raw, epoch_raw in lanes:
-        key = (str(boot_raw), int(epoch_raw))
-        current = newest.get(str(camera_id_raw))
-        if current is None or key > current:
-            newest[str(camera_id_raw)] = key
+    newest_seen: dict[str, int] = {}
+    for camera_id_raw, boot_raw, epoch_raw, last_raw in lanes:
+        camera_id, last_seen = str(camera_id_raw), int(last_raw)
+        if camera_id not in newest_seen or last_seen > newest_seen[camera_id]:
+            newest_seen[camera_id] = last_seen
+            newest[camera_id] = (str(boot_raw), int(epoch_raw))
     candidates = connection.execute(
         """
         WITH ordered AS (
@@ -55,7 +62,7 @@ def refresh_unit_terminals(connection: sqlite3.Connection, unit_horizon_ns: int)
         first_ns, last_ns, state = int(row[5]), int(row[6]), str(row[7])
         next_first = None if row[8] is None else int(row[8])
         by_horizon = next_first is not None and next_first > first_ns + unit_horizon_ns
-        by_epoch = (boot, epoch) < newest[camera_id]
+        by_epoch = (boot, epoch) != newest[camera_id]
         if not by_horizon and not by_epoch:
             continue
         if by_horizon:
