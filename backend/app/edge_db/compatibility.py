@@ -86,7 +86,7 @@ SCHEMA_18_IDENTITY: Final[MigrationIdentity] = (
 SCHEMA_19_IDENTITY: Final[MigrationIdentity] = (
     19,
     "strict_sixteen_table_application_schema",
-    "7ca0294b154e782de8d42267d4685415c2ede0ce58a1dd140fe538a4c5b1e9ec",
+    "650ddbab612389019ead5e994e9407c8f87f90177d40f88da5c16c8e3f129686",
 )
 
 # Explicit rolling-version matrix: exactly one schema is supported at runtime.

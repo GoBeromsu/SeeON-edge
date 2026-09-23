@@ -20,7 +20,6 @@ def test_delivery_attempt_outcomes_are_closed() -> None:
         "refused-retention-full",
         "exhausted-retained",
         "exhausted-retention-full",
-        "operator-blocked",
         "ack-removal-deferred",
     )
 
@@ -34,7 +33,6 @@ def test_delivery_attempt_outcomes_are_closed() -> None:
         ("refused-retention-full", 0, "PERMANENT", 422, False),
         ("exhausted-retained", 10, "exhausted", 599, True),
         ("exhausted-retention-full", 10, "exhausted", 599, False),
-        ("operator-blocked", 0, "CAMERA_MAPPING_MISSING", 409, False),
         ("ack-removal-deferred", 0, "acknowledge", None, None),
     ],
 )

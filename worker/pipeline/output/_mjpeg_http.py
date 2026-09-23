@@ -571,7 +571,6 @@ def _recovered_trace(
 ) -> RecoveredCameraTrace:
     return RecoveredCameraTrace(
         frames=tuple(_analysis_trace(frame) for frame in frames),
-        decisions=(),
         truncation=TraceTruncation(
             handoff_dropped_frames=_integer(truncation, "handoff_dropped_frames"),
             pruned_frames=_integer(truncation, "pruned_frames"),
