@@ -139,6 +139,10 @@ class FlowEvidenceBinding:
         published = self.publisher.publish(recovery.sealed, recovery.events)
         for contributor in recovery.sealed.contributors:
             self.stager.complete(contributor.event_ref, str(published.clip_id))
+        # ponytail: publish succeeded -- retire the crash-recovery sidecar so a
+        # future restart's replay_sealed() does not re-publish an
+        # already-completed clip and hit ClipIdCollisionError (issue #578).
+        self.sidecars.remove(recovery)
 
 
 def _admission_from_stage_result(result: object) -> tuple[bool, str | None]:

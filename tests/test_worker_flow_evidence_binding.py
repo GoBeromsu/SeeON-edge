@@ -57,9 +57,11 @@ class _Stager:
 @dataclass
 class _Publisher:
     fail: bool = False
+    calls: int = 0
 
     def publish(self, sealed: object, events: object) -> object:
         del events
+        self.calls += 1
         if self.fail:
             raise FlowClipPublicationError("publication failed")
         return type("_Published", (), {"clip_id": sealed.clip_id})()
@@ -189,6 +191,35 @@ def test_refused_recording_retries_on_tick(tmp_path: Path) -> None:
     assert actor.smart_record_start_refused_total == 1
     actor.tick()
     assert plane.starts == [1]
+
+
+def test_successful_seal_retires_the_sidecar_so_a_restart_does_not_replay_it(
+    tmp_path: Path,
+) -> None:
+    """Regression for #578: a completed clip must not be replayed forever.
+
+    Before the fix, '_publish_recovery' never called 'sidecars.remove', so
+    every sealed clip's recovery record survived on disk and
+    'replay_sealed' (run at every worker boot) republished it, hitting
+    'ClipIdCollisionError' since the clip's directory already existed.
+    """
+    plane, now = _Plane(), [0.0]
+    actor, binding, stager, publisher = _binding(
+        plane, now, [datetime(2026, 1, 1, tzinfo=UTC)], tmp_path
+    )
+    binding.emit_for_frame(_event("one"), _trigger())
+    now[0] = 30.0
+    actor.tick()
+    plane.seal(1)
+    assert stager.completed == [("one", "primary-clip")]
+    assert publisher.calls == 1
+
+    # The sidecar must be gone once publication succeeds ...
+    assert binding.sidecars.pending_for_camera("camera-a") == ()
+
+    # ... so a simulated restart's replay_sealed() has nothing left to redo.
+    binding.replay_sealed()
+    assert publisher.calls == 1
 
 
 def test_publication_failure_surfaces_without_completing_the_incident(tmp_path: Path) -> None:
