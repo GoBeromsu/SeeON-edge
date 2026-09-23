@@ -66,6 +66,25 @@ def fall_causal_unit_id(
     return f"{camera_id}:{worker_boot_id}:{stream_epoch}:{track}:{gen}"
 
 
+NO_MODULE: Final = "no-module"
+
+
+def module_causal_unit_id(
+    camera_id: str,
+    worker_boot_id: str,
+    stream_epoch: int,
+    module_qualified_id: str | None,
+    frame_seq: int,
+) -> str:
+    """Logical unit for a non-fall or unattributed decision: module + frame bucket.
+
+    Keeps bed-exit / window-gated / unattributed snapshots out of any fall
+    unit. Pre-Gate-R placeholder membership like the frame bucket.
+    """
+    module = NO_MODULE if module_qualified_id is None else module_qualified_id
+    return f"{camera_id}:{worker_boot_id}:{stream_epoch}:{module}:{frame_seq // FALL_WINDOW_FRAMES}"
+
+
 def observed_time(metadata: MetadataFrame, observed_at_ns: int | None) -> tuple[str, int]:
     if observed_at_ns is not None:
         return "monotonic", observed_at_ns
@@ -124,6 +143,7 @@ def make_record(
 
 __all__ = [
     "NO_GENERATION",
+    "NO_MODULE",
     "NO_TRACK",
     "PRODUCER_BACKEND",
     "PRODUCER_EVENT",
@@ -133,6 +153,7 @@ __all__ = [
     "fall_causal_unit_id",
     "frame_causal_unit_id",
     "make_record",
+    "module_causal_unit_id",
     "monotonic_or",
     "observed_time",
     "try_emit",

@@ -65,3 +65,18 @@ Seam default is `None` (feature off). No stub sink.
 Focused tests: `tests/test_execution_record_lanes.py`,
 `tests/test_execution_record_exporter.py`. Boundary:
 `uv run --group lint lint-imports`.
+
+## Attribution (every policy.decision names its producer)
+
+`EventAggregator.attributed_trace_snapshots()` tags each snapshot with the
+producing decider's `DecisionIdentity` (from composition, per module) and an
+`authority_role` (`authoritative`, or `shadow` for the trailing
+`last_shadow_trace_count` snapshots of a `ShadowTraceProvider` such as the
+bed-exit monitor). `policy.decision` writes `module_qualified_id` and
+`authority_role` into the payload, computes `decision_trace_id` with that
+module's identity only, and picks the causal unit by module: the fall
+track/generation unit for `fall.v2`, a module-scoped frame unit otherwise
+(`NO_MODULE` when unattributed). `model.score` is emitted only for the fall
+decider's own authoritative snapshots. The alert audit's `decision_trace_id`
+is computed with the identity of the decider that produced that event. No
+snapshot ever borrows another module's identity or unit.

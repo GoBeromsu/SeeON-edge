@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from shared.events.execution_records import WireRecord
 from worker.domains.fall.classifier import FALL_WINDOW_FRAMES
+from worker.domains.registry import FALL_MODULE_QUALIFIED_ID
 from worker.pipeline.diagnostics.record_builder import (
     PRODUCER_MODEL,
     PRODUCER_POLICY,
@@ -11,6 +12,7 @@ from worker.pipeline.diagnostics.record_builder import (
     fall_causal_unit_id,
     frame_causal_unit_id,
     make_record,
+    module_causal_unit_id,
     monotonic_or,
     observed_time,
 )
@@ -137,9 +139,21 @@ def policy_decision_record(
     frame_seq: int,
     source_pts_ns: int | None,
     generation: int | None,
+    module_qualified_id: str | None,
+    authority_role: str,
     decision_trace_id: str | None = None,
     observed_at_ns: int | None = None,
 ) -> WireRecord | None:
+    """One policy.decision record attributed to the module that produced it.
+
+    ``module_qualified_id`` is the compiled module (``fall.v2``, ``bed_exit.v1``,
+    ...) or None when composition gave the decider no identity; it is written
+    into the payload and selects the causal unit. Only the fall module uses the
+    fall track/generation unit; any other module (or an unattributed snapshot)
+    gets a module-scoped frame unit so it never joins a fall unit.
+    ``authority_role`` is ``authoritative`` or ``shadow``; a shadow snapshot is
+    never a cause.
+    """
     return make_record(
         record_kind="policy.decision",
         camera_id=camera_id,
@@ -149,8 +163,14 @@ def policy_decision_record(
         producer=PRODUCER_POLICY,
         observed_at_ns=monotonic_or(observed_at_ns),
         time_quality="monotonic",
-        causal_unit_id=fall_causal_unit_id(
-            camera_id, worker_boot_id, stream_epoch, snapshot.track_id, generation
+        causal_unit_id=(
+            fall_causal_unit_id(
+                camera_id, worker_boot_id, stream_epoch, snapshot.track_id, generation
+            )
+            if module_qualified_id == FALL_MODULE_QUALIFIED_ID
+            else module_causal_unit_id(
+                camera_id, worker_boot_id, stream_epoch, module_qualified_id, frame_seq
+            )
         ),
         outcome="triggered" if snapshot.triggered else snapshot.current_state,
         payload={
@@ -162,8 +182,12 @@ def policy_decision_record(
             "bed_id": snapshot.bed_id,
             "values": dict(snapshot.values),
             "missing_values": dict(snapshot.missing_values),
+            # Which compiled module produced this snapshot (None: unattributed)
+            # and whether it is a cause or a shadow evaluation.
+            "module_qualified_id": module_qualified_id,
+            "authority_role": authority_role,
             # Same id the relayed alert carries in audit.decision_trace_id;
-            # None when the pump had no decision identity to attribute to.
+            # None when the producing decider had no identity to attribute to.
             "decision_trace_id": decision_trace_id,
         },
         frame_seq=frame_seq,
