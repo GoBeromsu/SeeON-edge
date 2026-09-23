@@ -12,6 +12,7 @@ import shared.events.envelope_limits as limits
 from contracts.event import EventEvidence
 from contracts.worker_config import CONFIG_VERSION_KEY
 from shared.events.delivery_queue import (
+    AdmissionResult,
     DeliveryQueue,
     EventEntry,
     SnapshotAttachmentEntry,
@@ -71,7 +72,7 @@ class DurableEvidenceStager:
     def queue(self) -> DeliveryQueue:
         return self._queue
 
-    def stage(self, event: WorkerEventPayload) -> None:
+    def stage(self, event: WorkerEventPayload) -> AdmissionResult:
         edge_event_id = _required_text(event, "edge_event_id")
         detected_at = _required_text(event, "detected_at")
         event_type = _required_text(event, "event_type")
@@ -90,6 +91,7 @@ class DurableEvidenceStager:
         )
         if not result.accepted:
             raise RuntimeError(f"event delivery admission failed: {result.fault}")
+        return result
 
     def attach_snapshot(self, edge_event_id: str, snapshot: EventEvidence) -> None:
         result = self._queue.try_admit(

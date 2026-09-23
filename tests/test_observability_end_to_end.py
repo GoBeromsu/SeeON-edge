@@ -2,17 +2,25 @@
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from typing import Any
 from uuid import UUID
 
 from observability_stack_fixtures import serve_backend, wait_until
 from test_execution_record_wiring import _metadata, _pump
 
+from shared.events.evidence_export_contract import EventReceipt
 from shared.events.execution_records import WireProvenance
 from shared.events.execution_records_client import ExecutionRecordsClient
 from worker.domains.registry import FALL_MODULE_QUALIFIED_ID
 from worker.pipeline.diagnostics.exporter import ExecutionRecordExporter
 from worker.pipeline.diagnostics.lanes import ExecutionRecordLanes
+from worker.pipeline.output.evidence.evidence_sender import EvidenceSender, SenderConfig
+from worker.pipeline.output.evidence.evidence_stager import DurableEvidenceStager
+from worker.pipeline.output.evidence.flow_clip_publication import FlowClipPublicationError
+from worker.pipeline.output.evidence.flow_sealed_sidecar import FlowSealedSidecars
+from worker.pipeline.output.evidence.smart_record_actor import SmartRecordActor
+from worker.runtime.flow.evidence import FlowEvidenceBinding
 from worker.runtime.flow.execution_record_emit import emit_policy_consume
 from worker.runtime.flow.policy_pump import DecisionIdentity
 from worker.types.metadata import MetadataCounters, MetadataFrame
@@ -109,10 +117,61 @@ def _availability_kind_at(body: dict[str, Any], timestamp_ns: int) -> str | None
     return None
 
 
+class _RecordingPlane:
+    def start_recording(
+        self, camera_id: str, *, lookback_sec: int, duration_sec: int, on_sealed: object
+    ) -> int:
+        del camera_id, lookback_sec, duration_sec, on_sealed
+        return 1
+
+    def stop_recording(self, camera_id: str, session_id: int) -> None:
+        del camera_id, session_id
+
+
+class _NoClipPublisher:
+    def publish(self, sealed: object, events: object) -> object:
+        del sealed, events
+        raise FlowClipPublicationError("clip publication unused in hermetic e2e")
+
+
 def test_alert_joins_record_with_four_kinds_provenance_and_availability(tmp_path) -> None:
+    """Five kinds plus decision -> delivery -> acceptance.
+
+    decision->delivery is by frame identity (camera, boot, epoch, frame_seq)
+    plus edge_event_id (delivery.causal_unit_id). decision_trace_id joins the
+    triggered policy.decision to the alert audit, not to delivery/acceptance.
+    """
     lanes = ExecutionRecordLanes(lane_capacity=64)
     emitted: list[object] = []
-    pump = _pump(lanes, identity=_identity(), emitted=emitted, fall_transition=0.9)
+    queue_dir = tmp_path / "delivery-queue"
+    stager = DurableEvidenceStager(queue_dir, camera_id=_CAMERA, facility_id="facility-a")
+    plane = _RecordingPlane()
+    sealed: list[FlowEvidenceBinding] = []
+    actor = SmartRecordActor(
+        camera_id=_CAMERA,
+        media_plane=plane,
+        clock=lambda: 0.0,
+        sink=lambda clip: sealed[0].on_sealed(clip),
+        lookback_sec=10,
+        clip_id_factory=lambda: "primary-clip",
+    )
+    binding = FlowEvidenceBinding(
+        actor=actor,
+        stager=stager,
+        publisher=_NoClipPublisher(),
+        sidecars=FlowSealedSidecars(tmp_path / "sidecars"),
+        camera_id=_CAMERA,
+        execution_records=lanes,
+        now=lambda: datetime(2026, 1, 1, tzinfo=UTC),
+    )
+    sealed.append(binding)
+    pump = _pump(
+        lanes,
+        identity=_identity(),
+        emitted=emitted,
+        fall_transition=0.9,
+        event_sink=binding,
+    )
     exporter: ExecutionRecordExporter | None = None
     with serve_backend(tmp_path, budget_bytes=_BUDGET_BYTES, relay_token=_RELAY_TOKEN) as backend:
         try:
@@ -120,44 +179,106 @@ def test_alert_joins_record_with_four_kinds_provenance_and_availability(tmp_path
             exporter.start()
             _drive_frames(pump, 3, publish=True, consume=True)
 
-            def _triggered() -> bool:
-                return bool(_triggered_decisions(_query(backend)))
+            def _five_kinds() -> bool:
+                kinds = {row["record_kind"] for row in _query(backend)["records"]}
+                return {
+                    "sdk.frame",
+                    "model.score",
+                    "policy.decision",
+                    "policy.consume",
+                    "event.delivery",
+                }.issubset(kinds)
 
-            wait_until(_triggered, timeout=5.0, what="triggered policy.decision on Backend")
+            wait_until(_five_kinds, timeout=5.0, what="five execution-record kinds on Backend")
             body = _query(backend)
             triggered = _triggered_decisions(body)
             assert triggered, "the immediate classifier must trigger a fall in this fixture"
-            (record,) = triggered
+            (decision,) = triggered
             assert emitted, "a triggered decision must emit an alert"
             (event,) = emitted
             audit = event.audit  # type: ignore[attr-defined]
             assert audit is not None
-            assert audit["decision_trace_id"] == record["payload"]["decision_trace_id"]
+            assert audit["decision_trace_id"] == decision["payload"]["decision_trace_id"]
 
             kinds = {row["record_kind"] for row in body["records"]}
             assert "sdk.frame" in kinds
             assert "model.score" in kinds
             assert "policy.decision" in kinds
             assert "policy.consume" in kinds
+            assert "event.delivery" in kinds
 
-            provenance_ids = {row["provenance_id"] for row in body["records"]}
+            deliveries = [
+                row
+                for row in body["records"]
+                if row["record_kind"] == "event.delivery" and row["outcome"] == "admitted"
+            ]
+            assert deliveries, "staging must emit a stream-scoped event.delivery"
+            (delivery,) = deliveries
+            assert delivery["frame_seq"] == decision["frame_seq"]
+            assert delivery["frame_seq"] is not None
+            # Query is camera-scoped; worker_boot_id / stream_epoch are stored
+            # but not projected on ExecutionRecordView.
+            edge_event_id = str(event.identity)  # type: ignore[attr-defined]
+            assert delivery["causal_unit_id"] == edge_event_id
+
+            class _Accepting:
+                def send_event(self, payload_json: str, edge_event_id: str) -> EventReceipt:
+                    del payload_json
+                    return EventReceipt("accepted_local", edge_event_id, "")
+
+                def send_snapshot_attachment(self, payload: dict[str, object]) -> None:
+                    del payload
+
+                def send_snapshot_disposition(self, payload: dict[str, object]) -> None:
+                    del payload
+
+                def send_clip(self, claim: object) -> None:
+                    del claim
+                    raise AssertionError("no clip delivery expected")
+
+            sender = EvidenceSender(
+                queue_dir,
+                SenderConfig("http://relay.test", "token", _CAMERA),
+                transport=_Accepting(),
+                execution_records=lanes,
+                observing_boot_id="boot-observer",
+            )
+            sender.run_once()
+
+            def _acceptance() -> bool:
+                return any(
+                    row["record_kind"] == "backend.acceptance" for row in _query(backend)["records"]
+                )
+
+            wait_until(_acceptance, timeout=5.0, what="backend.acceptance on Backend")
+            joined = _query(backend)
+            acceptances = [
+                row for row in joined["records"] if row["record_kind"] == "backend.acceptance"
+            ]
+            assert acceptances
+            (acceptance,) = acceptances
+            assert acceptance["causal_unit_id"] == edge_event_id
+            assert acceptance["causal_unit_id"] == delivery["causal_unit_id"]
+            assert acceptance["outcome"] == "accepted_local"
+
+            provenance_ids = {row["provenance_id"] for row in joined["records"]}
             assert len(provenance_ids) == 1
             (provenance_id,) = provenance_ids
             assert provenance_id
 
-            observed = [int(row["observed_at_ns"]) for row in body["records"]]
+            observed = [int(row["observed_at_ns"]) for row in joined["records"]]
             first_observed = min(observed)
             last_observed = max(observed)
-            assert _availability_kind_at(body, first_observed) == "AVAILABLE"
-            assert _availability_kind_at(body, last_observed) == "AVAILABLE"
+            assert _availability_kind_at(joined, first_observed) == "AVAILABLE"
+            assert _availability_kind_at(joined, last_observed) == "AVAILABLE"
             tail = [
                 row
-                for row in body["availability"]
+                for row in joined["availability"]
                 if int(row["from_ns"]) > last_observed and row["kind"] == "UNKNOWN"
             ]
             assert tail, "the tail after last_observed must be UNKNOWN"
 
-            queryable = body["queryable_range"]
+            queryable = joined["queryable_range"]
             assert queryable["min_observed_at_ns"] == first_observed
             assert queryable["max_observed_at_ns"] == last_observed
         finally:

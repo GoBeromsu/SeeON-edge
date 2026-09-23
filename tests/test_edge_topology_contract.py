@@ -130,11 +130,26 @@ def test_edge_worker_runtime_status_environment_contract() -> None:
         "ML_WORKER_FLOW_PARSER_LIBRARY",
         "NVIDIA_DRIVER_CAPABILITIES",
         "ML_RTSP_ALLOW_PRIVATE_DESTINATIONS",
+        "ML_WORKER_EXECUTION_RECORDS_ENABLED",
+        "ML_WORKER_EXECUTION_RECORDS_LANE_CAPACITY",
+        "ML_WORKER_EXECUTION_RECORDS_BATCH_MAX",
+        "ML_WORKER_EXECUTION_RECORDS_FLUSH_MS",
         "ML_RTSP_ALLOW_LOCAL_DESTINATIONS",
     }
     assert worker_environment["ML_RTSP_ALLOW_PRIVATE_DESTINATIONS"] == (
         "${ML_RTSP_ALLOW_PRIVATE_DESTINATIONS:-0}"
     )
+    # Execution-record export is a seam: OFF by default, and the sizes have NO
+    # compose default so an enabled-but-unsized deployment refuses to start.
+    assert worker_environment["ML_WORKER_EXECUTION_RECORDS_ENABLED"] == (
+        "${ML_WORKER_EXECUTION_RECORDS_ENABLED:-0}"
+    )
+    for key in (
+        "ML_WORKER_EXECUTION_RECORDS_LANE_CAPACITY",
+        "ML_WORKER_EXECUTION_RECORDS_BATCH_MAX",
+        "ML_WORKER_EXECUTION_RECORDS_FLUSH_MS",
+    ):
+        assert worker_environment[key] == "${" + key + ":-}"
     assert worker_environment["ML_RTSP_ALLOW_LOCAL_DESTINATIONS"] == (
         "${ML_RTSP_ALLOW_LOCAL_DESTINATIONS:-0}"
     )

@@ -22,7 +22,10 @@ from shared.events.evidence_export_contract import (
     EventReceipt,
 )
 from worker.interfaces.execution_records import ExecutionRecordSink
-from worker.pipeline.diagnostics.emit_delivery import backend_acceptance_record
+from worker.pipeline.diagnostics.emit_delivery import (
+    backend_acceptance_record,
+    delivery_attempt_record,
+)
 from worker.pipeline.diagnostics.record_builder import try_emit
 from worker.pipeline.output.evidence.evidence_outbox_types import (
     ClipId,
@@ -196,6 +199,36 @@ class EvidenceSender:
             undeferred = due
         return next((item for item in undeferred if item["kind"] == "EVENT"), undeferred[0])
 
+    def _emit_event_delivery(
+        self,
+        entry: dict[str, object],
+        *,
+        outcome: str,
+        attempt: int,
+        failure_class: str | None,
+        status_code: int | None,
+        retained: bool | None,
+        dead_letter_dir: str | None = None,
+    ) -> None:
+        if entry["kind"] != "EVENT":
+            return
+        try_emit(
+            self._execution_records,
+            delivery_attempt_record(
+                camera_id=str(entry["camera_id"]),
+                observing_boot_id=str(self._observing_boot_id),
+                edge_event_id=str(entry["edge_event_id"]),
+                outcome=outcome,
+                attempt=attempt,
+                max_attempts=_MAX_ENTRY_ATTEMPTS,
+                failure_class=failure_class,
+                status_code=status_code,
+                retained=retained,
+                dead_letter_dir=dead_letter_dir,
+                queue_kind=str(entry["kind"]),
+            ),
+        )
+
     def run_once(self) -> SenderStep:
         queue = DeliveryQueue(self.queue_directory)
         entries = tuple(queue.entries())
@@ -226,6 +259,15 @@ class EvidenceSender:
                     _MAX_ENTRY_ATTEMPTS,
                     queue.dead_letter_directory,
                 )
+                self._emit_event_delivery(
+                    entry,
+                    outcome="exhausted-retained",
+                    attempt=_MAX_ENTRY_ATTEMPTS,
+                    failure_class="exhausted",
+                    status_code=_EXHAUSTED_STATUS,
+                    retained=True,
+                    dead_letter_dir=queue.dead_letter_directory.name,
+                )
                 return SenderStep.RETRY_SCHEDULED
             # Retention is full. The entry stays in the live queue, so it MUST be
             # deferred: without that it is reselected on every call forever, the
@@ -239,6 +281,15 @@ class EvidenceSender:
                 entry_id,
                 _MAX_ENTRY_ATTEMPTS,
                 queue.dead_letter_directory,
+            )
+            self._emit_event_delivery(
+                entry,
+                outcome="exhausted-retention-full",
+                attempt=_MAX_ENTRY_ATTEMPTS,
+                failure_class="exhausted",
+                status_code=_EXHAUSTED_STATUS,
+                retained=False,
+                dead_letter_dir=queue.dead_letter_directory.name,
             )
             return SenderStep.RETRY_SCHEDULED
         try:
@@ -257,6 +308,14 @@ class EvidenceSender:
                 attempts + 1,
                 _MAX_ENTRY_ATTEMPTS,
             )
+            self._emit_event_delivery(
+                entry,
+                outcome="retry-counted",
+                attempt=attempts + 1,
+                failure_class="exception",
+                status_code=None,
+                retained=None,
+            )
             return SenderStep.RETRY_SCHEDULED
         if isinstance(result, DeliveryFailure):
             if (
@@ -268,6 +327,14 @@ class EvidenceSender:
                 # instead of re-sending it on every tick.
                 self._deferred.add(entry_id)
                 self._blocked_until[entry_id] = self._clock() + _OPERATOR_BLOCKED_RETRY_SECONDS
+                self._emit_event_delivery(
+                    entry,
+                    outcome="operator-blocked",
+                    attempt=attempts,
+                    failure_class=str(result.code),
+                    status_code=result.status_code,
+                    retained=False,
+                )
                 return SenderStep.RETRY_SCHEDULED
             if (
                 result.disposition is DeliveryDisposition.PERMANENT
@@ -287,6 +354,15 @@ class EvidenceSender:
                         result.status_code,
                         queue.dead_letter_directory,
                     )
+                    self._emit_event_delivery(
+                        entry,
+                        outcome="refused-retained",
+                        attempt=attempts,
+                        failure_class=result.disposition.name,
+                        status_code=result.status_code,
+                        retained=True,
+                        dead_letter_dir=queue.dead_letter_directory.name,
+                    )
                     return SenderStep.RETRY_SCHEDULED
                 # Retention full: the entry remains queued and must be deferred,
                 # or this refused entry is reselected forever and blocks every
@@ -300,6 +376,15 @@ class EvidenceSender:
                     result.status_code,
                     queue.dead_letter_directory,
                 )
+                self._emit_event_delivery(
+                    entry,
+                    outcome="refused-retention-full",
+                    attempt=attempts,
+                    failure_class=result.disposition.name,
+                    status_code=result.status_code,
+                    retained=False,
+                    dead_letter_dir=queue.dead_letter_directory.name,
+                )
                 return SenderStep.RETRY_SCHEDULED
             self._deferred.add(entry_id)
             if result.disposition is DeliveryDisposition.RETRY:
@@ -308,8 +393,24 @@ class EvidenceSender:
                 # to survive, so it must NOT consume the attempt budget. Counting
                 # it turned an outage into mass dead-lettering of perfectly good
                 # evidence -- the opposite of the guarantee.
+                self._emit_event_delivery(
+                    entry,
+                    outcome="retry-transient",
+                    attempt=attempts,
+                    failure_class=result.disposition.name,
+                    status_code=result.status_code,
+                    retained=None,
+                )
                 return SenderStep.RETRY_SCHEDULED
             self._attempts[entry_id] = attempts + 1
+            self._emit_event_delivery(
+                entry,
+                outcome="retry-counted",
+                attempt=attempts + 1,
+                failure_class=result.disposition.name,
+                status_code=result.status_code,
+                retained=None,
+            )
             return SenderStep.RETRY_SCHEDULED
         if (
             entry["kind"] == "EVENT"
@@ -317,6 +418,14 @@ class EvidenceSender:
             and result.edge_event_id != entry["edge_event_id"]
         ):
             self._attempts[entry_id] = attempts + 1
+            self._emit_event_delivery(
+                entry,
+                outcome="retry-counted",
+                attempt=attempts + 1,
+                failure_class="edge_event_id_mismatch",
+                status_code=None,
+                retained=None,
+            )
             return SenderStep.RETRY_SCHEDULED
         self._attempts.pop(entry_id, None)
         try:
@@ -333,6 +442,14 @@ class EvidenceSender:
                 "evidence entry %s was delivered but could not be removed from "
                 "the queue; deferring it so newer evidence still drains",
                 entry_id,
+            )
+            self._emit_event_delivery(
+                entry,
+                outcome="ack-removal-deferred",
+                attempt=attempts,
+                failure_class="acknowledge",
+                status_code=None,
+                retained=None,
             )
             return SenderStep.RETRY_SCHEDULED
         self._deferred.discard(entry_id)

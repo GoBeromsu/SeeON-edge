@@ -23,8 +23,40 @@ scope.
 - `emit_delivery.py`: event.delivery and backend.acceptance payload builders.
   They never change control flow.
 
+## event.delivery outcomes
+
+Two producers share the kind and join on `causal_unit_id == edge_event_id`:
+
+- **Admission** (`FlowEvidenceBinding`): stream-scoped. Stamps the triggering
+  frame (`worker_boot_id`, `source_generation`, `stream_epoch`, `frame_seq`).
+  Outcome is `admitted` or `refused` from the durable queue's `try_admit`
+  result (or `stage()` raising). Never emit `admitted` without that proof.
+- **Sender dispositions** (`EvidenceSender.run_once`): process-scoped by
+  convention, like `backend.acceptance`. Stamps the observing boot and
+  `PROCESS_SCOPE` for generation/epoch. The wire `PROCESS_SCOPED_KINDS` set
+  still lists only `backend.acceptance`; stream-scoped admission records of
+  the same kind must keep the real frame identity. Closed vocabulary in
+  `DELIVERY_ATTEMPT_OUTCOMES`:
+  `retry-transient` (RETRY / 5xx / unreachable; attempt budget not consumed),
+  `retry-counted` (attempt consumed: send exception, PERMANENT non-4xx,
+  receipt `edge_event_id` mismatch),
+  `refused-retained` (PERMANENT 4xx kept in the dead-letter directory),
+  `refused-retention-full` (PERMANENT 4xx, retention area full, still queued),
+  `exhausted-retained`, `exhausted-retention-full`,
+  `operator-blocked` (`CAMERA_MAPPING_MISSING`; `run_once` applies that wait
+  only to CLIP entries, so EVENT never takes this outcome today),
+  `ack-removal-deferred` (delivered but `queue.acknowledge` failed).
+
+These sender outcomes are the sender's own dispositions, not Hub acceptance.
+`backend.acceptance` is the only record that says `accepted_local` /
+`hub-accepted`.
+
+Focused tests also include `tests/test_execution_record_delivery.py`,
+`tests/test_evidence_sender.py`, `tests/test_worker_flow_evidence_binding.py`,
+`tests/test_observability_end_to_end.py`.
+
 `producer_sequence` is assigned by the lane. `causal_unit_id` for sdk records
-uses `seq // 30` as a pre-Gate-R frame bucket; no `cpu.projection` producer
+uses `seq // FALL_WINDOW_FRAMES` (imported from `worker.domains.fall.classifier`, the deployed 30-frame window) as a pre-Gate-R frame bucket; no `cpu.projection` producer
 exists yet. Fall units use explicit `NO_TRACK` / `NO_GENERATION` tokens when
 track or generation is absent.
 

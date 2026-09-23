@@ -50,6 +50,14 @@ TIME_QUALITIES: Final = frozenset({"monotonic", "wall", "pts", "unknown"})
 # It is not a fallback for a missing stream identity on any other kind.
 PROCESS_SCOPED_KINDS: Final = frozenset({"backend.acceptance"})
 PROCESS_SCOPE: Final = 0
+
+# event.delivery has two producers with different scopes and is deliberately
+# NOT in PROCESS_SCOPED_KINDS: the Flow evidence binding records queue admission
+# with the real frame identity (stream-scoped), while the durable-queue drainer
+# records each attempt outcome with the observing boot and PROCESS_SCOPE
+# (process-scoped, same convention as backend.acceptance). Both share
+# causal_unit_id == edge_event_id. A consumer must not assume one scope for
+# this kind.
 STORAGE_STATES: Final = frozenset({"committed", "STORAGE_UNAVAILABLE"})
 
 _JSON_KW: Final = {"sort_keys": True, "separators": (",", ":"), "ensure_ascii": False}

@@ -377,6 +377,60 @@
       "category": "legacy compatibility",
       "authority": "baked http://ml-api:8000",
       "behavior": "retired; worker startup rejects injection unconditionally"
+    },
+    {
+      "name": "ML_API_EXECUTION_RECORDS_ENABLED",
+      "category": "deployment artifact",
+      "authority": "deployment env",
+      "behavior": "OFF by default; enables schema-19 execution-record ingest/query on ml-api",
+      "compose": true,
+      "example": true,
+      "service_environment": true
+    },
+    {
+      "name": "ML_API_EXECUTION_RECORDS_BUDGET_BYTES",
+      "category": "deployment artifact",
+      "authority": "deployment env (value from Gate M measurement, never a code default)",
+      "behavior": "required when ML_API_EXECUTION_RECORDS_ENABLED=1; total retention envelope in bytes; ml-api refuses to boot without it",
+      "compose": true,
+      "example": true,
+      "service_environment": true
+    },
+    {
+      "name": "ML_WORKER_EXECUTION_RECORDS_ENABLED",
+      "category": "deployment artifact",
+      "authority": "deployment env",
+      "behavior": "OFF by default; enables D0 execution-record export from ml-worker",
+      "compose": true,
+      "example": true,
+      "service_environment": true
+    },
+    {
+      "name": "ML_WORKER_EXECUTION_RECORDS_LANE_CAPACITY",
+      "category": "deployment artifact",
+      "authority": "deployment env (value from Gate M measurement)",
+      "behavior": "required when enabled; bounded in-memory lane depth per (camera, boot, producer); overflow is reported as a gap",
+      "compose": true,
+      "example": true,
+      "service_environment": true
+    },
+    {
+      "name": "ML_WORKER_EXECUTION_RECORDS_BATCH_MAX",
+      "category": "deployment artifact",
+      "authority": "deployment env (value from Gate M measurement)",
+      "behavior": "required when enabled; max records per relay POST",
+      "compose": true,
+      "example": true,
+      "service_environment": true
+    },
+    {
+      "name": "ML_WORKER_EXECUTION_RECORDS_FLUSH_MS",
+      "category": "deployment artifact",
+      "authority": "deployment env (value from Gate M measurement)",
+      "behavior": "required when enabled; max age before a partial batch is flushed",
+      "compose": true,
+      "example": true,
+      "service_environment": true
     }
   ]
 }

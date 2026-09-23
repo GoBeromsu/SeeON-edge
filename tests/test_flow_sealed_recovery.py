@@ -6,6 +6,7 @@ from pathlib import Path
 
 import pytest
 
+from shared.events.delivery_queue import AdmissionResult
 from worker.interfaces.media_plane import RecordingInfo
 from worker.pipeline.output.evidence.flow_clip_publication import FlowClipPublicationError
 from worker.pipeline.output.evidence.flow_sealed_sidecar import FlowSealedSidecars
@@ -36,8 +37,8 @@ class _Plane:
 class _Stager:
     completed: list[tuple[str, str | None]] = field(default_factory=list)
 
-    def stage(self, event: dict[str, object]) -> None:
-        pass
+    def stage(self, event: dict[str, object]) -> AdmissionResult:
+        return AdmissionResult(True)
 
     def complete(self, edge_event_id: str, clip_id: str | None) -> None:
         self.completed.append((edge_event_id, clip_id))

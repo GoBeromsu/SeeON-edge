@@ -6,6 +6,7 @@ from pathlib import Path
 
 import pytest
 
+from shared.events.delivery_queue import AdmissionResult
 from worker.interfaces.media_plane import RecordingInfo, RecordingRefused
 from worker.pipeline.output.evidence.flow_clip_publication import FlowClipPublicationError
 from worker.pipeline.output.evidence.flow_sealed_sidecar import FlowSealedSidecars
@@ -45,8 +46,9 @@ class _Stager:
     staged: list[dict[str, object]] = field(default_factory=list)
     completed: list[tuple[str, str | None]] = field(default_factory=list)
 
-    def stage(self, event: dict[str, object]) -> None:
+    def stage(self, event: dict[str, object]) -> AdmissionResult:
         self.staged.append(event)
+        return AdmissionResult(True)
 
     def complete(self, edge_event_id: str, clip_id: str | None) -> None:
         self.completed.append((edge_event_id, clip_id))
@@ -203,3 +205,79 @@ def test_publication_failure_surfaces_without_completing_the_incident(tmp_path: 
     assert stager.completed == []
     assert actor.state.name == "FINALIZING"
     assert len(binding.sidecars.pending_for_camera("camera-a")) == 1
+
+
+class _CollectingSink:
+    def __init__(self) -> None:
+        self.records: list[object] = []
+
+    def try_emit(self, record: object) -> bool:
+        self.records.append(record)
+        return True
+
+
+def test_staging_with_a_sink_emits_admitted_delivery_with_frame_identity(
+    tmp_path: Path,
+) -> None:
+    plane, now = _Plane(), [0.0]
+    _actor, binding, stager, _ = _binding(plane, now, [datetime(2026, 1, 1, tzinfo=UTC)], tmp_path)
+    sink = _CollectingSink()
+    binding.execution_records = sink
+    trigger = _trigger()
+    binding.emit_for_frame(_event("one"), trigger)
+    assert stager.staged
+    (record,) = sink.records
+    assert record.record_kind == "event.delivery"  # type: ignore[attr-defined]
+    assert record.outcome == "admitted"  # type: ignore[attr-defined]
+    assert record.worker_boot_id == trigger.worker_boot_id  # type: ignore[attr-defined]
+    assert record.source_generation == trigger.source_generation  # type: ignore[attr-defined]
+    assert record.stream_epoch == trigger.stream_epoch  # type: ignore[attr-defined]
+    assert record.frame_seq == trigger.seq  # type: ignore[attr-defined]
+    assert record.causal_unit_id == "one"  # type: ignore[attr-defined]
+
+
+def test_refusing_stager_emits_refused_before_reraising(tmp_path: Path) -> None:
+    plane, now = _Plane(), [0.0]
+    _actor, binding, stager, _ = _binding(plane, now, [datetime(2026, 1, 1, tzinfo=UTC)], tmp_path)
+
+    def _refuse(event: dict[str, object]) -> None:
+        del event
+        raise RuntimeError("event delivery admission failed: entry_capacity")
+
+    stager.stage = _refuse  # type: ignore[method-assign]
+    sink = _CollectingSink()
+    binding.execution_records = sink
+    with pytest.raises(RuntimeError, match="entry_capacity"):
+        binding.emit_for_frame(_event("one"), _trigger())
+    (record,) = sink.records
+    assert record.record_kind == "event.delivery"  # type: ignore[attr-defined]
+    assert record.outcome == "refused"  # type: ignore[attr-defined]
+    assert record.payload["reason"] == "entry_capacity"  # type: ignore[attr-defined]
+    assert not stager.staged
+    assert plane.starts == []
+
+
+def test_refusing_queue_emits_refused_with_admission_fault(tmp_path: Path) -> None:
+    from shared.events.delivery_queue import AdmissionFault, AdmissionResult
+
+    plane, now = _Plane(), [0.0]
+    _actor, binding, _, _ = _binding(plane, now, [datetime(2026, 1, 1, tzinfo=UTC)], tmp_path)
+
+    class _RefusingQueue:
+        def stage(self, event: dict[str, object]) -> AdmissionResult:
+            del event
+            return AdmissionResult(False, AdmissionFault.ENTRY_CAPACITY)
+
+        def complete(self, edge_event_id: str, clip_id: str | None) -> None:
+            del edge_event_id, clip_id
+
+    binding.stager = _RefusingQueue()  # type: ignore[assignment]
+    sink = _CollectingSink()
+    binding.execution_records = sink
+    with pytest.raises(RuntimeError, match="entry_capacity"):
+        binding.emit_for_frame(_event("one"), _trigger())
+    (record,) = sink.records
+    assert record.record_kind == "event.delivery"  # type: ignore[attr-defined]
+    assert record.outcome == "refused"  # type: ignore[attr-defined]
+    assert record.payload["reason"] == "entry_capacity"  # type: ignore[attr-defined]
+    assert plane.starts == []

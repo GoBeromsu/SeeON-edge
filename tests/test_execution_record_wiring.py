@@ -171,6 +171,7 @@ def _pump(
     identity: DecisionIdentity | None = None,
     emitted: list[object] | None = None,
     fall_transition: float = 0.1,
+    event_sink: object | None = None,
 ) -> NativePolicyPump:
     binding = SourceBinding("boot-1", str(uuid4()), "cam-1", 1, 3, "transform-a")
     slot = LatestMetadataSlot()
@@ -224,7 +225,8 @@ def _pump(
 
     class _Sink:
         def emit_for_frame(self, event: object, trigger: object) -> None:
-            del trigger
+            if event_sink is not None:
+                event_sink.emit_for_frame(event, trigger)
             if emitted is not None:
                 emitted.append(event)
 
