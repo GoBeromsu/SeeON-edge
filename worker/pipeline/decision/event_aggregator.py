@@ -5,7 +5,12 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Final
 
-from worker.interfaces.decision import Decider, ShadowTraceProvider, TraceSnapshotProvider
+from worker.interfaces.decision import (
+    Decider,
+    FreshnessProvider,
+    ShadowTraceProvider,
+    TraceSnapshotProvider,
+)
 from worker.pipeline.decision.incident_manager import IncidentManager
 from worker.types import (
     AttributedSnapshot,
@@ -70,8 +75,19 @@ class EventAggregator:
             if not isinstance(decider, TraceSnapshotProvider):
                 continue
             snapshots = decider.last_trace_snapshots
-            inner = unwrap_decider(decider)
-            shadow = inner.last_shadow_trace_count if isinstance(inner, ShadowTraceProvider) else 0
+            # The object whose last_trace_snapshots we read is the one whose
+            # freshness and shadow facts apply. A wrapper (window gate) that
+            # exposes its own snapshots mirrors those facts; otherwise read
+            # them from the innermost decider.
+            source: object = (
+                decider
+                if isinstance(decider, (FreshnessProvider, ShadowTraceProvider))
+                else unwrap_decider(decider)
+            )
+            shadow = (
+                source.last_shadow_trace_count if isinstance(source, ShadowTraceProvider) else 0
+            )
+            fresh = source.last_update_evaluated if isinstance(source, FreshnessProvider) else True
             cut = len(snapshots) - max(0, min(shadow, len(snapshots)))
             for position, snapshot in enumerate(snapshots):
                 out.append(
@@ -80,6 +96,7 @@ class EventAggregator:
                         identity=identity,
                         authority="shadow" if position >= cut else "authoritative",
                         producer_index=index,
+                        fresh=fresh,
                     )
                 )
         return tuple(out)

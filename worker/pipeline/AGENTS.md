@@ -15,7 +15,8 @@ admission, here only.
 - `analytics/`: post-Flow observation handling that feeds domain decisions.
 - `perception/`: worker-owned conversion and feature helpers; do not duplicate
 SDK tracking or inference.
-- `trace/`: bounded diagnostic traces.
+- `trace/`: replay-trace models and the bounded JSONL writer used by
+  policy pumps; decision-trace ids are stamped in runtime flow, not here.
 - `diagnostics/`: bounded in-memory execution-record lanes and export drain.
 
 ## Evidence and ownership

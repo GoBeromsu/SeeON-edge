@@ -21,7 +21,7 @@ from worker.domains.bed_exit.state_machine import (
     BedExitStateDecision,
     BedExitStateMachine,
 )
-from worker.domains.episode import EpisodeAuthority, EpisodeProposal
+from worker.domains.episode import EpisodeAuthority, EpisodeProposal, ProposalDisposition
 from worker.domains.staleness import DEFAULT_STALE_AFTER_SEC
 from worker.types import (
     BusinessEvent,
@@ -29,6 +29,7 @@ from worker.types import (
     DecisionTraceSnapshot,
     TemporalProfile,
 )
+from worker.types.trace import DecisionTraceReason
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -272,28 +273,40 @@ class BedExitMonitor:
             observation_age_sec=freshness.observation_age_sec,
         )
         if not in_window:
+            # Onsets computed this frame are suppressed by the detection window.
+            # The trace must say so: a triggered=True row with no event and no
+            # reason would read as a delivery failure.
+            self._mark_suppressed(
+                track_ids={event.person_id for event in frame.events},
+                reason=DecisionTraceReason.OUTSIDE_DETECTION_WINDOW,
+            )
             return ()
         self._episodes.expire(frame_index=input_value.frame_index, time_sec=event_time)
         emitted: list[BusinessEvent] = []
         for event in frame.events:
-            emitted.extend(
-                self._episodes.propose(
-                    EpisodeProposal(
-                        camera_id=self._config.camera_id,
-                        facility_id=self._config.facility_id,
-                        event_type="bed-exit",
-                        track_id=event.person_id,
-                        bed_id=event.bed_id,
-                        frame_index=input_value.frame_index,
-                        time_sec=event_time,
-                        qualifying=True,
-                        probability=1.0,
-                        domain="bed_exit",
-                        confirmation_votes=1,
-                        confirmation_window=1,
-                    )
+            produced = self._episodes.propose(
+                EpisodeProposal(
+                    camera_id=self._config.camera_id,
+                    facility_id=self._config.facility_id,
+                    event_type="bed-exit",
+                    track_id=event.person_id,
+                    bed_id=event.bed_id,
+                    frame_index=input_value.frame_index,
+                    time_sec=event_time,
+                    qualifying=True,
+                    probability=1.0,
+                    domain="bed_exit",
+                    confirmation_votes=1,
+                    confirmation_window=1,
                 )
             )
+            emitted.extend(produced)
+            if not produced:
+                # The episode authority suppressed this onset; name why.
+                self._mark_suppressed(
+                    track_ids={event.person_id},
+                    reason=_suppression_reason(self._episodes.last_disposition),
+                )
             if event.person_id in self._lost_track_ids:
                 self._episodes.track_lost(
                     camera_id=self._config.camera_id,
@@ -318,6 +331,37 @@ class BedExitMonitor:
                 )
             )
         return tuple(emitted)
+
+    def _mark_suppressed(self, *, track_ids: set[int | None], reason: DecisionTraceReason) -> None:
+        """Rewrite this frame's triggered snapshots for ``track_ids`` as suppressed.
+
+        Only authoritative rows are rewritten (the shadow tail never triggers).
+        The row keeps its states and values; triggered flips to False and the
+        reason names the suppression, so the non-event is explained rather
+        than looking like a lost delivery.
+        """
+        if not track_ids:
+            return
+        shadow = self.last_shadow_trace_count
+        cut = len(self.last_trace_snapshots) - shadow
+        rewritten: list[DecisionTraceSnapshot] = []
+        for index, snapshot in enumerate(self.last_trace_snapshots):
+            if index < cut and snapshot.triggered and snapshot.track_id in track_ids:
+                rewritten.append(
+                    DecisionTraceSnapshot(
+                        reason=str(reason),
+                        previous_state=snapshot.previous_state,
+                        current_state=snapshot.current_state,
+                        triggered=False,
+                        track_id=snapshot.track_id,
+                        bed_id=snapshot.bed_id,
+                        values=dict(snapshot.values),
+                        missing_values=dict(snapshot.missing_values),
+                    )
+                )
+            else:
+                rewritten.append(snapshot)
+        self.last_trace_snapshots = tuple(rewritten)
 
     def _update_frame(self, input_value: DecisionInput) -> BedExitFrame:
         self._recovery_events = []
@@ -638,6 +682,21 @@ class BedExitMonitor:
         snapshots = tuple(item.snapshot for item in decisions) + tuple(extra)
         self.last_shadow_trace_snapshots = snapshots
         return snapshots
+
+
+def _suppression_reason(disposition: ProposalDisposition | None) -> DecisionTraceReason:
+    """Map the episode authority's disposition to a compiled trace reason."""
+    if disposition is ProposalDisposition.ALREADY_OPEN:
+        return DecisionTraceReason.EPISODE_ALREADY_OPEN
+    if disposition is ProposalDisposition.REASSOCIATED:
+        return DecisionTraceReason.EPISODE_REASSOCIATED
+    if disposition is ProposalDisposition.RESOLVED_HOLD:
+        return DecisionTraceReason.EPISODE_RESOLVED_HOLD
+    if disposition is ProposalDisposition.CANDIDATE:
+        return DecisionTraceReason.EPISODE_CANDIDATE
+    # not-qualifying / recovery / None cannot follow a qualifying onset proposal;
+    # if they ever do, say the honest thing rather than invent a cause.
+    return DecisionTraceReason.TRACE_UNAVAILABLE
 
 
 def _bed_region_is_usable(source: BedRegionCacheState) -> bool:
