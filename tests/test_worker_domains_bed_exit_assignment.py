@@ -278,46 +278,89 @@ def test_track_id_churn_during_continuous_occupancy_preserves_arm_progress() -> 
     assert exited[0].bed_id == 0
 
 
-def test_new_track_appearing_beside_an_unrelated_stale_exit_does_not_complete_it() -> None:
-    """A new ID appearing must never, by itself, count as an exit.
+def test_track_id_churn_during_outside_dwell_carries_progress_and_fires_once() -> None:
+    """An ID switch mid-exit must carry outside-dwell progress forward.
 
-    If a track that had already accumulated outside-dwell progress vanishes,
-    and a *different* new track happens to appear elsewhere in frame (not
-    positively re-confirmed inside the same bed with posture in-bed), the
-    new track must not inherit the stale track's progress. Hand-off is
-    granted only for the in-bed direction to a track that independently
-    re-satisfies the full posture gate -- never for a track that is simply
-    "new" and off in some other unrelated position.
+    Finding #2 (PR #588 review): NvDCF's median track life is well under a
+    typical `outside_dwell_sec` on several cameras, so a resident who is
+    already outside when their track ID churns would otherwise lose all
+    accumulated outside-dwell evidence and never complete the exit. A
+    never-before-assigned live track that, this same frame, is contained in
+    neither the vacated bed nor any other bed is evidence that whoever left
+    is still out, so it inherits the stale assignment's `armed` state and
+    `outside_dwell_sec` instead of starting over from zero. This supersedes
+    the old `test_new_track_appearing_beside_an_unrelated_stale_exit_does_not_complete_it`,
+    whose premise -- that a bare "new ID" at the vacated position can never
+    be exit evidence -- is exactly the gap this fix closes.
     """
     monitor = _monitor(camera_id="camera-unrelated-churn", hold_frames=1, outside_dwell_sec=2.0)
     assert monitor.update(_input(IN_BED, (BED,), 0)) == ()
     assert monitor.update(_input(IN_BED, (BED,), 1, bed_pose_features=_lying_pose())) == ()
 
     # When: PERSON_ID walks outside (armed, only halfway through
-    # outside_dwell_sec), then vanishes mid-departure while an unrelated new
-    # track (not lying in the bed) appears.
+    # outside_dwell_sec), then vanishes mid-departure while a new track ID
+    # appears this same frame at the same outside position.
     assert monitor.update(_input(OUTSIDE_BED, (BED,), 2)) == ()
-    unrelated_id = 9
+    successor_id = 9
     events = monitor.update(
         DecisionInput(
             observation=FrameObservation(
                 detections=((OUTSIDE_BED,), ()),
                 regions=((BED,), ()),
-                track_ids=(unrelated_id,),
+                track_ids=(successor_id,),
             ),
             frame_width=180,
             frame_height=120,
-            live_track_ids=(unrelated_id,),
+            live_track_ids=(successor_id,),
             time_sec=3.0,
             frame_index=3,
             bed_region=BedRegionDebugSnapshot(source=BedRegionCacheState.FRESH),
         )
     )
 
-    # Then: absence still never emits, and the new track starts with no
-    # inherited armed/dwell state of its own -- it never even claims the bed,
-    # since it was never observed inside it.
+    # Then: 1.0s of outside evidence before the churn plus 1.0s after crosses
+    # the 2.0s threshold and fires exactly once, for the successor.
+    assert len(events) == 1
+    assert events[0].person_id == successor_id
+    assert events[0].bed_id == 0
+    assert PERSON_ID not in monitor._assignments  # noqa: SLF001
+    assert monitor._assignments[successor_id].armed is False  # noqa: SLF001
+    assert monitor._assignments[successor_id].outside_dwell_sec == 0.0  # noqa: SLF001
+
+
+def test_new_track_contained_in_a_different_bed_does_not_inherit_outside_dwell() -> None:
+    """A new track accounted for by a different bed must not inherit.
+
+    The outside-dwell hand-off only fires for a track positively unaccounted
+    for by any bed. A new track that is instead contained in a second,
+    different bed is evidence of that bed's own occupant, not of the
+    vacating resident continuing their exit, so it must start with no
+    inherited armed/dwell state.
+    """
+    bed_two: Final = BoundingBox(200, 10, 260, 90, 0.94)
+    monitor = _monitor(camera_id="camera-two-bed-churn", hold_frames=1, outside_dwell_sec=2.0)
+    assert monitor.update(_input(IN_BED, (BED, bed_two), 0)) == ()
+    assert monitor.update(_input(IN_BED, (BED, bed_two), 1, bed_pose_features=_lying_pose())) == ()
+    assert monitor.update(_input(OUTSIDE_BED, (BED, bed_two), 2)) == ()
+
+    other_id = 9
+    events = monitor.update(
+        DecisionInput(
+            observation=FrameObservation(
+                detections=((bed_two,), ()),
+                regions=((BED, bed_two), ()),
+                track_ids=(other_id,),
+            ),
+            frame_width=300,
+            frame_height=120,
+            live_track_ids=(other_id,),
+            time_sec=3.0,
+            frame_index=3,
+            bed_region=BedRegionDebugSnapshot(source=BedRegionCacheState.FRESH),
+        )
+    )
+
     assert events == ()
     assert PERSON_ID not in monitor._assignments  # noqa: SLF001
-    assert monitor._assignments[unrelated_id].armed is False  # noqa: SLF001
-    assert monitor._assignments[unrelated_id].bed_id is None  # noqa: SLF001
+    assert monitor._assignments[other_id].armed is False  # noqa: SLF001
+    assert monitor._assignments[other_id].outside_dwell_sec == 0.0  # noqa: SLF001

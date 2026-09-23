@@ -60,7 +60,7 @@ class LatestMetadataSlot:
         self._condition = threading.Condition(self._lock)
         self._expected: dict[str, SourceBinding] = {}
         self._latest: dict[str, MetadataFrame] = {}
-        self._high_water: dict[tuple[str, int, int], tuple[int, int, int]] = {}
+        self._high_water: dict[tuple[str, int, int], tuple[int | None, int, int]] = {}
         self._counters = MetadataCounters()
         self._execution_records: ExecutionRecordSink | None = None
 
@@ -130,21 +130,26 @@ class LatestMetadataSlot:
                 self._counters = _increment(counters, mismatch)
                 return False
             identity = (
-                metadata.identity.source_pts or 0,
+                metadata.identity.source_pts,
                 metadata.identity.seq,
                 metadata.native_publish_sequence,
             )
             binding_key = (camera_id, metadata.source_generation, metadata.identity.stream_epoch)
             high_water = self._high_water.get(binding_key)
             if high_water is not None and any(
-                current <= previous for current, previous in zip(identity, high_water, strict=True)
+                current is not None and previous is not None and current <= previous
+                for current, previous in zip(identity, high_water, strict=True)
             ):
                 self._counters = _increment(counters, "late")
                 return False
             if camera_id in self._latest:
                 counters = _increment(counters, "overwritten")
             self._latest[camera_id] = metadata
-            self._high_water[binding_key] = identity
+            self._high_water[binding_key] = (
+                identity[0] if identity[0] is not None else (high_water[0] if high_water else None),
+                identity[1],
+                identity[2],
+            )
             self._counters = _increment(counters, "accepted")
             self._condition.notify_all()
         try_emit(self._execution_records, sdk_frame_record(metadata))
