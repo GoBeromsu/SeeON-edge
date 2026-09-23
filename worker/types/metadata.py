@@ -9,6 +9,23 @@ from worker.types.perception_frame import PerceptionFrameIdentity, PerceptionFra
 
 
 @dataclass(frozen=True, slots=True)
+class NativeObservationEvidence:
+    """Scalar facts observed while converting one SDK frame.
+
+    This envelope never retains SDK metadata, tensor values, arrays, or image
+    data. ``None`` identifiers mean the supplied SDK frame did not expose that
+    scalar.
+    """
+
+    sdk_frame_number: int | None
+    source_id: int | None
+    inference_tensor_present: bool
+    raw_output_row_count: int
+    eligible_row_count: int
+    matched_row_count: int
+
+
+@dataclass(frozen=True, slots=True)
 class SourceBinding:
     worker_boot_id: str
     child_instance_id: str
@@ -28,6 +45,7 @@ class MetadataFrame:
     source_width: int = 0
     source_height: int = 0
     source_time_ns: int = 0
+    native_observation_evidence: NativeObservationEvidence | None = None
 
     @property
     def identity(self) -> PerceptionFrameIdentity:
@@ -49,4 +67,9 @@ class MetadataCounters:
     pull_failures: int = 0
 
 
-__all__ = ["MetadataCounters", "MetadataFrame", "SourceBinding"]
+__all__ = [
+    "MetadataCounters",
+    "MetadataFrame",
+    "NativeObservationEvidence",
+    "SourceBinding",
+]

@@ -18,7 +18,7 @@ from worker.adapters.model.pose_bbox56_bundle_support import (
     read_json,
     verify_bundle,
 )
-from worker.interfaces.fall_model import FallV2Probabilities
+from worker.interfaces.fall_model import BinaryFallScoreEvidence, FallV2Probabilities
 from worker.types import FallModelInput
 
 _SHAPE: Final = (30, 56)
@@ -36,7 +36,12 @@ class _ProxyGru(nn.Module):
 
 
 class PoseBbox56BundleRunner:
-    """Verified, binary-source proxy exposed through the V2 three-class seam."""
+    """Verified, binary-source proxy exposed through the V2 three-class seam.
+
+    Each result retains the observed pre-calibration logit and the loaded
+    temperature. The three policy fields remain the calibrated sigmoid's
+    complement, the calibrated sigmoid, and a synthetic zero respectively.
+    """
 
     device: Final[str] = "cpu"
 
@@ -127,6 +132,10 @@ class PoseBbox56BundleRunner:
             background=float(1.0 - fall_transition),
             fall_transition=float(fall_transition),
             fallen=0.0,
+            model_evidence=BinaryFallScoreEvidence(
+                raw_logit=float(logits[0, 0]),
+                applied_temperature=self._temperature,
+            ),
         )
 
     def warmup(self) -> None:

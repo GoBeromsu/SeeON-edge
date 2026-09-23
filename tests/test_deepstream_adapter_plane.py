@@ -17,6 +17,7 @@ from collections.abc import Callable
 from pathlib import Path
 from types import SimpleNamespace
 
+import numpy as np
 import pytest
 
 from worker.adapters.deepstream.service_maker import (
@@ -127,6 +128,7 @@ def _plane(
     snapshot_branch_enabled: bool = False,
     native_frame_grabber: Callable[[str], bytes] | None = None,
     clock: Callable[[], float] | None = None,
+    metadata_slot: LatestMetadataSlot | None = None,
 ) -> tuple[DeepStreamMediaPlane, _Pipeline]:
     pipeline = pipeline or _Pipeline()
     config = DeepStreamMediaPlaneConfig(
@@ -144,9 +146,10 @@ def _plane(
         kwargs["native_frame_grabber"] = native_frame_grabber
     if clock is not None:
         kwargs["clock"] = clock
+    slot = metadata_slot if metadata_slot is not None else LatestMetadataSlot()
     plane = DeepStreamMediaPlane(
         config,
-        metadata_slot=LatestMetadataSlot(),
+        metadata_slot=slot,
         flow_factory=lambda _: _FlowHandle(
             flow=_Flow(),
             pipeline=pipeline,
@@ -776,6 +779,51 @@ def test_a_frame_without_pose_tensor_is_counted_and_named_once(
     ]
     assert len(warnings) == 1
     assert "camera" in warnings[0].getMessage()
+
+
+def test_publish_captures_absent_vs_present_empty_tensor_without_changing_perception() -> None:
+    absent_slot = LatestMetadataSlot()
+    present_slot = LatestMetadataSlot()
+    absent_plane, _ = _plane(metadata_slot=absent_slot)
+    present_plane, _ = _plane(metadata_slot=present_slot)
+    absent_plane.add_source("camera", "rtsp://one")
+    present_plane.add_source("camera", "rtsp://one")
+    empty_rows = np.zeros((0, 57), dtype=np.float32)
+    tensor_output = SimpleNamespace(get_layers=lambda: {"output0": empty_rows})
+    tensor_meta = SimpleNamespace(as_tensor_output=lambda: tensor_output)
+
+    def frame(tensor_items: list[object]) -> SimpleNamespace:
+        return SimpleNamespace(
+            pad_index=0,
+            source_id=17,
+            frame_number=91,
+            buffer_pts=1_000,
+            tensor_items=tensor_items,
+            object_items=[],
+        )
+
+    absent_plane.publish_frame(frame([]))
+    present_plane.publish_frame(frame([tensor_meta]))
+
+    absent = absent_slot.peek("camera")
+    present = present_slot.peek("camera")
+    assert absent is not None
+    assert present is not None
+    assert absent.frame == present.frame
+    assert absent.frame.identity.seq == present.frame.identity.seq == 1
+    assert absent.native_publish_sequence == present.native_publish_sequence == 1
+    absent_evidence = absent.native_observation_evidence
+    present_evidence = present.native_observation_evidence
+    assert absent_evidence is not None
+    assert present_evidence is not None
+    assert absent_evidence.sdk_frame_number == present_evidence.sdk_frame_number == 91
+    assert absent_evidence.source_id == present_evidence.source_id == 17
+    assert absent_evidence.sdk_frame_number != absent.native_publish_sequence
+    assert absent_evidence.inference_tensor_present is False
+    assert present_evidence.inference_tensor_present is True
+    assert absent_evidence.raw_output_row_count == present_evidence.raw_output_row_count == 0
+    assert absent_evidence.eligible_row_count == present_evidence.eligible_row_count == 0
+    assert absent_evidence.matched_row_count == present_evidence.matched_row_count == 0
 
 
 def test_the_probe_stops_converting_once_the_plane_is_stopping(
