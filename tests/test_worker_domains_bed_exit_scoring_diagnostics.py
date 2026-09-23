@@ -25,9 +25,11 @@ from contracts.observation import (
     BoundingBox,
     FrameObservation,
 )
+from tests_support.bed_pose_fixtures import frame_pose_features, lying_in_bed
 from worker.domains import bed_exit
 from worker.runtime.telemetry.runtime_diagnostics import WorkerDiagnostics
 from worker.types import DecisionInput
+from worker.types.bed_pose_features import EMPTY_FRAME_BED_POSE_FEATURES, FrameBedPoseFeatures
 
 CAMERA_ID: Final = "camera-bed-exit-scoring"
 FACILITY_ID: Final = "facility-bed-exit-scoring"
@@ -46,6 +48,8 @@ def _monitor(
     *,
     hold_frames: int = 1,
     grace_frames: int = 2,
+    in_bed_dwell_sec: float = 1.0,
+    outside_dwell_sec: float = 1.0,
     scoring_recorder: bed_exit.BedExitScoringRecorder | None = None,
 ) -> bed_exit.BedExitMonitor:
     return bed_exit.BedExitMonitor(
@@ -55,6 +59,8 @@ def _monitor(
             min_containment=0.5,
             hold_frames=hold_frames,
             grace_frames=grace_frames,
+            in_bed_dwell_sec=in_bed_dwell_sec,
+            outside_dwell_sec=outside_dwell_sec,
             night_window=bed_exit.NightWindow(start="21:00", end="05:00", tz="Asia/Seoul"),
         ),
         clock=_clock_at(),
@@ -71,6 +77,7 @@ def _input(
     bed_boxes: tuple[BoundingBox, ...],
     track_ids: tuple[int | None, ...],
     frame_index: int,
+    bed_pose_features: FrameBedPoseFeatures = EMPTY_FRAME_BED_POSE_FEATURES,
 ) -> DecisionInput:
     return DecisionInput(
         observation=FrameObservation(
@@ -84,7 +91,12 @@ def _input(
         time_sec=float(frame_index),
         frame_index=frame_index,
         bed_region=BedRegionDebugSnapshot(source=BedRegionCacheState.FRESH),
+        bed_pose_features=bed_pose_features,
     )
+
+
+def _lying_pose() -> FrameBedPoseFeatures:
+    return frame_pose_features(lying_in_bed(track_id=PERSON_ID, bed_id=0))
 
 
 def test_update_without_a_recorder_does_not_crash() -> None:
@@ -126,11 +138,14 @@ def test_never_near_a_bed_reports_near_zero_containment_and_no_assignment() -> N
 
 
 def test_assignment_and_exit_are_both_reflected_cumulatively() -> None:
-    """Signal (c): scored inside, assigned, then a full grace window recorded.
+    """Signal (c): scored inside, assigned, armed, then a genuine exit recorded.
 
     Mirrors ``test_own_bed_exit_emits_once_after_grace_period`` in
     tests/test_worker_domains_bed_exit.py's frame sequence, but reads the
-    scoring recorder instead of the returned events.
+    scoring recorder instead of the returned events. Under the dwell model
+    `grace_positive_transitions` counts posture-confirmed arm transitions
+    (0 -> armed), not raw off-bed frames -- so it needs a lying-pose dwell
+    frame before the exit, not just off-bed frames.
     """
     diagnostics = WorkerDiagnostics()
     monitor = _monitor(grace_frames=2, scoring_recorder=diagnostics)
@@ -149,7 +164,21 @@ def test_assignment_and_exit_are_both_reflected_cumulatively() -> None:
     assert after_assignment.assignments_made == 1
     assert after_assignment.grace_positive_transitions == 0
 
-    for frame_index in (1, 2, 3):
+    # Arm: observed lying in bed for a full in_bed_dwell_sec.
+    _ = monitor.update(
+        _input(
+            person_boxes=(IN_BED_A,),
+            bed_boxes=(BED_A,),
+            track_ids=(PERSON_ID,),
+            frame_index=1,
+            bed_pose_features=_lying_pose(),
+        )
+    )
+    after_arm = diagnostics.bed_exit_scoring_selection(CAMERA_ID)
+    assert after_arm is not None
+    assert after_arm.grace_positive_transitions == 1
+
+    for frame_index in (2, 3):
         _ = monitor.update(
             _input(
                 person_boxes=(OUTSIDE_BEDS,),
@@ -167,5 +196,5 @@ def test_assignment_and_exit_are_both_reflected_cumulatively() -> None:
     # reset just because the assignment was cleared after the exit fired.
     assert after_exit.max_containment_observed == 1.0
     assert after_exit.assignments_made == 1
-    # One 0 -> 1 entry into the grace window, not one per off-bed frame.
+    # One 0 -> armed transition, not one per off-bed frame.
     assert after_exit.grace_positive_transitions == 1

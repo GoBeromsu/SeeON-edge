@@ -13,8 +13,10 @@ from contracts.observation import (
     BoundingBox,
     FrameObservation,
 )
+from tests_support.bed_pose_fixtures import frame_pose_features, lying_in_bed
 from worker.domains import bed_exit
 from worker.types import BusinessEvent, DecisionInput
+from worker.types.bed_pose_features import EMPTY_FRAME_BED_POSE_FEATURES, FrameBedPoseFeatures
 
 NIGHT_CAMERA_ID: Final = "camera-night-window"
 NIGHT_FACILITY_ID: Final = "facility-night-window"
@@ -34,7 +36,13 @@ def _clock_at(hour: int, minute: int = 0) -> Callable[[], datetime]:
     return lambda: fixed
 
 
-def _decision_input(person: BoundingBox, bed: BoundingBox, frame_index: int) -> DecisionInput:
+def _decision_input(
+    person: BoundingBox,
+    bed: BoundingBox,
+    frame_index: int,
+    *,
+    bed_pose_features: FrameBedPoseFeatures = EMPTY_FRAME_BED_POSE_FEATURES,
+) -> DecisionInput:
     return DecisionInput(
         observation=FrameObservation(
             detections=((person,), ()),
@@ -47,13 +55,20 @@ def _decision_input(person: BoundingBox, bed: BoundingBox, frame_index: int) -> 
         time_sec=float(frame_index),
         frame_index=frame_index,
         bed_region=BedRegionDebugSnapshot(source=BedRegionCacheState.FRESH),
+        bed_pose_features=bed_pose_features,
     )
+
+
+def _lying_pose() -> FrameBedPoseFeatures:
+    return frame_pose_features(lying_in_bed(track_id=PERSON_ID, bed_id=0))
 
 
 def _night_monitor(
     clock: Callable[[], datetime],
     *,
     night_window: bed_exit.NightWindow | None = NIGHT_WINDOW,
+    in_bed_dwell_sec: float = 1.0,
+    outside_dwell_sec: float = 1.0,
 ) -> bed_exit.BedExitMonitor:
     return bed_exit.BedExitMonitor(
         config=bed_exit.BedExitConfig(
@@ -62,6 +77,8 @@ def _night_monitor(
             min_containment=0.5,
             hold_frames=1,
             grace_frames=0,
+            in_bed_dwell_sec=in_bed_dwell_sec,
+            outside_dwell_sec=outside_dwell_sec,
             night_window=night_window,
         ),
         clock=clock,
@@ -91,9 +108,10 @@ def test_cross_midnight_and_daytime_gate_use_injected_clock(
 
     monitor = _night_monitor(clock)
     _ = monitor.update(_decision_input(IN_BED, BED, 0))
+    _ = monitor.update(_decision_input(IN_BED, BED, 1, bed_pose_features=_lying_pose()))
 
     # When
-    events = monitor.update(_decision_input(OUTSIDE, BED, 1))
+    events = monitor.update(_decision_input(OUTSIDE, BED, 2))
 
     # Then
     assert len(events) == expected_count
@@ -145,9 +163,10 @@ def test_night_window_outside_still_populates_debug_snapshot_for_overlay() -> No
     # Given
     monitor = _night_monitor(_clock_at(13))
     assert monitor.update(_decision_input(IN_BED, BED, 0)) == ()
+    assert monitor.update(_decision_input(IN_BED, BED, 1, bed_pose_features=_lying_pose())) == ()
 
     # When
-    events = monitor.update(_decision_input(OUTSIDE, BED, 1))
+    events = monitor.update(_decision_input(OUTSIDE, BED, 2))
 
     # Then
     assert events == ()
@@ -161,6 +180,12 @@ def test_night_window_does_not_consume_a_daytime_episode_onset() -> None:
     """A boundary exit must remain available once the clock enters the window.
 
     Suppression must happen before the episode authority receives the onset.
+    Note: the raw ``triggered`` computation still unconditionally clears the
+    assignment's armed/dwell state inside ``_update_frame`` -- before the
+    night-window gate is even checked -- so the daytime attempt below
+    consumes its own arm latch even though it is suppressed; the in-window
+    attempt needs its own fresh arm cycle (frames 3-4), not a carried-over
+    one.
     """
     # Given
     now = datetime(2026, 7, 31, 13, 0, tzinfo=SEOUL)
@@ -170,17 +195,19 @@ def test_night_window_does_not_consume_a_daytime_episode_onset() -> None:
 
     monitor = _night_monitor(clock)
     assert monitor.update(_decision_input(IN_BED, BED, 0)) == ()
+    assert monitor.update(_decision_input(IN_BED, BED, 1, bed_pose_features=_lying_pose())) == ()
 
-    # When: confirmed exit outside the window
-    daytime_events = monitor.update(_decision_input(OUTSIDE, BED, 1))
+    # When: confirmed (raw) exit outside the window
+    daytime_events = monitor.update(_decision_input(OUTSIDE, BED, 2))
 
     # Then: suppressed, and no episode onset has been emitted
     assert daytime_events == ()
 
-    # When: the same person/bed pair exits again inside the window
+    # When: the same person/bed pair re-arms and exits again inside the window
     now = datetime(2026, 7, 31, 22, 0, tzinfo=SEOUL)
-    assert monitor.update(_decision_input(IN_BED, BED, 2)) == ()
-    night_events = monitor.update(_decision_input(OUTSIDE, BED, 3))
+    assert monitor.update(_decision_input(IN_BED, BED, 3)) == ()
+    assert monitor.update(_decision_input(IN_BED, BED, 4, bed_pose_features=_lying_pose())) == ()
+    night_events = monitor.update(_decision_input(OUTSIDE, BED, 5))
 
     # Then
     assert night_events == (
@@ -190,7 +217,7 @@ def test_night_window_does_not_consume_a_daytime_episode_onset() -> None:
             identity="boot-night-window:epoch-night-window:bed-exit:0:11:0:0:1",
             camera_id=NIGHT_CAMERA_ID,
             facility_id=NIGHT_FACILITY_ID,
-            time_sec=3.0,
+            time_sec=5.0,
             probability=1.0,
             person_id=PERSON_ID,
             bed_id=0,
@@ -199,7 +226,12 @@ def test_night_window_does_not_consume_a_daytime_episode_onset() -> None:
 
 
 def test_night_window_suppressed_onset_does_not_poison_later_in_window_exit() -> None:
-    """A gated onset must not leave the authority holding the episode open."""
+    """A gated onset must not leave the authority holding the episode open.
+
+    As in the sibling test above, the suppressed daytime trigger still
+    clears the assignment's arm latch internally, so the in-window attempt
+    needs its own fresh arm cycle.
+    """
     # Given
     now = datetime(2026, 7, 31, 13, 0, tzinfo=SEOUL)
 
@@ -208,12 +240,14 @@ def test_night_window_suppressed_onset_does_not_poison_later_in_window_exit() ->
 
     monitor = _night_monitor(clock)
     assert monitor.update(_decision_input(IN_BED, BED, 0)) == ()
-    assert monitor.update(_decision_input(OUTSIDE, BED, 1)) == ()
+    assert monitor.update(_decision_input(IN_BED, BED, 1, bed_pose_features=_lying_pose())) == ()
+    assert monitor.update(_decision_input(OUTSIDE, BED, 2)) == ()
 
-    # When: re-assign and exit after the window opens
+    # When: re-assign, re-arm, and exit after the window opens
     now = datetime(2026, 7, 31, 22, 0, tzinfo=SEOUL)
-    assert monitor.update(_decision_input(IN_BED, BED, 2)) == ()
-    events = monitor.update(_decision_input(OUTSIDE, BED, 3))
+    assert monitor.update(_decision_input(IN_BED, BED, 3)) == ()
+    assert monitor.update(_decision_input(IN_BED, BED, 4, bed_pose_features=_lying_pose())) == ()
+    events = monitor.update(_decision_input(OUTSIDE, BED, 5))
 
     # Then
     assert len(events) == 1

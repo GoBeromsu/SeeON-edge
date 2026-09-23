@@ -28,6 +28,9 @@ from test_worker_domains_bed_exit import (
     _input as _bed_exit_input,
 )
 from test_worker_domains_bed_exit import (
+    _lying_pose as _bed_lying_pose,
+)
+from test_worker_domains_bed_exit import (
     _monitor as _bed_exit_monitor,
 )
 
@@ -68,6 +71,11 @@ _FALL_POLICY = "a" * 64
 _BED_POLICY = "b" * 64
 _PTS_STEP_NS = 66_666_667
 _TRACK = 9
+# COCO-17 keypoint indices for the hips, mirroring
+# worker/pipeline/perception/features/bed_geometry.py's private constants
+# (not imported: those are that module's implementation detail).
+_LEFT_HIP = 11
+_RIGHT_HIP = 12
 
 
 def _query(backend: object) -> dict[str, Any]:
@@ -83,7 +91,16 @@ def _bed_identity() -> DecisionIdentity:
 
 
 def _night_monitor(*, camera_id: str = _CAMERA) -> object:
-    return _bed_exit_monitor(camera_id=camera_id, hold_frames=1, grace_frames=2)
+    # `_PTS_STEP_NS` steps frames ~0.0667s apart; dwell thresholds must be
+    # small enough for a single real dt to clear them, or these fixtures'
+    # short frame sequences could never arm or trigger at all.
+    return _bed_exit_monitor(
+        camera_id=camera_id,
+        hold_frames=1,
+        grace_frames=2,
+        in_bed_dwell_sec=0.05,
+        outside_dwell_sec=0.05,
+    )
 
 
 def _compose_bed_and_fall(
@@ -113,7 +130,15 @@ def _bed_metadata(
 ) -> MetadataFrame:
     identity = PerceptionFrameIdentity("boot-1", "cam-1", 3, seq, pts)
     region = BedRegion(0, 0, 80, 100, 0.99)
-    pose = tuple(Keypoint(index + 1, index + 2, 0.9) for index in range(17))
+    # Hips placed at the bed region's center so `hip_depth` clears
+    # `_MIN_IN_BED_HIP_DEPTH` (posture-confirmed); every other keypoint keeps
+    # the original arbitrary diagonal placeholder -- only the hips matter to
+    # the posture gate. Harmless on "outside" frames, where posture is never
+    # checked.
+    keypoints = [Keypoint(index + 1, index + 2, 0.9) for index in range(17)]
+    keypoints[_LEFT_HIP] = Keypoint(35, 50, 0.9)
+    keypoints[_RIGHT_HIP] = Keypoint(45, 50, 0.9)
+    pose = tuple(keypoints)
     return MetadataFrame(
         frame=PerceptionFrameV1(
             identity=identity,
@@ -331,7 +356,14 @@ def test_g11_2_nonmonotonic_pts_coasts_then_resumes_through_backend_query(tmp_pa
 
 
 def test_g11_3_bed_exit_episode_already_open_through_backend_query(tmp_path) -> None:
-    """Onset is triggered+delivered; the next frame is episode-already-open with no delivery."""
+    """Onset is triggered+delivered; the next frame explains the non-repeat.
+
+    The one-way hysteresis latch (#the-track-must-re-arm-to-exit-again)
+    unconditionally clears `armed`/both dwell accumulators the instant a
+    trigger fires, so the very next frame -- still outside, still the same
+    track -- reads as "outside-not-armed", not a second onset and not a
+    silent gap.
+    """
     lanes = ExecutionRecordLanes(lane_capacity=256)
     pump = _pump(
         lanes,
@@ -350,7 +382,10 @@ def test_g11_3_bed_exit_episode_already_open_through_backend_query(tmp_path) -> 
             assert isinstance(child, UUID)
             in_bed = _person(IN_BED_A)
             outside = _person(OUTSIDE_BEDS)
-            boxes = (in_bed, outside, outside, outside, outside)
+            # Two contained frames are required to arm: the first is the
+            # dwell anchor (dt=0), the second is where a real dt first
+            # accumulates toward `in_bed_dwell_sec`.
+            boxes = (in_bed, in_bed, outside, outside, outside)
             for seq, person in enumerate(boxes):
                 pump._process(  # noqa: SLF001
                     _bed_metadata(
@@ -385,9 +420,9 @@ def test_g11_3_bed_exit_episode_already_open_through_backend_query(tmp_path) -> 
                 row
                 for row in bed_rows
                 if row["frame_seq"] == follow_seq
-                and _payload(row).get("reason") == "episode-already-open"
+                and _payload(row).get("reason") == "outside-not-armed"
             ]
-            assert follow, f"frame_seq {follow_seq} must explain the open episode"
+            assert follow, f"frame_seq {follow_seq} must explain the non-repeat"
             for row in follow:
                 assert _payload(row).get("triggered") is False
                 assert _payload(row).get("track_id") == _TRACK
@@ -418,7 +453,9 @@ def test_g11_4_bed_exit_outside_window_through_backend_query(tmp_path) -> None:
             assert isinstance(child, UUID)
             in_bed = _person(IN_BED_A)
             outside = _person(OUTSIDE_BEDS)
-            boxes = (in_bed, outside, outside, outside)
+            # Two contained frames to arm (see test_g11_3), then an outside
+            # frame that would trigger if not for the closed night window.
+            boxes = (in_bed, in_bed, outside, outside)
             for seq, person in enumerate(boxes):
                 pump._process(  # noqa: SLF001
                     _bed_metadata(
@@ -506,7 +543,18 @@ def _bed_sequence(monitor: object) -> tuple[BusinessEvent, ...]:
             frame_index=0,
         )
     )
-    for frame_index in (1, 2, 3, 4):
+    # A second, posture-confirmed in-bed frame is required to arm: frame 0
+    # is the dwell anchor (dt=0), so a real dt first accumulates here.
+    events += monitor.update(  # type: ignore[union-attr]
+        _bed_exit_input(
+            person_boxes=(IN_BED_A,),
+            bed_boxes=(BED_A,),
+            track_ids=(_TRACK,),
+            frame_index=1,
+            bed_pose_features=_bed_lying_pose(track_id=_TRACK),
+        )
+    )
+    for frame_index in (2, 3, 4):
         events += monitor.update(  # type: ignore[union-attr]
             _bed_exit_input(
                 person_boxes=(OUTSIDE_BEDS,),

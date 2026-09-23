@@ -176,6 +176,46 @@ BED_EXIT_REASONS: frozenset[str] = frozenset(
         "bed-polygon-invalid",
     }
 )
+# Evidence-driven exit redesign (absence-never-emits, posture-gated arming,
+# dwell measured in PTS seconds instead of frame counts): additive on top of
+# BED_EXIT_REASONS/STATES/VALUE_NAMES/MISSING_REASONS above, which stay as
+# emitted by the deleted shadow state machine's now-dead code paths.
+BED_EXIT_DWELL_REASONS: frozenset[str] = frozenset(
+    {
+        "contained-posture-unconfirmed",
+        "outside-dwell-exit",
+        "outside-dwell",
+        "outside-not-armed",
+        # Track-ID-churn resilience (NvDCF has no ReID; median track lifetime
+        # is well under a typical in_bed_dwell_sec on several cameras): a
+        # never-before-assigned track that independently re-confirms the
+        # full posture gate inside the same bed a vanishing track owned
+        # inherits that track's armed/in-bed-dwell progress instead of
+        # restarting from zero.
+        "identity-handoff",
+    }
+)
+BED_EXIT_DWELL_STATES: frozenset[str] = frozenset(
+    {
+        "armed",
+        "arming",
+    }
+)
+BED_EXIT_DWELL_VALUE_NAMES: frozenset[str] = frozenset(
+    {
+        "in_bed_dwell_sec",
+        "in_bed_dwell_threshold_sec",
+        "outside_dwell_sec",
+        "outside_dwell_threshold_sec",
+        "time_sec",
+    }
+)
+BED_EXIT_DWELL_MISSING_REASONS: frozenset[str] = frozenset(
+    {
+        "no-pose-evidence",
+        "time-not-provided",
+    }
+)
 
 _HOLD_REASON_BY_STATE: dict[str, str] = {
     "in-bed": "in-bed-hold",
@@ -265,6 +305,76 @@ def _new_token_snapshots() -> tuple[DecisionTraceSnapshot, ...]:
             },
         )
     )
+    snapshots.append(
+        DecisionTraceSnapshot(
+            reason="contained-posture-unconfirmed",
+            previous_state="arming",
+            current_state="arming",
+            triggered=False,
+            track_id=5,
+            bed_id=0,
+            values={"in_bed_dwell_sec": 0.0, "in_bed_dwell_threshold_sec": 3.0},
+        )
+    )
+    snapshots.append(
+        DecisionTraceSnapshot(
+            reason="outside-not-armed",
+            previous_state="arming",
+            current_state="arming",
+            triggered=False,
+            track_id=5,
+            bed_id=0,
+            values={"outside_dwell_sec": 0.5, "outside_dwell_threshold_sec": 2.0},
+        )
+    )
+    snapshots.append(
+        DecisionTraceSnapshot(
+            reason="outside-dwell",
+            previous_state="armed",
+            current_state="armed",
+            triggered=False,
+            track_id=5,
+            bed_id=0,
+            values={"outside_dwell_sec": 1.0, "outside_dwell_threshold_sec": 2.0},
+        )
+    )
+    snapshots.append(
+        DecisionTraceSnapshot(
+            reason="outside-dwell-exit",
+            previous_state="armed",
+            current_state="triggered",
+            triggered=True,
+            track_id=5,
+            bed_id=0,
+            values={"outside_dwell_sec": 2.0, "outside_dwell_threshold_sec": 2.0},
+        )
+    )
+    snapshots.append(
+        DecisionTraceSnapshot(
+            reason="contained",
+            previous_state="arming",
+            current_state="arming",
+            triggered=False,
+            track_id=5,
+            bed_id=0,
+            values={"in_bed_dwell_sec": 1.0, "in_bed_dwell_threshold_sec": 3.0},
+            missing_values={
+                "hip_depth": "no-pose-evidence",
+                "time_sec": "time-not-provided",
+            },
+        )
+    )
+    snapshots.append(
+        DecisionTraceSnapshot(
+            reason="identity-handoff",
+            previous_state="arming",
+            current_state="arming",
+            triggered=False,
+            track_id=6,
+            bed_id=0,
+            values={"in_bed_dwell_sec": 1.5, "outside_dwell_sec": 0.0},
+        )
+    )
     return tuple(snapshots)
 
 
@@ -294,10 +404,19 @@ def test_baseline_vocabularies_are_exactly_the_pre_extension_sets() -> None:
     extra_missing = current_missing - BASELINE_MISSING_REASONS
 
     if extra_reasons | extra_states | extra_value_names | extra_missing:
-        assert extra_reasons == BED_EXIT_REASONS | FALL_V2_REASONS | EPISODE_REASONS
-        assert extra_states == BED_EXIT_STATES | FALL_V2_STATES
-        assert extra_value_names == BED_EXIT_VALUE_NAMES | FALL_VALUE_NAMES
-        assert extra_missing == BED_EXIT_MISSING_REASONS | FALL_MISSING_REASONS
+        assert (
+            extra_reasons
+            == BED_EXIT_REASONS | FALL_V2_REASONS | EPISODE_REASONS | BED_EXIT_DWELL_REASONS
+        )
+        assert extra_states == BED_EXIT_STATES | FALL_V2_STATES | BED_EXIT_DWELL_STATES
+        assert (
+            extra_value_names
+            == BED_EXIT_VALUE_NAMES | FALL_VALUE_NAMES | BED_EXIT_DWELL_VALUE_NAMES
+        )
+        assert (
+            extra_missing
+            == BED_EXIT_MISSING_REASONS | FALL_MISSING_REASONS | BED_EXIT_DWELL_MISSING_REASONS
+        )
     else:
         assert current_reasons == BASELINE_REASONS
         assert current_states == BASELINE_STATES
@@ -308,16 +427,29 @@ def test_baseline_vocabularies_are_exactly_the_pre_extension_sets() -> None:
 def test_bed_exit_and_fall_v2_tokens_are_additive_and_closed() -> None:
     assert (
         _values(DecisionTraceReason)
-        == BASELINE_REASONS | BED_EXIT_REASONS | FALL_V2_REASONS | EPISODE_REASONS
+        == BASELINE_REASONS
+        | BED_EXIT_REASONS
+        | FALL_V2_REASONS
+        | EPISODE_REASONS
+        | BED_EXIT_DWELL_REASONS
     )
-    assert _values(DecisionTraceState) == BASELINE_STATES | BED_EXIT_STATES | FALL_V2_STATES
+    assert (
+        _values(DecisionTraceState)
+        == BASELINE_STATES | BED_EXIT_STATES | FALL_V2_STATES | BED_EXIT_DWELL_STATES
+    )
     assert (
         _values(DecisionTraceValueName)
-        == BASELINE_VALUE_NAMES | BED_EXIT_VALUE_NAMES | FALL_VALUE_NAMES
+        == BASELINE_VALUE_NAMES
+        | BED_EXIT_VALUE_NAMES
+        | FALL_VALUE_NAMES
+        | BED_EXIT_DWELL_VALUE_NAMES
     )
     assert (
         _values(DecisionTraceMissingReason)
-        == BASELINE_MISSING_REASONS | BED_EXIT_MISSING_REASONS | FALL_MISSING_REASONS
+        == BASELINE_MISSING_REASONS
+        | BED_EXIT_MISSING_REASONS
+        | FALL_MISSING_REASONS
+        | BED_EXIT_DWELL_MISSING_REASONS
     )
 
 
@@ -397,10 +529,10 @@ def test_new_tokens_round_trip_through_trace_adapter_and_writer() -> None:
         seen_value_names.update(str(name) for name in snapshot.missing_values)
         seen_missing_reasons.update(str(reason) for reason in snapshot.missing_values.values())
 
-    assert seen_reasons >= BED_EXIT_REASONS
-    assert seen_states >= BED_EXIT_STATES
-    assert seen_value_names >= BED_EXIT_VALUE_NAMES
-    assert seen_missing_reasons >= BED_EXIT_MISSING_REASONS
+    assert seen_reasons >= BED_EXIT_REASONS | BED_EXIT_DWELL_REASONS
+    assert seen_states >= BED_EXIT_STATES | BED_EXIT_DWELL_STATES
+    assert seen_value_names >= BED_EXIT_VALUE_NAMES | BED_EXIT_DWELL_VALUE_NAMES
+    assert seen_missing_reasons >= BED_EXIT_MISSING_REASONS | BED_EXIT_DWELL_MISSING_REASONS
 
     recovered_by_key = {
         (
