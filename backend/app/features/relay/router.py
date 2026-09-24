@@ -489,6 +489,10 @@ class RelayDeliveryQueueStatus(BaseModel):
     # answered 422, which is how 41 real events were destroyed here.
     dead_lettered_count: int = Field(default=0, ge=0)
     dead_lettered_bytes: int = Field(default=0, ge=0)
+    # Oldest live EVENT entry's acceptance time (ISO-8601 UTC), or None. Defaulted
+    # for the same reason as dead_lettered_count above: a worker predating this
+    # field must not be answered 422.
+    oldest_event_accepted_at: str | None = Field(default=None)
 
 
 class RelayRuntimeStatusRequest(BaseModel):

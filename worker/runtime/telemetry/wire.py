@@ -101,6 +101,10 @@ class RelayDeliveryQueuePayload(TypedDict):
     by_kind: dict[str, int]
     dead_lettered_count: int
     dead_lettered_bytes: int
+    #: Oldest live EVENT entry's acceptance time (ISO-8601 UTC), or None when
+    #: no EVENT is queued. Absolute so the reader computes age at read time
+    #: instead of trusting a staleness figure computed when this was sent.
+    oldest_event_accepted_at: str | None
 
 
 class RelayRuntimeStatusPayload(TypedDict):

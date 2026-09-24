@@ -359,7 +359,7 @@ describe('status normalization', () => {
     expect(normalizeStatusSnapshot({ cameras: {}, runtime: { cameras: {} } })).toEqual({
       cameras: {},
       stale_after_sec: null,
-      runtime: { cameras: {}, worker: null, device: null, clip_export_applied: { enabled: null, version: null, freshness: 'unknown' }, clip_recorder: null, stale_after_sec: null },
+      runtime: { cameras: {}, worker: null, device: null, clip_export_applied: { enabled: null, version: null, freshness: 'unknown' }, clip_recorder: null, delivery_queue: null, stale_after_sec: null },
     });
   });
 
@@ -434,6 +434,7 @@ describe('status normalization', () => {
           available: true, dropped_frames: null, dropped_events: null, failed_writes: null,
           finalized_clips: 4, video_unavailable_clips: null, active_clips: null, encoder: null,
         },
+        delivery_queue: null,
         stale_after_sec: 15,
       },
     });
@@ -475,6 +476,7 @@ describe('status normalization', () => {
         device: null,
         clip_export_applied: { enabled: null, version: null, freshness: 'unknown' },
         clip_recorder: null,
+        delivery_queue: null,
         stale_after_sec: null,
       },
     });
