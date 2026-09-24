@@ -23,6 +23,7 @@ CounterName: TypeAlias = Literal[
     "transform_mismatch",
     "malformed",
     "pull_failures",
+    "pts_missing",
 ]
 
 
@@ -129,8 +130,17 @@ class LatestMetadataSlot:
             if mismatch is not None:
                 self._counters = _increment(counters, mismatch)
                 return False
+            if metadata.identity.source_pts is None:
+                # Production's only publisher (deepstream/metadata.py) always
+                # sets an int source_pts; a None here is a malformed/synthetic
+                # frame that must never reach the high-water logic below --
+                # a fabricated 0.0 downstream reads as a PTS rollback and
+                # wipes dwell/window state that keys off real elapsed PTS.
+                # Named honestly rather than folded into "late".
+                self._counters = _increment(counters, "pts_missing")
+                return False
             identity = (
-                metadata.identity.source_pts or 0,
+                metadata.identity.source_pts,
                 metadata.identity.seq,
                 metadata.native_publish_sequence,
             )

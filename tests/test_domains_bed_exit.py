@@ -12,10 +12,12 @@ from contracts.observation import (
     BoundingBox,
     FrameObservation,
 )
+from tests_support.bed_pose_fixtures import frame_pose_features, lying_in_bed
 from worker.domains.bed_exit.detector import BedExitMonitor
 from worker.domains.bed_exit.night_window import NightWindow
 from worker.domains.bed_exit.schema import BedExitConfig, BedExitEvent, BedExitFrame, BedStatus
 from worker.types import DecisionInput
+from worker.types.bed_pose_features import EMPTY_FRAME_BED_POSE_FEATURES, FrameBedPoseFeatures
 
 # Supersession notes (edge assertions not ported here, behavior verified
 # elsewhere against the current BedExitMonitor(config=..., clock=...) API):
@@ -48,6 +50,7 @@ def _input(
     bed_boxes: tuple[BoundingBox, ...],
     frame_index: int,
     time_sec: float | None = None,
+    bed_pose_features: FrameBedPoseFeatures = EMPTY_FRAME_BED_POSE_FEATURES,
 ) -> DecisionInput:
     return DecisionInput(
         observation=FrameObservation(detections=(person_boxes, ()), regions=(bed_boxes, ())),
@@ -57,6 +60,7 @@ def _input(
         time_sec=float(frame_index) if time_sec is None else time_sec,
         frame_index=frame_index,
         bed_region=BedRegionDebugSnapshot(source=BedRegionCacheState.FRESH),
+        bed_pose_features=bed_pose_features,
     )
 
 
@@ -69,6 +73,8 @@ def _monitor(
     min_containment: float = 0.5,
     camera_id: str = "camera-bed-exit-schema",
     facility_id: str = "facility-bed-exit-schema",
+    in_bed_dwell_sec: float = 1.0,
+    outside_dwell_sec: float = 1.0,
 ) -> BedExitMonitor:
     return BedExitMonitor(
         config=BedExitConfig(
@@ -78,6 +84,8 @@ def _monitor(
             hold_frames=hold_frames,
             grace_frames=grace_frames,
             night_window=night_window,
+            in_bed_dwell_sec=in_bed_dwell_sec,
+            outside_dwell_sec=outside_dwell_sec,
         ),
         clock=clock,
         boot_id="boot-bed-exit-schema",
@@ -92,13 +100,28 @@ def _own_bed_exit_events(
     *,
     exit_time_sec: float | None = None,
 ) -> tuple[object, ...]:
+    """Assign, arm via a posture-confirmed in-bed dwell, then exit.
+
+    Matches `_monitor()`'s default `in_bed_dwell_sec=outside_dwell_sec=1.0`:
+    frame 0 assigns, frame 1 (1s later, lying/sitting posture) arms, frame 2
+    (another 1s later, outside) fires exactly one event.
+    """
     monitor.update(_input(person_boxes=(box(10, 10, 70, 90),), bed_boxes=(bed,), frame_index=0))
+    monitor.update(
+        _input(
+            person_boxes=(box(10, 10, 70, 90),),
+            bed_boxes=(bed,),
+            frame_index=1,
+            time_sec=1.0,
+            bed_pose_features=frame_pose_features(lying_in_bed(track_id=0, bed_id=0)),
+        )
+    )
     return monitor.update(
         _input(
             person_boxes=(box(90, 10, 150, 90),),
             bed_boxes=(bed,),
-            frame_index=1,
-            time_sec=exit_time_sec,
+            frame_index=2,
+            time_sec=2.0 if exit_time_sec is None else exit_time_sec,
         )
     )
 
@@ -229,83 +252,78 @@ def test_without_night_window_emits_regardless_of_clock() -> None:
     assert len(events) == 1
 
 
-def test_a_failing_shadow_evaluation_does_not_discard_the_bed_exit_event(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """The shadow path is non-authoritative and must not be able to destroy one.
-
-    `_record_shadow` never replaces the containment decision and never carries
-    triggered=True, yet it sat between the events being computed and the return
-    that delivers them. A shadow failure therefore discarded a real bed-exit
-    event -- a capability that cannot decide anything destroying a decision.
-    """
-    fixed = datetime(2026, 1, 1, 13, 0, tzinfo=ZoneInfo("Asia/Seoul"))
-    monitor = _monitor(clock=lambda: fixed, night_window=None)
-    bed = box(0, 0, 80, 100)
-
-    def _explode(*_args: object, **_kwargs: object) -> tuple[object, ...]:
-        raise RuntimeError("shadow evaluation failed")
-
-    monkeypatch.setattr(type(monitor), "_record_shadow", _explode, raising=True)
-
-    events = _own_bed_exit_events(monitor, bed)
-
-    assert len(events) == 1, (
-        "the bed-exit event was discarded because a non-authoritative shadow evaluation raised"
-    )
-
-
 def test_bed_exit_rearms_only_after_confirmed_recovery() -> None:
-    """Repeated exits are suppressed until a contained recovery is confirmed."""
+    """Repeated exits are suppressed until a posture-confirmed recovery dwell.
+
+    Supersedes the frame-count version of this test: an exit now requires an
+    armed track (posture-confirmed in-bed dwell) followed by a live outside
+    dwell, and firing clears the latch (hysteresis, addendum #1) so a bare
+    repeat at the same outside position never re-fires -- only a fresh,
+    positively-observed return to bed re-arms it.
+    """
     fixed = datetime(2026, 1, 1, 13, 0, tzinfo=ZoneInfo("Asia/Seoul"))
     monitor = _monitor(clock=lambda: fixed, night_window=None, grace_frames=0)
     bed = box(0, 0, 80, 100)
+    lying = frame_pose_features(lying_in_bed(track_id=0, bed_id=0))
 
-    monitor.update(_input(person_boxes=(box(10, 10, 70, 90),), bed_boxes=(bed,), frame_index=0))
-    exited = monitor.update(
-        _input(person_boxes=(box(90, 10, 150, 90),), bed_boxes=(bed,), frame_index=1)
-    )
+    exited = _own_bed_exit_events(monitor, bed)
     assert len(exited) == 1, "the exit was never reported"
 
     repeated = monitor.update(
-        _input(person_boxes=(box(90, 10, 150, 90),), bed_boxes=(bed,), frame_index=2)
+        _input(person_boxes=(box(90, 10, 150, 90),), bed_boxes=(bed,), frame_index=3, time_sec=3.0)
     )
-    recovered = monitor.update(
-        _input(person_boxes=(box(10, 10, 70, 90),), bed_boxes=(bed,), frame_index=3)
+    monitor.update(
+        _input(
+            person_boxes=(box(10, 10, 70, 90),),
+            bed_boxes=(bed,),
+            frame_index=4,
+            time_sec=4.0,
+            bed_pose_features=lying,
+        )
     )
     reexited = monitor.update(
-        _input(person_boxes=(box(90, 10, 150, 90),), bed_boxes=(bed,), frame_index=4)
+        _input(person_boxes=(box(90, 10, 150, 90),), bed_boxes=(bed,), frame_index=5, time_sec=5.0)
     )
 
-    assert repeated == recovered == ()
+    assert repeated == ()
     assert len(reexited) == 1
-    assert reexited[0].identity == "boot-bed-exit-schema:epoch-bed-exit-schema:bed-exit:0:0:0:0:2"
+    assert reexited[0].identity != exited[0].identity
 
 
 def test_release_reopens_a_failed_bed_exit_for_one_retry() -> None:
+    """`release_onset` reopens episode bookkeeping only -- not the arm latch.
+
+    A downstream storage failure lets the runtime ask for exactly one retry
+    of a bed-exit onset. Under the dwell model that retry still cannot
+    bypass the detector's own hysteresis latch (addendum #1): a bare repeat
+    at the same outside position, with no fresh in-bed dwell, still does not
+    re-fire. A genuine return to bed and a fresh outside dwell does, with a
+    new identity.
+    """
     fixed = datetime(2026, 1, 1, 13, 0, tzinfo=ZoneInfo("Asia/Seoul"))
     monitor = _monitor(clock=lambda: fixed, night_window=None, grace_frames=0)
     bed = box(0, 0, 80, 100)
 
     failed = _own_bed_exit_events(monitor, bed)[0]
     monitor.release_onset(failed)
-    retried = monitor.update(
+
+    bare_repeat = monitor.update(
+        _input(person_boxes=(box(90, 10, 150, 90),), bed_boxes=(bed,), frame_index=3, time_sec=3.0)
+    )
+    assert bare_repeat == ()
+
+    monitor.update(
         _input(
-            person_boxes=(box(90, 10, 150, 90),),
+            person_boxes=(box(10, 10, 70, 90),),
             bed_boxes=(bed,),
-            frame_index=2,
+            frame_index=4,
+            time_sec=4.0,
+            bed_pose_features=frame_pose_features(lying_in_bed(track_id=0, bed_id=0)),
         )
+    )
+    retried = monitor.update(
+        _input(person_boxes=(box(90, 10, 150, 90),), bed_boxes=(bed,), frame_index=5, time_sec=5.0)
     )
 
     assert len(retried) == 1
     assert retried[0].identity != failed.identity
-    assert (
-        monitor.update(
-            _input(
-                person_boxes=(box(90, 10, 150, 90),),
-                bed_boxes=(bed,),
-                frame_index=3,
-            )
-        )
-        == ()
-    )

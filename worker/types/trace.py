@@ -33,9 +33,13 @@ class DecisionTraceReason(StrEnum):
     ASSIGNMENT_HOLD = "assignment-hold"
     BELOW_CONTAINMENT = "below-containment"
     CONTAINED = "contained"
+    CONTAINED_POSTURE_UNCONFIRMED = "contained-posture-unconfirmed"
     CONTAINED_IN_OTHER_BED = "contained-in-other-bed"
     LIVE_GRACE_EXIT = "live-grace-exit"
     LIVE_GRACE = "live-grace"
+    OUTSIDE_DWELL_EXIT = "outside-dwell-exit"
+    OUTSIDE_DWELL = "outside-dwell"
+    OUTSIDE_NOT_ARMED = "outside-not-armed"
     PERSON_OBSERVATION_MISSING = "person-observation-missing"
     IN_BED_HOLD = "in-bed-hold"
     SITTING_UP_HOLD = "sitting-up-hold"
@@ -55,6 +59,7 @@ class DecisionTraceReason(StrEnum):
     EPISODE_REASSOCIATED = "episode-reassociated"
     EPISODE_RESOLVED_HOLD = "episode-resolved-hold"
     EPISODE_CANDIDATE = "episode-candidate"
+    IDENTITY_HANDOFF = "identity-handoff"
 
 
 class DecisionTraceState(StrEnum):
@@ -74,6 +79,8 @@ class DecisionTraceState(StrEnum):
     RETIRED = "retired"
     UNASSIGNED = "unassigned"
     OTHER_BED = "other-bed"
+    ARMED = "armed"
+    ARMING = "arming"
     IN_BED = "in-bed"
     SITTING_UP = "sitting-up"
     EDGE_SITTING = "edge-sitting"
@@ -114,6 +121,11 @@ class DecisionTraceValueName(StrEnum):
     OBSERVABILITY = "observability"
     DWELL_FRAMES = "dwell_frames"
     DWELL_THRESHOLD = "dwell_threshold"
+    IN_BED_DWELL_SEC = "in_bed_dwell_sec"
+    IN_BED_DWELL_THRESHOLD_SEC = "in_bed_dwell_threshold_sec"
+    OUTSIDE_DWELL_SEC = "outside_dwell_sec"
+    OUTSIDE_DWELL_THRESHOLD_SEC = "outside_dwell_threshold_sec"
+    TIME_SEC = "time_sec"
 
 
 class DecisionTraceMissingReason(StrEnum):
@@ -132,6 +144,8 @@ class DecisionTraceMissingReason(StrEnum):
     NO_OBSERVED_PERSON = "no-observed-person"
     POSE_UNAVAILABLE = "pose-unavailable"
     BED_POLYGON_INVALID = "bed-polygon-invalid"
+    NO_POSE_EVIDENCE = "no-pose-evidence"
+    TIME_NOT_PROVIDED = "time-not-provided"
 
 
 @overload
