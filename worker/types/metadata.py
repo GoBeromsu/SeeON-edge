@@ -65,6 +65,7 @@ class MetadataCounters:
     transform_mismatch: int = 0
     malformed: int = 0
     pull_failures: int = 0
+    pts_missing: int = 0
 
 
 __all__ = [

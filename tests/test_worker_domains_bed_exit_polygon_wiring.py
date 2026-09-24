@@ -22,9 +22,11 @@ from contracts.observation import (
     BoundingBox,
     FrameObservation,
 )
+from tests_support.bed_pose_fixtures import frame_pose_features, lying_in_bed
 from worker.domains import bed_exit
 from worker.pipeline.perception.scene_state import SceneState
 from worker.types import DecisionInput
+from worker.types.bed_pose_features import EMPTY_FRAME_BED_POSE_FEATURES, FrameBedPoseFeatures
 
 PERSON_ID: Final = 1
 
@@ -53,7 +55,13 @@ IN_BED: Final = BoundingBox(40, 40, 60, 60, 0.95)
 BESIDE_BED_IN_AABB: Final = BoundingBox(80, 80, 95, 95, 0.9)
 
 
-def _monitor(*, min_containment: float = 0.5, grace_frames: int = 1) -> bed_exit.BedExitMonitor:
+def _monitor(
+    *,
+    min_containment: float = 0.5,
+    grace_frames: int = 1,
+    in_bed_dwell_sec: float = 1.0,
+    outside_dwell_sec: float = 1.0,
+) -> bed_exit.BedExitMonitor:
     fixed = datetime(2026, 7, 31, 22, 0, tzinfo=ZoneInfo("Asia/Seoul"))
     return bed_exit.BedExitMonitor(
         config=bed_exit.BedExitConfig(
@@ -62,6 +70,8 @@ def _monitor(*, min_containment: float = 0.5, grace_frames: int = 1) -> bed_exit
             min_containment=min_containment,
             hold_frames=1,
             grace_frames=grace_frames,
+            in_bed_dwell_sec=in_bed_dwell_sec,
+            outside_dwell_sec=outside_dwell_sec,
             night_window=bed_exit.NightWindow(start="21:00", end="05:00", tz="Asia/Seoul"),
         ),
         clock=lambda: fixed,
@@ -71,7 +81,12 @@ def _monitor(*, min_containment: float = 0.5, grace_frames: int = 1) -> bed_exit
     )
 
 
-def _input(person: BoundingBox, frame_index: int) -> DecisionInput:
+def _input(
+    person: BoundingBox,
+    frame_index: int,
+    *,
+    bed_pose_features: FrameBedPoseFeatures = EMPTY_FRAME_BED_POSE_FEATURES,
+) -> DecisionInput:
     return DecisionInput(
         observation=FrameObservation(
             detections=((person,), ()),
@@ -84,31 +99,37 @@ def _input(person: BoundingBox, frame_index: int) -> DecisionInput:
         time_sec=float(frame_index),
         frame_index=frame_index,
         bed_region=BedRegionDebugSnapshot(source=BedRegionCacheState.FRESH),
+        bed_pose_features=bed_pose_features,
     )
+
+
+def _lying_pose() -> FrameBedPoseFeatures:
+    return frame_pose_features(lying_in_bed(track_id=PERSON_ID, bed_id=0))
 
 
 def test_person_beside_polygon_bed_but_inside_aabb_eventually_exits() -> None:
     # Given: the person is assigned to the bed while genuinely inside the
-    # diamond-shaped polygon.
-    monitor = _monitor(grace_frames=1)
+    # diamond-shaped polygon, then observed lying down long enough to arm.
+    monitor = _monitor(grace_frames=1, outside_dwell_sec=2.0)
     assert monitor.update(_input(IN_BED, 0)) == ()
+    assert monitor.update(_input(IN_BED, 1, bed_pose_features=_lying_pose())) == ()
     assert monitor.last_debug_snapshot is not None
     assert monitor.last_debug_snapshot.statuses[0].occupancy == "occupied"
 
     # When: the person moves to a spot that is outside the real polygon but
-    # still inside the bed's AABB, and stays there past the grace period.
-    frame_1 = monitor.update(_input(BESIDE_BED_IN_AABB, 1))
+    # still inside the bed's AABB, and stays there past the dwell threshold.
     frame_2 = monitor.update(_input(BESIDE_BED_IN_AABB, 2))
+    frame_3 = monitor.update(_input(BESIDE_BED_IN_AABB, 3))
 
-    # Then: grace_frames must actually advance (own_ratio must read as 0,
-    # not 1.0) -- no event yet after the first off-polygon frame, but the
-    # bed-exit event fires once grace_frames exceeds the configured
-    # threshold. Pre-fix, this would never happen: own_ratio would read 1.0
-    # against the AABB and grace_frames would reset to 0 every frame.
-    assert frame_1 == ()
-    assert len(frame_2) == 1
-    assert frame_2[0].bed_id == 0
-    assert frame_2[0].person_id == PERSON_ID
+    # Then: outside_dwell_sec must actually advance (own_ratio must read as
+    # 0, not 1.0) -- no event yet after the first off-polygon frame, but the
+    # bed-exit event fires once the dwell threshold is crossed. Pre-fix,
+    # own_ratio would read 1.0 against the AABB and the dwell timer would
+    # never advance.
+    assert frame_2 == ()
+    assert len(frame_3) == 1
+    assert frame_3[0].bed_id == 0
+    assert frame_3[0].person_id == PERSON_ID
 
 
 def test_person_beside_polygon_bed_reads_as_not_occupied_immediately() -> None:
