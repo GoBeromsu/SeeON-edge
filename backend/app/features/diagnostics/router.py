@@ -8,6 +8,7 @@ from typing import Annotated
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from starlette.concurrency import run_in_threadpool
 
+from backend.app.edge_db.compatibility import EdgeDatabaseError
 from backend.app.features.diagnostics.schemas import (
     ExecutionQueryParams,
     ExecutionQueryResponse,
@@ -21,6 +22,11 @@ from backend.app.shared.dashboard_auth import authorize_dashboard
 from shared.events.execution_records import ExecutionRecordContractError, WireBatch
 
 DISABLED_DETAIL = "execution records disabled"
+# The one-shot edge_db bootstrap stamps edge-diagnostics.sqlite3 before the
+# runtime ever starts (#579/#580, S1/S2); if a deploy skipped it, the store's
+# connection factory raises EdgeDatabaseError on first use rather than
+# creating the file, so that failure must not surface as an opaque 500.
+UNAVAILABLE_DETAIL = "diagnostics store unavailable: run edge-db bootstrap"
 
 router = APIRouter(tags=["diagnostics"], route_class=BoundedBodyRoute)
 
@@ -66,7 +72,13 @@ async def ingest_execution_records(
     ingest = ingest_batch_from_wire(batch, backend_build_revision=backend_build_revision(request))
     # SQLite work (including bounded capacity pruning) never runs on the event
     # loop: a busy ingest must not stall /health or the dashboard.
-    receipt = await run_in_threadpool(store.ingest_batch, ingest)
+    try:
+        receipt = await run_in_threadpool(store.ingest_batch, ingest)
+    except EdgeDatabaseError as error:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=UNAVAILABLE_DETAIL,
+        ) from error
     return wire_receipt_from_store(receipt).to_json()
 
 
@@ -77,15 +89,20 @@ def query_execution_records(
     params: Annotated[ExecutionQueryParams, Query()],
 ) -> ExecutionQueryResponse:
     store = execution_record_store(request)
-    return query_response_from_result(
-        store.query(
+    try:
+        result = store.query(
             params.camera_id,
             params.from_ns,
             params.to_ns,
             params.limit,
             params.cursor,
         )
-    )
+    except EdgeDatabaseError as error:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=UNAVAILABLE_DETAIL,
+        ) from error
+    return query_response_from_result(result)
 
 
 __all__ = ["backend_build_revision", "execution_record_store", "router"]

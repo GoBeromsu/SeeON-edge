@@ -985,8 +985,7 @@ def acknowledge_applied_detection_policies(
     expected = worker_config_snapshot(request).get("config_version")
     if expected != config_version:
         return
-    store = _detection_policy_store(request.app)
-    store.mark_applied(facility_id, store.generation(facility_id))
+    _detection_policy_store(request.app).acknowledge_applied(facility_id)
 
 
 def _apply_numeric_detection_policies(

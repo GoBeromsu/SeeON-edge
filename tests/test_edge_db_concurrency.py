@@ -212,3 +212,11 @@ def test_fatal_fault_best_effort_write_returns_without_waiting_for_writer(tmp_pa
         ).fetchone() == (0,)
     finally:
         connection.close()
+
+
+# The diagnostics-file isolation this used to cover (a writer on
+# edge-diagnostics.sqlite3 never blocking edge.sqlite3) is now exercised
+# through the real production wiring instead -- see
+# tests/test_api_execution_records.py::
+# test_lifespan_diagnostics_query_and_product_write_skip_a_pending_diagnostics_write
+# (#579/#580, S4).

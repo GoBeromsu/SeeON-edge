@@ -216,18 +216,36 @@ class DetectionPolicyStore:
                 raise PolicyActivationRefused(0, str(error)) from error
         return bundle
 
-    def mark_applied(self, facility_id: str, activation_generation: int) -> None:
-        with (
-            closing(open_configuration_database(self.path)) as connection,
-            write_transaction(connection),
-        ):
-            now = utc_now()
-            connection.execute(
-                "UPDATE policies SET status='applied',refusal_reason=NULL,"
-                "applied_at=?,updated_at=? "
-                "WHERE facility_id=? AND status='pending' AND activation_generation<=?",
-                (now, now, facility_id, activation_generation),
-            )
+    def acknowledge_applied(self, facility_id: str) -> None:
+        """Mark every pending activation at or below the latest generation as applied.
+
+        Single-connection combination of a ``generation()``-style read with the
+        write. Every worker heartbeat that acknowledges its running config
+        calls this; opening two separate connections for one
+        read-then-maybe-write sequence doubled needless contention against
+        other writers on the same database file (#579/#580 review, N7).
+        """
+        with closing(open_configuration_database(self.path)) as connection:
+            row = connection.execute(
+                "SELECT max(activation_generation) FROM policies WHERE facility_id=?",
+                (facility_id,),
+            ).fetchone()
+            activation_generation = 0 if row is None or row[0] is None else int(row[0])
+            pending = connection.execute(
+                "SELECT 1 FROM policies WHERE facility_id=? AND status='pending'"
+                " AND activation_generation<=? LIMIT 1",
+                (facility_id, activation_generation),
+            ).fetchone()
+            if pending is None:
+                return
+            with write_transaction(connection):
+                now = utc_now()
+                connection.execute(
+                    "UPDATE policies SET status='applied',refusal_reason=NULL,"
+                    "applied_at=?,updated_at=? "
+                    "WHERE facility_id=? AND status='pending' AND activation_generation<=?",
+                    (now, now, facility_id, activation_generation),
+                )
 
     def activations(self, facility_id: str) -> tuple[PolicyActivation, ...]:
         with closing(open_configuration_database(self.path)) as connection:

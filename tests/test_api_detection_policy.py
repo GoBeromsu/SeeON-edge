@@ -3,11 +3,13 @@ from __future__ import annotations
 import sqlite3
 from pathlib import Path
 
+import pytest
 from fastapi.testclient import TestClient
 
 from backend.app.edge_db.bootstrap import bootstrap_database
 from backend.app.features.cameras.store import CameraRegistryStore
 from backend.app.features.connection.store import ConnectionSettingsStore
+from backend.app.features.detection_settings import policy_store
 from backend.app.features.detection_settings.policy_store import DetectionPolicyStore
 from backend.app.main import create_app, no_lifespan
 
@@ -691,6 +693,47 @@ def test_two_operator_rollback_race_requires_cas_token(tmp_path: Path) -> None:
     assert winner.status_code == 202
     assert winner.json()["active_revision_id"] > current_revision
     assert loser.status_code == 409
+
+
+def test_acknowledge_applied_skips_write_transaction_when_nothing_pending(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    database = tmp_path / "edge.sqlite3"
+    bootstrap_database(database)
+    store = DetectionPolicyStore(database)
+    store.apply(
+        facility_id=FACILITY_ID,
+        module_id="fall",
+        module_version=2,
+        schema_id="fall.policy",
+        schema_version=2,
+        camera_id=None,
+        values={"transition_threshold": 0.62},
+        expected_revision_id=0,
+    )
+
+    calls: list[None] = []
+    real_write_transaction = policy_store.write_transaction
+
+    def _spy(connection: sqlite3.Connection):
+        calls.append(None)
+        return real_write_transaction(connection)
+
+    monkeypatch.setattr(policy_store, "write_transaction", _spy)
+
+    # The pending row is at or below the latest generation: it gets applied,
+    # through exactly one write transaction.
+    store.acknowledge_applied(FACILITY_ID)
+    assert len(calls) == 1
+    with sqlite3.connect(database) as connection:
+        assert connection.execute(
+            "SELECT status FROM policies WHERE facility_id=?", (FACILITY_ID,)
+        ).fetchone() == ("applied",)
+
+    # Nothing pending any more: acknowledge_applied must not open a write
+    # transaction.
+    store.acknowledge_applied(FACILITY_ID)
+    assert len(calls) == 1
 
 
 def test_policy_authority_writes_only_the_compact_policy_table(tmp_path: Path) -> None:
