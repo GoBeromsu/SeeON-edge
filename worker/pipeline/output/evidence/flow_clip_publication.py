@@ -8,11 +8,21 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Protocol
 
-from worker.pipeline.output.evidence.clip_identity import ClipIdAllocator, ClipReservation
+from worker.pipeline.output.evidence.clip_identity import (
+    ClipIdAllocator,
+    ClipIdCollisionError,
+    ClipReservation,
+)
 from worker.pipeline.output.evidence.clip_publication_types import (
     ClipPublicationMetadata,
     PublishedClip,
 )
+from worker.pipeline.output.evidence.evidence_manifest import (
+    ClipEvidenceError,
+    ReadyClipManifest,
+    parse_manifest,
+)
+from worker.pipeline.output.evidence.evidence_outbox_types import ClipId
 from worker.pipeline.output.evidence.manifest_models import (
     ClipExtension,
     ExtensionContributor,
@@ -84,13 +94,20 @@ class FlowClipPublisher:
         clip_end_at = clip_start_at + timedelta(seconds=duration_s)
         if finalized_at < clip_end_at:
             finalized_at = clip_end_at
-        reservation = self.allocator.reserve_existing(event.camera_id, sealed.clip_id)
+        event_refs = tuple(item.event_ref for item in contributors)
+        try:
+            reservation = self.allocator.reserve_existing(event.camera_id, sealed.clip_id)
+        except ClipIdCollisionError:
+            resumed = self._resume_if_already_published(sealed.clip_id, event.camera_id, event_refs)
+            if resumed is not None:
+                return resumed
+            raise
         return self.publisher.publish_adopted_ready(
             reservation,
             Path(sealed.path),
             ClipPublicationMetadata(
                 camera_id=event.camera_id,
-                event_refs=tuple(item.event_ref for item in contributors),
+                event_refs=event_refs,
                 event_type=event.event_type,
                 clip_start_at=clip_start_at,
                 clip_end_at=clip_end_at,
@@ -112,6 +129,32 @@ class FlowClipPublisher:
                 facility_id=event.facility_id,
             ),
         )
+
+    def _resume_if_already_published(
+        self, clip_id: str, camera_id: str, event_refs: tuple[str, ...]
+    ) -> PublishedClip | None:
+        """Resume a clip whose reservation collided because it already published.
+
+        A crash between ``publisher.publish()`` succeeding and the sidecar's
+        removal replays here on every restart: ``reserve_existing`` collides
+        because ``final_dir`` already exists. If the manifest already there
+        records this exact clip (same camera and contributors), the publish
+        already happened -- return it instead of raising. Anything else (no
+        manifest, an unreadable one, or one that identifies a different clip)
+        cannot be verified as a safe resume, so the caller still raises the
+        collision rather than silently trusting or deleting evidence.
+        """
+        manifest_path = self.allocator.final_dir(clip_id) / "manifest.json"
+        try:
+            manifest = parse_manifest(manifest_path)
+        except ClipEvidenceError:
+            return None
+        if manifest.camera_id != camera_id or manifest.event_refs != event_refs:
+            return None
+        video_path = (
+            manifest_path.parent / "clip.mp4" if isinstance(manifest, ReadyClipManifest) else None
+        )
+        return PublishedClip(ClipId(clip_id), manifest, manifest_path, video_path)
 
 
 def _parse_timestamp(value: str) -> datetime:

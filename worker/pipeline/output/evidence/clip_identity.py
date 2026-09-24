@@ -67,6 +67,14 @@ class ClipIdAllocator:
             raise ClipIdCollisionError(camera_id, 1)
         return reservation
 
+    def final_dir(self, clip_id: str) -> Path:
+        """The final on-disk directory a clip id reserves, whether or not it exists yet.
+
+        Lets a caller that just caught ``ClipIdCollisionError`` from
+        ``reserve_existing`` look for an already-published manifest there.
+        """
+        return self._clips_dir / clip_id
+
     def _reserve(self, camera_id: str, clip_id: ClipId) -> ClipReservation | None:
         final_dir = self._clips_dir / clip_id
         staging_dir = self._staging_root / clip_id
