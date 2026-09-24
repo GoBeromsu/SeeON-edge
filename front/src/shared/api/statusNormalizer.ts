@@ -15,6 +15,7 @@ import type {
   RuntimeDecodeDiagnostics,
   RuntimeDetectionDiagnostics,
   RuntimeDetectionRawCounters,
+  RuntimeDeliveryQueue,
   RuntimeDeviceDiagnostics,
   RuntimeLatencyDiagnostics,
   RuntimeWorkerDiagnostics,
@@ -243,6 +244,24 @@ function normalizeRuntimeClipRecorder(value: unknown): RuntimeClipRecorder | nul
   };
 }
 
+function normalizeRuntimeDeliveryQueue(value: unknown): RuntimeDeliveryQueue | null {
+  if (!isRecord(value)) return null;
+  const rawByKind = value.by_kind;
+  const byKind = isRecord(rawByKind)
+    ? Object.fromEntries(
+        Object.entries(rawByKind).filter(
+          (entry): entry is [string, number] => typeof entry[1] === 'number' && Number.isFinite(entry[1]),
+        ),
+      )
+    : null;
+  return {
+    accepted_count: pickNonNegativeNumber(value, ['accepted_count', 'acceptedCount']),
+    by_kind: byKind,
+    dead_lettered_count: pickNonNegativeNumber(value, ['dead_lettered_count', 'deadLetteredCount']),
+    oldest_event_accepted_at: pickNullableString(value, ['oldest_event_accepted_at', 'oldestEventAcceptedAt']),
+  };
+}
+
 export function normalizeStatusSnapshot(value: unknown): StatusSnapshot {
   const record = isRecord(value) ? value : null;
   const rawCameras = record?.cameras;
@@ -272,6 +291,7 @@ export function normalizeStatusSnapshot(value: unknown): StatusSnapshot {
       device: normalizeRuntimeDevice(rawRuntime.device),
       clip_export_applied: normalizeRuntimeClipExportApplied(rawRuntime.clip_export_applied),
       clip_recorder: normalizeRuntimeClipRecorder(rawRuntime.clip_recorder),
+      delivery_queue: normalizeRuntimeDeliveryQueue(rawRuntime.delivery_queue),
       stale_after_sec: pickNonNegativeNumber(rawRuntime, ['stale_after_sec', 'staleAfterSec']),
     },
   };

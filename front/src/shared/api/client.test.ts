@@ -52,7 +52,7 @@ describe('api client contracts', () => {
     await expect(fetchStatus()).resolves.toEqual({
       cameras: {},
       stale_after_sec: null,
-      runtime: { cameras: {}, worker: null, device: null, clip_export_applied: { enabled: null, version: null, freshness: 'unknown' }, clip_recorder: null, stale_after_sec: null },
+      runtime: { cameras: {}, worker: null, device: null, clip_export_applied: { enabled: null, version: null, freshness: 'unknown' }, clip_recorder: null, delivery_queue: null, stale_after_sec: null },
     });
     await expect(fetchClips()).resolves.toEqual([]);
   });
