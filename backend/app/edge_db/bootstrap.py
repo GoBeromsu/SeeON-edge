@@ -41,6 +41,7 @@ from backend.app.edge_db.compatibility import (
 from backend.app.edge_db.execution_records_ddl import EXECUTION_RECORD_CREATE_STATEMENTS
 from backend.app.edge_db.functions import register_edge_db_functions
 from backend.app.edge_db.paths import (
+    DIAGNOSTICS_DATABASE_FILENAME,
     EDGE_DATABASE_PATH,
     prepare_database_path,
     schema18_backup_path,
@@ -52,12 +53,24 @@ BOOTSTRAP_BUSY_TIMEOUT_MS: Final = 5_000
 DEPLOYMENT_LOCK_NAME: Final = "deployment.lock"
 SCHEMA_18_VERSION: Final = 18
 
+# The standalone diagnostics database has no migration history to preserve --
+# unlike edge.sqlite3 it carries no schema_migrations ledger table at all, only
+# this flat PRAGMA user_version stamp (#579/#580, S1/S2).
+DIAGNOSTICS_SCHEMA_VERSION: Final = 1
+
 
 @dataclass(frozen=True, slots=True)
 class BootstrapResult:
     path: Path
     created: bool
     extended: bool
+    schema_version: int
+
+
+@dataclass(frozen=True, slots=True)
+class DiagnosticsBootstrapResult:
+    path: Path
+    created: bool
     schema_version: int
 
 
@@ -76,6 +89,19 @@ class UnsupportedSchemaError(EdgeDatabaseError):
             f"edge database schema {self.found} is not schema "
             f"{EDGE_DATABASE_SCHEMA_VERSION}; bootstrap creates 19 or extends 18 "
             "and never migrates any other version"
+        )
+
+
+@dataclass(slots=True)
+class UnsupportedDiagnosticsSchemaError(EdgeDatabaseError):
+    """The diagnostics database exists at a user_version other than the current one."""
+
+    found: int
+
+    def __str__(self) -> str:
+        return (
+            f"diagnostics database schema {self.found} is not schema "
+            f"{DIAGNOSTICS_SCHEMA_VERSION}; bootstrap only ever creates or verifies it"
         )
 
 
@@ -297,6 +323,69 @@ def bootstrap_database(
         secure_database_files(path)
 
 
+def _create_diagnostics_schema(connection: sqlite3.Connection) -> None:
+    """Create the six execution-record tables and stamp user_version, one txn."""
+    connection.execute("BEGIN IMMEDIATE")
+    try:
+        _require_still_empty(connection)
+        for statement in EXECUTION_RECORD_CREATE_STATEMENTS:
+            connection.execute(statement)
+        connection.execute(f"PRAGMA user_version = {DIAGNOSTICS_SCHEMA_VERSION}")
+        connection.commit()
+    except BaseException:
+        connection.rollback()
+        raise
+
+
+def bootstrap_diagnostics_database(
+    path: Path,
+    *,
+    lock: DeploymentLock,
+) -> DiagnosticsBootstrapResult:
+    """Create the standalone execution-record database, or verify it as-is.
+
+    Sibling of ``edge.sqlite3``: same one-shot bootstrap, same exclusive
+    ``deployment.lock`` (``DeploymentLock.require_for`` only checks the
+    containing directory, so one lock legitimately covers both files), same
+    bootstrap-once/verify-only runtime split -- but a flat ``PRAGMA
+    user_version`` is its only schema ledger, with no migration path and no
+    ``schema_migrations`` table (see ``backend/app/edge_db/diagnostics_connection.py``,
+    which now only opens and verifies it). (#579/#580, S1/S2/N1)
+    """
+    lock.require_for(path)
+    prepare_database_path(path)
+    connection = sqlite3.connect(
+        path,
+        timeout=BOOTSTRAP_BUSY_TIMEOUT_MS / 1000,
+        isolation_level=None,
+    )
+    try:
+        connection.execute(f"PRAGMA busy_timeout = {BOOTSTRAP_BUSY_TIMEOUT_MS}")
+        connection.execute("PRAGMA foreign_keys = ON")
+        _enable_wal(connection)
+        connection.execute("PRAGMA synchronous = FULL")
+        version = _user_version(connection)
+        created = False
+        if version == 0:
+            if _has_any_table(connection):
+                raise SchemaLedgerError(
+                    "diagnostics database has tables but no schema version; "
+                    "refusing to bootstrap over it"
+                )
+            _create_diagnostics_schema(connection)
+            created = True
+            version = DIAGNOSTICS_SCHEMA_VERSION
+        elif version != DIAGNOSTICS_SCHEMA_VERSION:
+            raise UnsupportedDiagnosticsSchemaError(found=version)
+        integrity = connection.execute("PRAGMA integrity_check").fetchone()
+        if integrity != ("ok",):
+            raise SchemaLedgerError(f"diagnostics database integrity check failed: {integrity!r}")
+        return DiagnosticsBootstrapResult(path=path, created=created, schema_version=version)
+    finally:
+        connection.close()
+        secure_database_files(path)
+
+
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description=(
@@ -311,7 +400,14 @@ def _parser() -> argparse.ArgumentParser:
 def main(argv: Sequence[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     try:
-        result = bootstrap_database(args.database)
+        # One shared exclusive lock covers both files (same directory), so the
+        # diagnostics sibling is created/verified in the same one-shot run as
+        # edge.sqlite3 -- never bootstrapped lazily at runtime (#579/#580).
+        with deployment_lock(args.database.parent) as lock:
+            result = bootstrap_database(args.database, lock=lock)
+            diagnostics_result = bootstrap_diagnostics_database(
+                args.database.parent / DIAGNOSTICS_DATABASE_FILENAME, lock=lock
+            )
     except (OSError, sqlite3.Error, EdgeDatabaseError) as error:
         print(f"EDGE_DB_BOOTSTRAP_FAILED: {error}", file=sys.stderr)
         return 1
@@ -319,6 +415,11 @@ def main(argv: Sequence[str] | None = None) -> int:
         f"EDGE_DB_BOOTSTRAP_OK path={result.path} "
         f"schema={result.schema_version} created={str(result.created).lower()} "
         f"extended={str(result.extended).lower()}"
+    )
+    print(
+        f"EDGE_DIAGNOSTICS_DB_BOOTSTRAP_OK path={diagnostics_result.path} "
+        f"schema={diagnostics_result.schema_version} "
+        f"created={str(diagnostics_result.created).lower()}"
     )
     return 0
 
@@ -331,8 +432,11 @@ __all__ = [
     "BootstrapResult",
     "DeploymentLock",
     "DeploymentLockError",
+    "DiagnosticsBootstrapResult",
+    "UnsupportedDiagnosticsSchemaError",
     "UnsupportedSchemaError",
     "bootstrap_database",
+    "bootstrap_diagnostics_database",
     "deployment_lock",
     "main",
 ]

@@ -54,6 +54,7 @@ from shared.events.evidence_export_contract import (
     EventReceipt,
 )
 from shared.events.execution_records import MAX_EXECUTION_RECORD_BODY_BYTES
+from shared.events.relay_failure_log import RelayFailureLog
 
 RELAY_TOKEN_HEADER = "X-Edge-Relay-Token"
 
@@ -154,6 +155,15 @@ class BoundedBodyRoute(APIRoute):
 
 
 _LOGGER = logging.getLogger(__name__)
+
+# Rate-limited/classified logging for ml-api's own outbound call to the Hub's
+# backend ingest API (mirrors the worker-side RelayFailureLog channels in
+# shared.events.evidence_export_client). Never logs the alert payload,
+# facility/relay token, or any Hub response body -- only disposition, reason
+# code, and status (see #579/#580).
+_backend_ingest_alert_failures = RelayFailureLog(
+    _LOGGER, channel="backend ingest alerts", method="POST"
+)
 
 router = APIRouter(prefix="/relay", tags=["relay"], route_class=BoundedBodyRoute)
 
@@ -624,20 +634,29 @@ def relay_alert(
             **alert_kwargs,
         )
         if isinstance(result, DeliveryFailure):
+            _backend_ingest_alert_failures.record_failure(result, path="alerts")
             if result.disposition is DeliveryDisposition.RETRY:
                 code = status.HTTP_503_SERVICE_UNAVAILABLE
+                # Names the failing side explicitly: this is the Hub/backend
+                # ingest API declining or timing out, not ml-api's own local
+                # SQLite projection (that failure keeps its own distinct
+                # "central evidence projection unavailable" detail below).
+                detail = f"backend ingest retryable failure: {result.code}"
             elif result.disposition is DeliveryDisposition.COMPATIBILITY:
                 code = status.HTTP_404_NOT_FOUND
+                detail = "backend ingest rejected alert"
             else:
                 code = result.status_code or status.HTTP_502_BAD_GATEWAY
+                detail = "backend ingest rejected alert"
             headers = None
             if result.retry_after_seconds is not None:
                 headers = {"Retry-After": str(max(0, int(result.retry_after_seconds)))}
             raise HTTPException(
                 status_code=code,
-                detail="backend ingest rejected alert",
+                detail=detail,
                 headers=headers,
             )
+        _backend_ingest_alert_failures.record_success(path="alerts")
         response = {
             "status": result.status,
             "edge_event_id": result.edge_event_id,

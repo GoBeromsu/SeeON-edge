@@ -2,7 +2,11 @@
 
 from __future__ import annotations
 
+import multiprocessing
+import os
+import sqlite3
 from collections.abc import Iterator
+from multiprocessing.connection import Connection
 from pathlib import Path
 
 import pytest
@@ -10,8 +14,13 @@ from fastapi.testclient import TestClient
 from pydantic import ValidationError
 
 from backend.app.core.config import Settings, get_settings
-from backend.app.edge_db.bootstrap import bootstrap_database
-from backend.app.edge_db.connection import RuntimeActor, open_runtime_database
+from backend.app.edge_db import DIAGNOSTICS_DATABASE_FILENAME, open_diagnostics_database
+from backend.app.edge_db.bootstrap import (
+    bootstrap_database,
+    bootstrap_diagnostics_database,
+    deployment_lock,
+)
+from backend.app.edge_db.connection import RuntimeActor, open_runtime_database, write_transaction
 from backend.app.features.diagnostics.retention import RetentionBudget
 from backend.app.features.diagnostics.store import ExecutionRecordStore
 from backend.app.features.relay.router import RELAY_TOKEN_HEADER
@@ -78,6 +87,21 @@ def _login(client: TestClient) -> None:
         json={"username": "admin", "password": "admin"},
     )
     assert response.status_code == 204
+
+
+def _hold_diagnostics_write(diagnostics_path: str, channel: Connection) -> None:
+    """Stand in for an in-flight ingest write: hold edge-diagnostics.sqlite3's
+    writer lock until told to commit (#579/#580, S4)."""
+    connection = open_diagnostics_database(Path(diagnostics_path))
+    try:
+        connection.execute("BEGIN IMMEDIATE")
+        channel.send("LOCKED")
+        assert channel.recv() == "COMMIT"
+        connection.commit()
+        channel.send("COMMITTED")
+    finally:
+        connection.close()
+        channel.close()
 
 
 @pytest.fixture
@@ -218,6 +242,34 @@ def test_disabled_feature_answers_503(tmp_path: Path) -> None:
     assert query.json()["detail"] == "execution records disabled"
 
 
+def test_missing_diagnostics_database_answers_503(tmp_path: Path, enabled_settings: None) -> None:
+    """edge-diagnostics.sqlite3 missing (bootstrap never ran) must not leak an
+    opaque 500 -- EdgeDatabaseError is mapped to a clear 503 (#579/#580, round 2)."""
+    app = create_app(lifespan=no_lifespan)
+    app.state.edge_relay_token = _RELAY_TOKEN
+    app.state.backend_build_revision = _BUILD_REVISION
+    missing = tmp_path / "edge-diagnostics.sqlite3"
+    app.state.execution_record_store = ExecutionRecordStore(
+        lambda: open_diagnostics_database(missing),
+        RetentionBudget(total_bytes=_BUDGET_BYTES),
+    )
+    client = TestClient(app)
+    ingest = client.post(
+        _PATH,
+        json=_batch(_record(0)).to_json(),
+        headers={RELAY_TOKEN_HEADER: _RELAY_TOKEN},
+    )
+    assert ingest.status_code == 503
+    assert ingest.json()["detail"] == "diagnostics store unavailable: run edge-db bootstrap"
+    _login(client)
+    query = client.get(
+        _QUERY,
+        params={"camera_id": "cam-1", "from_ns": 0, "to_ns": 10},
+    )
+    assert query.status_code == 503
+    assert query.json()["detail"] == "diagnostics store unavailable: run edge-db bootstrap"
+
+
 def test_query_requires_dashboard_session(tmp_path: Path, enabled_settings: None) -> None:
     client = _enabled_client(tmp_path)
     response = client.get(
@@ -302,3 +354,71 @@ def test_lifespan_constructs_store_when_enabled(
     with TestClient(app) as client:
         assert isinstance(client.app.state.execution_record_store, ExecutionRecordStore)
         assert client.app.state.backend_build_revision == _BUILD_REVISION
+
+
+def test_lifespan_diagnostics_query_and_product_write_skip_a_pending_diagnostics_write(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, enabled_settings: None
+) -> None:
+    """Through the real lifespan wiring: while another process holds
+    edge-diagnostics.sqlite3's writer lock (standing in for an in-flight
+    ingest write), a diagnostics query and a product-database write both
+    complete promptly. Separate SQLite files have independent writer locks,
+    so this holds structurally once execution-record telemetry lives in its
+    own file next to edge.sqlite3 (see backend/app/edge_db/diagnostics_connection.py).
+    Replaces the old direct-connection N4 test that lived in
+    tests/test_edge_db_concurrency.py (#579/#580, S4).
+    """
+    import backend.app.lifespan as lifespan_module
+
+    monkeypatch.setenv("API_EDGE_RELAY_TOKEN", _RELAY_TOKEN)
+    database = lifespan_module.EDGE_DATABASE_PATH
+    diagnostics_path = database.parent / DIAGNOSTICS_DATABASE_FILENAME
+    with deployment_lock(diagnostics_path.parent) as lock:
+        bootstrap_diagnostics_database(diagnostics_path, lock=lock)
+
+    app = create_app(lifespan=lifespan)
+    with TestClient(app) as client:
+        posted = client.post(
+            _PATH,
+            json=_batch(_record(0)).to_json(),
+            headers={RELAY_TOKEN_HEADER: _RELAY_TOKEN},
+        )
+        assert posted.status_code == 200
+        _login(client)
+
+        context = multiprocessing.get_context("spawn")
+        holder_parent, holder_child = context.Pipe()
+        holder = context.Process(
+            target=_hold_diagnostics_write,
+            args=(os.fspath(diagnostics_path), holder_child),
+        )
+        holder.start()
+        assert holder_parent.poll(10), "diagnostics writer did not acquire its write lock"
+        assert holder_parent.recv() == "LOCKED"
+        try:
+            query = client.get(
+                _QUERY,
+                params={"camera_id": "cam-1", "from_ns": 0, "to_ns": 5_000},
+            )
+            assert query.status_code == 200
+
+            connection = open_runtime_database(database, actor=RuntimeActor.API)
+            try:
+                with write_transaction(connection):
+                    connection.execute(
+                        "INSERT INTO edge_site (id,updated_at) VALUES (1,'2026-09-24T00:00:00Z')"
+                    )
+            finally:
+                connection.close()
+        finally:
+            holder_parent.send("COMMIT")
+            assert holder_parent.poll(10), "diagnostics writer did not commit"
+            assert holder_parent.recv() == "COMMITTED"
+            holder.join(10)
+        assert holder.exitcode == 0
+
+    connection = sqlite3.connect(database)
+    try:
+        assert connection.execute("SELECT id FROM edge_site WHERE id=1").fetchone() == (1,)
+    finally:
+        connection.close()
