@@ -135,7 +135,10 @@ def test_edge_worker_runtime_status_environment_contract() -> None:
         "ML_WORKER_EXECUTION_RECORDS_BATCH_MAX",
         "ML_WORKER_EXECUTION_RECORDS_FLUSH_MS",
         "ML_RTSP_ALLOW_LOCAL_DESTINATIONS",
+        "WORKER_REPLAY_TRACE_DIR",
     }
+    # Replay-trace capture is opt-in: empty by default (disabled).
+    assert worker_environment["WORKER_REPLAY_TRACE_DIR"] == "${WORKER_REPLAY_TRACE_DIR:-}"
     assert worker_environment["ML_RTSP_ALLOW_PRIVATE_DESTINATIONS"] == (
         "${ML_RTSP_ALLOW_PRIVATE_DESTINATIONS:-0}"
     )

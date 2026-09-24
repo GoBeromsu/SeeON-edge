@@ -234,6 +234,9 @@ services:
       ML_WORKER_EXECUTION_RECORDS_LANE_CAPACITY: ${ML_WORKER_EXECUTION_RECORDS_LANE_CAPACITY:-}
       ML_WORKER_EXECUTION_RECORDS_BATCH_MAX: ${ML_WORKER_EXECUTION_RECORDS_BATCH_MAX:-}
       ML_WORKER_EXECUTION_RECORDS_FLUSH_MS: ${ML_WORKER_EXECUTION_RECORDS_FLUSH_MS:-}
+      # Opt-in bounded replay-trace capture (rotating JSONL under the state volume);
+      # empty disables it. Feeds scripts/qa/fall_model_recall_at_gate.py.
+      WORKER_REPLAY_TRACE_DIR: ${WORKER_REPLAY_TRACE_DIR:-}
       ML_RTSP_ALLOW_LOCAL_DESTINATIONS: ${ML_RTSP_ALLOW_LOCAL_DESTINATIONS:-0}
     volumes:
       # Fixed image-adjacent model root, populated by edge-model-fetch.
