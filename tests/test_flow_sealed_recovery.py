@@ -124,15 +124,15 @@ def test_failed_seal_replays_contributors_and_discards_missing_media(tmp_path: P
 
     assert stager.completed == [("one", "clip-1"), ("two", "clip-1")]
     assert restarted.sealed_recovery_missing_media_total == 1
-    assert len(sidecars.pending_for_camera("camera-a")) == 1
+    # The "clip-1" sidecar is retired once its replay publishes successfully
+    # (issue #578), and "a-missing" was already discarded via the
+    # missing-media path above, so nothing remains pending.
+    assert sidecars.pending_for_camera("camera-a") == ()
 
+    # A further restart's replay has nothing left to redo: "clip-1" was
+    # retired above, so it is not republished a second time.
     restarted.replay_sealed()
-    assert stager.completed == [
-        ("one", "clip-1"),
-        ("two", "clip-1"),
-        ("one", "clip-1"),
-        ("two", "clip-1"),
-    ]
+    assert stager.completed == [("one", "clip-1"), ("two", "clip-1")]
 
 
 def test_a_failing_replay_is_counted_and_never_blocks_activation(

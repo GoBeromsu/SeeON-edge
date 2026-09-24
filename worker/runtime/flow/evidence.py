@@ -120,7 +120,12 @@ class FlowEvidenceBinding:
             del self._events[contributor.event_ref]
 
     def replay_sealed(self) -> None:
-        """Retry sealed clips before Flow activates any camera sources."""
+        """Retry sealed clips before Flow activates any camera sources.
+
+        Each sidecar is isolated: a clip this replay cannot safely resume (a
+        genuine identity mismatch, or any other publish failure) is logged and
+        left in place rather than aborting every other sidecar queued behind it.
+        """
         for recovery in self.sidecars.pending_for_camera(self.camera_id):
             media_path = Path(recovery.sealed.path)
             if not media_path.is_file():
@@ -128,7 +133,14 @@ class FlowEvidenceBinding:
                 self.sealed_recovery_missing_media_total += 1
                 LOGGER.error("%s", error)
                 continue
-            self._publish_recovery(recovery)
+            try:
+                self._publish_recovery(recovery)
+            except Exception:  # noqa: BLE001 - one bad sidecar must not block the rest
+                LOGGER.exception(
+                    "sealed Flow clip replay failed clip_id=%s camera_id=%s",
+                    recovery.sealed.clip_id,
+                    self.camera_id,
+                )
 
     def _publish_recovery(self, recovery: FlowSealedRecovery) -> None:
         for contributor in recovery.sealed.contributors:
@@ -139,6 +151,11 @@ class FlowEvidenceBinding:
         published = self.publisher.publish(recovery.sealed, recovery.events)
         for contributor in recovery.sealed.contributors:
             self.stager.complete(contributor.event_ref, str(published.clip_id))
+        # ponytail: publish is idempotent (FlowClipPublisher resumes from the
+        # existing manifest on a collision) and replay_sealed() isolates each
+        # sidecar, so retiring here is just cleanup -- a crash before this line
+        # leaves a sidecar that the next replay_sealed() resumes and retires.
+        self.sidecars.remove(recovery)
 
 
 def _admission_from_stage_result(result: object) -> tuple[bool, str | None]:

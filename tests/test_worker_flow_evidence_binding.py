@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -7,12 +8,28 @@ from pathlib import Path
 import pytest
 
 from shared.events.delivery_queue import AdmissionResult
+from tests_support.clip_analysis import no_op_ready_hook
+from tests_support.thumbnail import DeterministicThumbnailGenerator
 from worker.interfaces.media_plane import RecordingInfo, RecordingRefused
-from worker.pipeline.output.evidence.flow_clip_publication import FlowClipPublicationError
+from worker.pipeline.output.evidence.clip_identity import ClipIdAllocator
+from worker.pipeline.output.evidence.clip_publication import ClipPublisher
+from worker.pipeline.output.evidence.evidence_media import MediaFacts
+from worker.pipeline.output.evidence.flow_clip_publication import (
+    FlowClipPublicationError,
+    FlowClipPublisher,
+)
 from worker.pipeline.output.evidence.flow_sealed_sidecar import FlowSealedSidecars
-from worker.pipeline.output.evidence.smart_record_actor import SmartRecordActor
+from worker.pipeline.output.evidence.smart_record_actor import (
+    ClipContributor,
+    ClipSealed,
+    SmartRecordActor,
+)
 from worker.runtime.flow.evidence import FlowEvidenceBinding
 from worker.types import BusinessEvent, NativeEvidenceTrigger
+
+EVENT_ONE = "00000000-0000-4000-8000-000000000001"
+EVENT_TWO = "00000000-0000-4000-8000-000000000002"
+EVENT_THREE = "00000000-0000-4000-8000-000000000003"
 
 
 @dataclass
@@ -57,9 +74,11 @@ class _Stager:
 @dataclass
 class _Publisher:
     fail: bool = False
+    calls: int = 0
 
     def publish(self, sealed: object, events: object) -> object:
         del events
+        self.calls += 1
         if self.fail:
             raise FlowClipPublicationError("publication failed")
         return type("_Published", (), {"clip_id": sealed.clip_id})()
@@ -80,9 +99,10 @@ def _binding(
     sidecar_directory: Path,
     *,
     extension_sec: int = 45,
-) -> tuple[SmartRecordActor, FlowEvidenceBinding, _Stager, _Publisher]:
+    publisher: object | None = None,
+) -> tuple[SmartRecordActor, FlowEvidenceBinding, _Stager, object]:
     stager = _Stager()
-    publisher = _Publisher()
+    publisher = _Publisher() if publisher is None else publisher
     sealed: list[FlowEvidenceBinding] = []
     actor = SmartRecordActor(
         camera_id="camera-a",
@@ -191,6 +211,35 @@ def test_refused_recording_retries_on_tick(tmp_path: Path) -> None:
     assert plane.starts == [1]
 
 
+def test_successful_seal_retires_the_sidecar_so_a_restart_does_not_replay_it(
+    tmp_path: Path,
+) -> None:
+    """Regression for #578: a completed clip must not be replayed forever.
+
+    Before the fix, '_publish_recovery' never called 'sidecars.remove', so
+    every sealed clip's recovery record survived on disk and
+    'replay_sealed' (run at every worker boot) republished it, hitting
+    'ClipIdCollisionError' since the clip's directory already existed.
+    """
+    plane, now = _Plane(), [0.0]
+    actor, binding, stager, publisher = _binding(
+        plane, now, [datetime(2026, 1, 1, tzinfo=UTC)], tmp_path
+    )
+    binding.emit_for_frame(_event("one"), _trigger())
+    now[0] = 30.0
+    actor.tick()
+    plane.seal(1)
+    assert stager.completed == [("one", "primary-clip")]
+    assert publisher.calls == 1
+
+    # The sidecar must be gone once publication succeeds ...
+    assert binding.sidecars.pending_for_camera("camera-a") == ()
+
+    # ... so a simulated restart's replay_sealed() has nothing left to redo.
+    binding.replay_sealed()
+    assert publisher.calls == 1
+
+
 def test_publication_failure_surfaces_without_completing_the_incident(tmp_path: Path) -> None:
     plane, now = _Plane(), [0.0]
     actor, binding, stager, publisher = _binding(
@@ -205,6 +254,147 @@ def test_publication_failure_surfaces_without_completing_the_incident(tmp_path: 
     assert stager.completed == []
     assert actor.state.name == "FINALIZING"
     assert len(binding.sidecars.pending_for_camera("camera-a")) == 1
+
+
+def _real_flow_publisher(
+    store_dir: Path, monkeypatch: pytest.MonkeyPatch, *, now: datetime
+) -> FlowClipPublisher:
+    """A production FlowClipPublisher + ClipPublisher, ffprobe stubbed out.
+
+    Mirrors the pattern tests/test_worker_clip_publication.py uses for every
+    real-ClipPublisher test: only ffprobe (an external binary) is faked.
+    """
+    monkeypatch.setattr(
+        "worker.pipeline.output.evidence.evidence_manifest.inspect_finalized_media",
+        lambda _path, **_kwargs: MediaFacts("a" * 64, len(b"clip-bytes"), 1000),
+    )
+    clip_publisher = ClipPublisher(
+        store_dir,
+        thumbnail_generator=DeterministicThumbnailGenerator(),
+        on_ready=no_op_ready_hook,
+    )
+    return FlowClipPublisher(ClipIdAllocator(store_dir), clip_publisher, now=lambda: now)
+
+
+def _write_media(path: Path) -> str:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(b"clip-bytes")
+    return str(path)
+
+
+def test_replay_resumes_a_clip_whose_sidecar_survived_a_crash_after_publish(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """SHOULD (PR #582 review): a crash between publish() succeeding and the
+    sidecar's removal must resume idempotently on replay. Exercises the real
+    ClipIdAllocator/ClipPublisher, not the _Publisher fake -- reserve_existing()
+    alone treats an already-published final_dir as a permanent collision.
+    """
+    flow_publisher = _real_flow_publisher(
+        tmp_path / "store", monkeypatch, now=datetime(2026, 1, 1, 0, 2, tzinfo=UTC)
+    )
+    plane, now = _Plane(), [0.0]
+    _actor, binding, stager, _ = _binding(
+        plane,
+        now,
+        [datetime(2026, 1, 1, tzinfo=UTC)],
+        tmp_path / "sidecars",
+        publisher=flow_publisher,
+    )
+    event = _event(EVENT_ONE)
+    sealed = ClipSealed(
+        "clip-1",
+        _write_media(tmp_path / "plane" / "clip-1.mp4"),
+        60_000,
+        (ClipContributor(EVENT_ONE, "2026-01-01T00:00:00Z"),),
+        "none",
+    )
+
+    binding.emit_for_frame(event, _trigger())
+    binding.on_sealed(sealed)
+    assert stager.completed == [(EVENT_ONE, "clip-1")]
+    assert binding.sidecars.pending_for_camera("camera-a") == ()
+
+    # Simulate the crash: the clip already published in full, but the sidecar
+    # that sidecars.remove() would have retired is still on disk.
+    binding.sidecars.persist(sealed, {EVENT_ONE: event})
+    assert len(binding.sidecars.pending_for_camera("camera-a")) == 1
+
+    binding.replay_sealed()
+
+    assert binding.sidecars.pending_for_camera("camera-a") == ()
+    assert stager.completed == [(EVENT_ONE, "clip-1"), (EVENT_ONE, "clip-1")]
+
+
+def test_replay_isolates_a_mismatched_sidecar_and_still_replays_its_neighbor(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """SHOULD (PR #582 review): one colliding sidecar must not abort replay of
+    the rest, and a manifest identifying a different clip must still be a
+    collision -- never silently resumed or deleted.
+    """
+    flow_publisher = _real_flow_publisher(
+        tmp_path / "store", monkeypatch, now=datetime(2026, 1, 1, 0, 2, tzinfo=UTC)
+    )
+    plane, now = _Plane(), [0.0]
+    _actor, binding, stager, _ = _binding(
+        plane,
+        now,
+        [datetime(2026, 1, 1, tzinfo=UTC), datetime(2026, 1, 1, tzinfo=UTC)],
+        tmp_path / "sidecars",
+        publisher=flow_publisher,
+    )
+
+    # clip-1 resumes cleanly (its recreated sidecar matches the published manifest).
+    good_event = _event(EVENT_ONE)
+    good_sealed = ClipSealed(
+        "clip-1",
+        _write_media(tmp_path / "plane" / "clip-1.mp4"),
+        60_000,
+        (ClipContributor(EVENT_ONE, "2026-01-01T00:00:00Z"),),
+        "none",
+    )
+    binding.emit_for_frame(good_event, _trigger())
+    binding.on_sealed(good_sealed)
+    binding.sidecars.persist(good_sealed, {EVENT_ONE: good_event})
+
+    # clip-2 publishes once for EVENT_TWO, then a stale sidecar for the *same*
+    # clip_id shows up claiming a different contributor (EVENT_THREE) -- its
+    # identity no longer matches the manifest clip-2 already has on disk.
+    two_event = _event(EVENT_TWO)
+    two_sealed = ClipSealed(
+        "clip-2",
+        _write_media(tmp_path / "plane" / "clip-2.mp4"),
+        60_000,
+        (ClipContributor(EVENT_TWO, "2026-01-01T00:00:00Z"),),
+        "none",
+    )
+    binding.emit_for_frame(two_event, _trigger())
+    binding.on_sealed(two_sealed)
+    three_event = _event(EVENT_THREE)
+    mismatched_sealed = ClipSealed(
+        "clip-2",
+        two_sealed.path,
+        60_000,
+        (ClipContributor(EVENT_THREE, "2026-01-01T00:00:00Z"),),
+        "none",
+    )
+    binding.sidecars.persist(mismatched_sealed, {EVENT_THREE: three_event})
+
+    assert stager.completed == [(EVENT_ONE, "clip-1"), (EVENT_TWO, "clip-2")]
+    assert len(binding.sidecars.pending_for_camera("camera-a")) == 2
+
+    with caplog.at_level(logging.ERROR):
+        binding.replay_sealed()
+
+    remaining = binding.sidecars.pending_for_camera("camera-a")
+    assert [recovery.sealed.clip_id for recovery in remaining] == ["clip-2"]
+    assert stager.completed == [
+        (EVENT_ONE, "clip-1"),
+        (EVENT_TWO, "clip-2"),
+        (EVENT_ONE, "clip-1"),
+    ]
+    assert any("clip-2" in record.message for record in caplog.records)
 
 
 class _CollectingSink:
