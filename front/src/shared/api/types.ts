@@ -212,6 +212,15 @@ export type RuntimeClipRecorder = {
   encoder: string | null;
 };
 
+/** DeliveryQueue capacity snapshot forwarded via runtime-status -> /status (see backend RelayDeliveryQueueStatus). */
+export type RuntimeDeliveryQueue = {
+  accepted_count: number | null;
+  by_kind: Record<string, number> | null;
+  dead_lettered_count: number | null;
+  /** Oldest live EVENT entry's acceptance time (ISO-8601 UTC), or null when no EVENT is queued. */
+  oldest_event_accepted_at: string | null;
+};
+
 
 export type StatusSnapshot = {
   cameras: Record<string, CameraHeartbeat>;
@@ -222,6 +231,8 @@ export type StatusSnapshot = {
     device: RuntimeDeviceDiagnostics | null;
     clip_export_applied: RuntimeClipExportApplied;
     clip_recorder: RuntimeClipRecorder | null;
+    /** Optional: absent on fixtures/backends predating this field (see RuntimeDeliveryQueue). */
+    delivery_queue?: RuntimeDeliveryQueue | null;
     stale_after_sec: number | null;
   };
   runtime_settings?: RuntimeSettings;

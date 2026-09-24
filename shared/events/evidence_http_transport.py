@@ -163,9 +163,10 @@ def classify_http_failure(
     # out-of-band, and the event is still perfectly valid once it is -- so
     # dead-lettering it forever turns a recoverable config error into data
     # loss for no reason (see #183, #202). RETRY already has exactly the
-    # backoff behavior this needs: retry_after_seconds when the response
-    # supplies one, else capped exponential backoff (EvidenceSender._delay),
-    # indefinitely -- it never gives up on its own.
+    # behavior this needs: the entry is deferred and re-polled on the sender's
+    # own tick (about every 1s, see EvidenceExportRuntime._run_sender) without
+    # consuming its attempt budget, indefinitely -- it never gives up on its
+    # own.
     failure_code = _failure_code(body)
     if failure_code is DeliveryFailureCode.CAMERA_MAPPING_MISSING:
         disposition = DeliveryDisposition.RETRY

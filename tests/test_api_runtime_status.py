@@ -207,7 +207,18 @@ def test_status_round_trips_delivery_queue_capacity_and_kind_mix(tmp_path: Path)
         # operator needs to see it here; nothing is retained in this fixture.
         "dead_lettered_count": expected.dead_lettered_count,
         "dead_lettered_bytes": expected.dead_lettered_bytes,
+        "oldest_event_accepted_at": expected.oldest_event_accepted_at,
     }
+    assert projected["oldest_event_accepted_at"] is not None
+
+
+def test_status_promotes_delivery_queue_to_top_level(tmp_path: Path) -> None:
+    client = _client()
+    _post_queue_capacity(client, _delivery_queue(tmp_path))
+
+    runtime = _json(client.get("/api/v1/status"))["runtime"]
+
+    assert runtime["delivery_queue"] == runtime["facilities"]["facility-1"]["delivery_queue"]
 
 
 def test_status_reports_delivery_queue_bounds_for_headroom_calculation(tmp_path: Path) -> None:
@@ -232,6 +243,10 @@ def test_runtime_status_schema_round_trip_and_rejects_extra_fields() -> None:
         "delivery_queue": None,
         "cameras": [{**camera, "measured_fps": None, "detection": None}],
     }
+    with pytest.raises(ValidationError):
+        RelayRuntimeStatusRequest.model_validate(
+            {**payload, "delivery_queue": {"unexpected": True}}
+        )
     with pytest.raises(ValidationError):
         RelayRuntimeStatusRequest.model_validate(_payload(unexpected=True))
 

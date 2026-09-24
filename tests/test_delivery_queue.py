@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 from concurrent.futures import ThreadPoolExecutor
+from datetime import UTC, datetime
 from pathlib import Path
 
 from shared.events import envelope_limits
@@ -141,6 +142,47 @@ def test_capacity_snapshot_counts_clip_entries_by_kind(tmp_path: Path) -> None:
     queue = DeliveryQueue(tmp_path)
     assert queue.try_admit(_clip()).accepted
     assert queue.capacity_snapshot.by_kind[EntryKind.CLIP] == 1
+
+
+def test_capacity_snapshot_oldest_event_accepted_at_is_min_over_live_events(
+    tmp_path: Path,
+) -> None:
+    queue = DeliveryQueue(tmp_path)
+    older, newer = _event(1), _event(2)
+    assert queue.try_admit(older).accepted
+    assert queue.try_admit(newer).accepted
+    os.utime(tmp_path / f"{older.entry_id}.json", (1_700_000_000, 1_700_000_000))
+    os.utime(tmp_path / f"{newer.entry_id}.json", (1_700_000_500, 1_700_000_500))
+
+    oldest = queue.capacity_snapshot.oldest_event_accepted_at
+
+    assert oldest is not None
+    assert datetime.fromisoformat(oldest) == datetime.fromtimestamp(1_700_000_000, tz=UTC)
+
+
+def test_capacity_snapshot_oldest_event_accepted_at_is_none_for_clip_only(
+    tmp_path: Path,
+) -> None:
+    queue = DeliveryQueue(tmp_path)
+    assert queue.try_admit(_clip()).accepted
+    assert queue.capacity_snapshot.oldest_event_accepted_at is None
+
+
+def test_capacity_snapshot_oldest_event_accepted_at_excludes_dead_lettered(
+    tmp_path: Path,
+) -> None:
+    queue = DeliveryQueue(tmp_path)
+    dead, live = _event(1), _event(2)
+    assert queue.try_admit(dead).accepted
+    assert queue.try_admit(live).accepted
+    os.utime(tmp_path / f"{dead.entry_id}.json", (1_700_000_000, 1_700_000_000))
+    os.utime(tmp_path / f"{live.entry_id}.json", (1_700_000_500, 1_700_000_500))
+    assert queue.dead_letter(dead.entry_id, 422)
+
+    oldest = queue.capacity_snapshot.oldest_event_accepted_at
+
+    assert oldest is not None
+    assert datetime.fromisoformat(oldest) == datetime.fromtimestamp(1_700_000_500, tz=UTC)
 
 
 def test_acknowledgement_removes_only_the_named_entry(tmp_path: Path) -> None:

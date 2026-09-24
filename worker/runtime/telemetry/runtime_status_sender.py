@@ -283,6 +283,7 @@ class RuntimeStatusSender:
             by_kind={kind.value: count for kind, count in snapshot.by_kind.items()},
             dead_lettered_count=snapshot.dead_lettered_count,
             dead_lettered_bytes=snapshot.dead_lettered_bytes,
+            oldest_event_accepted_at=snapshot.oldest_event_accepted_at,
         )
 
     def _post(self, snapshots: list[RelayRuntimeStatusPayload]) -> bool:
