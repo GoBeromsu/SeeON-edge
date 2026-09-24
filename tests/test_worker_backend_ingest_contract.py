@@ -5,6 +5,7 @@ from pydantic import ValidationError
 
 from backend.app.features.relay.router import RelayAlertRequest
 from contracts.relay import EventApiPayload
+from shared.events.edge_ingest_client import _audit_payload_fields
 from worker.runtime.config.worker_models import WorkerConfig
 
 
@@ -149,6 +150,29 @@ def test_event_api_payload_omits_audit_when_unset_and_includes_when_set() -> Non
         "operating_threshold": 0.72,
         "clock_source": "edge_wall_clock",
     }
+
+
+@pytest.mark.parametrize(
+    ("config_version", "expect_forwarded"),
+    [
+        pytest.param(52_160_668_988, False, id="overflows-hub-int4"),
+        pytest.param(2**31 - 1, True, id="max-hub-int4"),
+    ],
+)
+def test_audit_payload_fields_omits_config_version_beyond_hub_int4(
+    config_version: int, expect_forwarded: bool
+) -> None:
+    fields = _audit_payload_fields(
+        {
+            "config_version": config_version,
+            "model_version": "model-v1",
+        }
+    )
+
+    assert ("config_version" in fields) is expect_forwarded
+    if expect_forwarded:
+        assert fields["config_version"] == config_version
+    assert fields["model_version"] == "model-v1"
 
 
 def _backend_policy_fields() -> set[str]:

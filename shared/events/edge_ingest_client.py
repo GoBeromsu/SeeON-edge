@@ -19,6 +19,7 @@ from shared.events.evidence_export_client import BackendEvidenceClient
 from shared.events.evidence_export_contract import DeliveryFailure, EventReceipt
 
 DEFAULT_TIMEOUT_SEC: Final = 0.5
+_HUB_INT4_MAX: Final = 2**31 - 1
 EdgeEventId = str
 IngestErrorClass = Literal["auth", "timeout", "unreachable"]
 
@@ -317,8 +318,13 @@ def _audit_payload_fields(audit: dict[str, object] | None) -> _AuditPayloadField
     fields: _AuditPayloadFields = {}
     if audit is None:
         return fields
+    # The Hub stores config_version as a nullable INT4 column. The edge token
+    # is opaque and can exceed the INT4 range once a detection policy is
+    # applied (base_version * 1e9 + policy hash), which made the Hub 500
+    # every alert. Forward it only when it fits; the full value still lives
+    # in the edge audit log, and the Hub column is left null otherwise.
     config_version = audit.get("config_version")
-    if isinstance(config_version, int):
+    if isinstance(config_version, int) and 0 <= config_version <= _HUB_INT4_MAX:
         fields["config_version"] = config_version
     model_version = audit.get("model_version")
     if isinstance(model_version, str):
