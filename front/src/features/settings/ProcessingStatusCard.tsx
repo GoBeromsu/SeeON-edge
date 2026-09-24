@@ -8,6 +8,9 @@ type ProcessingStatusCardProps = {
 
 const UNKNOWN = '확인 중';
 
+/** Hub가 이보다 오래 EVENT를 못 가져가면 "전송 지연" 대신 Hub 미전달로 경고한다 (issue: 9일간 5xx 무경고 적체). */
+const HUB_STALL_THRESHOLD_MS = 5 * 60 * 1000;
+
 function deviceLabel(status: StatusSnapshot): string {
   const device = status.runtime.device;
   if (!device?.device_name && !device?.backend) return UNKNOWN;
@@ -43,6 +46,27 @@ function clipExportAppliedLabel(status: StatusSnapshot): string {
       ? ' · 워커 오프라인'
       : '';
   return `워커 적용: ${applied.enabled ? 'ON' : 'OFF'} · 버전 ${applied.version}${freshness}`;
+}
+
+/** Live(미확정) EVENT 대기 수. by_kind는 delivery_queue가 있으면 항상 온다 -- accepted_count는 EVENT/CLIP 등 전체 kind를 합친 값이라 대체 지표로 쓰면 과다 집계된다. */
+function alertQueueCountLabel(status: StatusSnapshot): string {
+  const queue = status.runtime.delivery_queue;
+  if (!queue) return UNKNOWN;
+  const eventCount = queue.by_kind?.EVENT ?? 0;
+  const deadLettered = queue.dead_lettered_count;
+  const suffix = deadLettered ? ` (실패 ${deadLettered})` : '';
+  return `${eventCount}건 대기${suffix}`;
+}
+
+/** Hub가 HUB_STALL_THRESHOLD_MS 넘게 가장 오래된 EVENT를 못 가져가면 경고 문구를 낸다. */
+function alertQueueWarning(status: StatusSnapshot): string | null {
+  const acceptedAt = status.runtime.delivery_queue?.oldest_event_accepted_at;
+  if (!acceptedAt) return null;
+  const ageMs = Date.now() - new Date(acceptedAt).getTime();
+  if (!Number.isFinite(ageMs) || ageMs < HUB_STALL_THRESHOLD_MS) return null;
+  const ageMinutes = Math.floor(ageMs / 60_000);
+  const age = ageMinutes < 60 ? `${ageMinutes}분` : `${Math.floor(ageMinutes / 60)}시간`;
+  return `Hub 미전달 ${age}`;
 }
 
 function workerBadge(status: StatusSnapshot | null): { label: string; className: string } {
@@ -101,6 +125,13 @@ export function ProcessingStatusCard({ resource }: ProcessingStatusCardProps): J
         <dd className="text-right text-foreground">{status ? clipExportAppliedLabel(status) : `워커 적용: ${UNKNOWN}`}</dd>
         <dt className="text-muted-foreground">전송 지연</dt>
         <dd className="text-right tabular-nums text-foreground">{status ? latencyLabel(status) : UNKNOWN}</dd>
+        <dt className="text-muted-foreground">알림 전송</dt>
+        <dd className="text-right text-foreground">
+          {status ? alertQueueCountLabel(status) : UNKNOWN}
+          {status && alertQueueWarning(status) ? (
+            <span className="ml-2 text-destructive">{alertQueueWarning(status)}</span>
+          ) : null}
+        </dd>
       </dl>
     </article>
   );

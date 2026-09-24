@@ -13,6 +13,7 @@ import uuid
 from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import asdict, dataclass
+from datetime import UTC, datetime
 from enum import StrEnum
 from pathlib import Path
 from typing import Final, TypeAlias
@@ -224,6 +225,11 @@ class DeliveryQueueCapacitySnapshot:
     #: deployment cannot act on what it cannot see.
     dead_lettered_count: int = 0
     dead_lettered_bytes: int = 0
+    #: Acceptance time of the oldest live EVENT entry (ISO-8601 UTC), or None
+    #: when no EVENT is queued. This is the stall signal: last_success_at goes
+    #: stale in quiet hours with no events, and CLIP entries wait forever by
+    #: design while clip export is off, so neither can stand in for it.
+    oldest_event_accepted_at: str | None = None
 
 
 class DeliveryQueue:
@@ -270,12 +276,19 @@ class DeliveryQueue:
         with self._locked():
             paths = tuple(self._published_paths())
             by_kind = dict.fromkeys(EntryKind, 0)
+            oldest_event_mtime: float | None = None
+            accepted_bytes = 0
             for path in paths:
+                stat = path.stat()
+                accepted_bytes += stat.st_size
                 entry = json.loads(path.read_bytes())
                 kind = EntryKind(entry["kind"])
                 by_kind[kind] += 1
+                if kind is EntryKind.EVENT and (
+                    oldest_event_mtime is None or stat.st_mtime < oldest_event_mtime
+                ):
+                    oldest_event_mtime = stat.st_mtime
             accepted_count = len(paths)
-            accepted_bytes = sum(path.stat().st_size for path in paths)
             self._count, self._bytes = accepted_count, accepted_bytes
             dead_directory = self.dead_letter_directory
             dead_count = 0
@@ -285,6 +298,13 @@ class DeliveryQueue:
                     if retained.is_file():
                         dead_count += 1
                         dead_bytes += retained.stat().st_size
+            oldest_event_accepted_at = (
+                None
+                if oldest_event_mtime is None
+                else datetime.fromtimestamp(oldest_event_mtime, tz=UTC)
+                .isoformat(timespec="milliseconds")
+                .replace("+00:00", "Z")
+            )
             return DeliveryQueueCapacitySnapshot(
                 accepted_count=accepted_count,
                 accepted_bytes=accepted_bytes,
@@ -293,6 +313,7 @@ class DeliveryQueue:
                 by_kind=by_kind,
                 dead_lettered_count=dead_count,
                 dead_lettered_bytes=dead_bytes,
+                oldest_event_accepted_at=oldest_event_accepted_at,
             )
 
     def try_admit(self, entry: DeliveryEntry) -> AdmissionResult:

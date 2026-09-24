@@ -37,6 +37,7 @@ def status(request: Request) -> dict[str, object]:
     runtime["worker"] = primary.get("worker") if primary else None
     runtime["device"] = _to_device_diagnostics(primary.get("gpu") if primary else None)
     runtime["clip_recorder"] = primary.get("clip_recorder") if primary else None
+    runtime["delivery_queue"] = primary.get("delivery_queue") if primary else None
     runtime["clip_export_applied"] = _clip_export_applied(primary)
     response["runtime"] = runtime
     response["runtime_settings"] = get_runtime_settings_store(request.app).get().as_dict()

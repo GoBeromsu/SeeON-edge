@@ -127,6 +127,45 @@ describe('ProcessingStatusCard', () => {
     act(() => root.unmount());
   });
 
+  it('shows the live EVENT count and no warning when the oldest EVENT is fresh', () => {
+    const fresh: StatusSnapshot = {
+      ...status,
+      runtime: {
+        ...status.runtime,
+        delivery_queue: {
+          accepted_count: 3,
+          by_kind: { EVENT: 3 },
+          dead_lettered_count: 0,
+          oldest_event_accepted_at: new Date().toISOString(),
+        },
+      },
+    };
+    const { host, root } = render(makeResource({ data: fresh }));
+    expect(host.textContent).toContain('3건 대기');
+    expect(host.textContent).not.toContain('Hub 미전달');
+    act(() => root.unmount());
+  });
+
+  it('warns Hub 미전달 when the oldest EVENT is older than the stall threshold', () => {
+    const stale: StatusSnapshot = {
+      ...status,
+      runtime: {
+        ...status.runtime,
+        delivery_queue: {
+          accepted_count: 5,
+          by_kind: { EVENT: 5 },
+          dead_lettered_count: 2,
+          oldest_event_accepted_at: new Date(Date.now() - 10 * 60 * 1000).toISOString(),
+        },
+      },
+    };
+    const { host, root } = render(makeResource({ data: stale }));
+    expect(host.textContent).toContain('5건 대기');
+    expect(host.textContent).toContain('실패 2');
+    expect(host.textContent).toContain('Hub 미전달 10분');
+    act(() => root.unmount());
+  });
+
   it('shows 정상 when the worker is alive', () => {
     const { host, root } = render();
     expect(host.textContent).toContain('정상');
