@@ -286,10 +286,32 @@ def _apply(connection, reconciliation: _Reconciliation) -> None:
             "SELECT manifest_sha256, media_sha256, media_size_bytes FROM clips WHERE clip_id = ?",
             (clip_id,),
         ).fetchone()
-        if existing is not None and tuple(existing) != item.identity:
-            raise CompactClipConflictError(f"clip {clip_id} immutable content changed")
         if existing is None:
             connection.execute(_INSERT_CLIP, item.values)
+            continue
+        catalogued = tuple(existing)
+        if catalogued == item.identity:
+            continue
+        if not _identity_compatible(catalogued, item.identity):
+            raise CompactClipConflictError(f"clip {clip_id} immutable content changed")
+        # The catalogue never learned this content (the row was parked
+        # UNAVAILABLE while its manifest was missing, or CORRUPT while its
+        # media was) and the filesystem now presents it: restore, don't refuse.
+        # Refusing here made one parked row poison every listing request.
+        connection.execute(_RESTORE_CLIP, (*item.values[1:18], item.values[19], clip_id))
+
+
+def _identity_compatible(
+    catalogued: tuple[object, ...], observed: tuple[str, str | None, int | None]
+) -> bool:
+    """True when every identity fact the catalogue holds matches what is on disk.
+
+    A NULL catalogued fact is absence of knowledge, not a claim: only a known
+    hash or size that differs from the observed one is a content change.
+    """
+    return all(
+        known is None or known == seen for known, seen in zip(catalogued, observed, strict=True)
+    )
 
 
 def _page_rows(connection, query: CompactClipQuery):
@@ -332,6 +354,16 @@ def _page_rows(connection, query: CompactClipQuery):
     )
     return rows, total, facets
 
+
+_RESTORE_CLIP = """
+UPDATE clips SET
+    camera_id=?, event_facet=?, started_at=?, duration_ms=?, codec=?, mime_type=?,
+    manifest_relpath=?, media_relpath=?, thumbnail_relpath=?, manifest_sha256=?,
+    media_sha256=?, thumbnail_sha256=?, manifest_size_bytes=?, media_size_bytes=?,
+    thumbnail_size_bytes=?, local_state=?, local_reason=?,
+    revision=revision+1, updated_at=?
+WHERE clip_id=?
+"""
 
 _INSERT_CLIP = """
 INSERT INTO clips (

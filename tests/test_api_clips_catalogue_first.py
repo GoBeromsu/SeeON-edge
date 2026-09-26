@@ -228,3 +228,79 @@ def test_examination_is_bounded_per_call_and_converges(
         assert first.json()["clips"][0]["clip_id"] == "clip-00019"
         calls = _catalogue_everything(client, count)
     assert calls == 2  # ceil(20 / 7) - 1 further calls after the first
+
+
+def _park_as_manifest_missing(clip_id: str) -> None:
+    """Put a row in the state ``_apply`` leaves when a referenced clip's manifest vanishes."""
+    from backend.app.features.clips import router as router_module
+
+    with sqlite3.connect(router_module.EDGE_DATABASE_PATH) as connection:
+        _ = connection.execute(
+            """
+            UPDATE clips SET
+                manifest_relpath=NULL, media_relpath=NULL, thumbnail_relpath=NULL,
+                manifest_sha256=NULL, media_sha256=NULL, thumbnail_sha256=NULL,
+                manifest_size_bytes=NULL, media_size_bytes=NULL, thumbnail_size_bytes=NULL,
+                local_state='UNAVAILABLE', local_reason='MANIFEST_MISSING',
+                revision=revision+1
+            WHERE clip_id=?
+            """,
+            (clip_id,),
+        )
+
+
+def test_parked_row_whose_manifest_reappears_is_restored_not_refused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A row parked UNAVAILABLE/MANIFEST_MISSING carries no identity. When the
+    manifest is back on disk the listing must restore it, not report a content
+    change: one such row made every ``GET /clips`` answer 503 in production."""
+    root = tmp_path / "clip-store"
+    for index in range(3):
+        _write_clip(root, index)
+    app = _app(root, monkeypatch)
+    with _client(app) as client:
+        first = client.get("/api/v1/clips", params={"limit": 10})
+        assert first.status_code == 200
+        assert first.json()["pagination"]["total"] == 3
+
+        _park_as_manifest_missing("clip-00001")
+        parked = client.get("/api/v1/clips", params={"limit": 10})
+        assert parked.status_code == 200
+        assert parked.json()["pagination"]["total"] == 3
+        assert "clip-00001" in {clip["clip_id"] for clip in parked.json()["clips"]}
+
+    from backend.app.features.clips import router as router_module
+
+    with sqlite3.connect(router_module.EDGE_DATABASE_PATH) as connection:
+        row = connection.execute(
+            "SELECT local_state, local_reason, manifest_relpath, media_sha256, revision "
+            "FROM clips WHERE clip_id='clip-00001'"
+        ).fetchone()
+    assert row[0] == "AVAILABLE"
+    assert row[1] is None
+    assert row[2] == "clips/clip-00001/manifest.json"
+    assert row[3] is not None
+    assert row[4] == 3, "insert, park, restore"
+
+
+def test_corrupt_row_whose_media_reappears_is_restored(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = tmp_path / "clip-store"
+    media = b"stable media bytes"
+    _write_clip(root, 0, media=media)
+    app = _app(root, monkeypatch)
+    media_path = root / "clips" / "clip-00000" / "clip.mp4"
+    media_path.unlink()
+    with _client(app) as client:
+        corrupt = client.get("/api/v1/clips", params={"limit": 10})
+        assert corrupt.status_code == 200
+        assert corrupt.json()["clips"][0]["clip_id"] == "clip-00000"
+        _ = media_path.write_bytes(media)
+        restored = client.get("/api/v1/clips", params={"limit": 10})
+        assert restored.status_code == 200
+        assert [clip["clip_id"] for clip in restored.json()["clips"]] == ["clip-00000"]
+
+        _ = media_path.write_bytes(b"different bytes now")
+        assert client.get("/api/v1/clips", params={"limit": 10}).status_code == 503
