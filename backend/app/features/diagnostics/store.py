@@ -9,7 +9,7 @@ from collections.abc import Callable
 from contextlib import closing
 
 from backend.app.edge_db.connection import write_transaction
-from backend.app.features.diagnostics.coverage import insert_coverage
+from backend.app.features.diagnostics.coverage import UNSCOPED_GAP_CAUSE, insert_coverage
 from backend.app.features.diagnostics.ingest import (
     insert_record,
     payload_text_and_bytes,
@@ -103,7 +103,15 @@ class ExecutionRecordStore:
             (batch.batch_id,),
         ).fetchone()
         if existing is not None:
-            return _receipt_from_json(str(existing[0]))
+            prior_receipt = _receipt_from_json(str(existing[0]))
+            if prior_receipt.storage_state is not StorageState.STORAGE_UNAVAILABLE:
+                return prior_receipt
+            # Only a refusal is retryable. Remove it before the savepoint so
+            # either outcome can replace it under the same id. The enclosing
+            # write transaction restores it if ingestion raises.
+            connection.execute(
+                "DELETE FROM execution_batches WHERE batch_id = ?", (batch.batch_id,)
+            )
         connection.execute("SAVEPOINT ingest")
         provenance_id = upsert_provenance(connection, batch.provenance, now_ns)
         accepted = 0
@@ -150,30 +158,38 @@ class ExecutionRecordStore:
                 duplicates += 1
             else:
                 rejected.append((record.record_id, disposition))
+        gap_lanes: set[tuple[str, str, int, int]] = set()
         for gap in batch.gaps:
+            scoped = gap.source_generation is not None and gap.stream_epoch is not None
+            # (0, 0) is only a storage bucket for legacy unresolved loss.
+            # Its UNKNOWN marker explicitly applies across this camera/boot;
+            # no batch neighbour establishes the lost observation's scope.
+            generation = gap.source_generation if scoped else 0
+            epoch = gap.stream_epoch if scoped else 0
             insert_coverage(
                 connection,
                 camera_id=batch.camera_id,
                 worker_boot_id=batch.worker_boot_id,
-                source_generation=epoch_ns[0],
-                stream_epoch=epoch_ns[1],
-                kind=CoverageKind.MISSING_NOT_RECORDED,
+                source_generation=generation,
+                stream_epoch=epoch,
+                kind=CoverageKind.MISSING_NOT_RECORDED if scoped else CoverageKind.UNKNOWN,
                 producer=gap.producer,
                 from_sequence=gap.from_sequence,
                 to_sequence=gap.to_sequence,
                 from_ns=gap.from_ns,
                 to_ns=gap.to_ns,
                 record_count=gap.record_count,
-                exact=True,
-                cause=gap.cause,
+                exact=scoped,
+                cause=gap.cause if scoped else UNSCOPED_GAP_CAUSE,
                 recorded_at_ns=now_ns,
             )
+            gap_lanes.add((batch.camera_id, batch.worker_boot_id, generation, epoch))
         if batch.gaps:
             coarsen_coverage(
                 connection,
                 self.budget.coverage_rows_per_epoch,
                 now_ns,
-                ((batch.camera_id, batch.worker_boot_id, epoch_ns[0], epoch_ns[1]),),
+                gap_lanes,
             )
         receipt = BatchReceipt(
             batch_id=batch.batch_id,
@@ -206,6 +222,13 @@ class ExecutionRecordStore:
                 exact=False,
                 cause="capacity",
                 recorded_at_ns=now_ns,
+            )
+            # Budget enforcement's coarsening rolled back with ingest.
+            coarsen_coverage(
+                connection,
+                self.budget.coverage_rows_per_epoch,
+                now_ns,
+                {(batch.camera_id, batch.worker_boot_id, epoch_ns[0], epoch_ns[1])},
             )
             receipt = BatchReceipt(
                 batch_id=batch.batch_id,

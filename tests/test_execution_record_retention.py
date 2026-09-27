@@ -26,7 +26,11 @@ from backend.app.features.diagnostics.retention import (
     used_bytes,
 )
 from backend.app.features.diagnostics.store import ExecutionRecordStore
-from backend.app.features.diagnostics.terminals import refresh_unit_terminals
+from backend.app.features.diagnostics.terminals import (
+    force_oldest_units_terminal,
+    refresh_unit_terminals,
+    seal_final_segments,
+)
 
 CAMERA = "cam-a"
 BOOT = "boot-1"
@@ -80,6 +84,7 @@ def _record(
     seq: int,
     observed: int,
     payload: str,
+    camera: str = CAMERA,
     boot: str = BOOT,
     generation: int = 0,
     epoch: int = 0,
@@ -88,7 +93,7 @@ def _record(
     return ExecutionRecordInput(
         record_id=_hex(label),
         record_kind=RecordKind.SDK_FRAME,
-        camera_id=CAMERA,
+        camera_id=camera,
         worker_boot_id=boot,
         source_generation=generation,
         stream_epoch=epoch,
@@ -103,11 +108,15 @@ def _record(
 
 
 def _batch(
-    label: str, records: tuple[ExecutionRecordInput, ...], *, boot: str = BOOT
+    label: str,
+    records: tuple[ExecutionRecordInput, ...],
+    *,
+    camera: str = CAMERA,
+    boot: str = BOOT,
 ) -> IngestBatch:
     return IngestBatch(
         batch_id=_hex(label),
-        camera_id=CAMERA,
+        camera_id=camera,
         worker_boot_id=boot,
         provenance=PROVENANCE,
         records=records,
@@ -604,3 +613,416 @@ def test_newer_boot_is_decided_by_observation_time_not_boot_id_text(tmp_path: Pa
         connection.close()
     assert rows["dead-u"] == 1, "the superseded boot's unit is terminal"
     assert rows["live-u"] == 0, "the live boot's unit must stay open"
+
+
+def _unit_states(connection) -> dict[str, tuple[int, str]]:
+    return {
+        str(row[0]): (int(row[1]), str(row[2]))
+        for row in connection.execute(
+            "SELECT causal_unit_id, terminal, causal_state FROM execution_units"
+        )
+    }
+
+
+def test_issue577_known_gap_survives_dense_watermark_closure(tmp_path: Path) -> None:
+    """Dense units close from the lane watermark. An overlapping known gap is
+    INCOMPLETE_KNOWN, and a unit already marked known is not rewritten COMPLETE."""
+    budget = RetentionBudget(total_bytes=2**20, unit_horizon_ns=HORIZON)
+    store, path = _store(tmp_path, budget)
+    stamps = (0, 1, 2, 50_000)
+    store.ingest_batch(
+        _batch(
+            "gaps",
+            tuple(
+                _record(
+                    label=f"g{stamp}",
+                    unit=f"gap-{stamp}",
+                    seq=index,
+                    observed=stamp,
+                    payload="a",
+                )
+                for index, stamp in enumerate(stamps)
+            ),
+        )
+    )
+    connection = _open(path)
+    try:
+        connection.execute(
+            "UPDATE execution_units SET terminal = 0, causal_state = ? WHERE causal_unit_id = ?",
+            (str(UnitCausalState.INCOMPLETE_UNKNOWN), "gap-0"),
+        )
+        connection.execute(
+            "UPDATE execution_units SET terminal = 0, causal_state = ? WHERE causal_unit_id = ?",
+            (str(UnitCausalState.INCOMPLETE_KNOWN), "gap-1"),
+        )
+        insert_coverage(
+            connection,
+            camera_id=CAMERA,
+            worker_boot_id=BOOT,
+            source_generation=0,
+            stream_epoch=0,
+            kind=CoverageKind.MISSING_NOT_RECORDED,
+            producer="sdk",
+            from_sequence=0,
+            to_sequence=0,
+            from_ns=0,
+            to_ns=0,
+            record_count=1,
+            exact=True,
+            cause="drop",
+            recorded_at_ns=1,
+        )
+        refresh_unit_terminals(connection, HORIZON)
+        states = _unit_states(connection)
+    finally:
+        connection.close()
+    assert states["gap-0"] == (1, UnitCausalState.INCOMPLETE_KNOWN)
+    assert states["gap-1"] == (1, UnitCausalState.INCOMPLETE_KNOWN)
+    assert states["gap-50000"][0] == 0
+    assert states["gap-50000"][1] != UnitCausalState.COMPLETE
+
+
+def test_issue577_epoch_closure_preserves_unfinished_uncertainty(tmp_path: Path) -> None:
+    """A known gap does not exclude additional loss at an abrupt epoch end."""
+    budget = RetentionBudget(total_bytes=2**20, unit_horizon_ns=HORIZON)
+    store, path = _store(tmp_path, budget)
+    store.ingest_batch(
+        _batch("old", (_record(label="old", unit="old-known", seq=0, observed=10, payload="a"),))
+    )
+    store.ingest_batch(
+        _batch(
+            "new",
+            (
+                _record(
+                    label="new",
+                    unit="new-open",
+                    seq=0,
+                    observed=10 + HORIZON * 10,
+                    payload="b",
+                    epoch=1,
+                ),
+            ),
+        )
+    )
+    connection = _open(path)
+    try:
+        connection.execute(
+            "UPDATE execution_units SET terminal = 0, causal_state = ? WHERE causal_unit_id = ?",
+            (str(UnitCausalState.INCOMPLETE_KNOWN), "old-known"),
+        )
+        refresh_unit_terminals(connection, HORIZON)
+        states = _unit_states(connection)
+    finally:
+        connection.close()
+    assert states["old-known"] == (1, UnitCausalState.INCOMPLETE_UNKNOWN)
+    assert states["new-open"][0] == 0
+    assert states["new-open"][1] != UnitCausalState.COMPLETE
+
+
+def test_issue577_pressure_chooses_globally_oldest_not_camera_name(tmp_path: Path) -> None:
+    """cam-a sorts first but was observed later. Pressure must terminal the
+    quieter cam-z unit without claiming the forced closure is fully known."""
+    horizon = 100_000
+    budget = RetentionBudget(total_bytes=2**20, unit_horizon_ns=horizon)
+    store, path = _store(tmp_path, budget)
+    store.ingest_batch(
+        _batch(
+            "early-camera",
+            (
+                _record(
+                    label="start",
+                    unit="early-start",
+                    seq=0,
+                    observed=10,
+                    payload="a",
+                    camera="cam-a",
+                ),
+                _record(
+                    label="recent",
+                    unit="early-start",
+                    seq=1,
+                    observed=9_000,
+                    payload="a",
+                    camera="cam-a",
+                ),
+            ),
+            camera="cam-a",
+        )
+    )
+    store.ingest_batch(
+        _batch(
+            "quiet-camera",
+            (
+                _record(
+                    label="quiet",
+                    unit="quiet",
+                    seq=0,
+                    observed=5_000,
+                    payload="b",
+                    camera="cam-z",
+                ),
+            ),
+            camera="cam-z",
+        )
+    )
+    assert "cam-a" < "cam-z"
+    connection = _open(path)
+    try:
+        refresh_unit_terminals(connection, horizon)
+        opened = _unit_states(connection)
+        assert opened["early-start"][0] == 0
+        assert opened["quiet"][0] == 0
+        connection.execute(
+            "UPDATE execution_units SET causal_state = ? WHERE causal_unit_id = ?",
+            (str(UnitCausalState.INCOMPLETE_KNOWN), "quiet"),
+        )
+        closed = force_oldest_units_terminal(connection, 1)
+        states = _unit_states(connection)
+    finally:
+        connection.close()
+    assert closed == 1
+    assert states["quiet"] == (1, UnitCausalState.INCOMPLETE_UNKNOWN)
+    assert states["early-start"][0] == 0
+
+
+def test_issue577_pressure_tie_breaks_on_unit_id_not_camera_name(tmp_path: Path) -> None:
+    """Equal observation times break ties by causal_unit_id. cam-a must not win
+    just because its name sorts first."""
+    horizon = 100_000
+    budget = RetentionBudget(total_bytes=2**20, unit_horizon_ns=horizon)
+    store, path = _store(tmp_path, budget)
+    store.ingest_batch(
+        _batch(
+            "lexical",
+            (
+                _record(
+                    label="m",
+                    unit="unit-m",
+                    seq=0,
+                    observed=100,
+                    payload="a",
+                    camera="cam-a",
+                ),
+            ),
+            camera="cam-a",
+        )
+    )
+    store.ingest_batch(
+        _batch(
+            "older-id",
+            (
+                _record(
+                    label="a",
+                    unit="unit-a",
+                    seq=0,
+                    observed=100,
+                    payload="b",
+                    camera="cam-z",
+                ),
+            ),
+            camera="cam-z",
+        )
+    )
+    assert "cam-a" < "cam-z"
+    assert "unit-a" < "unit-m"
+    connection = _open(path)
+    try:
+        closed = force_oldest_units_terminal(connection, 1)
+        states = _unit_states(connection)
+    finally:
+        connection.close()
+    assert closed == 1
+    assert states["unit-a"] == (1, UnitCausalState.INCOMPLETE_UNKNOWN)
+    assert states["unit-m"][0] == 0
+
+
+def _spanning_lane(tmp_path: Path) -> tuple[Path, int, int]:
+    budget = RetentionBudget(total_bytes=2**20, unit_horizon_ns=10**15)
+    store, path = _store(tmp_path, budget)
+    old_count, live_count = 200, 10
+    old_records = tuple(
+        _record(
+            label=f"o{index}",
+            unit="old",
+            seq=index,
+            observed=10 + index,
+            payload=PAYLOAD_BLOB,
+        )
+        for index in range(old_count)
+    )
+    live_records = tuple(
+        _record(
+            label=f"l{index}",
+            unit="live",
+            seq=old_count + index,
+            observed=50_000 + index,
+            payload=PAYLOAD_BLOB,
+        )
+        for index in range(live_count)
+    )
+    store.ingest_batch(_batch("span", old_records + live_records))
+    return path, old_count, live_count
+
+
+def _segment_members(connection) -> dict[int, tuple[str, dict[str, int]]]:
+    rows = connection.execute(
+        """
+        SELECT s.segment_id, s.storage_state, r.causal_unit_id, COUNT(*)
+        FROM execution_segments AS s
+        JOIN execution_records AS r ON r.segment_id = s.segment_id
+        GROUP BY s.segment_id, s.storage_state, r.causal_unit_id
+        """
+    ).fetchall()
+    segments: dict[int, tuple[str, dict[str, int]]] = {}
+    for segment_id, state, unit_id, count in rows:
+        current = segments.get(int(segment_id))
+        units = {} if current is None else current[1]
+        units[str(unit_id)] = int(count)
+        segments[int(segment_id)] = (str(state), units)
+    return segments
+
+
+def test_issue577_segment_seal_uses_membership_not_unrelated_open_unit(tmp_path: Path) -> None:
+    """A pending segment whose own units are terminal becomes final even while
+    a later segment on the lane still has an open unit. Sealing drops no rows."""
+    path, old_count, live_count = _spanning_lane(tmp_path)
+    connection = _open(path)
+    try:
+        before = _segment_members(connection)
+        only_old = [
+            segment_id for segment_id, (_state, units) in before.items() if set(units) == {"old"}
+        ]
+        with_live = [segment_id for segment_id, (state, units) in before.items() if "live" in units]
+        assert only_old
+        assert with_live
+        assert sum(units.get("old", 0) for _state, units in before.values()) == old_count
+        connection.execute(
+            "UPDATE execution_units SET terminal = 1, causal_state = ? WHERE causal_unit_id = ?",
+            (str(UnitCausalState.COMPLETE), "old"),
+        )
+        seal_final_segments(connection)
+        after = _segment_members(connection)
+        live = connection.execute(
+            "SELECT terminal, causal_state FROM execution_units WHERE causal_unit_id = ?",
+            ("live",),
+        ).fetchone()
+    finally:
+        connection.close()
+    for segment_id in only_old:
+        assert after[segment_id][0] == SegmentStorageState.SEALED_FINAL
+    for segment_id in with_live:
+        assert after[segment_id][0] != SegmentStorageState.SEALED_FINAL
+    assert sum(units.get("old", 0) for _state, units in after.values()) == old_count
+    assert sum(units.get("live", 0) for _state, units in after.values()) == live_count
+    assert live == (0, UnitCausalState.INCOMPLETE_UNKNOWN)
+
+
+def test_issue577_spanning_unit_survives_seal_and_prunes_whole(tmp_path: Path) -> None:
+    """Finalizing one segment of a causal unit must not delete that segment's
+    rows while another segment still holds the unit. Prune removes every
+    segment of the unit together."""
+    path, old_count, live_count = _spanning_lane(tmp_path)
+    connection = _open(path)
+    try:
+        connection.execute(
+            "UPDATE execution_units SET terminal = 1, causal_state = ? WHERE causal_unit_id = ?",
+            (str(UnitCausalState.COMPLETE), "old"),
+        )
+        seal_final_segments(connection)
+        membership = _segment_members(connection)
+        old_segments = [
+            segment_id for segment_id, (_state, units) in membership.items() if "old" in units
+        ]
+        final_with_old = [
+            segment_id
+            for segment_id in old_segments
+            if membership[segment_id][0] == SegmentStorageState.SEALED_FINAL
+        ]
+        still_open = [
+            segment_id
+            for segment_id in old_segments
+            if membership[segment_id][0] != SegmentStorageState.SEALED_FINAL
+        ]
+        assert final_with_old
+        assert still_open
+        assert sum(membership[segment_id][1]["old"] for segment_id in old_segments) == old_count
+        from backend.app.edge_db.connection import write_transaction
+        from backend.app.features.diagnostics.prune import prune_unit
+
+        with write_transaction(connection):
+            prune_unit(connection, "old", 1)
+        leftover = connection.execute(
+            """
+            SELECT segment_id, COUNT(*) FROM execution_records
+            WHERE causal_unit_id = 'old'
+            GROUP BY segment_id
+            """
+        ).fetchall()
+        live = connection.execute(
+            "SELECT COUNT(*) FROM execution_records WHERE causal_unit_id = ?",
+            ("live",),
+        ).fetchone()
+        unit = connection.execute(
+            "SELECT COUNT(*) FROM execution_units WHERE causal_unit_id = ?",
+            ("old",),
+        ).fetchone()
+    finally:
+        connection.close()
+    assert leftover == []
+    assert live == (live_count,)
+    assert unit == (0,)
+
+
+@pytest.mark.parametrize(
+    "kind",
+    (CoverageKind.UNKNOWN_COARSENED, CoverageKind.UNKNOWN, CoverageKind.DELETED_BY_CAPACITY),
+)
+@pytest.mark.parametrize(
+    "prior", (UnitCausalState.INCOMPLETE_UNKNOWN, UnitCausalState.INCOMPLETE_KNOWN)
+)
+def test_issue577_watermark_cannot_erase_unknown_coverage(
+    tmp_path: Path, kind: CoverageKind, prior: UnitCausalState
+) -> None:
+    store, path = _store(tmp_path, RetentionBudget(total_bytes=2**20, unit_horizon_ns=10**15))
+    store.ingest_batch(
+        _batch(
+            "unknown",
+            (
+                _record(label="before", unit="before", seq=0, observed=10, payload="a"),
+                _record(label="watermark", unit="watermark", seq=1, observed=50_000, payload="b"),
+            ),
+        )
+    )
+    connection = _open(path)
+    try:
+        connection.execute(
+            "UPDATE execution_units SET causal_state = ? WHERE causal_unit_id = ?",
+            (str(prior), "before"),
+        )
+        insert_coverage(
+            connection,
+            camera_id=CAMERA,
+            worker_boot_id=BOOT,
+            source_generation=0,
+            stream_epoch=0,
+            kind=kind,
+            producer=None,
+            from_sequence=None,
+            to_sequence=None,
+            from_ns=10,
+            to_ns=10,
+            record_count=1,
+            exact=kind is CoverageKind.DELETED_BY_CAPACITY,
+            cause="test-unknown",
+            recorded_at_ns=50_000,
+        )
+        refresh_unit_terminals(connection, HORIZON)
+        states = _unit_states(connection)
+        retained = connection.execute(
+            "SELECT COUNT(*) FROM execution_coverage WHERE coverage_kind = ?", (str(kind),)
+        ).fetchone()
+    finally:
+        connection.close()
+    assert states["before"] == (1, UnitCausalState.INCOMPLETE_UNKNOWN)
+    assert states["watermark"][0] == 0
+    assert retained == (1,)

@@ -5,7 +5,11 @@ from __future__ import annotations
 import sqlite3
 from collections.abc import Iterable
 
-from backend.app.features.diagnostics.coverage import insert_coverage
+from backend.app.features.diagnostics.coverage import (
+    UNSCOPED_GAP_CAUSE,
+    downgrade_terminal_certainty,
+    insert_coverage,
+)
 from backend.app.features.diagnostics.records import (
     CoverageKind,
     SegmentStorageState,
@@ -160,7 +164,7 @@ def _extend_contiguous_deletion(
     """
     row = connection.execute(
         """
-        SELECT coverage_id FROM execution_coverage
+        SELECT coverage_id, from_ns, to_ns FROM execution_coverage
         WHERE camera_id = ? AND worker_boot_id = ? AND source_generation = ?
           AND stream_epoch = ? AND producer = ? AND coverage_kind = ? AND exact = 1
           AND to_sequence = ? - 1
@@ -185,6 +189,18 @@ def _extend_contiguous_deletion(
         WHERE coverage_id = ?
         """,
         (to_sequence, to_ns, record_count, recorded_at_ns, int(row[0])),
+    )
+    downgrade_terminal_certainty(
+        connection,
+        camera_id=camera_id,
+        worker_boot_id=worker_boot_id,
+        source_generation=source_generation,
+        stream_epoch=stream_epoch,
+        kind=CoverageKind.DELETED_BY_CAPACITY,
+        from_ns=int(row[1]),
+        to_ns=max(int(row[2]), to_ns),
+        exact=True,
+        cause="capacity",
     )
     return True
 
@@ -260,7 +276,7 @@ def coarsen_coverage(
             continue
         rows = connection.execute(
             """
-            SELECT coverage_id, from_ns, to_ns, record_count FROM execution_coverage
+            SELECT coverage_id, from_ns, to_ns, record_count, cause FROM execution_coverage
             WHERE camera_id = ? AND worker_boot_id = ? AND source_generation = ?
               AND stream_epoch = ?
             ORDER BY from_ns, coverage_id
@@ -289,7 +305,11 @@ def coarsen_coverage(
             to_ns=max(int(row[2]) for row in rows),
             record_count=sum(int(row[3]) for row in rows),
             exact=False,
-            cause="coarsened",
+            cause=(
+                UNSCOPED_GAP_CAUSE
+                if any(row[4] == UNSCOPED_GAP_CAUSE for row in rows)
+                else "coarsened"
+            ),
             recorded_at_ns=now_ns,
         )
 

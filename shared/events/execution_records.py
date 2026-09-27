@@ -241,6 +241,8 @@ class WireGap:
     to_ns: int
     record_count: int
     cause: str
+    source_generation: int | None = None
+    stream_epoch: int | None = None
 
     def __post_init__(self) -> None:
         _identity(self.producer, "producer")
@@ -249,16 +251,35 @@ class WireGap:
             _non_negative(getattr(self, name), name)
         if self.to_sequence < self.from_sequence or self.to_ns < self.from_ns:
             raise ExecutionRecordContractError("invalid gap range")
+        if (self.source_generation is None) != (self.stream_epoch is None):
+            raise ExecutionRecordContractError("gap scope must include generation and epoch")
+        if self.source_generation is not None:
+            _non_negative(self.source_generation, "source_generation")
+            _non_negative(self.stream_epoch, "stream_epoch")
 
     def to_json(self) -> dict[str, object]:
-        return {name: getattr(self, name) for name in self.__slots__}
+        # Legacy omission preserves old-worker batch identities. Absence is
+        # unresolved scope, never the genuine numeric (0, 0) process lane.
+        return {
+            name: getattr(self, name) for name in self.__slots__ if getattr(self, name) is not None
+        }
 
     @classmethod
     def from_json(cls, value: object) -> WireGap:
         if not isinstance(value, Mapping):
             raise ExecutionRecordContractError("gap must be an object")
+        scope = ("source_generation", "stream_epoch")
+        present = tuple(name in value for name in scope)
+        if any(present) and not all(present):
+            raise ExecutionRecordContractError("gap scope must include generation and epoch")
+        if all(present):
+            for name in scope:
+                _non_negative(value[name], name)
         try:
-            return cls(**{name: value[name] for name in cls.__slots__})
+            fields = {name: value[name] for name in cls.__slots__ if name not in scope}
+            if all(present):
+                fields.update({name: value[name] for name in scope})
+            return cls(**fields)
         except KeyError as error:
             raise ExecutionRecordContractError(f"gap missing {error.args[0]}") from None
 
