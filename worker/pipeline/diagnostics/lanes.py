@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import threading
 from collections import deque
+from collections.abc import Sequence
 from dataclasses import dataclass
 
 from shared.events.execution_records import ExecutionRecordContractError, WireGap, WireRecord
@@ -113,6 +114,10 @@ class ExecutionRecordLanes:
             return sum(len(lane.records) for lane in self._lanes.values())
 
     def drain_for(self, camera_id: str, worker_boot_id: str, *, limit: int) -> DrainedLane | None:
+        """Pop up to ``limit`` records and this boot's pending gaps.
+
+        Encoding and HTTP stay with the caller, after this lock is released.
+        """
         if limit < 1:
             raise ValueError("drain limit must be a positive integer")
         records: list[WireRecord] = []
@@ -133,6 +138,37 @@ class ExecutionRecordLanes:
         if not records and not gaps:
             return None
         return DrainedLane(camera_id, worker_boot_id, tuple(records), tuple(gaps))
+
+    def restore_unattempted(self, drained: DrainedLane) -> None:
+        """Return a serialized drain's unsent suffix without assigning identities.
+
+        Each producer's suffix fits its original capacity. Older restored
+        records displace only the newest arrivals, which become lane overflow.
+        Gaps are already normalized loss and retain their objects and counts.
+        """
+        by_lane: dict[_LaneKey, list[WireRecord]] = {}
+        for record in drained.records:
+            key = _LaneKey(record.camera_id, record.worker_boot_id, record.producer)
+            by_lane.setdefault(key, []).append(record)
+        with self._condition:
+            for key, records in by_lane.items():
+                lane = self._lanes[key]
+                evicted: list[WireRecord] = []
+                while len(lane.records) + len(records) > self._capacity:
+                    evicted.append(lane.records.pop())
+                lane.records.extendleft(reversed(records))
+                if evicted:
+                    if lane.overflow is None:
+                        lane.overflow = []
+                    # Tail pops are descending and precede any arrival-time
+                    # overflow, so restore sequence order for gap grouping.
+                    lane.overflow[:0] = reversed(evicted)
+            if drained.gaps:
+                pending = self._export_failed.setdefault(
+                    (drained.camera_id, drained.worker_boot_id), []
+                )
+                pending.extend(drained.gaps)
+            self._condition.notify_all()
 
     def note_export_failure(self, drained: DrainedLane) -> None:
         gaps = [
@@ -163,6 +199,31 @@ class ExecutionRecordLanes:
         return False
 
 
+def account_unsendable_records(
+    drained: DrainedLane, unsendable: Sequence[WireRecord]
+) -> DrainedLane:
+    """Drop ``unsendable`` records and append one ``record-invalid`` gap each.
+
+    Neighbor records keep their order and sequences. Existing gaps stay in
+    front, with their ``record_count`` unchanged. One gap per dropped record
+    so a hole is not swallowed by a single span.
+    """
+    if not unsendable:
+        return drained
+    pending = {record.record_id: record for record in unsendable}
+    kept: list[WireRecord] = []
+    gaps = list(drained.gaps)
+    for record in drained.records:
+        key = record.record_id
+        if pending.pop(key, None) is None:
+            kept.append(record)
+            continue
+        gaps.append(_single_record_gap(record, RECORD_INVALID_CAUSE, record.producer_sequence))
+    if pending:
+        raise ValueError("unsendable records must belong to the drained batch")
+    return DrainedLane(drained.camera_id, drained.worker_boot_id, tuple(kept), tuple(gaps))
+
+
 def _take_overflow(lane: _Lane) -> tuple[WireGap, ...]:
     dropped = lane.overflow
     if not dropped:
@@ -179,16 +240,22 @@ def _take_invalid(lane: _Lane) -> tuple[WireGap, ...]:
     return tuple(gaps)
 
 
-def _note_invalid(lane: _Lane, record: WireRecord, sequence: int) -> None:
-    gap = WireGap(
+def _single_record_gap(record: WireRecord, cause: str, sequence: int) -> WireGap:
+    return WireGap(
         producer=record.producer,
         from_sequence=sequence,
         to_sequence=sequence,
         from_ns=record.observed_at_ns,
         to_ns=record.observed_at_ns,
         record_count=1,
-        cause=RECORD_INVALID_CAUSE,
+        cause=cause,
+        source_generation=record.source_generation,
+        stream_epoch=record.stream_epoch,
     )
+
+
+def _note_invalid(lane: _Lane, record: WireRecord, sequence: int) -> None:
+    gap = _single_record_gap(record, RECORD_INVALID_CAUSE, sequence)
     if lane.invalid_gaps is None:
         lane.invalid_gaps = []
     lane.invalid_gaps.append(gap)
@@ -197,11 +264,15 @@ def _note_invalid(lane: _Lane, record: WireRecord, sequence: int) -> None:
 def _gaps_for_records(
     records: tuple[WireRecord, ...] | list[WireRecord], cause: str
 ) -> list[WireGap]:
-    grouped: dict[str, list[WireRecord]] = {}
+    grouped: dict[tuple[str, int, int], list[list[WireRecord]]] = {}
     for record in records:
-        grouped.setdefault(record.producer, []).append(record)
-    # Sequence bounds are lane-assigned and monotonic per producer, so
-    # first/last are correct. observed_at_ns is producer-supplied and may not
+        key = (record.producer, record.source_generation, record.stream_epoch)
+        runs = grouped.setdefault(key, [])
+        if not runs or runs[-1][-1].producer_sequence + 1 != record.producer_sequence:
+            runs.append([])
+        runs[-1].append(record)
+    # A separately accounted invalid record can leave holes in a failed batch.
+    # Never describe those holes as part of another exact gap. Timestamps may not
     # be monotonic across the dropped items (PTS-derived vs process-monotonic
     # producers, reordered publishes), so the time range must be min/max: a
     # WireGap with from_ns > to_ns is a contract error that would kill the
@@ -215,8 +286,11 @@ def _gaps_for_records(
             to_ns=max(item.observed_at_ns for item in items),
             record_count=len(items),
             cause=cause,
+            source_generation=generation,
+            stream_epoch=epoch,
         )
-        for producer, items in grouped.items()
+        for (producer, generation, epoch), runs in grouped.items()
+        for items in runs
     ]
 
 
@@ -247,4 +321,5 @@ __all__ = [
     "RECORD_INVALID_CAUSE",
     "DrainedLane",
     "ExecutionRecordLanes",
+    "account_unsendable_records",
 ]

@@ -42,6 +42,8 @@ def ingest_batch_from_wire(batch: WireBatch, *, backend_build_revision: str) -> 
                 to_ns=gap.to_ns,
                 record_count=gap.record_count,
                 cause=gap.cause,
+                source_generation=gap.source_generation,
+                stream_epoch=gap.stream_epoch,
             )
             for gap in batch.gaps
         ),
