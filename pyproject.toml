@@ -12,6 +12,7 @@ dependencies = [
     "uvicorn[standard]>=0.30",
     "pydantic>=2",
     "pydantic-settings>=2",
+    "psycopg[binary,pool]>=3.3,<3.4",
     "numpy>=1.26",
     "opencv-python-headless>=4.10",
     "pyyaml>=6",
