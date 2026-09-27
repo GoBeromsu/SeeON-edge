@@ -16,6 +16,7 @@ from backend.app.features.diagnostics.records import (
     Provenance,
     RecordKind,
     StorageState,
+    UnitCausalState,
     late_ack_unit_id,
 )
 from backend.app.features.diagnostics.retention import RetentionBudget
@@ -58,12 +59,21 @@ def _factory(path: Path):
 
 
 def _store(
-    tmp_path: Path, *, total_bytes: int = 2**20, clock: _Clock | None = None
+    tmp_path: Path,
+    *,
+    total_bytes: int = 2**20,
+    clock: _Clock | None = None,
+    horizon_ns: int | None = None,
 ) -> tuple[ExecutionRecordStore, Path]:
     path = _database(tmp_path)
+    budget = (
+        RetentionBudget(total_bytes=total_bytes)
+        if horizon_ns is None
+        else RetentionBudget(total_bytes=total_bytes, unit_horizon_ns=horizon_ns)
+    )
     store = ExecutionRecordStore(
         _factory(path),
-        RetentionBudget(total_bytes=total_bytes),
+        budget,
         clock=clock or _Clock(),
     )
     return store, path
@@ -77,6 +87,7 @@ def _record(
     seq: int = 0,
     observed: int = 100,
     payload: dict[str, object] | None = None,
+    camera: str = CAMERA,
     boot: str = BOOT,
     generation: int = 0,
     epoch: int = 0,
@@ -86,7 +97,7 @@ def _record(
     return ExecutionRecordInput(
         record_id=_hex(label),
         record_kind=kind,
-        camera_id=CAMERA,
+        camera_id=camera,
         worker_boot_id=boot,
         source_generation=generation,
         stream_epoch=epoch,
@@ -105,11 +116,12 @@ def _batch(
     records: tuple[ExecutionRecordInput, ...],
     gaps: tuple[GapReport, ...] = (),
     *,
+    camera: str = CAMERA,
     boot: str = BOOT,
 ) -> IngestBatch:
     return IngestBatch(
         batch_id=_hex(label),
-        camera_id=CAMERA,
+        camera_id=camera,
         worker_boot_id=boot,
         provenance=PROVENANCE,
         records=records,
@@ -195,6 +207,8 @@ def test_query_availability_unknown_tails_and_cursor(tmp_path: Path) -> None:
                     to_ns=210,
                     record_count=2,
                     cause="drop",
+                    source_generation=0,
+                    stream_epoch=0,
                 ),
             ),
         )
@@ -342,3 +356,151 @@ def test_availability_lane_boundary_ends_a_span(tmp_path: Path) -> None:
     assert available == [(1_000, 1_020), (5_000, 5_020)]
     gap = [item for item in page.availability if item.from_ns > 1_020 and item.to_ns < 5_000]
     assert gap and all(item.kind is AvailabilityKind.UNKNOWN for item in gap)
+
+
+def _unit_states(path: Path) -> dict[str, tuple[int, str]]:
+    connection = open_runtime_database(path, actor=RuntimeActor.API)
+    try:
+        return {
+            str(row[0]): (int(row[1]), str(row[2]))
+            for row in connection.execute(
+                "SELECT causal_unit_id, terminal, causal_state FROM execution_units"
+            )
+        }
+    finally:
+        connection.close()
+
+
+def test_issue577_dense_consecutive_units_close_on_observed_watermark(tmp_path: Path) -> None:
+    """Successor gaps of 1 ns must not keep a unit open after the lane watermark
+    is more than a horizon past its last observation. The immediate-successor
+    test leaves dense-0 open; the tail inside the horizon stays open."""
+    horizon = 1_000
+    store, path = _store(tmp_path, horizon_ns=horizon)
+    stamps = (0, 1, 2, 3, 48_500, 49_200, 50_000)
+    store.ingest_batch(
+        _batch(
+            "dense",
+            tuple(
+                _record(label=f"d{stamp}", unit=f"dense-{stamp}", seq=index, observed=stamp)
+                for index, stamp in enumerate(stamps)
+            ),
+        )
+    )
+    states = _unit_states(path)
+    for stamp in (0, 1, 2, 3, 48_500):
+        assert states[f"dense-{stamp}"] == (1, UnitCausalState.COMPLETE), states[f"dense-{stamp}"]
+    for stamp in (49_200, 50_000):
+        terminal, causal = states[f"dense-{stamp}"]
+        assert terminal == 0, states[f"dense-{stamp}"]
+        assert causal != UnitCausalState.COMPLETE
+
+
+def test_issue577_active_unit_stays_open_until_last_observed_passes_horizon(
+    tmp_path: Path,
+) -> None:
+    """A unit whose first observation is older than the horizon is still in
+    flight when its last observation is the lane watermark. Closing it from
+    first_observed_ns would claim COMPLETE while records are still arriving."""
+    horizon = 1_000
+    store, path = _store(tmp_path, horizon_ns=horizon)
+    store.ingest_batch(
+        _batch(
+            "active",
+            (
+                _record(label="start", unit="active", seq=0, observed=0),
+                _record(label="middle", unit="middle", seq=1, observed=horizon + 1),
+                _record(label="still", unit="active", seq=2, observed=20_000),
+            ),
+        )
+    )
+    states = _unit_states(path)
+    assert states["active"] == (0, UnitCausalState.INCOMPLETE_UNKNOWN)
+    assert states["middle"] == (1, UnitCausalState.COMPLETE)
+
+
+def test_issue577_opaque_uuid_boot_does_not_decide_terminal_order(tmp_path: Path) -> None:
+    """The live boot id sorts first. It stays open. The dead boot's dense early
+    unit is COMPLETE from that boot's own watermark, and its tail is unknown
+    rather than a fabricated complete claim."""
+    horizon = 1_000
+    live_boot, dead_boot = "11111111-live", "ffffffff-dead"
+    assert live_boot < dead_boot
+    store, path = _store(tmp_path, horizon_ns=horizon)
+    store.ingest_batch(
+        _batch(
+            "dead",
+            (
+                _record(label="d0", unit="dead-0", seq=0, observed=0, boot=dead_boot),
+                _record(label="d1", unit="dead-1", seq=1, observed=1, boot=dead_boot),
+                _record(label="dtail", unit="dead-tail", seq=2, observed=50_000, boot=dead_boot),
+            ),
+            boot=dead_boot,
+        )
+    )
+    store.ingest_batch(
+        _batch(
+            "live",
+            (_record(label="live", unit="live", seq=0, observed=80_000, boot=live_boot),),
+            boot=live_boot,
+        )
+    )
+    states = _unit_states(path)
+    assert states["dead-0"] == (1, UnitCausalState.COMPLETE)
+    assert states["dead-1"] == (1, UnitCausalState.COMPLETE)
+    assert states["dead-tail"] == (1, UnitCausalState.INCOMPLETE_UNKNOWN)
+    assert states["live"][0] == 0
+    assert states["live"][1] != UnitCausalState.COMPLETE
+
+
+def test_issue577_generation_watermark_does_not_close_another_generation(
+    tmp_path: Path,
+) -> None:
+    """Generation 0's watermark completes its own dense units and does not
+    terminal a unit that only exists on generation 9."""
+    horizon = 1_000
+    store, path = _store(tmp_path, horizon_ns=horizon)
+    store.ingest_batch(
+        _batch(
+            "gens",
+            (
+                _record(label="g0", unit="gen-0", seq=0, observed=0, generation=0),
+                _record(label="g1", unit="gen-1", seq=1, observed=1, generation=0),
+                _record(label="gtail", unit="gen-tail", seq=2, observed=50_000, generation=0),
+                _record(label="gother", unit="gen-other", seq=3, observed=10, generation=9),
+            ),
+        )
+    )
+    states = _unit_states(path)
+    assert states["gen-0"] == (1, UnitCausalState.COMPLETE)
+    assert states["gen-1"] == (1, UnitCausalState.COMPLETE)
+    assert states["gen-tail"][0] == 0
+    assert states["gen-tail"][1] != UnitCausalState.COMPLETE
+    assert states["gen-other"] == (0, UnitCausalState.INCOMPLETE_UNKNOWN)
+
+
+def test_issue577_epoch_watermark_does_not_fabricate_complete(tmp_path: Path) -> None:
+    """A newer epoch closes the previous epoch without calling it complete.
+    Dense units the old epoch itself observed past the horizon are COMPLETE.
+    A lone older epoch with no internal watermark proof stays unknown."""
+    horizon = 1_000
+    store, path = _store(tmp_path, horizon_ns=horizon)
+    store.ingest_batch(
+        _batch(
+            "epochs",
+            (
+                _record(label="e0", unit="epoch-0", seq=0, observed=0, epoch=0),
+                _record(label="e1", unit="epoch-1", seq=1, observed=1, epoch=0),
+                _record(label="etail", unit="epoch-tail", seq=2, observed=50_000, epoch=0),
+                _record(label="lone", unit="epoch-lone", seq=3, observed=100, epoch=4),
+                _record(label="new", unit="epoch-new", seq=4, observed=80_000, epoch=8),
+            ),
+        )
+    )
+    states = _unit_states(path)
+    assert states["epoch-0"] == (1, UnitCausalState.COMPLETE)
+    assert states["epoch-1"] == (1, UnitCausalState.COMPLETE)
+    assert states["epoch-tail"] == (1, UnitCausalState.INCOMPLETE_UNKNOWN)
+    assert states["epoch-lone"] == (1, UnitCausalState.INCOMPLETE_UNKNOWN)
+    assert states["epoch-new"][0] == 0
+    assert states["epoch-new"][1] != UnitCausalState.COMPLETE

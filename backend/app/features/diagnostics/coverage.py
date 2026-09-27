@@ -10,9 +10,11 @@ from typing import Final
 from backend.app.features.diagnostics.records import (
     AvailabilityKind,
     CoverageKind,
+    UnitCausalState,
 )
 
 _INF: Final = 1 << 62
+UNSCOPED_GAP_CAUSE: Final = "scope-unresolved"
 
 _AVAIL_EXACT: Final = {
     CoverageKind.MISSING_NOT_RECORDED: AvailabilityKind.MISSING_NOT_RECORDED,
@@ -75,6 +77,63 @@ def insert_coverage(
             1 if exact else 0,
             cause,
             recorded_at_ns,
+        ),
+    )
+    downgrade_terminal_certainty(
+        connection,
+        camera_id=camera_id,
+        worker_boot_id=worker_boot_id,
+        source_generation=source_generation,
+        stream_epoch=stream_epoch,
+        kind=kind,
+        from_ns=from_ns,
+        to_ns=to_ns,
+        exact=exact,
+        cause=cause,
+    )
+
+
+def downgrade_terminal_certainty(
+    connection: sqlite3.Connection,
+    *,
+    camera_id: str,
+    worker_boot_id: str,
+    source_generation: int,
+    stream_epoch: int,
+    kind: CoverageKind,
+    from_ns: int,
+    to_ns: int,
+    exact: bool,
+    cause: str,
+) -> None:
+    # Coverage may arrive after a watermark or be coarsened after pruning.
+    # Lower terminal certainty in this same transaction; never reopen a unit
+    # or upgrade a forced/previously unknown terminal to a known state.
+    unknown = kind is not CoverageKind.MISSING_NOT_RECORDED or not exact
+    connection.execute(
+        """
+        UPDATE execution_units SET causal_state = ?
+        WHERE terminal = 1 AND causal_state IN (?, ?)
+          AND camera_id = ? AND worker_boot_id = ?
+          AND (
+              (source_generation = ? AND stream_epoch = ?)
+              OR ?
+          )
+          AND first_observed_ns <= ? AND last_observed_ns >= ?
+        """,
+        (
+            str(
+                UnitCausalState.INCOMPLETE_UNKNOWN if unknown else UnitCausalState.INCOMPLETE_KNOWN
+            ),
+            str(UnitCausalState.COMPLETE),
+            str(UnitCausalState.INCOMPLETE_KNOWN),
+            camera_id,
+            worker_boot_id,
+            source_generation,
+            stream_epoch,
+            cause == UNSCOPED_GAP_CAUSE and not exact,
+            to_ns,
+            from_ns,
         ),
     )
 
@@ -267,9 +326,11 @@ def _atom_kind(
 
 
 __all__ = [
+    "UNSCOPED_GAP_CAUSE",
     "AvailabilityRange",
     "QueryableRange",
     "availability",
+    "downgrade_terminal_certainty",
     "insert_coverage",
     "parent_loss_kind",
     "queryable_range",

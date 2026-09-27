@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import sqlite3
 
+from backend.app.features.diagnostics.coverage import UNSCOPED_GAP_CAUSE
 from backend.app.features.diagnostics.records import (
     CoverageKind,
     SegmentStorageState,
@@ -12,142 +13,181 @@ from backend.app.features.diagnostics.records import (
 
 
 def refresh_unit_terminals(connection: sqlite3.Connection, unit_horizon_ns: int) -> None:
-    """Mark units terminal by horizon or by a newer (boot, epoch) on the camera.
+    """Mark units terminal by a lane watermark or by a newer (boot, epoch).
 
-    Only non-terminal units are candidates (a terminal unit never changes),
-    and the per-lane successor lookup is one window query in SQLite rather
-    than a Python pass over every unit per candidate: the previous shape was
-    O(units^2) per ingest and cost half of every request on a 50k-unit DB.
+    Horizon closure is scoped to one (camera, boot, generation, epoch) lane.
+    The lane watermark is its maximum ``last_observed_ns``. A unit closes only
+    when that watermark is strictly more than ``unit_horizon_ns`` past the
+    unit's own last observation. The next unit's ``first_observed_ns`` is not
+    evidence: dense neighbours never clear the horizon, and a unit that is
+    still receiving observations would look finished because it started long
+    ago. Another generation's observations are not this lane's watermark.
+
+    A different (boot, epoch) on the same camera closes only when some other
+    (boot, epoch) was observed strictly later. Boot ids are opaque, so they
+    are not ordered as text. Abrupt closure cannot prove completeness beyond
+    already COMPLETE units. Later coverage can only lower a terminal unit's
+    certainty; it never reopens the unit or upgrades forced UNKNOWN.
     """
-    # The newest (boot, epoch) lane per camera is the one observed most
-    # recently. Boot ids are opaque (UUIDs): comparing them as strings marked
-    # a NEWER boot's units terminal whenever its id happened to sort lower,
-    # so live data was pruned first and a dead boot's units were kept.
-    lanes = connection.execute(
+    known = str(UnitCausalState.INCOMPLETE_KNOWN)
+    connection.execute(
         """
-        SELECT camera_id, worker_boot_id, stream_epoch, MAX(last_observed_ns)
-        FROM execution_units
-        GROUP BY camera_id, worker_boot_id, stream_epoch
-        """
-    ).fetchall()
-    if not lanes:
-        return
-    newest: dict[str, tuple[str, int]] = {}
-    newest_seen: dict[str, int] = {}
-    for camera_id_raw, boot_raw, epoch_raw, last_raw in lanes:
-        camera_id, last_seen = str(camera_id_raw), int(last_raw)
-        if camera_id not in newest_seen or last_seen > newest_seen[camera_id]:
-            newest_seen[camera_id] = last_seen
-            newest[camera_id] = (str(boot_raw), int(epoch_raw))
-    candidates = connection.execute(
-        """
-        WITH ordered AS (
-            SELECT causal_unit_id, camera_id, worker_boot_id, source_generation, stream_epoch,
-                   first_observed_ns, last_observed_ns, causal_state, terminal,
-                   LEAD(first_observed_ns) OVER (
-                       PARTITION BY camera_id, worker_boot_id, source_generation, stream_epoch
-                       ORDER BY first_observed_ns
-                   ) AS next_first_ns
+        UPDATE execution_units
+        SET terminal = 1,
+            causal_state = CASE
+                WHEN EXISTS (
+                    SELECT 1 FROM execution_coverage AS gap
+                    WHERE gap.camera_id = execution_units.camera_id
+                      AND gap.worker_boot_id = execution_units.worker_boot_id
+                      AND (
+                          (gap.source_generation = execution_units.source_generation
+                           AND gap.stream_epoch = execution_units.stream_epoch)
+                          OR (gap.cause = ? AND gap.exact = 0)
+                      )
+                      AND (gap.coverage_kind != ? OR gap.exact = 0)
+                      AND gap.from_ns <= execution_units.last_observed_ns
+                      AND gap.to_ns >= execution_units.first_observed_ns
+                ) THEN ?
+                WHEN execution_units.causal_state = ? THEN execution_units.causal_state
+                WHEN EXISTS (
+                    SELECT 1 FROM execution_coverage AS gap
+                    WHERE gap.camera_id = execution_units.camera_id
+                      AND gap.worker_boot_id = execution_units.worker_boot_id
+                      AND gap.source_generation = execution_units.source_generation
+                      AND gap.stream_epoch = execution_units.stream_epoch
+                      AND gap.coverage_kind = ?
+                      AND gap.exact = 1
+                      AND gap.from_ns <= execution_units.last_observed_ns
+                      AND gap.to_ns >= execution_units.first_observed_ns
+                ) THEN ?
+                ELSE ?
+            END
+        FROM (
+            SELECT camera_id, worker_boot_id, source_generation, stream_epoch,
+                   MAX(last_observed_ns) AS watermark_ns
             FROM execution_units
-        )
-        SELECT causal_unit_id, camera_id, worker_boot_id, source_generation, stream_epoch,
-               first_observed_ns, last_observed_ns, causal_state, next_first_ns
-        FROM ordered
-        WHERE terminal = 0
+            GROUP BY camera_id, worker_boot_id, source_generation, stream_epoch
+        ) AS lane
+        WHERE execution_units.camera_id = lane.camera_id
+          AND execution_units.worker_boot_id = lane.worker_boot_id
+          AND execution_units.source_generation = lane.source_generation
+          AND execution_units.stream_epoch = lane.stream_epoch
+          AND (
+              (execution_units.terminal = 0
+               AND lane.watermark_ns - execution_units.last_observed_ns > ?)
+              OR (execution_units.terminal = 1 AND execution_units.causal_state IN (?, ?))
+          )
+        """,
+        (
+            UNSCOPED_GAP_CAUSE,
+            str(CoverageKind.MISSING_NOT_RECORDED),
+            str(UnitCausalState.INCOMPLETE_UNKNOWN),
+            known,
+            str(CoverageKind.MISSING_NOT_RECORDED),
+            known,
+            str(UnitCausalState.COMPLETE),
+            unit_horizon_ns,
+            str(UnitCausalState.COMPLETE),
+            known,
+        ),
+    )
+    connection.execute(
         """
-    ).fetchall()
-    for row in candidates:
-        unit_id, camera_id, boot = str(row[0]), str(row[1]), str(row[2])
-        gen, epoch = int(row[3]), int(row[4])
-        first_ns, last_ns, state = int(row[5]), int(row[6]), str(row[7])
-        next_first = None if row[8] is None else int(row[8])
-        by_horizon = next_first is not None and next_first > first_ns + unit_horizon_ns
-        by_epoch = (boot, epoch) != newest[camera_id]
-        if not by_horizon and not by_epoch:
-            continue
-        if by_horizon:
-            new_state = _horizon_state(connection, camera_id, boot, gen, epoch, first_ns, last_ns)
-        elif state == UnitCausalState.COMPLETE:
-            new_state = UnitCausalState.COMPLETE
-        else:
-            new_state = UnitCausalState.INCOMPLETE_UNKNOWN
-        connection.execute(
-            "UPDATE execution_units SET terminal = 1, causal_state = ? WHERE causal_unit_id = ?",
-            (str(new_state), unit_id),
-        )
+        UPDATE execution_units
+        SET terminal = 1,
+            causal_state = CASE WHEN execution_units.causal_state = ?
+                THEN ? ELSE ? END
+        FROM (
+            SELECT lane.camera_id AS camera_id,
+                   lane.worker_boot_id AS worker_boot_id,
+                   lane.stream_epoch AS stream_epoch
+            FROM (
+                SELECT camera_id, worker_boot_id, stream_epoch,
+                       MAX(last_observed_ns) AS seen_ns
+                FROM execution_units
+                GROUP BY camera_id, worker_boot_id, stream_epoch
+            ) AS lane
+            JOIN (
+                SELECT camera_id, MAX(last_observed_ns) AS newest_ns
+                FROM execution_units
+                GROUP BY camera_id
+            ) AS camera
+              ON camera.camera_id = lane.camera_id
+             AND camera.newest_ns > lane.seen_ns
+        ) AS stale
+        WHERE execution_units.terminal = 0
+          AND execution_units.camera_id = stale.camera_id
+          AND execution_units.worker_boot_id = stale.worker_boot_id
+          AND execution_units.stream_epoch = stale.stream_epoch
+        """,
+        (
+            str(UnitCausalState.COMPLETE),
+            str(UnitCausalState.COMPLETE),
+            str(UnitCausalState.INCOMPLETE_UNKNOWN),
+        ),
+    )
     seal_final_segments(connection)
 
 
-def _horizon_state(
-    connection: sqlite3.Connection,
-    camera_id: str,
-    boot: str,
-    gen: int,
-    epoch: int,
-    first_ns: int,
-    last_ns: int,
-) -> UnitCausalState:
-    gap = connection.execute(
-        """
-        SELECT 1 FROM execution_coverage
-        WHERE camera_id = ? AND worker_boot_id = ? AND source_generation = ?
-          AND stream_epoch = ? AND coverage_kind = ? AND exact = 1
-          AND from_ns <= ? AND to_ns >= ?
-        LIMIT 1
-        """,
-        (
-            camera_id,
-            boot,
-            gen,
-            epoch,
-            str(CoverageKind.MISSING_NOT_RECORDED),
-            last_ns,
-            first_ns,
-        ),
-    ).fetchone()
-    return UnitCausalState.INCOMPLETE_KNOWN if gap is not None else UnitCausalState.COMPLETE
-
-
 def seal_final_segments(connection: sqlite3.Connection) -> None:
-    pending = connection.execute(
+    """Promote a pending segment only when every member causal unit is terminal.
+
+    An open unit elsewhere on the lane does not hold an older segment pending.
+    A segment that still contains a non-terminal unit stays pending, including
+    when that unit also has rows in another segment. Sealing does not delete
+    rows; a unit that spans segments is removed only as a whole unit.
+    """
+    connection.execute(
         """
-        SELECT segment_id, camera_id, worker_boot_id, source_generation, stream_epoch
-        FROM execution_segments WHERE storage_state = ?
+        UPDATE execution_segments
+        SET storage_state = ?
+        WHERE storage_state = ?
+          AND NOT EXISTS (
+              SELECT 1
+              FROM execution_records AS record
+              JOIN execution_units AS unit
+                ON unit.causal_unit_id = record.causal_unit_id
+              WHERE record.segment_id = execution_segments.segment_id
+                AND unit.terminal = 0
+          )
         """,
-        (str(SegmentStorageState.SEALED_PENDING),),
-    ).fetchall()
-    for segment_id, camera_id, boot, gen, epoch in pending:
-        open_units = connection.execute(
-            """
-            SELECT 1 FROM execution_units
-            WHERE camera_id = ? AND worker_boot_id = ? AND source_generation = ?
-              AND stream_epoch = ? AND terminal = 0
-            LIMIT 1
-            """,
-            (camera_id, boot, gen, epoch),
-        ).fetchone()
-        if open_units is None:
-            connection.execute(
-                "UPDATE execution_segments SET storage_state = ? WHERE segment_id = ?",
-                (str(SegmentStorageState.SEALED_FINAL), segment_id),
-            )
+        (str(SegmentStorageState.SEALED_FINAL), str(SegmentStorageState.SEALED_PENDING)),
+    )
 
 
 def force_oldest_units_terminal(connection: sqlite3.Connection, count: int = 1) -> int:
+    """Pressure fallback: close ``count`` globally oldest non-terminal units.
+
+    Oldest matches ``next_prunable_unit`` once the row is terminal: least
+    ``last_observed_ns``, then ``causal_unit_id``.
+    Camera and boot ids are not a priority. The closed state is
+    INCOMPLETE_UNKNOWN: even a known gap cannot exclude additional unknown
+    loss when pressure forces closure. Existing coverage is retained.
+    This does not raise the count or the byte budget.
+    """
     rows = connection.execute(
         """
         SELECT causal_unit_id FROM execution_units
         WHERE terminal = 0
-        ORDER BY camera_id, worker_boot_id, source_generation, stream_epoch, first_observed_ns
+        ORDER BY last_observed_ns, causal_unit_id
         LIMIT ?
         """,
         (count,),
     ).fetchall()
-    for (unit_id,) in rows:
-        connection.execute(
-            "UPDATE execution_units SET terminal = 1, causal_state = ? WHERE causal_unit_id = ?",
-            (str(UnitCausalState.INCOMPLETE_UNKNOWN), unit_id),
-        )
+    connection.executemany(
+        """
+        UPDATE execution_units
+        SET terminal = 1, causal_state = ?
+        WHERE causal_unit_id = ? AND terminal = 0
+        """,
+        [
+            (
+                str(UnitCausalState.INCOMPLETE_UNKNOWN),
+                str(row[0]),
+            )
+            for row in rows
+        ],
+    )
     if rows:
         seal_final_segments(connection)
     return len(rows)
