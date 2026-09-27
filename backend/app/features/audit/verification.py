@@ -39,12 +39,28 @@ def _canonical_triggers() -> dict[str, str]:
 
 
 _CANONICAL_TRIGGERS: Final = _canonical_triggers()
-_ROW_SELECT: Final = (
-    "SELECT audit_id,occurred_at,recorded_at,clock_quality,actor_type,actor_id,"
-    "auth_mechanism,action,target_type,target_id,outcome,reason,request_id,"
-    "interaction_id,detail_json,previous_hash,record_hash,retention_class,hold_reference "
-    "FROM audit_events"
+AUDIT_ROW_COLUMNS: Final = (
+    "audit_id",
+    "occurred_at",
+    "recorded_at",
+    "clock_quality",
+    "actor_type",
+    "actor_id",
+    "auth_mechanism",
+    "action",
+    "target_type",
+    "target_id",
+    "outcome",
+    "reason",
+    "request_id",
+    "interaction_id",
+    "detail_json",
+    "previous_hash",
+    "record_hash",
+    "retention_class",
+    "hold_reference",
 )
+_ROW_SELECT: Final = "SELECT " + ",".join(AUDIT_ROW_COLUMNS) + " FROM audit_events"
 
 SqlValue = str | int | float | bytes | None
 DatabaseIdentity = tuple[int, int]
@@ -264,6 +280,7 @@ def verify_row(row: tuple[SqlValue, ...], expected_previous: str) -> tuple[int, 
 
 
 __all__ = [
+    "AUDIT_ROW_COLUMNS",
     "GENESIS_HASH",
     "MAX_AUDIT_ROWS",
     "AuditVerificationError",
@@ -272,4 +289,5 @@ __all__ = [
     "VerificationCheckpoint",
     "database_identity",
     "verify_connection",
+    "verify_row",
 ]
