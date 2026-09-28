@@ -16,16 +16,19 @@ name: Edge ML Images
 #
 # The boot smoke has two shapes, and exactly one runs per image build:
 #
-#   freshly built, not a release -> load the docker-format carrier and run it
-#     with networking disabled. This is every pull_request and every push to
-#     main.
+#   freshly built, not a release -> free the builder, load the docker-format
+#     carrier and run it with networking disabled. This is every pull_request
+#     and every push to main.
 #   reused, or a release build   -> pull the published digest and `docker run`
 #     it, so the seal never carries a worker digest that was not booted in this
 #     run. Rare, and already logged in to the registry.
 #
 # The fresh-build carrier is written by BuildKit and loaded only for its smoke.
 # It keeps boot verification outside the shipped Dockerfile while ensuring the
-# exact locally built image is what starts.
+# exact locally built image is what starts. It is also what lets this job fit
+# on a hosted runner's disk: the carrier is a self-contained copy of the image,
+# so the builder can be emptied before the daemon imports anything (see
+# "Reclaim runner disk" and the fresh smoke below for the measured sizes).
 #
 # Publish policy:
 #   pull_request     -> build + boot smoke only. Never pushes, never logs in.
@@ -214,6 +217,49 @@ jobs:
             echo "$var=$tags" >> "$GITHUB_ENV"
           done
 
+      - name: Reclaim runner disk for the DeepStream build
+        # Runs before the builder exists, so everything it frees is available
+        # to the ml-worker build and to the smoke's load.
+        #
+        # Why this is needed: every run of this job from 2026-09-23 on, PR and
+        # main alike, died inside `Build and push ml-worker image`. The newer
+        # runs carry the runner's own "System.IO.IOException: No space left on
+        # device" annotation (run 36419648599 job 108919015991; run 36333104182
+        # job 108658704476). Run 35761939129 (job 106861862720) failed inside
+        # BuildKit instead: `write /var/lib/buildkit/runc-overlayfs/content/
+        # ingest/...: no space left on device`, after pulling the 10.08 GB
+        # DeepStream base. The last green run was 35420972693 (2026-09-19).
+        # The image did not grow in between: the base is pinned by digest, and
+        # Dockerfile.edge's only change was a schema ARG. So the hosted runner
+        # now leaves less free space on `/`.
+        #
+        # How much this job needs, measured on a fresh docker-container builder
+        # (the driver setup-buildx-action creates) for 48fa4d6:
+        #
+        #   ml-worker build:    builder 29.16 GB + carrier 10.09 GB = ~39.3 GB
+        #   smoke load:         carrier 10.09 GB + import tmp and layers
+        #                       peaking at 27.79 GB = ~37.9 GB; the loaded
+        #                       image ends at 17.96 GB
+        #
+        # The fresh smoke empties the builder before it loads, so those two
+        # peaks follow each other instead of adding up to ~67 GB.
+        #
+        # Nothing removed here is used by this job, which needs only docker,
+        # git and the system python3. A plain `rm` is used instead of a
+        # third-party action: it is auditable in place and needs no pin. `df`
+        # before and after puts the real headroom in every run's log.
+        run: |
+          set -euo pipefail
+          df -h / /mnt || true
+          sudo rm -rf \
+            /usr/share/dotnet \
+            /usr/local/lib/android \
+            /opt/ghc \
+            /usr/local/.ghcup \
+            /opt/hostedtoolcache/CodeQL \
+            /usr/share/swift
+          df -h / /mnt || true
+
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3.12.0
 
@@ -298,7 +344,9 @@ jobs:
           # which means attaching provenance.
           push: ${{ env.PUSH_IMAGES == 'true' }}
           provenance: ${{ env.RELEASE_BUILD == 'true' }}
-          outputs: type=docker,dest=/tmp/ml-worker-runtime.tar
+          # Only non-release smoke consumes a local archive; release smoke
+          # pulls the published digest.
+          outputs: ${{ env.RELEASE_BUILD != 'true' && 'type=docker,dest=/tmp/ml-worker-runtime.tar' || '' }}
           build-args: |
             SOURCE_REVISION=${{ env.DEPLOY_SHA }}
           tags: ${{ env.ML_WORKER_TAGS }}
@@ -325,10 +373,31 @@ jobs:
           cache-to: ${{ env.PUSH_IMAGES == 'true' && 'type=gha,scope=edge-ml-worker,mode=max' || '' }}
 
       - name: Boot smoke test — freshly built ml-worker image actually boots
+        # The builder is emptied BEFORE the load, so its state and the load
+        # never share the disk. By this step the build step has finished
+        # everything that needs the builder: the carrier is written, and on a
+        # push the push and the cache export are done. The carrier alone is
+        # enough to boot the image.
+        #
+        # Why keep the carrier instead of `load: true`: `load: true` streams
+        # the same tarball into the daemon while the builder still holds all
+        # of its state. The builder (29.16 GB), docker's unpacked copy of the
+        # tarball and the imported image (together peaking at 27.79 GB) would
+        # all be on disk at once, ~57 GB. It is also slower: 717.7s on PR run
+        # 33156001540 (125.9s exporting + 347.9s sending + 244.0s importing;
+        # quoted in #462). Writing the carrier to a file is what makes it
+        # possible to empty the builder first. Deleting it right after the
+        # load returns its 10.09 GB.
+        #
+        # `df` before and after puts the real headroom in every run's log.
         if: env.BUILD_ML_WORKER == 'true' && env.RELEASE_BUILD != 'true'
         run: |
           set -euo pipefail
+          docker buildx prune --all --force
+          df -h /
           docker load --input /tmp/ml-worker-runtime.tar
+          rm -f /tmp/ml-worker-runtime.tar
+          df -h /
           set +e
           docker run --rm --network none \
             -e RELAY_TOKEN=ci-boot-smoke-test \

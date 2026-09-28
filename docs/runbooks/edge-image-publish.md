@@ -125,10 +125,46 @@ migrator/consistency services run the same image) and `Dockerfile.edge` ->
 `ml-worker`. Models are never baked into either image.
 
 For a fresh non-release worker build, the workflow exports
-`/tmp/ml-worker-runtime.tar`, loads that carrier, and runs
+`/tmp/ml-worker-runtime.tar`, empties the BuildKit builder
+(`docker buildx prune --all --force`), loads that carrier, deletes it, and runs
 `docker run --network none ... python -m worker --check-config`. The Dockerfile
 has no smoke stage; release and reused images are pulled by digest for the same
 check.
+
+**Runner disk.** The `ml-worker` build only fits on a hosted runner because of
+two steps. Every run from 2026-09-23 on died inside `Build and push ml-worker
+image` with the runner's `No space left on device` annotation (runs 36419648599
+and 36333104182), or with BuildKit's own `write /var/lib/buildkit/...: no space
+left on device` (run 35761939129). The last green run was 35420972693 on
+2026-09-19. The image did not grow: the DeepStream base is pinned by digest and
+`Dockerfile.edge` only changed a schema ARG. The runner simply leaves less free
+space on `/`.
+
+Measured for 48fa4d6 on a fresh docker-container builder (the driver
+`setup-buildx-action` creates):
+
+| phase | on disk at the peak |
+|---|---|
+| `ml-worker` build | builder 29.16 GB + carrier 10.09 GB = ~39.3 GB |
+| smoke load | carrier 10.09 GB + import tmp and layers peaking at 27.79 GB = ~37.9 GB; the loaded image ends at 17.96 GB |
+
+- `Reclaim runner disk for the DeepStream build` runs before the builder
+  exists. It removes toolchains this job never uses (`/usr/share/dotnet`,
+  `/usr/local/lib/android`, `/opt/ghc`, `/usr/local/.ghcup`,
+  `/opt/hostedtoolcache/CodeQL`, `/usr/share/swift`) with a plain `sudo rm -rf`,
+  not a third-party action. It prints `df -h / /mnt` before and after.
+- The fresh smoke prunes the builder **before** `docker load`, so the two peaks
+  above follow each other instead of adding up to ~67 GB. `load: true` is not an
+  alternative: it imports while the builder still holds its state (~57 GB) and
+  took 717.7 s on PR run 33156001540 (#462).
+
+If the job hits ENOSPC again, read the two `df` lines in the reclaim step and
+the smoke step first; they show the real headroom on that run. In order of
+cost, the fallbacks are: remove more unused toolchains (`/opt/microsoft`,
+`/opt/az`, `/usr/local/share/chromium`, `/usr/local/share/powershell`,
+`/usr/lib/google-cloud-sdk`); prune the builder between the `ml-api` and
+`ml-worker` builds; move the carrier or the Docker data-root to `/mnt` if its
+`df` shows the room; switch this job to a larger runner.
 
 | Event                 | Builds both | Boot smoke | Pushes to GHCR | Tags pushed                          | Writes build cache |
 |-----------------------|-------------|------------|----------------|--------------------------------------|--------------------|
@@ -212,11 +248,11 @@ The boot smoke test always runs against the image that would be deployed. When
 `ml-worker` was reused rather than rebuilt it is **pulled by digest** and booted,
 so the seal never carries a worker digest that was not booted in that run.
 
-A release build therefore builds `ml-worker` **without** `load:` and pulls it
-back by digest for the smoke. A digest that a later release may reuse has to be an OCI
+A release build therefore builds `ml-worker` **without** a Docker archive export
+or `load:` and pulls it back by digest for the smoke. A digest that a later release may reuse has to be an OCI
 index (see below), and the docker exporter cannot export a manifest list, so the
-two are mutually exclusive on that path. Every other event keeps the cheap local
-load. A consequence worth knowing: `ml-worker` digests published *before* this
+two are mutually exclusive on that path. Every other event keeps the local
+load from the carrier described above. A consequence worth knowing: `ml-worker` digests published *before* this
 landed are plain manifests and cannot be reused — the guard below detects that
 and rebuilds, and the next release publishes an index that later releases can
 reuse.

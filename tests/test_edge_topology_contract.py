@@ -364,7 +364,9 @@ def test_edge_worker_boot_smoke_runs_on_the_single_build() -> None:
 
     assert not (REPO_ROOT / ".github/workflows/edge-worker-image.yml").exists()
     assert "load" not in worker_step["with"]
-    assert worker_step["with"]["outputs"] == "type=docker,dest=/tmp/ml-worker-runtime.tar"
+    assert worker_step["with"]["outputs"] == (
+        "${{ env.RELEASE_BUILD != 'true' && 'type=docker,dest=/tmp/ml-worker-runtime.tar' || '' }}"
+    )
     # A release still pushes an OCI index, because a release's digest is the one
     # a later release may reuse and re-tagging only preserves a digest when the
     # manifest is an index. See docs/runbooks/edge-image-publish.md.
