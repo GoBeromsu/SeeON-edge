@@ -2,29 +2,15 @@
 
 from __future__ import annotations
 
-import hashlib
 import sqlite3
-from dataclasses import dataclass
 
 from backend.app.edge_db.configuration import utc_now
 from backend.app.features.clips.listing import effective_event_type
-from backend.app.features.clips.manifest import ClipManifest
 from backend.app.features.evidence.receipt_store import (
-    ArtifactReceipt,
     ArtifactReceiptConflictError,
-    VerifiedArtifact,
+    ClipProjection,
+    primary_artifact_id,
 )
-
-
-@dataclass(frozen=True, slots=True)
-class ClipProjection:
-    receipt: ArtifactReceipt
-    verified: VerifiedArtifact
-    manifest: ClipManifest
-    manifest_relpath: str
-    media_relpath: str
-    manifest_hash: str
-    manifest_size: int
 
 
 def commit_clip(connection: sqlite3.Connection, projection: ClipProjection) -> None:
@@ -101,7 +87,7 @@ def commit_primary_artifact(
         "FROM artifacts WHERE incident_id = ? AND kind = 'PRIMARY_CLIP'",
         (incident_id,),
     ).fetchone()
-    artifact_id = _primary_artifact_id(clip_id, edge_event_id)
+    artifact_id = primary_artifact_id(clip_id, edge_event_id)
     expected = (
         clip_id,
         "AVAILABLE",
@@ -147,11 +133,6 @@ def commit_unavailable_primary(
     timestamp: str,
 ) -> None:
     _commit_primary_failure(connection, incident_id, reason, timestamp)
-
-
-def _primary_artifact_id(clip_id: str, edge_event_id: str) -> str:
-    digest = hashlib.sha256(f"{clip_id}\x1f{edge_event_id}".encode()).hexdigest()[:32]
-    return f"primary:{digest}"
 
 
 def _complete_incident(connection: sqlite3.Connection, incident_id: str, timestamp: str) -> None:
@@ -202,7 +183,6 @@ def _commit_primary_failure(
 
 
 __all__ = [
-    "ClipProjection",
     "commit_clip",
     "commit_primary_artifact",
     "commit_unavailable_primary",
