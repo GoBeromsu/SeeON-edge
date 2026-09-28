@@ -20,6 +20,8 @@ from backend.app.features.clips.catalog import CatalogConflictError, CatalogStor
 if TYPE_CHECKING:
     from fastapi import FastAPI
 
+    from backend.app.features.clips.manifest import ClipManifest
+
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 
 
@@ -33,6 +35,10 @@ class ArtifactReceiptVerificationError(RuntimeError):
 
 class ArtifactReceiptPersistenceError(RuntimeError):
     """No durable backend receipt store is available."""
+
+
+class ReceiptMissingIncidentError(ArtifactReceiptPersistenceError):
+    """A manifest references an incident that has not reached durable storage."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -76,6 +82,22 @@ class VerifiedArtifact:
     @property
     def identity(self) -> tuple[int, int]:
         return self.device, self.inode
+
+
+@dataclass(frozen=True, slots=True)
+class ClipProjection:
+    receipt: ArtifactReceipt
+    verified: VerifiedArtifact
+    manifest: ClipManifest
+    manifest_relpath: str
+    media_relpath: str
+    manifest_hash: str
+    manifest_size: int
+
+
+def primary_artifact_id(clip_id: str, edge_event_id: str) -> str:
+    digest = hashlib.sha256(f"{clip_id}\x1f{edge_event_id}".encode()).hexdigest()[:32]
+    return f"primary:{digest}"
 
 
 def verified_artifact(handle: BinaryIO) -> VerifiedArtifact:
@@ -155,7 +177,10 @@ __all__ = [
     "ArtifactReceiptStore",
     "ArtifactReceiptVerificationError",
     "CatalogArtifactReceiptStore",
+    "ClipProjection",
+    "ReceiptMissingIncidentError",
     "VerifiedArtifact",
+    "primary_artifact_id",
     "verified_artifact",
     "verify_artifact",
 ]

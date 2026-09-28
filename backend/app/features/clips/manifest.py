@@ -11,6 +11,7 @@ from typing import TypedDict
 
 from pydantic import JsonValue, TypeAdapter, ValidationError
 
+from backend.app.features.clips.descriptor_files import open_contained_regular_file
 from shared.events.clip_identity import is_clip_id
 
 _MEDIA_SUFFIXES = {".mp4", ".mov", ".m4v", ".webm", ".mkv"}
@@ -127,8 +128,19 @@ def discover_manifest_paths(root: Path) -> list[Path]:
 
 def read_manifest_file(path: Path) -> ClipManifest | None:
     try:
-        parsed = _MANIFEST_PAYLOAD.validate_json(path.read_bytes())
-    except (OSError, ValidationError):
+        opened = open_contained_regular_file(path.parent, path)
+        with opened.handle:
+            content = opened.handle.read()
+    except OSError:
+        return None
+    return parse_manifest_bytes(content)
+
+
+def parse_manifest_bytes(content: bytes) -> ClipManifest | None:
+    """Decode exactly the bytes a caller inspected, without a second path read."""
+    try:
+        parsed = _MANIFEST_PAYLOAD.validate_json(content)
+    except ValidationError:
         return None
     return _manifest_from_mapping(parsed)
 
@@ -284,6 +296,7 @@ __all__ = [
     "ClipManifest",
     "ExtensionContributor",
     "discover_manifest_paths",
+    "parse_manifest_bytes",
     "read_manifest_file",
     "video_file_from_dir",
 ]

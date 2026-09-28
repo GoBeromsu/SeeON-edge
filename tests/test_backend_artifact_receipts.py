@@ -18,21 +18,21 @@ from backend.app.features.clips.compact_listing import CompactClipListing, Compa
 from backend.app.features.clips.manifest import ClipManifest
 from backend.app.features.clips.store import ClipStore
 from backend.app.features.evidence.compact_receipt_sql import (
-    ClipProjection,
     commit_clip,
     commit_primary_artifact,
 )
 from backend.app.features.evidence.compact_receipts import (
     CompactArtifactReceiptStore,
-    CompactReceiptHooks,
-    CompactReceiptMissingIncidentError,
 )
+from backend.app.features.evidence.receipt_files import ReceiptHooks
 from backend.app.features.evidence.receipt_store import (
     ArtifactReceipt,
     ArtifactReceiptConflictError,
     ArtifactReceiptStore,
     ArtifactReceiptVerificationError,
     CatalogArtifactReceiptStore,
+    ClipProjection,
+    ReceiptMissingIncidentError,
     VerifiedArtifact,
     verify_artifact,
 )
@@ -368,7 +368,7 @@ def test_missing_manifest_incident_rolls_back_all_receipt_projection(tmp_path: P
         )
     )
 
-    with pytest.raises(CompactReceiptMissingIncidentError, match="event-missing"):
+    with pytest.raises(ReceiptMissingIncidentError, match="event-missing"):
         CompactArtifactReceiptStore(database, tmp_path / "clip-store").commit(_receipt(data))
     with sqlite3.connect(database) as connection:
         assert connection.execute("SELECT count(*) FROM clips").fetchone() == (0,)
@@ -765,7 +765,7 @@ def test_real_route_rejects_swap_after_preflight_before_transaction(
     store = CompactArtifactReceiptStore(
         database,
         tmp_path / "clip-store",
-        CompactReceiptHooks(after_preflight=swap_after_preflight),
+        ReceiptHooks(after_preflight=swap_after_preflight),
     )
     client = _client(tmp_path, store)
 
@@ -819,7 +819,7 @@ def test_real_route_rolls_back_swap_during_receipt_transaction(
     store = CompactArtifactReceiptStore(
         database,
         tmp_path / "clip-store",
-        CompactReceiptHooks(before_final_check=swap_before_final_check),
+        ReceiptHooks(before_final_check=swap_before_final_check),
     )
     client = _client(tmp_path, store)
 
@@ -865,7 +865,7 @@ def test_real_route_valid_compact_receipt_commits_and_closes_descriptor(
     store = ObservedStore(
         database,
         tmp_path / "clip-store",
-        CompactReceiptHooks(
+        ReceiptHooks(
             after_preflight=lambda: hook_order.append("after-preflight"),
             before_final_check=lambda: hook_order.append("before-final-check"),
         ),
