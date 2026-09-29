@@ -1,16 +1,20 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import os
-import sqlite3
 from pathlib import Path
 
 import pytest
+from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from backend.app.features.clips import store as store_module
-from backend.app.features.clips.store import ClipStore
-from backend.app.main import create_app, no_lifespan
+from backend.app.features.audit.postgres_runtime import PostgresAuditRuntime
+from tests_support.postgres_api_app import postgres_api_app
+from tests_support.postgres_clip_app import index_clips
+from tests_support.postgres_sandbox import ProductSandbox
+
+pytest_plugins = ("tests_support.postgres_sandbox",)
 
 DASHBOARD_LOGIN = {"username": "admin", "password": "admin"}
 JPEG = b"\xff\xd8thumbnail\xff\xd9"
@@ -52,17 +56,28 @@ def clip_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     return root
 
 
+@pytest.fixture
+def app(
+    clip_env: Path,
+    postgres_product_sandbox: ProductSandbox,
+    postgres_audit_runtime: PostgresAuditRuntime,
+) -> FastAPI:
+    return postgres_api_app(postgres_product_sandbox, postgres_audit_runtime)
+
+
 def _login(client: TestClient) -> None:
     assert client.post("/api/v1/auth/session", json=DASHBOARD_LOGIN).status_code == 204
 
 
 def test_list_and_metadata_compute_thumbnail_availability_for_returned_items(
     clip_env: Path,
+    app: FastAPI,
 ) -> None:
     _write_clip(clip_env, "clip-with", thumbnail=True)
     _write_clip(clip_env, "clip-without", thumbnail=False)
+    index_clips(app)
 
-    with TestClient(create_app(lifespan=no_lifespan)) as client:
+    with TestClient(app) as client:
         _login(client)
         listed = client.get("/api/v1/clips")
         metadata = client.get("/api/v1/clips/clip-with/metadata")
@@ -74,44 +89,42 @@ def test_list_and_metadata_compute_thumbnail_availability_for_returned_items(
     assert metadata.json()["thumbnail_available"] is True
 
 
-def test_compact_listing_rebuilds_thumbnail_identity(clip_env: Path) -> None:
+def test_compact_listing_rebuilds_thumbnail_identity(
+    clip_env: Path,
+    app: FastAPI,
+    postgres_product_sandbox: ProductSandbox,
+) -> None:
     # Given: a finalized clip with a regular thumbnail.
     _write_clip(clip_env, "clip-with", thumbnail=True)
 
-    # When: keyset listing rebuilds schema-18 clips.
-    with TestClient(create_app(lifespan=no_lifespan)) as client:
+    # When: the catalogue indexes the store and the keyset listing reads it.
+    index_clips(app)
+    with TestClient(app) as client:
         _login(client)
         response = client.get("/api/v1/clips", params={"limit": 10})
 
-    # Then: the response and compact authority both retain thumbnail identity.
+    # Then: the response and the PostgreSQL catalogue both retain thumbnail identity.
     assert response.status_code == 200
     assert response.json()["clips"][0]["thumbnail_available"] is True
-    database = clip_env.parent / ".central-fixture" / "edge.sqlite3"
-    with sqlite3.connect(database) as connection:
-        row = connection.execute(
-            "SELECT thumbnail_relpath, length(thumbnail_sha256), thumbnail_size_bytes "
-            "FROM clips WHERE clip_id='clip-with'"
-        ).fetchone()
-    assert row == ("clips/clip-with/thumbnail.jpg", 64, len(JPEG))
+    row = postgres_product_sandbox.admin.execute(
+        "SELECT thumbnail_relpath, thumbnail_sha256, thumbnail_size_bytes "
+        "FROM clips WHERE clip_id = %s",
+        ("clip-with",),
+    ).fetchone()
+    assert row == (
+        "clips/clip-with/thumbnail.jpg",
+        hashlib.sha256(JPEG).hexdigest(),
+        len(JPEG),
+    )
 
 
 def test_first_page_rebuilds_thumbnail_availability(
     clip_env: Path,
-    monkeypatch: pytest.MonkeyPatch,
+    app: FastAPI,
 ) -> None:
     for item_index in range(60):
         _write_clip(clip_env, f"clip-{item_index:03d}", thumbnail=item_index % 2 == 0)
-    app = create_app(lifespan=no_lifespan)
-    app.state.clip_store = ClipStore(clip_env)
-    root_walks = 0
-    original = store_module.bounded_clip_roots
-
-    def instrumented(root: Path) -> tuple[Path, ...]:
-        nonlocal root_walks
-        root_walks += 1
-        return original(root)
-
-    monkeypatch.setattr(store_module, "bounded_clip_roots", instrumented)
+    index_clips(app)
 
     with TestClient(app) as client:
         _login(client)
@@ -120,7 +133,6 @@ def test_first_page_rebuilds_thumbnail_availability(
     assert response.status_code == 200
     clips = response.json()["clips"]
     assert len(clips) == 48
-    assert root_walks > 0
     assert all(
         clip["thumbnail_available"] == (int(clip["clip_id"].removeprefix("clip-")) % 2 == 0)
         for clip in clips
@@ -134,10 +146,11 @@ def test_first_page_rebuilds_thumbnail_availability(
 def test_authenticated_thumbnail_endpoint_serves_all_bounded_layouts_with_cache_headers(
     clip_env: Path,
     layout: Path,
+    app: FastAPI,
 ) -> None:
     _write_clip(clip_env / layout, "clip-layout", thumbnail=True)
 
-    with TestClient(create_app(lifespan=no_lifespan)) as client:
+    with TestClient(app) as client:
         unauthorized = client.get("/api/v1/clips/clip-layout/thumbnail")
         _login(client)
         response = client.get("/api/v1/clips/clip-layout/thumbnail")
@@ -151,13 +164,15 @@ def test_authenticated_thumbnail_endpoint_serves_all_bounded_layouts_with_cache_
 
 def test_thumbnail_payload_limit_is_enforced_for_availability_and_reads(
     clip_env: Path,
+    app: FastAPI,
 ) -> None:
     accepted_dir = _write_clip(clip_env, "clip-accepted", thumbnail=False)
     rejected_dir = _write_clip(clip_env, "clip-rejected", thumbnail=False)
     (accepted_dir / "thumbnail.jpg").write_bytes(b"a" * THUMBNAIL_LIMIT_BYTES)
     (rejected_dir / "thumbnail.jpg").write_bytes(b"b" * (THUMBNAIL_LIMIT_BYTES + 1))
+    index_clips(app)
 
-    with TestClient(create_app(lifespan=no_lifespan)) as client:
+    with TestClient(app) as client:
         _login(client)
         listed = client.get("/api/v1/clips")
         accepted = client.get("/api/v1/clips/clip-accepted/thumbnail")
@@ -173,6 +188,7 @@ def test_thumbnail_payload_limit_is_enforced_for_availability_and_reads(
 def test_thumbnail_endpoint_rejects_missing_symlink_and_duplicate_clip_ids(
     clip_env: Path,
     tmp_path: Path,
+    app: FastAPI,
 ) -> None:
     missing_dir = _write_clip(clip_env, "clip-missing", thumbnail=False)
     symlink_dir = _write_clip(clip_env, "clip-symlink", thumbnail=False)
@@ -182,7 +198,7 @@ def test_thumbnail_endpoint_rejects_missing_symlink_and_duplicate_clip_ids(
     _write_clip(clip_env, "clip-duplicate", thumbnail=True)
     _write_clip(clip_env / "archive", "clip-duplicate", thumbnail=True)
 
-    with TestClient(create_app(lifespan=no_lifespan)) as client:
+    with TestClient(app) as client:
         _login(client)
         missing = client.get("/api/v1/clips/clip-missing/thumbnail")
         symlink = client.get("/api/v1/clips/clip-symlink/thumbnail")
@@ -196,11 +212,12 @@ def test_thumbnail_endpoint_rejects_missing_symlink_and_duplicate_clip_ids(
 
 def test_head_thumbnail_answers_with_the_get_header_section_and_no_body(
     clip_env: Path,
+    app: FastAPI,
 ) -> None:
     """Same #452 gap as the video route: FastAPI does not synthesise HEAD."""
     _write_clip(clip_env, "clip-head", thumbnail=True)
 
-    with TestClient(create_app(lifespan=no_lifespan)) as client:
+    with TestClient(app) as client:
         unauthorized = client.head("/api/v1/clips/clip-head/thumbnail")
         _login(client)
         head = client.head("/api/v1/clips/clip-head/thumbnail")

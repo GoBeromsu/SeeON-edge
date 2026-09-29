@@ -51,6 +51,12 @@
       "behavior": "retired roster key; backend startup rejects injection"
     },
     {
+      "name": "API_CLIP_CATALOG_INTERVAL_SEC",
+      "category": "deployment artifact",
+      "authority": "deployment env",
+      "behavior": "clip catalog reconcile interval in seconds; typed default 5; finite value in (0, 300]; read once at startup; invalid refuses startup; no disable"
+    },
+    {
       "name": "API_CONNECTION_SETTINGS_PATH",
       "category": "fixed internal topology",
       "authority": "baked runtime state path",

@@ -10,10 +10,11 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 import pytest
+from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from backend.app.core.config import get_settings
-from backend.app.main import create_app, no_lifespan
+from backend.app.features.audit.postgres_runtime import PostgresAuditRuntime
 from shared.events.clip_analysis_wire import (
     ClipAnalysisBox,
     ClipAnalysisFrame,
@@ -21,6 +22,10 @@ from shared.events.clip_analysis_wire import (
     ClipAnalysisTimeBase,
     encode_clip_analysis,
 )
+from tests_support.postgres_api_app import postgres_api_app
+from tests_support.postgres_sandbox import ProductSandbox
+
+pytest_plugins = ("tests_support.postgres_sandbox",)
 
 CLIP_ID = "clip-1"
 CLIP_SHA256 = "a" * 64
@@ -104,6 +109,15 @@ def _environment(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[Pa
     get_settings.cache_clear()
     yield clip_store
     get_settings.cache_clear()
+
+
+@pytest.fixture
+def app(
+    _environment: Path,
+    postgres_product_sandbox: ProductSandbox,
+    postgres_audit_runtime: PostgresAuditRuntime,
+) -> FastAPI:
+    return postgres_api_app(postgres_product_sandbox, postgres_audit_runtime)
 
 
 def _login(client: TestClient) -> None:
@@ -201,6 +215,7 @@ def _write_playback(
 @pytest.mark.parametrize("worker_status", [200, 202, 409, 404])
 def test_trigger_relays_worker_status_and_original_manifest_identity(
     _environment: Path,
+    app: FastAPI,
     worker_server: _WorkerServer,
     monkeypatch: pytest.MonkeyPatch,
     worker_status: int,
@@ -211,7 +226,7 @@ def test_trigger_relays_worker_status_and_original_manifest_identity(
     worker_server.get_response_body = {"state": "running"}
     monkeypatch.setenv("ML_API_WORKER_STREAM_ORIGIN", worker_server.origin)
     get_settings.cache_clear()
-    with TestClient(create_app(lifespan=no_lifespan)) as client:
+    with TestClient(app) as client:
         _login(client)
         response = client.post(f"/api/v1/clips/{CLIP_ID}/analysis")
     assert response.status_code == worker_status
@@ -231,14 +246,14 @@ def test_trigger_relays_worker_status_and_original_manifest_identity(
 
 
 def test_trigger_projects_worker_rejection_reason(
-    _environment: Path, worker_server: _WorkerServer, monkeypatch: pytest.MonkeyPatch
+    _environment: Path, app: FastAPI, worker_server: _WorkerServer, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     _write_clip(_environment)
     worker_server.response_status = 422
     worker_server.response_body = {"error": "rejected", "reason": "duration"}
     monkeypatch.setenv("ML_API_WORKER_STREAM_ORIGIN", worker_server.origin)
     get_settings.cache_clear()
-    with TestClient(create_app(lifespan=no_lifespan)) as client:
+    with TestClient(app) as client:
         _login(client)
         response = client.post(f"/api/v1/clips/{CLIP_ID}/analysis")
     assert response.status_code == 422
@@ -249,11 +264,13 @@ def test_trigger_projects_worker_rejection_reason(
     }
 
 
-def test_available_analysis_reports_identical_served_timing(_environment: Path) -> None:
+def test_available_analysis_reports_identical_served_timing(
+    _environment: Path, app: FastAPI
+) -> None:
     clip_dir = _write_clip(_environment)
     _write_analysis(clip_dir)
     _write_playback(clip_dir, pts_identical=True)
-    with TestClient(create_app(lifespan=no_lifespan)) as client:
+    with TestClient(app) as client:
         _login(client)
         response = client.get(f"/api/v1/clips/{CLIP_ID}/analysis")
     assert response.status_code == 200
@@ -264,10 +281,11 @@ def test_available_analysis_reports_identical_served_timing(_environment: Path) 
 
 def test_available_analysis_on_original_reports_identical_served_timing(
     _environment: Path,
+    app: FastAPI,
 ) -> None:
     clip_dir = _write_clip(_environment)
     _write_analysis(clip_dir)
-    with TestClient(create_app(lifespan=no_lifespan)) as client:
+    with TestClient(app) as client:
         _login(client)
         response = client.get(f"/api/v1/clips/{CLIP_ID}/analysis")
     assert response.status_code == 200
@@ -276,11 +294,13 @@ def test_available_analysis_on_original_reports_identical_served_timing(
     assert response.json()["result"]["clip_sha256"] == CLIP_SHA256
 
 
-def test_available_analysis_reports_nonidentical_served_timing(_environment: Path) -> None:
+def test_available_analysis_reports_nonidentical_served_timing(
+    _environment: Path, app: FastAPI
+) -> None:
     clip_dir = _write_clip(_environment)
     _write_analysis(clip_dir)
     _write_playback(clip_dir, pts_identical=False)
-    with TestClient(create_app(lifespan=no_lifespan)) as client:
+    with TestClient(app) as client:
         _login(client)
         response = client.get(f"/api/v1/clips/{CLIP_ID}/analysis")
     assert response.status_code == 200
@@ -292,10 +312,10 @@ def test_available_analysis_reports_nonidentical_served_timing(_environment: Pat
     }
 
 
-def test_analysis_identity_mismatch_is_unavailable(_environment: Path) -> None:
+def test_analysis_identity_mismatch_is_unavailable(_environment: Path, app: FastAPI) -> None:
     clip_dir = _write_clip(_environment)
     _write_analysis(clip_dir, clip_sha256="e" * 64)
-    with TestClient(create_app(lifespan=no_lifespan)) as client:
+    with TestClient(app) as client:
         _login(client)
         response = client.get(f"/api/v1/clips/{CLIP_ID}/analysis")
     assert response.status_code == 200
@@ -308,6 +328,7 @@ def test_analysis_identity_mismatch_is_unavailable(_environment: Path) -> None:
 
 def test_corrupt_newest_analysis_does_not_mask_older_valid_analysis(
     _environment: Path,
+    app: FastAPI,
 ) -> None:
     clip_dir = _write_clip(_environment)
     _write_analysis(clip_dir, artifact_id="0123456789abcdef")
@@ -316,7 +337,7 @@ def test_corrupt_newest_analysis_does_not_mask_older_valid_analysis(
     newest.with_name(f"{newest.name}.sha256").write_text(
         hashlib.sha256(b"different").hexdigest() + "\n", encoding="ascii"
     )
-    with TestClient(create_app(lifespan=no_lifespan)) as client:
+    with TestClient(app) as client:
         _login(client)
         response = client.get(f"/api/v1/clips/{CLIP_ID}/analysis")
     assert response.status_code == 200
@@ -325,12 +346,12 @@ def test_corrupt_newest_analysis_does_not_mask_older_valid_analysis(
 
 
 def test_worker_unreachable_is_an_honest_available_status(
-    _environment: Path, monkeypatch: pytest.MonkeyPatch
+    _environment: Path, app: FastAPI, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     _write_clip(_environment)
     monkeypatch.setenv("ML_API_WORKER_STREAM_ORIGIN", "http://127.0.0.1:1")
     get_settings.cache_clear()
-    with TestClient(create_app(lifespan=no_lifespan)) as client:
+    with TestClient(app) as client:
         _login(client)
         response = client.get(f"/api/v1/clips/{CLIP_ID}/analysis")
     assert response.status_code == 200
@@ -339,14 +360,14 @@ def test_worker_unreachable_is_an_honest_available_status(
 
 
 def test_worker_analysis_disabled_is_an_honest_unavailable_status(
-    _environment: Path, worker_server: _WorkerServer, monkeypatch: pytest.MonkeyPatch
+    _environment: Path, app: FastAPI, worker_server: _WorkerServer, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     _write_clip(_environment)
     worker_server.response_status = 503
     worker_server.response_body = {"error": "clip_analysis_disabled"}
     monkeypatch.setenv("ML_API_WORKER_STREAM_ORIGIN", worker_server.origin)
     get_settings.cache_clear()
-    with TestClient(create_app(lifespan=no_lifespan)) as client:
+    with TestClient(app) as client:
         _login(client)
         response = client.get(f"/api/v1/clips/{CLIP_ID}/analysis")
     assert response.status_code == 200
@@ -360,6 +381,7 @@ def test_worker_analysis_disabled_is_an_honest_unavailable_status(
 )
 def test_analysis_uses_original_when_rendition_attestation_is_unbound(
     _environment: Path,
+    app: FastAPI,
     source_sha256: str,
     rendition_sha256: str | None,
 ) -> None:
@@ -371,7 +393,7 @@ def test_analysis_uses_original_when_rendition_attestation_is_unbound(
         source_sha256=source_sha256,
         rendition_sha256=rendition_sha256,
     )
-    with TestClient(create_app(lifespan=no_lifespan)) as client:
+    with TestClient(app) as client:
         _login(client)
         response = client.get(f"/api/v1/clips/{CLIP_ID}/analysis")
     assert response.json()["state"] == "available"
@@ -382,6 +404,7 @@ def test_analysis_uses_original_when_rendition_attestation_is_unbound(
 @pytest.mark.parametrize("worker_state", ["idle", "queued", "running", "failed"])
 def test_worker_states_include_served_media_identity(
     _environment: Path,
+    app: FastAPI,
     worker_server: _WorkerServer,
     monkeypatch: pytest.MonkeyPatch,
     worker_state: str,
@@ -391,7 +414,7 @@ def test_worker_states_include_served_media_identity(
     worker_server.response_body = {"state": worker_state}
     monkeypatch.setenv("ML_API_WORKER_STREAM_ORIGIN", worker_server.origin)
     get_settings.cache_clear()
-    with TestClient(create_app(lifespan=no_lifespan)) as client:
+    with TestClient(app) as client:
         _login(client)
         response = client.get(f"/api/v1/clips/{CLIP_ID}/analysis")
     assert response.json()["state"] == worker_state
@@ -399,12 +422,12 @@ def test_worker_states_include_served_media_identity(
 
 
 def test_cancel_relays_empty_response_and_worker_auth_is_unreachable(
-    _environment: Path, worker_server: _WorkerServer, monkeypatch: pytest.MonkeyPatch
+    _environment: Path, app: FastAPI, worker_server: _WorkerServer, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     _write_clip(_environment)
     monkeypatch.setenv("ML_API_WORKER_STREAM_ORIGIN", worker_server.origin)
     get_settings.cache_clear()
-    with TestClient(create_app(lifespan=no_lifespan)) as client:
+    with TestClient(app) as client:
         _login(client)
         worker_server.response_status = 204
         worker_server.response_body = {}
@@ -417,9 +440,9 @@ def test_cancel_relays_empty_response_and_worker_auth_is_unreachable(
     assert unreachable.json()["reason"] == "worker_unreachable"
 
 
-def test_analysis_rejects_clip_id_outside_worker_grammar(_environment: Path) -> None:
+def test_analysis_rejects_clip_id_outside_worker_grammar(_environment: Path, app: FastAPI) -> None:
     _write_clip(_environment)
-    with TestClient(create_app(lifespan=no_lifespan)) as client:
+    with TestClient(app) as client:
         _login(client)
         response = client.get("/api/v1/clips/clip%3Alegacy/analysis")
     assert response.status_code == 400

@@ -24,24 +24,35 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
+from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from backend.app.main import create_app, no_lifespan
+from backend.app.features.audit.postgres_runtime import PostgresAuditRuntime
 from shared.events.delivery_queue import (
     DeliveryQueue,
     EventEntry,
     SnapshotAttachmentEntry,
     SnapshotDispositionEntry,
 )
+from tests_support.postgres_api_app import postgres_api_app
+from tests_support.postgres_sandbox import ProductSandbox
 from worker.runtime.telemetry.runtime_diagnostics import WorkerDiagnostics
 from worker.runtime.telemetry.runtime_status_sender import (
     RelayRuntimeStatusTransport,
     RuntimeStatusSender,
 )
 
+pytest_plugins = ("tests_support.postgres_sandbox",)
 
-def _client() -> TestClient:
-    app = create_app(lifespan=no_lifespan)
+
+@pytest.fixture
+def app(
+    postgres_product_sandbox: ProductSandbox, postgres_audit_runtime: PostgresAuditRuntime
+) -> FastAPI:
+    return postgres_api_app(postgres_product_sandbox, postgres_audit_runtime)
+
+
+def _client(app: FastAPI) -> TestClient:
     app.state.edge_relay_token = "relay-token"
     app.state.camera_inventory = {
         "camera-1": {"camera_id": "camera-1", "facility_id": "facility-1"}
@@ -134,10 +145,10 @@ def _populated_queue(directory: Path, *, falls: int) -> DeliveryQueue:
 
 
 @pytest.fixture(name="reported")
-def _reported(tmp_path: Path) -> dict[str, object]:
+def _reported(tmp_path: Path, app: FastAPI) -> dict[str, object]:
     """Capacity as `GET /api/v1/status` reports it, not as we computed it."""
     queue = _populated_queue(tmp_path / "delivery-queue", falls=8)
-    return _post_queue_capacity(_client(), queue)
+    return _post_queue_capacity(_client(app), queue)
 
 
 def test_the_status_path_reports_the_kind_mix_a_fall_actually_produces(
@@ -216,7 +227,7 @@ def test_the_entry_bound_binds_before_the_byte_bound(
 
 
 def test_retained_refused_evidence_reaches_the_operator_status_endpoint(
-    tmp_path: Path,
+    tmp_path: Path, app: FastAPI
 ) -> None:
     """Retention is only actionable if the deployment reports it.
 
@@ -229,7 +240,7 @@ def test_retained_refused_evidence_reaches_the_operator_status_endpoint(
     entry_id = str(next(iter(queue.entries()))["entry_id"])
     assert queue.dead_letter(entry_id, 422)
 
-    with _client() as client:
+    with _client(app) as client:
         reported = _post_queue_capacity(client, queue)
 
     assert reported["dead_lettered_count"] == 1, (

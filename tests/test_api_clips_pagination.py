@@ -4,9 +4,15 @@ import json
 from pathlib import Path
 
 import pytest
+from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from backend.app.main import create_app, no_lifespan
+from backend.app.features.audit.postgres_runtime import PostgresAuditRuntime
+from tests_support.postgres_api_app import postgres_api_app
+from tests_support.postgres_clip_app import index_clips
+from tests_support.postgres_sandbox import ProductSandbox
+
+pytest_plugins = ("tests_support.postgres_sandbox",)
 
 
 def _write_manifest(
@@ -49,8 +55,11 @@ def _login(client: TestClient) -> None:
     assert response.status_code == 204
 
 
-def _app() -> object:
-    return create_app(lifespan=no_lifespan)
+@pytest.fixture
+def app(
+    postgres_product_sandbox: ProductSandbox, postgres_audit_runtime: PostgresAuditRuntime
+) -> FastAPI:
+    return postgres_api_app(postgres_product_sandbox, postgres_audit_runtime)
 
 
 @pytest.fixture(autouse=True)
@@ -64,6 +73,7 @@ def clip_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
 
 def test_first_page_returns_compact_cursor(
     clip_env: Path,
+    app: FastAPI,
 ) -> None:
     store_root = clip_env / "clip-store"
     for index in range(60):
@@ -84,7 +94,8 @@ def test_first_page_returns_compact_cursor(
             event_ref=event_ref,
         )
 
-    with TestClient(_app()) as client:
+    index_clips(app)
+    with TestClient(app) as client:
         _login(client)
         response = client.get(
             "/api/v1/clips",
@@ -116,6 +127,7 @@ def test_first_page_returns_compact_cursor(
 )
 def test_event_filter_uses_effective_category_and_keeps_camera_scoped_facets(
     clip_env: Path,
+    app: FastAPI,
     event_type: str,
     expected_ids: list[str],
     expected_total: int,
@@ -139,7 +151,8 @@ def test_event_filter_uses_effective_category_and_keeps_camera_scoped_facets(
             event_ref=event_ref,
         )
 
-    with TestClient(_app()) as client:
+    index_clips(app)
+    with TestClient(app) as client:
         _login(client)
         response = client.get(
             "/api/v1/clips",
@@ -159,9 +172,9 @@ def test_event_filter_uses_effective_category_and_keeps_camera_scoped_facets(
     assert body["event_type_counts"] == {"bed-exit": 5, "fall": 5, "other": 2}
 
 
-def test_paged_list_rebuilds_without_a_listing_generation() -> None:
+def test_paged_list_rebuilds_without_a_listing_generation(app: FastAPI) -> None:
     # Given: an application with no legacy listing-generation index.
-    with TestClient(create_app(lifespan=no_lifespan)) as client:
+    with TestClient(app) as client:
         _login(client)
 
         # When: a bounded listing is requested.
@@ -178,7 +191,9 @@ def test_paged_list_rebuilds_without_a_listing_generation() -> None:
     }
 
 
-def test_unpaged_list_preserves_all_clips_and_reports_unbounded_pagination(clip_env: Path) -> None:
+def test_unpaged_list_preserves_all_clips_and_reports_unbounded_pagination(
+    clip_env: Path, app: FastAPI
+) -> None:
     store_root = clip_env / "clip-store"
     _write_manifest(
         store_root,
@@ -195,7 +210,8 @@ def test_unpaged_list_preserves_all_clips_and_reports_unbounded_pagination(clip_
         event_ref="event-b",
     )
 
-    with TestClient(create_app(lifespan=no_lifespan)) as client:
+    index_clips(app)
+    with TestClient(app) as client:
         _login(client)
         response = client.get("/api/v1/clips")
 
@@ -221,8 +237,8 @@ def test_unpaged_list_preserves_all_clips_and_reports_unbounded_pagination(clip_
         {"offset": 1},
     ],
 )
-def test_list_rejects_invalid_pagination(params: dict[str, int]) -> None:
-    with TestClient(create_app(lifespan=no_lifespan)) as client:
+def test_list_rejects_invalid_pagination(params: dict[str, int], app: FastAPI) -> None:
+    with TestClient(app) as client:
         _login(client)
         response = client.get("/api/v1/clips", params=params)
 
@@ -233,6 +249,7 @@ def test_list_rejects_invalid_pagination(params: dict[str, int]) -> None:
 def test_single_clip_metadata_resolves_every_historical_layout(
     layout_prefix: str,
     clip_env: Path,
+    app: FastAPI,
 ) -> None:
     store_root = clip_env / "clip-store"
     clip_id = "clip-history"
@@ -245,7 +262,7 @@ def test_single_clip_metadata_resolves_every_historical_layout(
         layout_prefix=layout_prefix,
     )
 
-    with TestClient(create_app(lifespan=no_lifespan)) as client:
+    with TestClient(app) as client:
         _login(client)
         response = client.get(f"/api/v1/clips/{clip_id}/metadata")
 
