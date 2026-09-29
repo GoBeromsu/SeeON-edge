@@ -105,7 +105,7 @@ exports: `tests/test_contract_symbol_exports.py`. Docs live in
   priority hidden in branch fall-through or dict insertion order. Lift the
   decision to an explicit owner (registry, config, declaration).
 - No JSON state stores for application data. Mutable application state belongs in
-  the backend-owned SQLite database (`backend/app/edge_db`); the inference-runtime
+  the backend-owned PostgreSQL database (`backend/app/edge_db`); the inference-runtime
   slot holds no database at all (ADR-0005) and uses only its approved bounded
   file surfaces: the publish-once delivery queue, a verified bounded config read
   cache, media-integrity sidecars, zero-payload lock inodes, and startup-purged

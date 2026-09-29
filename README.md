@@ -92,43 +92,31 @@ and actual GPU access. Compiler and component checks are not product acceptance.
 
 ## Run
 
-### Local state directories
+### Local state
 
-Two storage paths default to absolute container paths that a non-root local
-user cannot create. The defaults are correct for the edge images — where
-`compose.edge.yaml` bind-mounts them — but a local run fails on both unless
-they are redirected:
+The backend stores durable state only in PostgreSQL. A local run needs a
+PostgreSQL 18 server whose schemas were created by
+`python -m backend.app.edge_db.migration provision`
+(`docs/runbooks/postgresql-cutover.md`), and three environment values
+(`backend/app/postgres_root.py`):
 
-| Env var | Default | Owner |
-| --- | --- | --- |
-| `CLIP_STORE_DIR` | `/var/lib/clip-store` | worker writes clips, `ml-api` reads them |
-| `API_CONNECTION_SETTINGS_PATH` | `/var/lib/ml-api/connection-settings.sqlite3` | `ml-api` connection settings |
+| Env var | Meaning |
+| --- | --- |
+| `API_POSTGRES_DSN_FILE` | file holding the runtime connection string |
+| `API_POSTGRES_AUTHORITY_FILE` | file holding the persistence authority |
+| `API_POSTGRES_SCHEMA` | schema name, default `seeon_edge` |
 
-(`API_LABEL_STORE` -- `ml-api` clip labels + audit log -- defaults to
-`resolve_state_dir("ml-api")` (`~/.local/state/ml-api/labels`,
-`backend/app/shared/state_dir.py`) instead, which a native dev process can
-already write; it only needs redirecting if you want labels/audit history
-kept somewhere else.)
-
-Left at their defaults locally, the failures are not obvious: connection
-settings degrade to `unable to open database file`, and the worker logs
-`clip recorder failed to start; clips disabled` while otherwise running
-normally. Export a shared local root once:
-
-```bash
-export ML_DEV_STATE="$HOME/.local/state/eldercare-dev"
-mkdir -p "$ML_DEV_STATE"/{clip-store,ml-api}
-```
-
-`CLIP_STORE_DIR` must be the *same* path for both instances — the worker writes
-evidence clips there and `ml-api` reads them back.
+The clip store is fixed at `/var/lib/clip-store` for both the worker and
+`ml-api`; `compose.edge.yaml` mounts it. `CLIP_STORE_DIR`,
+`API_CONNECTION_SETTINGS_PATH` and `API_LABEL_STORE` are retired: the backend
+refuses to start while any of them is set.
 
 ### Backend
 
 ```bash
+API_POSTGRES_DSN_FILE=/path/to/runtime.dsn \
+API_POSTGRES_AUTHORITY_FILE=/path/to/authority.json \
 API_EDGE_RELAY_TOKEN=local-edge-relay-token \
-CLIP_STORE_DIR="$ML_DEV_STATE/clip-store" \
-API_CONNECTION_SETTINGS_PATH="$ML_DEV_STATE/ml-api/connection-settings.sqlite3" \
 uv run uvicorn backend.app.main:app --host 127.0.0.1 --port 8000
 ```
 
@@ -144,18 +132,13 @@ Validate and run the worker with a local configuration:
 ```bash
 uv run python -m worker --config worker/ml-worker.local.yaml --check-config
 
-CLIP_STORE_DIR="$ML_DEV_STATE/clip-store" \
 ML_WORKER_PROFILE=cpu \
-ML_WORKER_DEV_MJPEG=true \
-ML_WORKER_DEV_MJPEG_HOST=127.0.0.1 \
-ML_WORKER_DEV_MJPEG_PORT=8090 \
 uv run python -m worker --config worker/ml-worker.local.yaml
 ```
 
-`ML_WORKER_DEV_MJPEG` serves the live view that the dashboard's room detail
-reads; port 8090 matches `Settings.worker_stream_origin`'s default, so leaving
-both at these values is what makes the live panel resolve. `cpu` is the only
-profile whose device check passes without a GPU.
+`cpu` is the only profile whose device check passes without a GPU.
+`ML_WORKER_DEV_MJPEG*` and `CLIP_STORE_DIR` are retired; the worker refuses to
+start while any of them is set.
 
 Run the front dev server:
 

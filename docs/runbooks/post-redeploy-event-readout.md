@@ -154,7 +154,7 @@ head `5e8fd29`, `6f35357` 위로 리베이스돼 있어 머지되면 같은 방�
 ### A-2. fall 이벤트의 `audit` 블록 — #217 threshold가 적용됐는지 확인
 
 이벤트 판독은 **백엔드의 Evidence API 또는 대시보드**에서 한다. 워커 상태 볼륨에는
-SQLite가 없으며, 워커에게 데이터베이스 조회를 시키지 않는다. 대시보드의 incident
+데이터베이스가 없으며, 워커에게 데이터베이스 조회를 시키지 않는다. 대시보드의 incident
 목록은 `GET /api/v1/incidents` 백엔드 API를 사용하며 `edge_event_id`,
 `detected_at`, `event_type`, `event_delivery_state`를 제공한다.
 
@@ -219,7 +219,7 @@ night window → 스테이징 → 릴레이)가 최소 한 번은 끝까지 살�
 | ② | 오버레이가 계속 `bed:empty` — 한 번도 `bed:occupied`로 안 바뀜 | 같은 스냅샷 엔드포인트, 사람이 침대 위에 있을 때 관찰 | #219(H2)의 수정(#227)은 이미 main에 머지돼 있어 오늘 밤 이 갈래를 밀어내는 방향으로는 더 이상 작용하지 않는다(0-1 확인 요). **PR #241(오픈, head `5e8fd29`)이 머지되면** `bed_exit_scoring.max_containment_observed`가 0에 가까운 채로 남는 것이 ②의 사후 확증 신호가 되고, `#242`(머지됨, `6f35357`) 위로 이미 리베이스돼 있으므로 머지되는 즉시 `docker compose logs`에도 값이 찍힌다 — 아래 [!NOTE] 참고 |
 | ③ | 오버레이가 `bed:occupied` → `bed:empty`로 **`bed:exit`을 거치지 않고** 바로 바뀜 | 같은 엔드포인트, 실시간 관찰 필요(사후 조회 불가) | **`#234`(머지됨, `ecfeda5`) 이후 이 갈래의 범위가 좁아졌다** — 배포 이미지가 `ecfeda5`의 후손인지는 0-1 방법으로 확인할 것. 후손이면 `grace_frames > 0`이었던 트랙 소실은 이제 `BedExitEvent`를 발화하며 ③에서 빠지고 정상적으로 A-3 사후 조회가 된다. 남는 건 **`grace_frames == 0`인 즉발 이탈**(트랙이 배정을 쌓을 시간도 없이 바로 소실 — #234 PR 바디가 명시한 후속 갭)뿐이고, 이건 여전히 **#220(H3, PR 없음)과 정확히 같은 겉모습**(occupied→empty, exit 없음)을 만든다. 코드상 두 경로 다 카운터/이벤트를 안 남기므로 사후에는 구분 불가 — 어느 쪽인지 알려면 그 순간 라이브 뷰를 보면서 사람이 실제로 방을 나갔는지(즉발 이탈이면 트랙을 놓쳤을 뿐 사람은 안 나갔을 수도 있음) 육안 대조가 유일한 방법이다. **이게 team-lead가 미리 알아야 한다고 한 바로 그 종류의 갭이다.** `assignments_made`/`grace_positive_transitions`(PR #241)는 ②/③ 경계는 구분해줘도 ③ 내부에서 잔여 #218 즉발 케이스 vs #220까지는 못 가른다. 이미지가 `ecfeda5`의 후손이 **아니라면**(구형 이미지) `grace_frames > 0` 케이스까지 포함한 원래 범위 그대로 ③이 적용된다 |
 | ④ | night window 밖 시간대에 ③까지는 확실히 넘었는데 이벤트가 안 옴 | 오버레이 라벨의 `bed:exit` 플래시 유무 — `detector.py`는 `last_debug_snapshot`을 night window 게이트(90-91행)보다 **먼저** 채우고, `overlay.py`의 `_draw_bedexit_beds`는 그 스냅샷의 `statuses[].occupancy`를 추가 게이팅 없이 그대로 그린다 | 그래서 게이트가 이벤트를 억제해도 오버레이엔 `bed:exit`이 그대로 짧게 뜬다 — **그 순간 `evidence_events`에 대응 행이 없으면 ④**다. ③(#220, 그리고 배포 이미지가 `ecfeda5`의 후손이 아니면 #218 전체, 후손이면 #218의 `grace_frames == 0` 잔여 케이스)은 애초에 `exit_beds`를 채우지 않으므로 `bed:exit` 자체가 절대 안 뜬다 — 이 플래시 유무가 ③/④를 가르는 신호다. window 경계(`night_window` 설정값)와 관찰 시각 대조도 병행할 것. **현재 상태 의존적으로 사실상 비활성** — 아래 [!NOTE] 참고, 관찰 시점에 `/api/v1/detection-settings`로 반드시 재확인할 것(이 노트를 그대로 믿지 말 것) |
-| ⑤ | A-3의 `delivery_state`/`last_error_code` | SQLite 쿼리(A-3) — 재시도 대기 행은 `delivery_state='PENDING'`으로 조회할 것 | **유실은 구조적으로 없다** — `DurableEvidenceStager`가 네트워크 시도 전에 이미 SQLite에 영속 기록한다. 실패해도 `PENDING`(재시도 대기, 최대 백오프 300초)이나 `PERMANENT`(그래도 행은 남는다)로만 간다 — **`RETRY_SCHEDULED`는 `delivery_state` 값이 아니라 `evidence_sender.py`의 `SenderStep` enum 멤버명이다**; `evidence_outbox_schema.py`의 CHECK 제약이 허용하는 값은 `PENDING`/`ACKED`/`PERMANENT`/`COMPATIBILITY`뿐이라 `RETRY_SCHEDULED`로 쿼리하면 항상 0행이 나온다(재시도가 없다는 뜻이 아니라 쿼리가 틀렸다는 뜻). "이벤트가 발화됐는데 흔적이 아예 없다"는 이 파이프라인에서 일어날 수 없는 일이다 — 그런 게 보이면 이 문서가 기술한 경로 자체가 틀렸다는 뜻이니 바로 알려달라 |
+| ⑤ | A-3의 `event_delivery_state` | 백엔드 API `GET /api/v1/incidents` 조회(A-3) | **유실은 구조적으로 없다** — `DurableEvidenceStager`가 네트워크 시도 전에 워커의 publish-once 전달 큐(`shared/events/delivery_queue.py`)에 파일로 영속 기록한다. 전송이 실패한 항목은 큐에 남아 재시도되고, 백엔드가 422처럼 영구 거절한 항목은 `<큐>-dead-letter` 디렉터리로 옮겨질 뿐 지워지지 않는다. "이벤트가 발화됐는데 흔적이 아예 없다"는 이 파이프라인에서 일어날 수 없는 일이다 — 그런 게 보이면 이 문서가 기술한 경로 자체가 틀렸다는 뜻이니 바로 알려달라 |
 
 > [!NOTE]
 > **④는 이 문서 작성 시점 기준 상태 의존적으로 사실상 비활성이다.** `bed_exit`의

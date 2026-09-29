@@ -112,10 +112,11 @@ that was composed without an effective policy; it has no `decision_trace_id`.
 ## Retention
 
 Total-capacity, not per-kind TTL. `ML_API_EXECUTION_RECORDS_BUDGET_BYTES` is
-the **on-disk** size of the six `execution_*` tables plus their indexes,
-measured exactly with SQLite's `dbstat` (not the whole `edge.sqlite3`, not
-the WAL). Rows plus five indexes were 3.8x the payload bytes on the
-reference edge, so never size the budget by payload.
+the byte envelope of the logical live rows of the six `execution_*` tables:
+the summed `pg_column_size` of every visible row. It excludes indexes, page
+overhead, dead tuples and WAL, so the physical size of the
+`seeon_edge_diagnostics` schema is larger than the budget; never size the
+disk by the budget alone.
 
 Records belong to a logical causal unit (one fall decision and its inputs;
 one event and its delivery/acceptance). Units become terminal by horizon, by
@@ -142,9 +143,8 @@ reference edge with 8 cameras: a 2 GB backlog drained at ~2 MB/s with
 - Worker restart / crash / power loss: records still in the in-memory lanes
   are lost. The worker reports the drop as a gap **if** it gets to flush; a
   hard kill leaves an `UNKNOWN` tail. There is no persistent worker spool.
-- Schema rollback: see `edge-database-schema-19.md`. A schema-18 image refuses
-  a schema-19 database; restoring the backup discards every application write
-  made after the extension.
+- Rollback: see `postgresql-cutover.md`. It says when the diagnostics schema
+  is kept, dropped, or denies a rollback.
 
 ## Enabling (seams)
 
