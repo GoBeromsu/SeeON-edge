@@ -1,6 +1,8 @@
 {
   "compare_rules": {
     "bytes": "exact byte equality",
+    "bytes-given-recorded-media-facts": "exact byte equality after feeding the recorded clip.mp4 media facts (size, sha256, codec, duration) to the writer; recorded with ffmpeg version 9.0.2 Copyright (c) 2000-2026 the FFmpeg developers; clip.mp4 size, sha256, codec and duration depend on the ffmpeg build; a Rust writer test feeds the recorded media facts and compares the manifest bytes exactly, a re-record on another ffmpeg may drift only in these fields",
+    "informational": "fields listed in a golden's `informational` (or `normalised: [\"informational\"]`) depend on the ffmpeg/libjpeg build or the host and are recorded for review only; they are never compared",
     "json-value": "parse both sides and compare values after dropping 'normalised' fields",
     "jsonl-lines-rebuild": "the golden holds the file as {file_name, lines, trailing_newline}; rebuild the bytes as '\\n'.join(lines) plus '\\n' when trailing_newline, then require exact byte equality with the producer's file named file_name",
     "mjpeg-part-framing": "framing is the contract, payload bytes are encoder-specific: the producer's first multipart part must equal part_head_template with <content-length> replaced by the decimal payload length, then the payload, then part_tail byte for byte; the payload must be the JPEG the producer was given, unchanged; recorded_payload_* and recorded_part_sha256 describe the Python recording and are not compared"
@@ -8,7 +10,27 @@
   "files_sha256": {
     "d/clip-analysis/clip.analysis.json": "7b42a6107011dd1cbd7854b144834adabd409ce7f6bf3c4cf156d6427b60fc2b",
     "d/clip-analysis/clip.analysis.json.sha256": "22c1023568feca0e3331aa547391144b33417ba1bf226e102782e3d7b6989192",
+    "d/clip-manifests/corrupt-existing.json": "6ab429331964b917ea73f90b9b4ac32df3732b7deb64ba6d221acee997bad9b0",
+    "d/clip-manifests/corrupt-existing.manifest.json": "09b71ee0075f99bc9f7f634f2be1c7533794f683f6e044eb207698445dccc14b",
+    "d/clip-manifests/corrupt-missing.json": "4fb227cdcfed224bbc55996617dc520ced0193d11fc8b3a3db42490e7865f03f",
+    "d/clip-manifests/corrupt-missing.manifest.json": "6cdf90727176358f700a9b22d741100c8f48cfa2cd845efec3ecd1b10d5d5431",
+    "d/clip-manifests/flow-publish.json": "ad39f89182972b04e8503036b0c8152f14691f57e467d6aead1067226180fd4a",
+    "d/clip-manifests/flow-publish.manifest.json": "16f068848ceafb147c930e5e9a410e48153cc67a4f75b8990740a4a1a600a754",
+    "d/clip-manifests/flow-resume.json": "998c3efb12024ab90b5c5e937c7a418507d56df1a5c39dab4b82a13bea26dc52",
+    "d/clip-manifests/ready.json": "bc38b299213c9a9974c476238cd2c97a644fa14b61f41cb8ad56b67a9fb7a7a0",
+    "d/clip-manifests/ready.manifest.json": "73aa98a635e59da87fef792db6d3fb33ffdd04c0f87db1044276db98d99acd1b",
+    "d/clip-manifests/summary.json": "778380c70dcf8e5ad33251d4c624cbc1fe26a27a104a3b85460f31b1cc94309a",
+    "d/clip-manifests/unavailable.json": "2af3444f50753a228aacc3e3d7da94b02077bdf395fb543cf1cccff11110da04",
+    "d/clip-manifests/unavailable.manifest.json": "58f9bd00c4a7a3623e60401c62840f11f3bd500943f7689efa30255cd0dc5ab8",
     "d/clip-playback/clip.playback-h264.json": "7ffb4c1519717e2e52b72e48622be524330655870abc4babb1833176937b62d4",
+    "d/clip-thumbnail.json": "99a9d5333cba6d6895ee8ff07ca518023072dbac373b489db76ba41df4fc1609",
+    "d/codec-edges.json": "daf19a25265c3ff75ee5afc3eb0b53baea05ed4bb7286e22b87c8d03cc8fff52",
+    "d/codec-edges/queue/event-b2c0dec0-0000-4000-8000-000000000000.json": "49960951b1272de83f8761585cd9480b3860ed554ca64ec8f8846543c4343a34",
+    "d/codec-edges/queue/event-b2c0dec0-0000-4000-8000-000000000001.json": "bd52dc75a300a1124602757ba6f5daef3fed93da465e8ed8285a24383892dadf",
+    "d/codec-edges/queue/event-b2c0dec0-0000-4000-8000-000000000002.json": "4f548f1b4656158bd78200c42a4e33084c656dbab3db1c662e8d92ea46384d20",
+    "d/codec-edges/queue/event-b2c0dec0-0000-4000-8000-000000000003.json": "e3a21488700108dc40565810e77d0c9c0564e88b58d47231e40679bb6033ab25",
+    "d/codec-edges/queue/event-b2c0dec0-0000-4000-8000-000000000004.json": "17e2d2ba51e14f64acbde13cc1d8be5911753902dd266813d394dd6ad1f053b0",
+    "d/codec-edges/queue/event-b2c0dec0-0000-4000-8000-000000000005.json": "be76af64fdd161af723f7355711420d3c3765359914764bd8798bdc901a277ae",
     "d/config-lkg/current.json": "3d2fcfb2af0b92ffd9a725798da7881ab41dd48a29ff8e8e8f8eefe73c5ad961",
     "d/config-lkg/revisions/00000000000000000002-00000000000000000007-00000000000000000005.json": "3d2fcfb2af0b92ffd9a725798da7881ab41dd48a29ff8e8e8f8eefe73c5ad961",
     "d/delivery-queue-dead-letter/queue-dead-letter/422.0.event-a5e15ff2-90fd-4764-be74-a7da4f573cc9.json": "fc7a8aa478a9078bb720b66b6bfd817d92492d530a31f7801e678c1081a8b905",
@@ -19,9 +41,36 @@
     "d/delivery-queue/disposition-d6681ffe537c67cb3880ffbf5edaa522cd5bfe992a5f99a034c3471ba257c405.json": "9370f1b2f2d86c7006e71ec89bc5754b7bd8079ab1ff3939a4e4551095f04d3c",
     "d/delivery-queue/event-a5e15ff2-90fd-4764-be74-a7da4f573cc9.json": "fc7a8aa478a9078bb720b66b6bfd817d92492d530a31f7801e678c1081a8b905",
     "d/engine-identity.json": "d97dffe367deb592f215d04195e143392c785e7d5049b61147f16dc161d71c0c",
+    "d/event-identities/cases.json": "25325a46d02ae6eb40f36b26d02897b5010ef15ab97533c89a017601b1cd16af",
+    "d/event-identities/fresh/0-after-resolve-new.lines.json": "69a0944f7cebde3ec67db9586c436a6c00002d9d4b931e294ec1888094594409",
+    "d/event-identities/refusal-conflicting-source-key/0-input.lines.json": "6b755a7fc482312b1da7fc2f299a760f8027942f96b2207a8ad2a37b63327d8b",
+    "d/event-identities/refusal-future-dated/0-input.lines.json": "4a9cd2459fe9f260d0006c9815527a48ac949592d8b66a54182f6b6b432f0dfd",
+    "d/event-identities/refusal-malformed-extra-field/0-input.lines.json": "dba175eae3462e0b5e8399f236755606af9e401d76b2563fa71afe6b4063c8a5",
+    "d/event-identities/refusal-malformed-syntax/0-input.lines.json": "9f1cb04213eb8b6c9874c8d19be098cadbac231019cafceceb5c8165f87fbb38",
+    "d/event-identities/retention/0-input.lines.json": "98ab083a4328133d8faad53c4c043d0b2c530392c58d27fd7fbeae85a1147eb6",
+    "d/event-identities/retention/1-after-open.lines.json": "e0662606a41ec8f44bd28cf413d568d75923cc919cec4a1b55ab132b1d6b8f23",
+    "d/event-identities/retention/2-after-resolve-older.lines.json": "985f928473e362a02095585f9580d66f36e57b94135b31b7c77cb9cdcbfafce5",
+    "d/event-identities/retention/3-after-resolve-new.lines.json": "f6951db278862608c7f25344386a6f5e505161ebad40a11bf3d484df4cebb318",
+    "d/flow-sealed/cases.json": "66b2a36985ee73c506987f7b47d86cdbd65332d08c3d0bc023e9f71550f0db3c",
+    "d/flow-sealed/state/sealed-a-non-ascii.json": "7cf326eab8cfaf5fcd604f7082e5c12294536ef0a753cf67f82356965a2cd622",
+    "d/flow-sealed/state/sealed-b-out-of-order.json": "e53b47f1ec6893c20320452f6a65dc63b72049949e7dace38609f081e6da92be",
+    "d/model-bundle-admission/digest-flip.json": "f1f09a1605adb4072808038ed9ba3cf18bde43b190c4acd14c787bc1c936f938",
+    "d/model-bundle-admission/escaping-symlink.json": "603d1c541a2f87e9eda43bcaca22436606829924a558ebd066c41671ba1cecd9",
+    "d/model-bundle-admission/extra-empty-dir.json": "9ab602cbd2c8db86b2da7be5f03e13a0bb4ff31330f33f12e9ea62be5c8a0551",
+    "d/model-bundle-admission/extra-file.json": "c07c010527debb7cc76d0f784e15efe857e9c94bd0f3bfbe48b37de92fcbf1ee",
+    "d/model-bundle-admission/extra-symlink.json": "0ef953b48b4df86d9dc404a5a744add3771e1c7ef3c86e99884ca8a6f04a4556",
+    "d/model-bundle-admission/flip-plus-extra.json": "aed3125a6470531c17e7cada4823f77c01cc10b730b063e6b0da637d500255ef",
+    "d/model-bundle-admission/in-root-symlink.json": "e5b0cec661ebcb1ba7430dc74436513277cb7e7deb8cc377d80e9904174fff10",
+    "d/model-bundle-admission/missing-member.json": "cd22f6ff01a3e45693846749447d97c73fd97b056dabee19435706e032ccaa11",
+    "d/model-bundle-admission/non-canonical-manifest.json": "e201c21f7fe51c3df66a49b99fdd90994c31cf8b6c0199b99cfb98b8df9228af",
+    "d/model-bundle-admission/ok.json": "5c2e27005421fc80c506c39f8b356e5892d28313ae7b11d0a8feec54b0c7bdea",
+    "d/model-bundle-admission/publication.json": "821055c8fb12940ebcec1b7c07dcbf36c15c666bd6e8e9bc7b87924338b425b5",
+    "d/model-bundle-admission/unknown-bundle-format.json": "50c47710ea708cda3fc46aaaf01d81570fa531050ac97f9c862e36d015c65c31",
+    "d/model-selection-refusals.json": "2f5140364b33605dc83cd7b4a3934c88046605ba36a26232534b2370fa646763",
     "d/model-selection.json": "ad894cc0e868cc1a463292ae418ecc14183680bd832b1adb4b09a1787e9e549b",
     "d/models-bundle-layout.json": "099dcee5335d6e3d6c68c8d2b45ed39be402b42e133821979f63ced33ea3b963",
     "d/models-layout.json": "1a8fb4ed580ba875ec1b90c94fd11c71ac9ae75618a9ce9e87876b95b032cf93",
+    "d/observation-coverage.json": "a8295753967a6e0789c73825510e112600cee44f59aad963852178c6412c5a2f",
     "d/replay-engine/bed-exit-v1.input.json": "2df388136c0d8fcc74b7d7c5e9cad3baac187d32dafb27a9dcb1cb347163242e",
     "d/replay-engine/bed-exit-v1.json": "8168fcf787a5c567642aa7470aea0389437de96255dda9f365ebb159b23f5586",
     "d/replay-engine/fall-v2.input.json": "484eacd5a3ead0df2c76b5889830ed7f8396e2e9b0b2191e44dea47b956cc873",
@@ -183,6 +232,284 @@
       "wire_class": "D"
     },
     {
+      "backend_parser": "backend/app/features/clips/manifest.py:parse_manifest_bytes",
+      "compare": "json-value",
+      "informational": [
+        "media_facts_informational",
+        "clip_store_listing[path=clips/*/clip.mp4].size_bytes",
+        "outcome.published.manifest (clip.mp4 facts)",
+        "ports.on_ready (clip.mp4 facts)",
+        "ports.delivery_queue.entry (clip.mp4 facts)"
+      ],
+      "input": "-f lavfi -i testsrc=size=320x240:rate=10 -t 2 -pix_fmt yuv420p -fflags +bitexact -flags:v +bitexact -map_metadata -1 -movflags +faststart <work>/<case>/source.mp4 (bytes never recorded)",
+      "lane": "b24",
+      "normalised": [],
+      "path": "d/clip-manifests/corrupt-existing.json",
+      "producer": "worker/pipeline/output/evidence/clip_corrupt_publication.py:20 publish_existing_corrupt",
+      "rows": [
+        12
+      ],
+      "sha256": "6ab429331964b917ea73f90b9b4ac32df3732b7deb64ba6d221acee997bad9b0",
+      "size_bytes": 10651,
+      "tests": [
+        "T24",
+        "T37"
+      ],
+      "wire_class": "D"
+    },
+    {
+      "backend_parser": "backend/app/features/clips/manifest.py:parse_manifest_bytes",
+      "compare": "bytes-given-recorded-media-facts",
+      "informational": "embeds clip.mp4 facts ['codec', 'duration_ms', 'duration_s', 'sha256', 'size_bytes'] from ffmpeg version 9.0.2 Copyright (c) 2000-2026 the FFmpeg developers",
+      "input": "-f lavfi -i testsrc=size=320x240:rate=10 -t 2 -pix_fmt yuv420p -fflags +bitexact -flags:v +bitexact -map_metadata -1 -movflags +faststart <work>/<case>/source.mp4 (bytes never recorded)",
+      "lane": "b24",
+      "normalised": [],
+      "path": "d/clip-manifests/corrupt-existing.manifest.json",
+      "producer": "worker/pipeline/output/evidence/clip_corrupt_publication.py:20 publish_existing_corrupt",
+      "rows": [
+        12
+      ],
+      "sha256": "09b71ee0075f99bc9f7f634f2be1c7533794f683f6e044eb207698445dccc14b",
+      "size_bytes": 905,
+      "tests": [
+        "T24",
+        "T37"
+      ],
+      "wire_class": "D"
+    },
+    {
+      "backend_parser": "backend/app/features/clips/manifest.py:parse_manifest_bytes",
+      "compare": "json-value",
+      "informational": [
+        "media_facts_informational",
+        "clip_store_listing[path=clips/*/clip.mp4].size_bytes",
+        "outcome.published.manifest (clip.mp4 facts)",
+        "ports.on_ready (clip.mp4 facts)",
+        "ports.delivery_queue.entry (clip.mp4 facts)"
+      ],
+      "input": "-f lavfi -i testsrc=size=320x240:rate=10 -t 2 -pix_fmt yuv420p -fflags +bitexact -flags:v +bitexact -map_metadata -1 -movflags +faststart <work>/<case>/source.mp4 (bytes never recorded)",
+      "lane": "b24",
+      "normalised": [],
+      "path": "d/clip-manifests/corrupt-missing.json",
+      "producer": "worker/pipeline/output/evidence/clip_publication.py:217 ClipPublisher.publish_corrupt",
+      "rows": [
+        12
+      ],
+      "sha256": "4fb227cdcfed224bbc55996617dc520ced0193d11fc8b3a3db42490e7865f03f",
+      "size_bytes": 7864,
+      "tests": [
+        "T24",
+        "T37"
+      ],
+      "wire_class": "D"
+    },
+    {
+      "backend_parser": "backend/app/features/clips/manifest.py:parse_manifest_bytes",
+      "compare": "bytes",
+      "informational": null,
+      "input": "-f lavfi -i testsrc=size=320x240:rate=10 -t 2 -pix_fmt yuv420p -fflags +bitexact -flags:v +bitexact -map_metadata -1 -movflags +faststart <work>/<case>/source.mp4 (bytes never recorded)",
+      "lane": "b24",
+      "normalised": [],
+      "path": "d/clip-manifests/corrupt-missing.manifest.json",
+      "producer": "worker/pipeline/output/evidence/clip_publication.py:217 ClipPublisher.publish_corrupt",
+      "rows": [
+        12
+      ],
+      "sha256": "6cdf90727176358f700a9b22d741100c8f48cfa2cd845efec3ecd1b10d5d5431",
+      "size_bytes": 706,
+      "tests": [
+        "T24",
+        "T37"
+      ],
+      "wire_class": "D"
+    },
+    {
+      "backend_parser": "backend/app/features/clips/manifest.py:parse_manifest_bytes",
+      "compare": "json-value",
+      "informational": [
+        "media_facts_informational",
+        "clip_store_listing[path=clips/*/clip.mp4].size_bytes",
+        "outcome.published.manifest (clip.mp4 facts)",
+        "ports.on_ready (clip.mp4 facts)",
+        "ports.delivery_queue.entry (clip.mp4 facts)"
+      ],
+      "input": "-f lavfi -i testsrc=size=320x240:rate=10 -t 2 -pix_fmt yuv420p -fflags +bitexact -flags:v +bitexact -map_metadata -1 -movflags +faststart <work>/<case>/source.mp4 (bytes never recorded)",
+      "lane": "b24",
+      "normalised": [],
+      "path": "d/clip-manifests/flow-publish.json",
+      "producer": "worker/pipeline/output/evidence/flow_clip_publication.py:61 FlowClipPublisher.publish",
+      "rows": [
+        12
+      ],
+      "sha256": "ad39f89182972b04e8503036b0c8152f14691f57e467d6aead1067226180fd4a",
+      "size_bytes": 10937,
+      "tests": [
+        "T24",
+        "T37"
+      ],
+      "wire_class": "D"
+    },
+    {
+      "backend_parser": "backend/app/features/clips/manifest.py:parse_manifest_bytes",
+      "compare": "bytes-given-recorded-media-facts",
+      "informational": "embeds clip.mp4 facts ['codec', 'duration_ms', 'duration_s', 'sha256', 'size_bytes'] from ffmpeg version 9.0.2 Copyright (c) 2000-2026 the FFmpeg developers",
+      "input": "-f lavfi -i testsrc=size=320x240:rate=10 -t 2 -pix_fmt yuv420p -fflags +bitexact -flags:v +bitexact -map_metadata -1 -movflags +faststart <work>/<case>/source.mp4 (bytes never recorded)",
+      "lane": "b24",
+      "normalised": [],
+      "path": "d/clip-manifests/flow-publish.manifest.json",
+      "producer": "worker/pipeline/output/evidence/flow_clip_publication.py:61 FlowClipPublisher.publish",
+      "rows": [
+        12
+      ],
+      "sha256": "16f068848ceafb147c930e5e9a410e48153cc67a4f75b8990740a4a1a600a754",
+      "size_bytes": 1234,
+      "tests": [
+        "T24",
+        "T37"
+      ],
+      "wire_class": "D"
+    },
+    {
+      "backend_parser": "backend/app/features/clips/manifest.py:parse_manifest_bytes",
+      "compare": "json-value",
+      "informational": [
+        "media_facts_informational",
+        "clip_store_listing[path=clips/*/clip.mp4].size_bytes",
+        "outcome.published.manifest (clip.mp4 facts)",
+        "ports.on_ready (clip.mp4 facts)",
+        "ports.delivery_queue.entry (clip.mp4 facts)"
+      ],
+      "input": "-f lavfi -i testsrc=size=320x240:rate=10 -t 2 -pix_fmt yuv420p -fflags +bitexact -flags:v +bitexact -map_metadata -1 -movflags +faststart <work>/<case>/source.mp4 (bytes never recorded)",
+      "lane": "b24",
+      "normalised": [],
+      "path": "d/clip-manifests/flow-resume.json",
+      "producer": "worker/pipeline/output/evidence/flow_clip_publication.py:133 FlowClipPublisher._resume_if_already_published",
+      "rows": [
+        12
+      ],
+      "sha256": "998c3efb12024ab90b5c5e937c7a418507d56df1a5c39dab4b82a13bea26dc52",
+      "size_bytes": 12027,
+      "tests": [
+        "T24",
+        "T37"
+      ],
+      "wire_class": "D"
+    },
+    {
+      "backend_parser": "backend/app/features/clips/manifest.py:parse_manifest_bytes",
+      "compare": "json-value",
+      "informational": [
+        "media_facts_informational",
+        "clip_store_listing[path=clips/*/clip.mp4].size_bytes",
+        "outcome.published.manifest (clip.mp4 facts)",
+        "ports.on_ready (clip.mp4 facts)",
+        "ports.delivery_queue.entry (clip.mp4 facts)"
+      ],
+      "input": "-f lavfi -i testsrc=size=320x240:rate=10 -t 2 -pix_fmt yuv420p -fflags +bitexact -flags:v +bitexact -map_metadata -1 -movflags +faststart <work>/<case>/source.mp4 (bytes never recorded)",
+      "lane": "b24",
+      "normalised": [],
+      "path": "d/clip-manifests/ready.json",
+      "producer": "worker/pipeline/output/evidence/clip_publication.py:84 ClipPublisher.publish_ready",
+      "rows": [
+        12
+      ],
+      "sha256": "bc38b299213c9a9974c476238cd2c97a644fa14b61f41cb8ad56b67a9fb7a7a0",
+      "size_bytes": 9943,
+      "tests": [
+        "T24",
+        "T37"
+      ],
+      "wire_class": "D"
+    },
+    {
+      "backend_parser": "backend/app/features/clips/manifest.py:parse_manifest_bytes",
+      "compare": "bytes-given-recorded-media-facts",
+      "informational": "embeds clip.mp4 facts ['codec', 'duration_ms', 'duration_s', 'sha256', 'size_bytes'] from ffmpeg version 9.0.2 Copyright (c) 2000-2026 the FFmpeg developers",
+      "input": "-f lavfi -i testsrc=size=320x240:rate=10 -t 2 -pix_fmt yuv420p -fflags +bitexact -flags:v +bitexact -map_metadata -1 -movflags +faststart <work>/<case>/source.mp4 (bytes never recorded)",
+      "lane": "b24",
+      "normalised": [],
+      "path": "d/clip-manifests/ready.manifest.json",
+      "producer": "worker/pipeline/output/evidence/clip_publication.py:84 ClipPublisher.publish_ready",
+      "rows": [
+        12
+      ],
+      "sha256": "73aa98a635e59da87fef792db6d3fb33ffdd04c0f87db1044276db98d99acd1b",
+      "size_bytes": 905,
+      "tests": [
+        "T24",
+        "T37"
+      ],
+      "wire_class": "D"
+    },
+    {
+      "backend_parser": "worker/pipeline/output/evidence/evidence_manifest.py:MAX_MANIFEST_BYTES",
+      "compare": "json-value",
+      "informational": [
+        "cases.*.sha256 and size_bytes of ready-type manifests (clip.mp4 facts)",
+        "largest_manifest.size_bytes"
+      ],
+      "input": "-f lavfi -i testsrc=size=320x240:rate=10 -t 2 -pix_fmt yuv420p -fflags +bitexact -flags:v +bitexact -map_metadata -1 -movflags +faststart <work>/<case>/source.mp4 (bytes never recorded)",
+      "lane": "b24",
+      "normalised": [],
+      "path": "d/clip-manifests/summary.json",
+      "producer": "worker/pipeline/output/evidence/clip_publication.py:265 ClipPublisher._publish_manifest",
+      "rows": [
+        12
+      ],
+      "sha256": "778380c70dcf8e5ad33251d4c624cbc1fe26a27a104a3b85460f31b1cc94309a",
+      "size_bytes": 2730,
+      "tests": [
+        "T37"
+      ],
+      "wire_class": "D"
+    },
+    {
+      "backend_parser": "backend/app/features/clips/manifest.py:parse_manifest_bytes",
+      "compare": "json-value",
+      "informational": [
+        "media_facts_informational",
+        "clip_store_listing[path=clips/*/clip.mp4].size_bytes",
+        "outcome.published.manifest (clip.mp4 facts)",
+        "ports.on_ready (clip.mp4 facts)",
+        "ports.delivery_queue.entry (clip.mp4 facts)"
+      ],
+      "input": "-f lavfi -i testsrc=size=320x240:rate=10 -t 2 -pix_fmt yuv420p -fflags +bitexact -flags:v +bitexact -map_metadata -1 -movflags +faststart <work>/<case>/source.mp4 (bytes never recorded)",
+      "lane": "b24",
+      "normalised": [],
+      "path": "d/clip-manifests/unavailable.json",
+      "producer": "worker/pipeline/output/evidence/clip_publication.py:178 ClipPublisher.publish_unavailable",
+      "rows": [
+        12
+      ],
+      "sha256": "2af3444f50753a228aacc3e3d7da94b02077bdf395fb543cf1cccff11110da04",
+      "size_bytes": 7894,
+      "tests": [
+        "T24",
+        "T37"
+      ],
+      "wire_class": "D"
+    },
+    {
+      "backend_parser": "backend/app/features/clips/manifest.py:parse_manifest_bytes",
+      "compare": "bytes",
+      "informational": null,
+      "input": "-f lavfi -i testsrc=size=320x240:rate=10 -t 2 -pix_fmt yuv420p -fflags +bitexact -flags:v +bitexact -map_metadata -1 -movflags +faststart <work>/<case>/source.mp4 (bytes never recorded)",
+      "lane": "b24",
+      "normalised": [],
+      "path": "d/clip-manifests/unavailable.manifest.json",
+      "producer": "worker/pipeline/output/evidence/clip_publication.py:178 ClipPublisher.publish_unavailable",
+      "rows": [
+        12
+      ],
+      "sha256": "58f9bd00c4a7a3623e60401c62840f11f3bd500943f7689efa30255cd0dc5ab8",
+      "size_bytes": 752,
+      "tests": [
+        "T24",
+        "T37"
+      ],
+      "wire_class": "D"
+    },
+    {
       "backend_parser": "backend/app/features/clips/store.py:ClipStore._read_playback_attestation -> {'rendition': 'clip.playback-h264.098bc4117d9a0bb9.mp4', 'rendition_sha256': '098bc4117d9a0bb913e7e304822caf417d13ee06aa6a727526267bb60680ce7d', 'pts_identical': True}",
       "compare": "bytes",
       "input": "clip bytes b'clip' with sha256 manifest; ffprobe reports hevc; ffmpeg stand-in writes b'synthetic-h264-rendition'; VideoTiming(1, 90000, (0, 3000))",
@@ -248,6 +575,137 @@
         "clip directory -> <clip-dir>",
         "tempfile suffix .playback-rendition.<random>.mp4 -> .playback-rendition.<tmp>.mp4"
       ],
+      "wire_class": "D"
+    },
+    {
+      "backend_parser": "ok: backend/app/features/clips/thumbnail_files.py:thumbnail_file_state + contained_thumbnail_path + bounded_clip_roots",
+      "compare": "json-value",
+      "input": "synthetic lavfi testsrc 320x240 2 s clip; eight synthetic thumbnail layouts (see golden recipe)",
+      "lane": "b25",
+      "normalised": [
+        "informational"
+      ],
+      "path": "d/clip-thumbnail.json",
+      "producer": "worker/adapters/media/ffmpeg_thumbnail.py:FfmpegThumbnailGenerator.generate",
+      "rows": [
+        12
+      ],
+      "sha256": "99a9d5333cba6d6895ee8ff07ca518023072dbac373b489db76ba41df4fc1609",
+      "size_bytes": 7516,
+      "wire_class": "D"
+    },
+    {
+      "backend_parser": "n/a (codec contract; consumer is the Rust serde port, T1/T2)",
+      "compare": "json-value",
+      "input": "synthetic literals listed in cases[].input and queue.entries[].fields",
+      "lane": "codec",
+      "normalised": [],
+      "note": "T1 float text, T2 base64 padding, ensure_ascii per serialiser, key order by code point",
+      "path": "d/codec-edges.json",
+      "producer": "the four canonical serialisers (see serialisers) and DeliveryQueue.try_admit",
+      "rows": [
+        9,
+        10,
+        14
+      ],
+      "sha256": "daf19a25265c3ff75ee5afc3eb0b53baea05ed4bb7286e22b87c8d03cc8fff52",
+      "size_bytes": 56521,
+      "wire_class": "D"
+    },
+    {
+      "backend_parser": "n/a (on-disk format; consumer is d2 Rust drain)",
+      "compare": "bytes",
+      "input": "d/codec-edges.json queue.entries[] with this file.path",
+      "lane": "codec",
+      "normalised": [],
+      "note": "byte-exact queue entry; base64 of length 0..4 or ensure_ascii escapes of shed_detail_keys",
+      "path": "d/codec-edges/queue/event-b2c0dec0-0000-4000-8000-000000000000.json",
+      "producer": "shared/events/delivery_queue.py:DeliveryQueue.try_admit",
+      "rows": [
+        10
+      ],
+      "sha256": "49960951b1272de83f8761585cd9480b3860ed554ca64ec8f8846543c4343a34",
+      "size_bytes": 320,
+      "wire_class": "D"
+    },
+    {
+      "backend_parser": "n/a (on-disk format; consumer is d2 Rust drain)",
+      "compare": "bytes",
+      "input": "d/codec-edges.json queue.entries[] with this file.path",
+      "lane": "codec",
+      "normalised": [],
+      "note": "byte-exact queue entry; base64 of length 0..4 or ensure_ascii escapes of shed_detail_keys",
+      "path": "d/codec-edges/queue/event-b2c0dec0-0000-4000-8000-000000000001.json",
+      "producer": "shared/events/delivery_queue.py:DeliveryQueue.try_admit",
+      "rows": [
+        10
+      ],
+      "sha256": "bd52dc75a300a1124602757ba6f5daef3fed93da465e8ed8285a24383892dadf",
+      "size_bytes": 328,
+      "wire_class": "D"
+    },
+    {
+      "backend_parser": "n/a (on-disk format; consumer is d2 Rust drain)",
+      "compare": "bytes",
+      "input": "d/codec-edges.json queue.entries[] with this file.path",
+      "lane": "codec",
+      "normalised": [],
+      "note": "byte-exact queue entry; base64 of length 0..4 or ensure_ascii escapes of shed_detail_keys",
+      "path": "d/codec-edges/queue/event-b2c0dec0-0000-4000-8000-000000000002.json",
+      "producer": "shared/events/delivery_queue.py:DeliveryQueue.try_admit",
+      "rows": [
+        10
+      ],
+      "sha256": "4f548f1b4656158bd78200c42a4e33084c656dbab3db1c662e8d92ea46384d20",
+      "size_bytes": 328,
+      "wire_class": "D"
+    },
+    {
+      "backend_parser": "n/a (on-disk format; consumer is d2 Rust drain)",
+      "compare": "bytes",
+      "input": "d/codec-edges.json queue.entries[] with this file.path",
+      "lane": "codec",
+      "normalised": [],
+      "note": "byte-exact queue entry; base64 of length 0..4 or ensure_ascii escapes of shed_detail_keys",
+      "path": "d/codec-edges/queue/event-b2c0dec0-0000-4000-8000-000000000003.json",
+      "producer": "shared/events/delivery_queue.py:DeliveryQueue.try_admit",
+      "rows": [
+        10
+      ],
+      "sha256": "e3a21488700108dc40565810e77d0c9c0564e88b58d47231e40679bb6033ab25",
+      "size_bytes": 328,
+      "wire_class": "D"
+    },
+    {
+      "backend_parser": "n/a (on-disk format; consumer is d2 Rust drain)",
+      "compare": "bytes",
+      "input": "d/codec-edges.json queue.entries[] with this file.path",
+      "lane": "codec",
+      "normalised": [],
+      "note": "byte-exact queue entry; base64 of length 0..4 or ensure_ascii escapes of shed_detail_keys",
+      "path": "d/codec-edges/queue/event-b2c0dec0-0000-4000-8000-000000000004.json",
+      "producer": "shared/events/delivery_queue.py:DeliveryQueue.try_admit",
+      "rows": [
+        10
+      ],
+      "sha256": "17e2d2ba51e14f64acbde13cc1d8be5911753902dd266813d394dd6ad1f053b0",
+      "size_bytes": 336,
+      "wire_class": "D"
+    },
+    {
+      "backend_parser": "n/a (on-disk format; consumer is d2 Rust drain)",
+      "compare": "bytes",
+      "input": "d/codec-edges.json queue.entries[] with this file.path",
+      "lane": "codec",
+      "normalised": [],
+      "note": "byte-exact queue entry; base64 of length 0..4 or ensure_ascii escapes of shed_detail_keys",
+      "path": "d/codec-edges/queue/event-b2c0dec0-0000-4000-8000-000000000005.json",
+      "producer": "shared/events/delivery_queue.py:DeliveryQueue.try_admit",
+      "rows": [
+        10
+      ],
+      "sha256": "be76af64fdd161af723f7355711420d3c3765359914764bd8798bdc901a277ae",
+      "size_bytes": 519,
       "wire_class": "D"
     },
     {
@@ -391,6 +849,421 @@
       "wire_class": "D"
     },
     {
+      "backend_parser": "none: worker-local state; read back only by worker/pipeline/decision/event_identity.py:EventIdentityStore._load",
+      "compare": "json-value",
+      "input": "synthetic journals for camera cmsnw6rjc01vhlh01oswn99yq with a fixed clock (see golden recipe)",
+      "lane": "p04c7",
+      "normalised": [],
+      "path": "d/event-identities/cases.json",
+      "producer": "worker/pipeline/decision/event_identity.py:EventIdentityStore.resolve + EventIdentityStore.__init__ (_load, _select_retained, _rewrite) + event_identity_path",
+      "rows": [
+        10
+      ],
+      "sha256": "25325a46d02ae6eb40f36b26d02897b5010ef15ab97533c89a017601b1cd16af",
+      "size_bytes": 32568,
+      "wire_class": "D"
+    },
+    {
+      "backend_parser": "none: worker-local state; read back only by worker/pipeline/decision/event_identity.py:EventIdentityStore._load",
+      "compare": "jsonl-lines-rebuild",
+      "input": "case fresh, journal state 'after-resolve-new'",
+      "lane": "p04c7",
+      "normalised": [],
+      "path": "d/event-identities/fresh/0-after-resolve-new.lines.json",
+      "producer": "worker/pipeline/decision/event_identity.py:EventIdentityStore._rewrite via _encoded_line",
+      "rows": [
+        10
+      ],
+      "sha256": "69a0944f7cebde3ec67db9586c436a6c00002d9d4b931e294ec1888094594409",
+      "size_bytes": 288,
+      "wire_class": "D"
+    },
+    {
+      "backend_parser": "none: worker-local state; read back only by worker/pipeline/decision/event_identity.py:EventIdentityStore._load",
+      "compare": "jsonl-lines-rebuild",
+      "input": "case refusal-conflicting-source-key, journal state 'input'",
+      "lane": "p04c7",
+      "normalised": [],
+      "path": "d/event-identities/refusal-conflicting-source-key/0-input.lines.json",
+      "producer": "recorder-authored input journal (see d/event-identities/cases.json)",
+      "rows": [
+        10
+      ],
+      "sha256": "6b755a7fc482312b1da7fc2f299a760f8027942f96b2207a8ad2a37b63327d8b",
+      "size_bytes": 439,
+      "wire_class": "D"
+    },
+    {
+      "backend_parser": "none: worker-local state; read back only by worker/pipeline/decision/event_identity.py:EventIdentityStore._load",
+      "compare": "jsonl-lines-rebuild",
+      "input": "case refusal-future-dated, journal state 'input'",
+      "lane": "p04c7",
+      "normalised": [],
+      "path": "d/event-identities/refusal-future-dated/0-input.lines.json",
+      "producer": "recorder-authored input journal (see d/event-identities/cases.json)",
+      "rows": [
+        10
+      ],
+      "sha256": "4a9cd2459fe9f260d0006c9815527a48ac949592d8b66a54182f6b6b432f0dfd",
+      "size_bytes": 439,
+      "wire_class": "D"
+    },
+    {
+      "backend_parser": "none: worker-local state; read back only by worker/pipeline/decision/event_identity.py:EventIdentityStore._load",
+      "compare": "jsonl-lines-rebuild",
+      "input": "case refusal-malformed-extra-field, journal state 'input'",
+      "lane": "p04c7",
+      "normalised": [],
+      "path": "d/event-identities/refusal-malformed-extra-field/0-input.lines.json",
+      "producer": "recorder-authored input journal (see d/event-identities/cases.json)",
+      "rows": [
+        10
+      ],
+      "sha256": "dba175eae3462e0b5e8399f236755606af9e401d76b2563fa71afe6b4063c8a5",
+      "size_bytes": 307,
+      "wire_class": "D"
+    },
+    {
+      "backend_parser": "none: worker-local state; read back only by worker/pipeline/decision/event_identity.py:EventIdentityStore._load",
+      "compare": "jsonl-lines-rebuild",
+      "input": "case refusal-malformed-syntax, journal state 'input'",
+      "lane": "p04c7",
+      "normalised": [],
+      "path": "d/event-identities/refusal-malformed-syntax/0-input.lines.json",
+      "producer": "recorder-authored input journal (see d/event-identities/cases.json)",
+      "rows": [
+        10
+      ],
+      "sha256": "9f1cb04213eb8b6c9874c8d19be098cadbac231019cafceceb5c8165f87fbb38",
+      "size_bytes": 305,
+      "wire_class": "D"
+    },
+    {
+      "backend_parser": "none: worker-local state; read back only by worker/pipeline/decision/event_identity.py:EventIdentityStore._load",
+      "compare": "jsonl-lines-rebuild",
+      "input": "case retention, journal state 'input'",
+      "lane": "p04c7",
+      "normalised": [],
+      "path": "d/event-identities/retention/0-input.lines.json",
+      "producer": "recorder-authored input journal (see d/event-identities/cases.json)",
+      "rows": [
+        10
+      ],
+      "sha256": "98ab083a4328133d8faad53c4c043d0b2c530392c58d27fd7fbeae85a1147eb6",
+      "size_bytes": 710,
+      "wire_class": "D"
+    },
+    {
+      "backend_parser": "none: worker-local state; read back only by worker/pipeline/decision/event_identity.py:EventIdentityStore._load",
+      "compare": "jsonl-lines-rebuild",
+      "input": "case retention, journal state 'after-open'",
+      "lane": "p04c7",
+      "normalised": [],
+      "path": "d/event-identities/retention/1-after-open.lines.json",
+      "producer": "worker/pipeline/decision/event_identity.py:EventIdentityStore._rewrite via _encoded_line",
+      "rows": [
+        10
+      ],
+      "sha256": "e0662606a41ec8f44bd28cf413d568d75923cc919cec4a1b55ab132b1d6b8f23",
+      "size_bytes": 590,
+      "wire_class": "D"
+    },
+    {
+      "backend_parser": "none: worker-local state; read back only by worker/pipeline/decision/event_identity.py:EventIdentityStore._load",
+      "compare": "jsonl-lines-rebuild",
+      "input": "case retention, journal state 'after-resolve-older'",
+      "lane": "p04c7",
+      "normalised": [],
+      "path": "d/event-identities/retention/2-after-resolve-older.lines.json",
+      "producer": "worker/pipeline/decision/event_identity.py:EventIdentityStore._rewrite via _encoded_line",
+      "rows": [
+        10
+      ],
+      "sha256": "985f928473e362a02095585f9580d66f36e57b94135b31b7c77cb9cdcbfafce5",
+      "size_bytes": 741,
+      "wire_class": "D"
+    },
+    {
+      "backend_parser": "none: worker-local state; read back only by worker/pipeline/decision/event_identity.py:EventIdentityStore._load",
+      "compare": "jsonl-lines-rebuild",
+      "input": "case retention, journal state 'after-resolve-new'",
+      "lane": "p04c7",
+      "normalised": [],
+      "path": "d/event-identities/retention/3-after-resolve-new.lines.json",
+      "producer": "worker/pipeline/decision/event_identity.py:EventIdentityStore._rewrite via _encoded_line",
+      "rows": [
+        10
+      ],
+      "sha256": "f6951db278862608c7f25344386a6f5e505161ebad40a11bf3d484df4cebb318",
+      "size_bytes": 892,
+      "wire_class": "D"
+    },
+    {
+      "backend_parser": "ok: worker/pipeline/output/evidence/flow_sealed_sidecar.py:FlowSealedSidecars.pending_for_camera + _read",
+      "compare": "json-value",
+      "input": "synthetic ClipSealed and BusinessEvent values (see golden recipe)",
+      "lane": "p04c6",
+      "normalised": [],
+      "path": "d/flow-sealed/cases.json",
+      "producer": "worker/pipeline/output/evidence/flow_sealed_sidecar.py:FlowSealedSidecars.persist + pending_for_camera",
+      "rows": [
+        12
+      ],
+      "sha256": "66b2a36985ee73c506987f7b47d86cdbd65332d08c3d0bc023e9f71550f0db3c",
+      "size_bytes": 16667,
+      "wire_class": "D"
+    },
+    {
+      "backend_parser": "ok: worker/pipeline/output/evidence/flow_sealed_sidecar.py:FlowSealedSidecars.pending_for_camera + _read",
+      "compare": "bytes",
+      "input": "synthetic ClipSealed case non-ascii (see d/flow-sealed/cases.json)",
+      "lane": "p04c6",
+      "normalised": [],
+      "path": "d/flow-sealed/state/sealed-a-non-ascii.json",
+      "producer": "worker/pipeline/output/evidence/flow_sealed_sidecar.py:FlowSealedSidecars.persist",
+      "rows": [
+        12
+      ],
+      "sha256": "7cf326eab8cfaf5fcd604f7082e5c12294536ef0a753cf67f82356965a2cd622",
+      "size_bytes": 473,
+      "wire_class": "D"
+    },
+    {
+      "backend_parser": "ok: worker/pipeline/output/evidence/flow_sealed_sidecar.py:FlowSealedSidecars.pending_for_camera + _read",
+      "compare": "bytes",
+      "input": "synthetic ClipSealed case out-of-order (see d/flow-sealed/cases.json)",
+      "lane": "p04c6",
+      "normalised": [],
+      "path": "d/flow-sealed/state/sealed-b-out-of-order.json",
+      "producer": "worker/pipeline/output/evidence/flow_sealed_sidecar.py:FlowSealedSidecars.persist",
+      "rows": [
+        12
+      ],
+      "sha256": "e53b47f1ec6893c20320452f6a65dc63b72049949e7dace38609f081e6da92be",
+      "size_bytes": 1241,
+      "wire_class": "D"
+    },
+    {
+      "backend_parser": "Rust model-bundle admission (T8)",
+      "compare": "json-value",
+      "input": "publication.json plus case.mutation (tree listed in case.tree)",
+      "lane": "codec",
+      "normalised": [],
+      "note": "T8: verdict, refusal class and message; flip-plus-extra pins digest-before-shape",
+      "path": "d/model-bundle-admission/digest-flip.json",
+      "producer": "worker/runtime/provenance/model_bundle.py:admit_model_bundle",
+      "rows": [
+        4,
+        22
+      ],
+      "sha256": "f1f09a1605adb4072808038ed9ba3cf18bde43b190c4acd14c787bc1c936f938",
+      "size_bytes": 3980,
+      "wire_class": "D"
+    },
+    {
+      "backend_parser": "Rust model-bundle admission (T8)",
+      "compare": "json-value",
+      "input": "publication.json plus case.mutation (tree listed in case.tree)",
+      "lane": "codec",
+      "normalised": [],
+      "note": "T8: verdict, refusal class and message; flip-plus-extra pins digest-before-shape",
+      "path": "d/model-bundle-admission/escaping-symlink.json",
+      "producer": "worker/runtime/provenance/model_bundle.py:admit_model_bundle",
+      "rows": [
+        4,
+        22
+      ],
+      "sha256": "603d1c541a2f87e9eda43bcaca22436606829924a558ebd066c41671ba1cecd9",
+      "size_bytes": 4312,
+      "wire_class": "D"
+    },
+    {
+      "backend_parser": "Rust model-bundle admission (T8)",
+      "compare": "json-value",
+      "input": "publication.json plus case.mutation (tree listed in case.tree)",
+      "lane": "codec",
+      "normalised": [],
+      "note": "T8: verdict, refusal class and message; flip-plus-extra pins digest-before-shape",
+      "path": "d/model-bundle-admission/extra-empty-dir.json",
+      "producer": "worker/runtime/provenance/model_bundle.py:admit_model_bundle",
+      "rows": [
+        4,
+        22
+      ],
+      "sha256": "9ab602cbd2c8db86b2da7be5f03e13a0bb4ff31330f33f12e9ea62be5c8a0551",
+      "size_bytes": 4165,
+      "wire_class": "D"
+    },
+    {
+      "backend_parser": "Rust model-bundle admission (T8)",
+      "compare": "json-value",
+      "input": "publication.json plus case.mutation (tree listed in case.tree)",
+      "lane": "codec",
+      "normalised": [],
+      "note": "T8: verdict, refusal class and message; flip-plus-extra pins digest-before-shape",
+      "path": "d/model-bundle-admission/extra-file.json",
+      "producer": "worker/runtime/provenance/model_bundle.py:admit_model_bundle",
+      "rows": [
+        4,
+        22
+      ],
+      "sha256": "c07c010527debb7cc76d0f784e15efe857e9c94bd0f3bfbe48b37de92fcbf1ee",
+      "size_bytes": 4260,
+      "wire_class": "D"
+    },
+    {
+      "backend_parser": "Rust model-bundle admission (T8)",
+      "compare": "json-value",
+      "input": "publication.json plus case.mutation (tree listed in case.tree)",
+      "lane": "codec",
+      "normalised": [],
+      "note": "T8: verdict, refusal class and message; flip-plus-extra pins digest-before-shape",
+      "path": "d/model-bundle-admission/extra-symlink.json",
+      "producer": "worker/runtime/provenance/model_bundle.py:admit_model_bundle",
+      "rows": [
+        4,
+        22
+      ],
+      "sha256": "0ef953b48b4df86d9dc404a5a744add3771e1c7ef3c86e99884ca8a6f04a4556",
+      "size_bytes": 4199,
+      "wire_class": "D"
+    },
+    {
+      "backend_parser": "Rust model-bundle admission (T8)",
+      "compare": "json-value",
+      "input": "publication.json plus case.mutation (tree listed in case.tree)",
+      "lane": "codec",
+      "normalised": [],
+      "note": "T8: verdict, refusal class and message; flip-plus-extra pins digest-before-shape",
+      "path": "d/model-bundle-admission/flip-plus-extra.json",
+      "producer": "worker/runtime/provenance/model_bundle.py:admit_model_bundle",
+      "rows": [
+        4,
+        22
+      ],
+      "sha256": "aed3125a6470531c17e7cada4823f77c01cc10b730b063e6b0da637d500255ef",
+      "size_bytes": 4270,
+      "wire_class": "D"
+    },
+    {
+      "backend_parser": "Rust model-bundle admission (T8)",
+      "compare": "json-value",
+      "input": "publication.json plus case.mutation (tree listed in case.tree)",
+      "lane": "codec",
+      "normalised": [],
+      "note": "T8: verdict, refusal class and message; flip-plus-extra pins digest-before-shape",
+      "path": "d/model-bundle-admission/in-root-symlink.json",
+      "producer": "worker/runtime/provenance/model_bundle.py:admit_model_bundle",
+      "rows": [
+        4,
+        22
+      ],
+      "sha256": "e5b0cec661ebcb1ba7430dc74436513277cb7e7deb8cc377d80e9904174fff10",
+      "size_bytes": 4230,
+      "wire_class": "D"
+    },
+    {
+      "backend_parser": "Rust model-bundle admission (T8)",
+      "compare": "json-value",
+      "input": "publication.json plus case.mutation (tree listed in case.tree)",
+      "lane": "codec",
+      "normalised": [],
+      "note": "T8: verdict, refusal class and message; flip-plus-extra pins digest-before-shape",
+      "path": "d/model-bundle-admission/missing-member.json",
+      "producer": "worker/runtime/provenance/model_bundle.py:admit_model_bundle",
+      "rows": [
+        4,
+        22
+      ],
+      "sha256": "cd22f6ff01a3e45693846749447d97c73fd97b056dabee19435706e032ccaa11",
+      "size_bytes": 3651,
+      "wire_class": "D"
+    },
+    {
+      "backend_parser": "Rust model-bundle admission (T8)",
+      "compare": "json-value",
+      "input": "publication.json plus case.mutation (tree listed in case.tree)",
+      "lane": "codec",
+      "normalised": [],
+      "note": "T8: verdict, refusal class and message; flip-plus-extra pins digest-before-shape",
+      "path": "d/model-bundle-admission/non-canonical-manifest.json",
+      "producer": "worker/runtime/provenance/model_bundle.py:admit_model_bundle",
+      "rows": [
+        4,
+        22
+      ],
+      "sha256": "e201c21f7fe51c3df66a49b99fdd90994c31cf8b6c0199b99cfb98b8df9228af",
+      "size_bytes": 3996,
+      "wire_class": "D"
+    },
+    {
+      "backend_parser": "Rust model-bundle admission (T8)",
+      "compare": "json-value",
+      "input": "publication.json plus case.mutation (tree listed in case.tree)",
+      "lane": "codec",
+      "normalised": [],
+      "note": "T8: verdict, refusal class and message; flip-plus-extra pins digest-before-shape",
+      "path": "d/model-bundle-admission/ok.json",
+      "producer": "worker/runtime/provenance/model_bundle.py:admit_model_bundle",
+      "rows": [
+        4,
+        22
+      ],
+      "sha256": "5c2e27005421fc80c506c39f8b356e5892d28313ae7b11d0a8feec54b0c7bdea",
+      "size_bytes": 6350,
+      "wire_class": "D"
+    },
+    {
+      "backend_parser": "Rust model-bundle admission (T8)",
+      "compare": "json-value",
+      "input": "bodies[] and selection_document (synthetic)",
+      "lane": "codec",
+      "normalised": [],
+      "note": "the published bundles/<sha>/ tree every admission case copies",
+      "path": "d/model-bundle-admission/publication.json",
+      "producer": "worker/tools/fetch_models/fetcher.py:fetch_all (bundle publication)",
+      "rows": [
+        4,
+        22
+      ],
+      "sha256": "821055c8fb12940ebcec1b7c07dcbf36c15c666bd6e8e9bc7b87924338b425b5",
+      "size_bytes": 16139,
+      "wire_class": "D"
+    },
+    {
+      "backend_parser": "Rust model-bundle admission (T8)",
+      "compare": "json-value",
+      "input": "publication.json plus case.mutation (tree listed in case.tree)",
+      "lane": "codec",
+      "normalised": [],
+      "note": "T8: verdict, refusal class and message; flip-plus-extra pins digest-before-shape",
+      "path": "d/model-bundle-admission/unknown-bundle-format.json",
+      "producer": "worker/runtime/provenance/model_bundle.py:admit_model_bundle",
+      "rows": [
+        4,
+        22
+      ],
+      "sha256": "50c47710ea708cda3fc46aaaf01d81570fa531050ac97f9c862e36d015c65c31",
+      "size_bytes": 4329,
+      "wire_class": "D"
+    },
+    {
+      "backend_parser": "Rust model-selection parser (T5)",
+      "compare": "json-value",
+      "input": "cases[].document (synthetic; $nonfinite markers become the named float)",
+      "lane": "codec",
+      "normalised": [],
+      "note": "T5: refusal class, message and named field per document; bool is neither integer nor probability; unknown bundle_format/runtime_format accepted at parse",
+      "path": "d/model-selection-refusals.json",
+      "producer": "contracts/model_selection.py:parse_model_selection",
+      "rows": [
+        2
+      ],
+      "sha256": "2f5140364b33605dc83cd7b4a3934c88046605ba36a26232534b2370fa646763",
+      "size_bytes": 201671,
+      "wire_class": "D"
+    },
+    {
       "backend_parser": "contracts/model_selection.py:parse_model_selection (round-trip equal); worker/runtime/provenance/model_bundle.py:desired_model_bundle_from_selection_document -> {'bundle_sha256': '2222222222222222222222222222222222222222222222222222222222222222', 'identities': {'dataset': '5555555555555555555555555555555555555555555555555555555555555555', 'evaluation': '66666",
       "compare": "bytes",
       "input": "synthetic digests (repeated hex digits), SeniorAILab/synthetic locators",
@@ -433,6 +1306,21 @@
       ],
       "sha256": "1a8fb4ed580ba875ec1b90c94fd11c71ac9ae75618a9ce9e87876b95b032cf93",
       "size_bytes": 2068,
+      "wire_class": "D"
+    },
+    {
+      "backend_parser": "none: worker-internal policy-input coverage; no backend parser",
+      "compare": "json-value",
+      "input": "scripted synthetic MetadataFrame sequence for one camera (see golden recipe and steps)",
+      "lane": "p04c8",
+      "normalised": [],
+      "path": "d/observation-coverage.json",
+      "producer": "worker/runtime/flow/observation_coverage.py:ObservationCoverage.observe + detect_gap + rebind (_close_gap, _native_publish_sequence_gap)",
+      "rows": [
+        7
+      ],
+      "sha256": "a8295753967a6e0789c73825510e112600cee44f59aad963852178c6412c5a2f",
+      "size_bytes": 36507,
       "wire_class": "D"
     },
     {
@@ -1200,6 +2088,133 @@
       "wire_class": "R"
     }
   ],
+  "lanes": {
+    "b24": {
+      "fixed_inputs": {
+        "camera_id": "cmsnw6rjc01vhlh01oswn99yq",
+        "clock": {
+          "datetimes": "literal UTC",
+          "time.time": 1787000000.0,
+          "uuid.uuid4": "counter UUID(int=n, version=4)"
+        },
+        "event_refs": [
+          "00000000-0000-4000-8000-00000000e0a1",
+          "00000000-0000-4000-8000-00000000e0b2"
+        ],
+        "facility_id": "facility-1",
+        "ffmpeg_version": "ffmpeg version 9.0.2 Copyright (c) 2000-2026 the FFmpeg developers",
+        "ports": "in-process fakes: DeliveryQueue(dir).try_admit, ClipIdFactory, ThumbnailGenerator.generate, on_ready, schedule_playback_rendition; each records its call arguments",
+        "source_mp4": "-f lavfi -i testsrc=size=320x240:rate=10 -t 2 -pix_fmt yuv420p -fflags +bitexact -flags:v +bitexact -map_metadata -1 -movflags +faststart <work>/<case>/source.mp4 (bytes never recorded)",
+        "wall_clock": 1787000000.0
+      },
+      "oracle_sources_sha256": {
+        "backend/app/features/clips/manifest.py": "d9eac87ded873a0473ffa2c1739097366f31c039efe87260d08d7de80d472d78",
+        "worker/pipeline/output/evidence/clip_corrupt_publication.py": "5c4c74c9e1f02dc6c9a5bc62dd48228b32a2d2eaf6d67ac81cfad7ff7152a612",
+        "worker/pipeline/output/evidence/clip_publication.py": "9d645e196b9e3399df860e8461ccec31a83fdc2c6efd82f8f05bcb8291e390bd",
+        "worker/pipeline/output/evidence/evidence_manifest.py": "a4bdce23443377f8ab751f1778a80095be53d3f78371a3c8cca06bfb7fe116cd",
+        "worker/pipeline/output/evidence/flow_clip_publication.py": "14fc0e7ef5cdd95aa83d3afdf388dea59a6377695a27c3286730258cde93585f"
+      },
+      "packages": {
+        "pydantic": "2.13.4"
+      },
+      "python": "3.12.13",
+      "recorder": "record_wire_b24.py",
+      "recorder_sha256": "c010106dd0e67939bcd0112caac6c7f3cd1a1705212fe50932c283dd6d32d49c",
+      "repo_head": "030aaf1dc2c4a114b5d1f83ae391757ddbc3da2c",
+      "schema": "rp1-b2-manifest-fragment/v1"
+    },
+    "b25": {
+      "fixed_inputs": {
+        "identities": "none used (the thumbnail oracle takes no camera or facility id)",
+        "source_duration_s": 2.0,
+        "source_mp4": "ffmpeg -nostdin -loglevel error -y -f lavfi -i testsrc=size=320x240:rate=10 -t 2 -pix_fmt yuv420p -fflags +bitexact -flags:v +bitexact -map_metadata -1 clip.mp4",
+        "uuid4": "uuid.uuid4 patched to UUID(int=n, version=4), n=1,2,...",
+        "wall_clock_sec": 1787000000.0
+      },
+      "oracle_sources_sha256": {
+        "backend/app/features/clips/thumbnail_files.py": "2f23f73d59bbcf8e5048d79c35f7ae1d21baff88b06b086ba2cb54033087a405",
+        "worker/adapters/media/ffmpeg_thumbnail.py": "e13b369d67bbd2337a5e81b3106ed8ce978759e16c0901af1cb487f3aeabf753"
+      },
+      "packages": {
+        "cv2": "4.13.0",
+        "ffmpeg": "ffmpeg version 9.0.2 Copyright (c) 2000-2026 the FFmpeg developers",
+        "numpy": "2.4.6",
+        "pydantic": "2.13.4"
+      },
+      "python": "3.12.13",
+      "recorder": "record_wire_b25.py (kept outside the repo; see recorder_sha256)",
+      "recorder_sha256": "73b9b94d0d3e99bcd84c47fbd0bcc9dc82e0cfe2255f2e01633c9fc1fd47956a",
+      "repo_head": "030aaf1dc2c4a114b5d1f83ae391757ddbc3da2c",
+      "schema": "seeon-worker-wire-goldens/v1 fragment (B2.5 lane b25, d/clip-thumbnail.json)"
+    },
+    "codec": {
+      "python": "3.12.13",
+      "recorder": "record_wire_b2_codec.py (lane exec-b2a; kept outside the repo; see recorder_sha256)",
+      "recorder_sha256": "020bb1c6716892ac315b8350ce3939d182749cc756f7af1348341874ccbde004",
+      "repo_head": "030aaf1dc2c4a114b5d1f83ae391757ddbc3da2c"
+    },
+    "p04c6": {
+      "fixed_inputs": {
+        "camera_id": "cmsnw6rjc01vhlh01oswn99yq",
+        "facility_id": "facility-1",
+        "monotonic_sec": 5000.0,
+        "umask": "0o22",
+        "uuid4": "uuid.uuid4 patched to UUID(int=n, version=4), n=1,2,...",
+        "wall_clock_sec": 1787000000.0
+      },
+      "oracle_sources_sha256": {
+        "worker/pipeline/output/evidence/flow_sealed_sidecar.py": "14894ef3375cad0ff2e292d24f05fd94a54fad705b558e42f39b28e20611b941"
+      },
+      "packages": {
+        "pydantic": "2.13.4"
+      },
+      "python": "3.12.13",
+      "recorder": "record_wire_p04c6.py (kept outside the repo; see recorder_sha256)",
+      "recorder_sha256": "0efb137c602f7e42af17ef8de8639df67810d2ab43ff5c8faf71c04ceac6470f",
+      "repo_head": "030aaf1dc2c4a114b5d1f83ae391757ddbc3da2c",
+      "schema": "seeon-worker-wire-goldens/v1 fragment (P0.4 item 6, d/flow-sealed)"
+    },
+    "p04c7": {
+      "fixed_inputs": {
+        "camera_id": "cmsnw6rjc01vhlh01oswn99yq",
+        "event_identity_clock_sec": 1787000000.125,
+        "facility_id": "facility-1",
+        "monotonic_sec": 5000.0,
+        "uuid4": "event_identity.uuid4 patched per case to UUID(int=0xB0+n, version=4), n=1,2,...",
+        "wall_clock_sec": 1787000000.0
+      },
+      "oracle_sources_sha256": {
+        "worker/pipeline/decision/event_identity.py": "697d5a9c03efe1558b7ea61a52d0b1b1fa931a546a2dea6fed4e5310aee7b70b"
+      },
+      "packages": {
+        "pydantic": "2.13.4"
+      },
+      "python": "3.12.13",
+      "recorder": "record_wire_p04c7.py (kept outside the repo; see recorder_sha256)",
+      "recorder_sha256": "7a08422c429a41e38c6b5bb9227cf885ac1052aa2758933e0c761ec0a7f5d2e1",
+      "repo_head": "030aaf1dc2c4a114b5d1f83ae391757ddbc3da2c",
+      "schema": "seeon-worker-wire-goldens/v1 fragment (P0.4 item 7, lane p04c7)"
+    },
+    "p04c8": {
+      "fixed_inputs": {
+        "camera_id": "cmsnw6rjc01vhlh01oswn99yq",
+        "monotonic_sec": 5000.0,
+        "uuid4": "uuid.uuid4 patched to UUID(int=n, version=4), n=1,2,... (not called by this section)",
+        "wall_clock_sec": 1787000000.0
+      },
+      "oracle_sources_sha256": {
+        "worker/runtime/flow/observation_coverage.py": "017f001ab0111d69b12e9f1efe25c28e3a5e4799f21b6420abd9ec09a7ba1af8"
+      },
+      "packages": {
+        "pydantic": "2.13.4"
+      },
+      "python": "3.12.13",
+      "recorder": "record_wire_p04c8.py (kept outside the repo; see recorder_sha256)",
+      "recorder_sha256": "cde032a17f0d9f3de2496a3930104e22dde17c3027394033ef1068b2d138f7f9",
+      "repo_head": "030aaf1dc2c4a114b5d1f83ae391757ddbc3da2c",
+      "schema": "seeon-worker-wire-goldens/v1 fragment (P0.4 lane p04c8, item 8)"
+    }
+  },
   "lock_files_excluded": [],
   "oracle_sources_sha256": {
     "backend/app/features/cameras/bed_zone_router.py": "662c592ef9d4ce3b533b0f54d1e362775aa2d682312812254939b2424e143d50",
@@ -1264,6 +2279,13 @@
     "10": {
       "gaps": [],
       "goldens": [
+        "d/codec-edges.json",
+        "d/codec-edges/queue/event-b2c0dec0-0000-4000-8000-000000000000.json",
+        "d/codec-edges/queue/event-b2c0dec0-0000-4000-8000-000000000001.json",
+        "d/codec-edges/queue/event-b2c0dec0-0000-4000-8000-000000000002.json",
+        "d/codec-edges/queue/event-b2c0dec0-0000-4000-8000-000000000003.json",
+        "d/codec-edges/queue/event-b2c0dec0-0000-4000-8000-000000000004.json",
+        "d/codec-edges/queue/event-b2c0dec0-0000-4000-8000-000000000005.json",
         "d/delivery-queue-dead-letter/queue-dead-letter/422.0.event-a5e15ff2-90fd-4764-be74-a7da4f573cc9.json",
         "d/delivery-queue/attachment-05d867440a7fae84651f59fffbea2b57faa3942ecb0f6b79716a6873ba01e9e7.json",
         "d/delivery-queue/clip-3c30d6568aa365b7abbdf561cbb3234bd102fce015112be7010ec16821b30848.json",
@@ -1271,6 +2293,16 @@
         "d/delivery-queue/clip-fb4271979957cd5b20b1078f7c3a2e13eaba5661c34a0a8d37e4387023d111e8.json",
         "d/delivery-queue/disposition-d6681ffe537c67cb3880ffbf5edaa522cd5bfe992a5f99a034c3471ba257c405.json",
         "d/delivery-queue/event-a5e15ff2-90fd-4764-be74-a7da4f573cc9.json",
+        "d/event-identities/cases.json",
+        "d/event-identities/fresh/0-after-resolve-new.lines.json",
+        "d/event-identities/refusal-conflicting-source-key/0-input.lines.json",
+        "d/event-identities/refusal-future-dated/0-input.lines.json",
+        "d/event-identities/refusal-malformed-extra-field/0-input.lines.json",
+        "d/event-identities/refusal-malformed-syntax/0-input.lines.json",
+        "d/event-identities/retention/0-input.lines.json",
+        "d/event-identities/retention/1-after-open.lines.json",
+        "d/event-identities/retention/2-after-resolve-older.lines.json",
+        "d/event-identities/retention/3-after-resolve-new.lines.json",
         "r/alert.json",
         "r/alert.response.json",
         "r/relay-dispositions.json"
@@ -1288,7 +2320,23 @@
         "playback rendition MP4 bytes"
       ],
       "goldens": [
+        "d/clip-manifests/corrupt-existing.json",
+        "d/clip-manifests/corrupt-existing.manifest.json",
+        "d/clip-manifests/corrupt-missing.json",
+        "d/clip-manifests/corrupt-missing.manifest.json",
+        "d/clip-manifests/flow-publish.json",
+        "d/clip-manifests/flow-publish.manifest.json",
+        "d/clip-manifests/flow-resume.json",
+        "d/clip-manifests/ready.json",
+        "d/clip-manifests/ready.manifest.json",
+        "d/clip-manifests/summary.json",
+        "d/clip-manifests/unavailable.json",
+        "d/clip-manifests/unavailable.manifest.json",
         "d/clip-playback/clip.playback-h264.json",
+        "d/clip-thumbnail.json",
+        "d/flow-sealed/cases.json",
+        "d/flow-sealed/state/sealed-a-non-ascii.json",
+        "d/flow-sealed/state/sealed-b-out-of-order.json",
         "r/clip-put-ready.json",
         "r/clip-put-ready.response.json",
         "r/clip-put-unavailable-capture-failed.json",
@@ -1309,6 +2357,7 @@
     "14": {
       "gaps": [],
       "goldens": [
+        "d/codec-edges.json",
         "r/execution-records.json",
         "r/execution-records.model-evidence.json",
         "r/execution-records.model-evidence.response.json",
@@ -1379,6 +2428,7 @@
         "selection document as written in production"
       ],
       "goldens": [
+        "d/model-selection-refusals.json",
         "d/model-selection.json"
       ]
     },
@@ -1393,6 +2443,18 @@
     "22": {
       "gaps": [],
       "goldens": [
+        "d/model-bundle-admission/digest-flip.json",
+        "d/model-bundle-admission/escaping-symlink.json",
+        "d/model-bundle-admission/extra-empty-dir.json",
+        "d/model-bundle-admission/extra-file.json",
+        "d/model-bundle-admission/extra-symlink.json",
+        "d/model-bundle-admission/flip-plus-extra.json",
+        "d/model-bundle-admission/in-root-symlink.json",
+        "d/model-bundle-admission/missing-member.json",
+        "d/model-bundle-admission/non-canonical-manifest.json",
+        "d/model-bundle-admission/ok.json",
+        "d/model-bundle-admission/publication.json",
+        "d/model-bundle-admission/unknown-bundle-format.json",
         "d/models-bundle-layout.json",
         "d/models-layout.json"
       ]
@@ -1435,6 +2497,18 @@
     "4": {
       "gaps": [],
       "goldens": [
+        "d/model-bundle-admission/digest-flip.json",
+        "d/model-bundle-admission/escaping-symlink.json",
+        "d/model-bundle-admission/extra-empty-dir.json",
+        "d/model-bundle-admission/extra-file.json",
+        "d/model-bundle-admission/extra-symlink.json",
+        "d/model-bundle-admission/flip-plus-extra.json",
+        "d/model-bundle-admission/in-root-symlink.json",
+        "d/model-bundle-admission/missing-member.json",
+        "d/model-bundle-admission/non-canonical-manifest.json",
+        "d/model-bundle-admission/ok.json",
+        "d/model-bundle-admission/publication.json",
+        "d/model-bundle-admission/unknown-bundle-format.json",
         "r/capabilities.request.json",
         "r/capabilities.response.json"
       ]
@@ -1446,11 +2520,18 @@
         "r/capabilities.response.json"
       ]
     },
+    "7": {
+      "gaps": [],
+      "goldens": [
+        "d/observation-coverage.json"
+      ]
+    },
     "9": {
       "gaps": [
         "execution-record accelerator value"
       ],
       "goldens": [
+        "d/codec-edges.json",
         "r/execution-records.json",
         "r/execution-records.model-evidence.json",
         "r/execution-records.model-evidence.response.json",

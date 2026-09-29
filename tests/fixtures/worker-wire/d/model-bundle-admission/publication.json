@@ -1,0 +1,237 @@
+{
+  "bodies": {
+    "bundle-manifest.json": {
+      "sha256": "818e7f5000412917be9727a9009281c34f0e5b2fdd939abaf06f11d1403c74c1",
+      "size": 46,
+      "text": "{\"schema_version\":\"bundle-manifest/proxy-v0\"}\n"
+    },
+    "calibration.json": {
+      "sha256": "4b28a1e4e1a8f6a6ceea1196c57fc7633579b245beac39c4cb1be7423a6a9ebd",
+      "size": 32,
+      "text": "{\"temporal_rule\":{\"m\":5,\"n\":5}}\n"
+    },
+    "conformance/pose-bbox56-v1.json": {
+      "sha256": "78425c76f6bf8a08471c30e824d5bcfd19a5a1a5a0302a2c0e21c7830cf1bc05",
+      "size": 54,
+      "text": "{\"conformance\":\"synthetic-pose-bbox56-v1\",\"cases\":[]}\n"
+    },
+    "evaluation-receipt.json": {
+      "sha256": "713ea4c7fd158f3a247990598ca5c24188b65fb342297af1102f72d39a17210a",
+      "size": 698,
+      "text": "{\"bundle_members_digest\":\"6666666666666666666666666666666666666666666666666666666666666666\",\"bundle_sha256\":\"161b70de8717765620463229cd1a35ff0dc95df7cfa66931f9703f53dc382854\",\"calibration_digest\":\"4b28a1e4e1a8f6a6ceea1196c57fc7633579b245beac39c4cb1be7423a6a9ebd\",\"conformance_digest\":\"78425c76f6bf8a08471c30e824d5bcfd19a5a1a5a0302a2c0e21c7830cf1bc05\",\"dataset_payload_digest\":\"1111111111111111111111111111111111111111111111111111111111111111\",\"input_observation_schema\":\"pose-observation/v1\",\"output_class_count\":2,\"output_class_semantics_digest\":\"4444444444444444444444444444444444444444444444444444444444444444\",\"policy_digest\":\"1658653ae3dcbc5d41deadac98205ded8e7ba558bb4f95ff4dad485bb0343e5c\"}\n"
+    },
+    "field-evaluation-receipt.json": {
+      "sha256": "0eb47d0308f7b8950eb1e84d1269c841e6317775cb3de7cd9c2b522643fcbcec",
+      "size": 810,
+      "text": "{\"bundle_members_digest\":\"6666666666666666666666666666666666666666666666666666666666666666\",\"bundle_sha256\":\"161b70de8717765620463229cd1a35ff0dc95df7cfa66931f9703f53dc382854\",\"calibration_digest\":\"4b28a1e4e1a8f6a6ceea1196c57fc7633579b245beac39c4cb1be7423a6a9ebd\",\"conformance_digest\":\"78425c76f6bf8a08471c30e824d5bcfd19a5a1a5a0302a2c0e21c7830cf1bc05\",\"dataset_payload_digest\":\"1111111111111111111111111111111111111111111111111111111111111111\",\"evaluation_receipt_digest\":\"e0f4c604277b03bceb719dc30635ac480f1fdbddaf09c2834be6c6db6a135760\",\"input_observation_schema\":\"pose-observation/v1\",\"output_class_count\":2,\"output_class_semantics_digest\":\"4444444444444444444444444444444444444444444444444444444444444444\",\"policy_digest\":\"1658653ae3dcbc5d41deadac98205ded8e7ba558bb4f95ff4dad485bb0343e5c\",\"status\":\"green\"}\n"
+    },
+    "model.onnx": {
+      "sha256": "17d8dd4ac25b89e067d8a7f4503e3f4a7be1571de2c5e5bad5a69dccdc68824e",
+      "size": 124,
+      "text": "synthetic-model-bytes-not-onnx\nsynthetic-model-bytes-not-onnx\nsynthetic-model-bytes-not-onnx\nsynthetic-model-bytes-not-onnx\n"
+    }
+  },
+  "bundle_sha256": "161b70de8717765620463229cd1a35ff0dc95df7cfa66931f9703f53dc382854",
+  "canonical_payload": "{\"members\":[{\"path\":\"bundle-manifest.json\",\"sha256\":\"818e7f5000412917be9727a9009281c34f0e5b2fdd939abaf06f11d1403c74c1\",\"size\":46},{\"path\":\"calibration.json\",\"sha256\":\"4b28a1e4e1a8f6a6ceea1196c57fc7633579b245beac39c4cb1be7423a6a9ebd\",\"size\":32},{\"path\":\"conformance/pose-bbox56-v1.json\",\"sha256\":\"78425c76f6bf8a08471c30e824d5bcfd19a5a1a5a0302a2c0e21c7830cf1bc05\",\"size\":54},{\"path\":\"model.onnx\",\"sha256\":\"17d8dd4ac25b89e067d8a7f4503e3f4a7be1571de2c5e5bad5a69dccdc68824e\",\"size\":124}],\"payload\":{\"identities\":{\"calibration\":\"4b28a1e4e1a8f6a6ceea1196c57fc7633579b245beac39c4cb1be7423a6a9ebd\",\"class\":\"4444444444444444444444444444444444444444444444444444444444444444\",\"conformance\":\"78425c76f6bf8a08471c30e824d5bcfd19a5a1a5a0302a2c0e21c7830cf1bc05\",\"dataset\":\"1111111111111111111111111111111111111111111111111111111111111111\",\"input\":\"pose-observation/v1\",\"members\":\"6666666666666666666666666666666666666666666666666666666666666666\",\"policy\":\"1658653ae3dcbc5d41deadac98205ded8e7ba558bb4f95ff4dad485bb0343e5c\"}}}",
+  "fetch_log": [
+    "downloading https://huggingface.co/SeniorAILab/synthetic/resolve/cccccccccccccccccccccccccccccccccccccccc/bundle-manifest.json -> <work>/published/models/bundles/.161b70de8717765620463229cd1a35ff0dc95df7cfa66931f9703f53dc382854.<mkdtemp>/bundle-manifest.json",
+    "downloading https://huggingface.co/SeniorAILab/synthetic/resolve/cccccccccccccccccccccccccccccccccccccccc/calibration.json -> <work>/published/models/bundles/.161b70de8717765620463229cd1a35ff0dc95df7cfa66931f9703f53dc382854.<mkdtemp>/calibration.json",
+    "downloading https://huggingface.co/SeniorAILab/synthetic/resolve/cccccccccccccccccccccccccccccccccccccccc/conformance/pose-bbox56-v1.json -> <work>/published/models/bundles/.161b70de8717765620463229cd1a35ff0dc95df7cfa66931f9703f53dc382854.<mkdtemp>/conformance/pose-bbox56-v1.json",
+    "downloading https://huggingface.co/SeniorAILab/synthetic/resolve/cccccccccccccccccccccccccccccccccccccccc/model.onnx -> <work>/published/models/bundles/.161b70de8717765620463229cd1a35ff0dc95df7cfa66931f9703f53dc382854.<mkdtemp>/model.onnx",
+    "downloading https://huggingface.co/SeniorAILab/synthetic/resolve/cccccccccccccccccccccccccccccccccccccccc/evaluation-receipt.json -> <work>/published/models/bundles/.161b70de8717765620463229cd1a35ff0dc95df7cfa66931f9703f53dc382854.<mkdtemp>/evaluation-receipt.json",
+    "downloading https://huggingface.co/SeniorAILab/synthetic/resolve/cccccccccccccccccccccccccccccccccccccccc/field-evaluation-receipt.json -> <work>/published/models/bundles/.161b70de8717765620463229cd1a35ff0dc95df7cfa66931f9703f53dc382854.<mkdtemp>/field-evaluation-receipt.json",
+    "fetched          818e7f5000412917be9727a9009281c34f0e5b2fdd939abaf06f11d1403c74c1  bundles/161b70de8717765620463229cd1a35ff0dc95df7cfa66931f9703f53dc382854/bundle-manifest.json",
+    "fetched          4b28a1e4e1a8f6a6ceea1196c57fc7633579b245beac39c4cb1be7423a6a9ebd  bundles/161b70de8717765620463229cd1a35ff0dc95df7cfa66931f9703f53dc382854/calibration.json",
+    "fetched          78425c76f6bf8a08471c30e824d5bcfd19a5a1a5a0302a2c0e21c7830cf1bc05  bundles/161b70de8717765620463229cd1a35ff0dc95df7cfa66931f9703f53dc382854/conformance/pose-bbox56-v1.json",
+    "fetched          17d8dd4ac25b89e067d8a7f4503e3f4a7be1571de2c5e5bad5a69dccdc68824e  bundles/161b70de8717765620463229cd1a35ff0dc95df7cfa66931f9703f53dc382854/model.onnx",
+    "fetched          713ea4c7fd158f3a247990598ca5c24188b65fb342297af1102f72d39a17210a  bundles/161b70de8717765620463229cd1a35ff0dc95df7cfa66931f9703f53dc382854/evaluation-receipt.json",
+    "fetched          0eb47d0308f7b8950eb1e84d1269c841e6317775cb3de7cd9c2b522643fcbcec  bundles/161b70de8717765620463229cd1a35ff0dc95df7cfa66931f9703f53dc382854/field-evaluation-receipt.json"
+  ],
+  "manifest_json": {
+    "equals_bundle_manifest_bytes": true,
+    "sha256": "318c23f2b701f014ef02249983ae0e248024341e535bcdb4549c01d8fd0d76a1",
+    "size": 1404,
+    "text": "{\"bundle_sha256\":\"161b70de8717765620463229cd1a35ff0dc95df7cfa66931f9703f53dc382854\",\"members\":[{\"path\":\"bundle-manifest.json\",\"sha256\":\"818e7f5000412917be9727a9009281c34f0e5b2fdd939abaf06f11d1403c74c1\",\"size\":46},{\"path\":\"calibration.json\",\"sha256\":\"4b28a1e4e1a8f6a6ceea1196c57fc7633579b245beac39c4cb1be7423a6a9ebd\",\"size\":32},{\"path\":\"conformance/pose-bbox56-v1.json\",\"sha256\":\"78425c76f6bf8a08471c30e824d5bcfd19a5a1a5a0302a2c0e21c7830cf1bc05\",\"size\":54},{\"path\":\"model.onnx\",\"sha256\":\"17d8dd4ac25b89e067d8a7f4503e3f4a7be1571de2c5e5bad5a69dccdc68824e\",\"size\":124}],\"payload\":{\"identities\":{\"calibration\":\"4b28a1e4e1a8f6a6ceea1196c57fc7633579b245beac39c4cb1be7423a6a9ebd\",\"class\":\"4444444444444444444444444444444444444444444444444444444444444444\",\"conformance\":\"78425c76f6bf8a08471c30e824d5bcfd19a5a1a5a0302a2c0e21c7830cf1bc05\",\"dataset\":\"1111111111111111111111111111111111111111111111111111111111111111\",\"input\":\"pose-observation/v1\",\"members\":\"6666666666666666666666666666666666666666666666666666666666666666\",\"policy\":\"1658653ae3dcbc5d41deadac98205ded8e7ba558bb4f95ff4dad485bb0343e5c\"}},\"receipts\":[{\"path\":\"evaluation-receipt.json\",\"sha256\":\"713ea4c7fd158f3a247990598ca5c24188b65fb342297af1102f72d39a17210a\",\"size\":698},{\"path\":\"field-evaluation-receipt.json\",\"sha256\":\"0eb47d0308f7b8950eb1e84d1269c841e6317775cb3de7cd9c2b522643fcbcec\",\"size\":810}],\"runtime_format\":\"onnxruntime\",\"schema_version\":1}\n"
+  },
+  "provenance": {
+    "kind": "synthetic-only",
+    "recipe": "four short ASCII member bodies (model.onnx is text, not ONNX) and two canonical receipts, published as bundles/<sha>/ by fetch_all from an in-process FakeSource keyed by the huggingface resolve URL; the bundle sha256 is sha256(Bundle.canonical_payload)"
+  },
+  "published_tree": [
+    {
+      "kind": "dir",
+      "path": "models"
+    },
+    {
+      "kind": "dir",
+      "path": "models/bundles"
+    },
+    {
+      "kind": "dir",
+      "path": "models/bundles/161b70de8717765620463229cd1a35ff0dc95df7cfa66931f9703f53dc382854"
+    },
+    {
+      "kind": "file",
+      "path": "models/bundles/161b70de8717765620463229cd1a35ff0dc95df7cfa66931f9703f53dc382854/bundle-manifest.json",
+      "sha256": "818e7f5000412917be9727a9009281c34f0e5b2fdd939abaf06f11d1403c74c1",
+      "size": 46
+    },
+    {
+      "kind": "file",
+      "path": "models/bundles/161b70de8717765620463229cd1a35ff0dc95df7cfa66931f9703f53dc382854/calibration.json",
+      "sha256": "4b28a1e4e1a8f6a6ceea1196c57fc7633579b245beac39c4cb1be7423a6a9ebd",
+      "size": 32
+    },
+    {
+      "kind": "dir",
+      "path": "models/bundles/161b70de8717765620463229cd1a35ff0dc95df7cfa66931f9703f53dc382854/conformance"
+    },
+    {
+      "kind": "file",
+      "path": "models/bundles/161b70de8717765620463229cd1a35ff0dc95df7cfa66931f9703f53dc382854/conformance/pose-bbox56-v1.json",
+      "sha256": "78425c76f6bf8a08471c30e824d5bcfd19a5a1a5a0302a2c0e21c7830cf1bc05",
+      "size": 54
+    },
+    {
+      "kind": "file",
+      "path": "models/bundles/161b70de8717765620463229cd1a35ff0dc95df7cfa66931f9703f53dc382854/evaluation-receipt.json",
+      "sha256": "713ea4c7fd158f3a247990598ca5c24188b65fb342297af1102f72d39a17210a",
+      "size": 698
+    },
+    {
+      "kind": "file",
+      "path": "models/bundles/161b70de8717765620463229cd1a35ff0dc95df7cfa66931f9703f53dc382854/field-evaluation-receipt.json",
+      "sha256": "0eb47d0308f7b8950eb1e84d1269c841e6317775cb3de7cd9c2b522643fcbcec",
+      "size": 810
+    },
+    {
+      "kind": "file",
+      "path": "models/bundles/161b70de8717765620463229cd1a35ff0dc95df7cfa66931f9703f53dc382854/manifest.json",
+      "sha256": "318c23f2b701f014ef02249983ae0e248024341e535bcdb4549c01d8fd0d76a1",
+      "size": 1404
+    },
+    {
+      "kind": "file",
+      "path": "models/bundles/161b70de8717765620463229cd1a35ff0dc95df7cfa66931f9703f53dc382854/model.onnx",
+      "sha256": "17d8dd4ac25b89e067d8a7f4503e3f4a7be1571de2c5e5bad5a69dccdc68824e",
+      "size": 124
+    }
+  ],
+  "recorder_sha256": "020bb1c6716892ac315b8350ce3939d182749cc756f7af1348341874ccbde004",
+  "repo_head": "030aaf1dc2c4a114b5d1f83ae391757ddbc3da2c",
+  "report": {
+    "results": [
+      {
+        "outcome": "fetched",
+        "path": "bundle-manifest.json",
+        "sha256": "818e7f5000412917be9727a9009281c34f0e5b2fdd939abaf06f11d1403c74c1"
+      },
+      {
+        "outcome": "fetched",
+        "path": "calibration.json",
+        "sha256": "4b28a1e4e1a8f6a6ceea1196c57fc7633579b245beac39c4cb1be7423a6a9ebd"
+      },
+      {
+        "outcome": "fetched",
+        "path": "conformance/pose-bbox56-v1.json",
+        "sha256": "78425c76f6bf8a08471c30e824d5bcfd19a5a1a5a0302a2c0e21c7830cf1bc05"
+      },
+      {
+        "outcome": "fetched",
+        "path": "model.onnx",
+        "sha256": "17d8dd4ac25b89e067d8a7f4503e3f4a7be1571de2c5e5bad5a69dccdc68824e"
+      },
+      {
+        "outcome": "fetched",
+        "path": "evaluation-receipt.json",
+        "sha256": "713ea4c7fd158f3a247990598ca5c24188b65fb342297af1102f72d39a17210a"
+      },
+      {
+        "outcome": "fetched",
+        "path": "field-evaluation-receipt.json",
+        "sha256": "0eb47d0308f7b8950eb1e84d1269c841e6317775cb3de7cd9c2b522643fcbcec"
+      }
+    ]
+  },
+  "review": {
+    "note": "The publication every admission case starts from. bodies holds each member and receipt as text so a port can rebuild the tree; published_tree is the lstat listing after fetch_all. fetch_log is the fetch_all log with <work> and the staging mkdtemp suffix scrubbed.",
+    "oracle": [
+      "worker/tools/fetch_models/fetcher.py:fetch_all L367, fetch_bundle L243, fetch_artifact L133, _verify_bundle_tree L202 @030aaf1",
+      "worker/tools/fetch_models/manifest.py:Bundle.canonical_payload, Bundle.manifest_bytes @030aaf1",
+      "worker/runtime/provenance/model_bundle.py:desired_model_bundle_from_selection_document L81, admit_model_bundle L104 @030aaf1"
+    ]
+  },
+  "schema": "seeon-worker-wire-model-bundle-publication/v1",
+  "selection_digest": "b6e20d236fd732d468f3f558f782cba4f428307ac710720c0c08b51155f51ae5",
+  "selection_document": {
+    "bundle_format": "bundle-manifest/proxy-v0",
+    "bundle_members_digest": "6666666666666666666666666666666666666666666666666666666666666666",
+    "calibration_digest": "4b28a1e4e1a8f6a6ceea1196c57fc7633579b245beac39c4cb1be7423a6a9ebd",
+    "conformance_digest": "78425c76f6bf8a08471c30e824d5bcfd19a5a1a5a0302a2c0e21c7830cf1bc05",
+    "dataset_publication": {
+      "payload_digest": "1111111111111111111111111111111111111111111111111111111111111111",
+      "revision": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "source_locator": "SeniorAILab/synthetic"
+    },
+    "evaluation_receipt_digest": "e0f4c604277b03bceb719dc30635ac480f1fdbddaf09c2834be6c6db6a135760",
+    "field_evaluation_receipt_digest": "d4e30bffcdfd9d9ff872ccf0e1b502e53b044cb37c03e9bed7069e7e605906d1",
+    "input_observation_schema": "pose-observation/v1",
+    "model_publication": {
+      "bundle_sha256": "161b70de8717765620463229cd1a35ff0dc95df7cfa66931f9703f53dc382854",
+      "revision": "cccccccccccccccccccccccccccccccccccccccc",
+      "source_locator": "SeniorAILab/synthetic"
+    },
+    "output_class_count": 2,
+    "output_class_semantics_digest": "4444444444444444444444444444444444444444444444444444444444444444",
+    "policy_digest": "1658653ae3dcbc5d41deadac98205ded8e7ba558bb4f95ff4dad485bb0343e5c",
+    "preprocessing_identity": "coco17-xyc-plus-pose-head-xyxy-valid-f32-v1",
+    "runtime_format": "onnxruntime",
+    "schema_version": 2,
+    "threshold_source": "default",
+    "transition_threshold": 0.5
+  },
+  "source": {
+    "kind": "huggingface",
+    "name": "synthetic-publication",
+    "ref": "cccccccccccccccccccccccccccccccccccccccc",
+    "source_locator": "SeniorAILab/synthetic"
+  },
+  "source_calls": [
+    {
+      "headers": {
+        "User-Agent": "seeon-edge-model-fetch/1"
+      },
+      "url": "https://huggingface.co/SeniorAILab/synthetic/resolve/cccccccccccccccccccccccccccccccccccccccc/bundle-manifest.json"
+    },
+    {
+      "headers": {
+        "User-Agent": "seeon-edge-model-fetch/1"
+      },
+      "url": "https://huggingface.co/SeniorAILab/synthetic/resolve/cccccccccccccccccccccccccccccccccccccccc/calibration.json"
+    },
+    {
+      "headers": {
+        "User-Agent": "seeon-edge-model-fetch/1"
+      },
+      "url": "https://huggingface.co/SeniorAILab/synthetic/resolve/cccccccccccccccccccccccccccccccccccccccc/conformance/pose-bbox56-v1.json"
+    },
+    {
+      "headers": {
+        "User-Agent": "seeon-edge-model-fetch/1"
+      },
+      "url": "https://huggingface.co/SeniorAILab/synthetic/resolve/cccccccccccccccccccccccccccccccccccccccc/model.onnx"
+    },
+    {
+      "headers": {
+        "User-Agent": "seeon-edge-model-fetch/1"
+      },
+      "url": "https://huggingface.co/SeniorAILab/synthetic/resolve/cccccccccccccccccccccccccccccccccccccccc/evaluation-receipt.json"
+    },
+    {
+      "headers": {
+        "User-Agent": "seeon-edge-model-fetch/1"
+      },
+      "url": "https://huggingface.co/SeniorAILab/synthetic/resolve/cccccccccccccccccccccccccccccccccccccccc/field-evaluation-receipt.json"
+    }
+  ]
+}

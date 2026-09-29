@@ -1,0 +1,1233 @@
+{
+  "provenance": "synthetic-only",
+  "recipe": {
+    "binding": {
+      "child_instance_id": "00000000-0000-0000-0000-000000000001",
+      "transform_id": "transform-identity"
+    },
+    "clock": "every call passes host_time explicitly; the monotonic fake returns 5000.0 and is never consulted",
+    "metadata_frame": "MetadataFrame(frame=PerceptionFrameV1(identity, all channels SKIPPED), source_generation, child_instance_id, native_publish_sequence, transform_id)",
+    "pts_step_ns": 33333333,
+    "scenario": "one ObservationCoverage over SourceBinding(worker_boot_id=boot-a, camera_id, source_generation=1, stream_epoch=0); each step calls the public API in order and records the return value, the raised class and message, and last_actual/open_gap after the call"
+  },
+  "recorder_sha256": "cde032a17f0d9f3de2496a3930104e22dde17c3027394033ef1068b2d138f7f9",
+  "repo_head": "030aaf1dc2c4a114b5d1f83ae391757ddbc3da2c",
+  "review": {
+    "independent_oracle": [
+      "worker/runtime/flow/observation_coverage.py:ObservationCoverage L48 @030aaf1",
+      "worker/runtime/flow/observation_coverage.py:ObservationCoverage.observe L73 @030aaf1",
+      "worker/runtime/flow/observation_coverage.py:ObservationCoverage.detect_gap L171 @030aaf1",
+      "worker/runtime/flow/observation_coverage.py:ObservationCoverage.rebind L70 @030aaf1",
+      "worker/runtime/flow/observation_coverage.py:_close_gap L225-259 (pts guard L245) @030aaf1",
+      "worker/runtime/flow/observation_coverage.py:_native_publish_sequence_gap L262 @030aaf1"
+    ],
+    "note": "Rust T34 (policy/coverage.rs) replays each step's call and arguments with a fake clock and must reproduce returned (gap or recovery fields, or null), raised (class and message) and state_after. A second detect_gap returns null and keeps the first gap; a foreign identity raises and leaves the gap open; duration fields are null, never negative, across boot, epoch, pts and host-time changes."
+  },
+  "schema": "seeon-worker-wire/observation-coverage/v1",
+  "steps": [
+    {
+      "arguments": {
+        "host_time": 99.0
+      },
+      "call": "detect_gap",
+      "label": "gap before any observation (no history)",
+      "returned": {
+        "identity": {
+          "camera_id": "cmsnw6rjc01vhlh01oswn99yq",
+          "source_generation": 1,
+          "stream_epoch": 0,
+          "worker_boot_id": "boot-a"
+        },
+        "last_actual": null,
+        "loss_detected_host_time": 99.0
+      },
+      "state_after": {
+        "last_actual": null,
+        "open_gap": {
+          "identity": {
+            "camera_id": "cmsnw6rjc01vhlh01oswn99yq",
+            "source_generation": 1,
+            "stream_epoch": 0,
+            "worker_boot_id": "boot-a"
+          },
+          "last_actual": null,
+          "loss_detected_host_time": 99.0
+        }
+      },
+      "step": 1
+    },
+    {
+      "arguments": {
+        "camera_id": "cmsnw6rjc01vhlh01oswn99yq",
+        "host_time": 99.5,
+        "native_publish_sequence": 1,
+        "seq": 0,
+        "source_generation": 1,
+        "source_pts": 1000000000,
+        "stream_epoch": 0,
+        "worker_boot_id": "boot-a"
+      },
+      "call": "observe",
+      "label": "first frame closes a gap with no history",
+      "returned": {
+        "gap": {
+          "identity": {
+            "camera_id": "cmsnw6rjc01vhlh01oswn99yq",
+            "source_generation": 1,
+            "stream_epoch": 0,
+            "worker_boot_id": "boot-a"
+          },
+          "last_actual": null,
+          "loss_detected_host_time": 99.0
+        },
+        "host_observation_duration": null,
+        "native_publish_sequence_gap": null,
+        "next_actual": {
+          "host_time": 99.5,
+          "identity": {
+            "camera_id": "cmsnw6rjc01vhlh01oswn99yq",
+            "source_generation": 1,
+            "stream_epoch": 0,
+            "worker_boot_id": "boot-a"
+          },
+          "native_publish_sequence": 1,
+          "seq": 0,
+          "source_pts_ns": 1000000000
+        },
+        "source_duration_ns": null
+      },
+      "state_after": {
+        "last_actual": {
+          "host_time": 99.5,
+          "identity": {
+            "camera_id": "cmsnw6rjc01vhlh01oswn99yq",
+            "source_generation": 1,
+            "stream_epoch": 0,
+            "worker_boot_id": "boot-a"
+          },
+          "native_publish_sequence": 1,
+          "seq": 0,
+          "source_pts_ns": 1000000000
+        },
+        "open_gap": null
+      },
+      "step": 2
+    },
+    {
+      "arguments": {
+        "camera_id": "cmsnw6rjc01vhlh01oswn99yq",
+        "host_time": 99.75,
+        "native_publish_sequence": 2,
+        "seq": 1,
+        "source_generation": 1,
+        "source_pts": 1033333333,
+        "stream_epoch": 0,
+        "worker_boot_id": "boot-a"
+      },
+      "call": "observe",
+      "label": "steady frame",
+      "returned": null,
+      "state_after": {
+        "last_actual": {
+          "host_time": 99.75,
+          "identity": {
+            "camera_id": "cmsnw6rjc01vhlh01oswn99yq",
+            "source_generation": 1,
+            "stream_epoch": 0,
+            "worker_boot_id": "boot-a"
+          },
+          "native_publish_sequence": 2,
+          "seq": 1,
+          "source_pts_ns": 1033333333
+        },
+        "open_gap": null
+      },
+      "step": 3
+    },
+    {
+      "arguments": {
+        "camera_id": "cmsnw6rjc01vhlh01oswn99yq",
+        "host_time": 100.0,
+        "native_publish_sequence": 3,
+        "seq": 2,
+        "source_generation": 1,
+        "source_pts": 1066666666,
+        "stream_epoch": 0,
+        "worker_boot_id": "boot-a"
+      },
+      "call": "observe",
+      "label": "steady frame",
+      "returned": null,
+      "state_after": {
+        "last_actual": {
+          "host_time": 100.0,
+          "identity": {
+            "camera_id": "cmsnw6rjc01vhlh01oswn99yq",
+            "source_generation": 1,
+            "stream_epoch": 0,
+            "worker_boot_id": "boot-a"
+          },
+          "native_publish_sequence": 3,
+          "seq": 2,
+          "source_pts_ns": 1066666666
+        },
+        "open_gap": null
+      },
+      "step": 4
+    },
+    {
+      "arguments": {
+        "host_time": 101.0
+      },
+      "call": "detect_gap",
+      "label": "gap opens after steady frames",
+      "returned": {
+        "identity": {
+          "camera_id": "cmsnw6rjc01vhlh01oswn99yq",
+          "source_generation": 1,
+          "stream_epoch": 0,
+          "worker_boot_id": "boot-a"
+        },
+        "last_actual": {
+          "host_time": 100.0,
+          "identity": {
+            "camera_id": "cmsnw6rjc01vhlh01oswn99yq",
+            "source_generation": 1,
+            "stream_epoch": 0,
+            "worker_boot_id": "boot-a"
+          },
+          "native_publish_sequence": 3,
+          "seq": 2,
+          "source_pts_ns": 1066666666
+        },
+        "loss_detected_host_time": 101.0
+      },
+      "state_after": {
+        "last_actual": {
+          "host_time": 100.0,
+          "identity": {
+            "camera_id": "cmsnw6rjc01vhlh01oswn99yq",
+            "source_generation": 1,
+            "stream_epoch": 0,
+            "worker_boot_id": "boot-a"
+          },
+          "native_publish_sequence": 3,
+          "seq": 2,
+          "source_pts_ns": 1066666666
+        },
+        "open_gap": {
+          "identity": {
+            "camera_id": "cmsnw6rjc01vhlh01oswn99yq",
+            "source_generation": 1,
+            "stream_epoch": 0,
+            "worker_boot_id": "boot-a"
+          },
+          "last_actual": {
+            "host_time": 100.0,
+            "identity": {
+              "camera_id": "cmsnw6rjc01vhlh01oswn99yq",
+              "source_generation": 1,
+              "stream_epoch": 0,
+              "worker_boot_id": "boot-a"
+            },
+            "native_publish_sequence": 3,
+            "seq": 2,
+            "source_pts_ns": 1066666666
+          },
+          "loss_detected_host_time": 101.0
+        }
+      },
+      "step": 5
+    },
+    {
+      "arguments": {
+        "host_time": 101.5
+      },
+      "call": "detect_gap",
+      "label": "second detect_gap while one is open",
+      "returned": null,
+      "state_after": {
+        "last_actual": {
+          "host_time": 100.0,
+          "identity": {
+            "camera_id": "cmsnw6rjc01vhlh01oswn99yq",
+            "source_generation": 1,
+            "stream_epoch": 0,
+            "worker_boot_id": "boot-a"
+          },
+          "native_publish_sequence": 3,
+          "seq": 2,
+          "source_pts_ns": 1066666666
+        },
+        "open_gap": {
+          "identity": {
+            "camera_id": "cmsnw6rjc01vhlh01oswn99yq",
+            "source_generation": 1,
+            "stream_epoch": 0,
+            "worker_boot_id": "boot-a"
+          },
+          "last_actual": {
+            "host_time": 100.0,
+            "identity": {
+              "camera_id": "cmsnw6rjc01vhlh01oswn99yq",
+              "source_generation": 1,
+              "stream_epoch": 0,
+              "worker_boot_id": "boot-a"
+            },
+            "native_publish_sequence": 3,
+            "seq": 2,
+            "source_pts_ns": 1066666666
+          },
+          "loss_detected_host_time": 101.0
+        }
+      },
+      "step": 6
+    },
+    {
+      "arguments": {
+        "camera_id": "cmsnw6rjc01vhlh01oswn99yq",
+        "host_time": 101.75,
+        "native_publish_sequence": 4,
+        "seq": 3,
+        "source_generation": 1,
+        "source_pts": 1099999999,
+        "stream_epoch": 0,
+        "worker_boot_id": "boot-foreign"
+      },
+      "call": "observe",
+      "label": "foreign-identity observation while the gap is open",
+      "raised": {
+        "class": "ValueError",
+        "message": "policy input observation identity does not match the expected source binding"
+      },
+      "state_after": {
+        "last_actual": {
+          "host_time": 100.0,
+          "identity": {
+            "camera_id": "cmsnw6rjc01vhlh01oswn99yq",
+            "source_generation": 1,
+            "stream_epoch": 0,
+            "worker_boot_id": "boot-a"
+          },
+          "native_publish_sequence": 3,
+          "seq": 2,
+          "source_pts_ns": 1066666666
+        },
+        "open_gap": {
+          "identity": {
+            "camera_id": "cmsnw6rjc01vhlh01oswn99yq",
+            "source_generation": 1,
+            "stream_epoch": 0,
+            "worker_boot_id": "boot-a"
+          },
+          "last_actual": {
+            "host_time": 100.0,
+            "identity": {
+              "camera_id": "cmsnw6rjc01vhlh01oswn99yq",
+              "source_generation": 1,
+              "stream_epoch": 0,
+              "worker_boot_id": "boot-a"
+            },
+            "native_publish_sequence": 3,
+            "seq": 2,
+            "source_pts_ns": 1066666666
+          },
+          "loss_detected_host_time": 101.0
+        }
+      },
+      "step": 7
+    },
+    {
+      "arguments": {
+        "camera_id": "cmsnw6rjc01vhlh01oswn99yq",
+        "host_time": 102.0,
+        "native_publish_sequence": 61,
+        "seq": 60,
+        "source_generation": 1,
+        "source_pts": 2999999980,
+        "stream_epoch": 0,
+        "worker_boot_id": "boot-a"
+      },
+      "call": "observe",
+      "label": "same-source recovery",
+      "returned": {
+        "gap": {
+          "identity": {
+            "camera_id": "cmsnw6rjc01vhlh01oswn99yq",
+            "source_generation": 1,
+            "stream_epoch": 0,
+            "worker_boot_id": "boot-a"
+          },
+          "last_actual": {
+            "host_time": 100.0,
+            "identity": {
+              "camera_id": "cmsnw6rjc01vhlh01oswn99yq",
+              "source_generation": 1,
+              "stream_epoch": 0,
+              "worker_boot_id": "boot-a"
+            },
+            "native_publish_sequence": 3,
+            "seq": 2,
+            "source_pts_ns": 1066666666
+          },
+          "loss_detected_host_time": 101.0
+        },
+        "host_observation_duration": 2.0,
+        "native_publish_sequence_gap": 57,
+        "next_actual": {
+          "host_time": 102.0,
+          "identity": {
+            "camera_id": "cmsnw6rjc01vhlh01oswn99yq",
+            "source_generation": 1,
+            "stream_epoch": 0,
+            "worker_boot_id": "boot-a"
+          },
+          "native_publish_sequence": 61,
+          "seq": 60,
+          "source_pts_ns": 2999999980
+        },
+        "source_duration_ns": 1933333314
+      },
+      "state_after": {
+        "last_actual": {
+          "host_time": 102.0,
+          "identity": {
+            "camera_id": "cmsnw6rjc01vhlh01oswn99yq",
+            "source_generation": 1,
+            "stream_epoch": 0,
+            "worker_boot_id": "boot-a"
+          },
+          "native_publish_sequence": 61,
+          "seq": 60,
+          "source_pts_ns": 2999999980
+        },
+        "open_gap": null
+      },
+      "step": 8
+    },
+    {
+      "arguments": {
+        "host_time": 103.0
+      },
+      "call": "detect_gap",
+      "label": "gap opens before a boot change",
+      "returned": {
+        "identity": {
+          "camera_id": "cmsnw6rjc01vhlh01oswn99yq",
+          "source_generation": 1,
+          "stream_epoch": 0,
+          "worker_boot_id": "boot-a"
+        },
+        "last_actual": {
+          "host_time": 102.0,
+          "identity": {
+            "camera_id": "cmsnw6rjc01vhlh01oswn99yq",
+            "source_generation": 1,
+            "stream_epoch": 0,
+            "worker_boot_id": "boot-a"
+          },
+          "native_publish_sequence": 61,
+          "seq": 60,
+          "source_pts_ns": 2999999980
+        },
+        "loss_detected_host_time": 103.0
+      },
+      "state_after": {
+        "last_actual": {
+          "host_time": 102.0,
+          "identity": {
+            "camera_id": "cmsnw6rjc01vhlh01oswn99yq",
+            "source_generation": 1,
+            "stream_epoch": 0,
+            "worker_boot_id": "boot-a"
+          },
+          "native_publish_sequence": 61,
+          "seq": 60,
+          "source_pts_ns": 2999999980
+        },
+        "open_gap": {
+          "identity": {
+            "camera_id": "cmsnw6rjc01vhlh01oswn99yq",
+            "source_generation": 1,
+            "stream_epoch": 0,
+            "worker_boot_id": "boot-a"
+          },
+          "last_actual": {
+            "host_time": 102.0,
+            "identity": {
+              "camera_id": "cmsnw6rjc01vhlh01oswn99yq",
+              "source_generation": 1,
+              "stream_epoch": 0,
+              "worker_boot_id": "boot-a"
+            },
+            "native_publish_sequence": 61,
+            "seq": 60,
+            "source_pts_ns": 2999999980
+          },
+          "loss_detected_host_time": 103.0
+        }
+      },
+      "step": 9
+    },
+    {
+      "arguments": {
+        "binding": {
+          "camera_id": "cmsnw6rjc01vhlh01oswn99yq",
+          "child_instance_id": "00000000-0000-0000-0000-000000000001",
+          "source_generation": 1,
+          "stream_epoch": 0,
+          "transform_id": "transform-identity",
+          "worker_boot_id": "boot-b"
+        }
+      },
+      "call": "rebind",
+      "label": "rebind to a new worker boot",
+      "returned": null,
+      "state_after": {
+        "last_actual": {
+          "host_time": 102.0,
+          "identity": {
+            "camera_id": "cmsnw6rjc01vhlh01oswn99yq",
+            "source_generation": 1,
+            "stream_epoch": 0,
+            "worker_boot_id": "boot-a"
+          },
+          "native_publish_sequence": 61,
+          "seq": 60,
+          "source_pts_ns": 2999999980
+        },
+        "open_gap": {
+          "identity": {
+            "camera_id": "cmsnw6rjc01vhlh01oswn99yq",
+            "source_generation": 1,
+            "stream_epoch": 0,
+            "worker_boot_id": "boot-a"
+          },
+          "last_actual": {
+            "host_time": 102.0,
+            "identity": {
+              "camera_id": "cmsnw6rjc01vhlh01oswn99yq",
+              "source_generation": 1,
+              "stream_epoch": 0,
+              "worker_boot_id": "boot-a"
+            },
+            "native_publish_sequence": 61,
+            "seq": 60,
+            "source_pts_ns": 2999999980
+          },
+          "loss_detected_host_time": 103.0
+        }
+      },
+      "step": 10
+    },
+    {
+      "arguments": {
+        "camera_id": "cmsnw6rjc01vhlh01oswn99yq",
+        "host_time": 104.0,
+        "native_publish_sequence": 1,
+        "seq": 0,
+        "source_generation": 1,
+        "source_pts": 5000000000,
+        "stream_epoch": 0,
+        "worker_boot_id": "boot-b"
+      },
+      "call": "observe",
+      "label": "recovery with a boot change",
+      "returned": {
+        "gap": {
+          "identity": {
+            "camera_id": "cmsnw6rjc01vhlh01oswn99yq",
+            "source_generation": 1,
+            "stream_epoch": 0,
+            "worker_boot_id": "boot-a"
+          },
+          "last_actual": {
+            "host_time": 102.0,
+            "identity": {
+              "camera_id": "cmsnw6rjc01vhlh01oswn99yq",
+              "source_generation": 1,
+              "stream_epoch": 0,
+              "worker_boot_id": "boot-a"
+            },
+            "native_publish_sequence": 61,
+            "seq": 60,
+            "source_pts_ns": 2999999980
+          },
+          "loss_detected_host_time": 103.0
+        },
+        "host_observation_duration": null,
+        "native_publish_sequence_gap": null,
+        "next_actual": {
+          "host_time": 104.0,
+          "identity": {
+            "camera_id": "cmsnw6rjc01vhlh01oswn99yq",
+            "source_generation": 1,
+            "stream_epoch": 0,
+            "worker_boot_id": "boot-b"
+          },
+          "native_publish_sequence": 1,
+          "seq": 0,
+          "source_pts_ns": 5000000000
+        },
+        "source_duration_ns": null
+      },
+      "state_after": {
+        "last_actual": {
+          "host_time": 104.0,
+          "identity": {
+            "camera_id": "cmsnw6rjc01vhlh01oswn99yq",
+            "source_generation": 1,
+            "stream_epoch": 0,
+            "worker_boot_id": "boot-b"
+          },
+          "native_publish_sequence": 1,
+          "seq": 0,
+          "source_pts_ns": 5000000000
+        },
+        "open_gap": null
+      },
+      "step": 11
+    },
+    {
+      "arguments": {
+        "camera_id": "cmsnw6rjc01vhlh01oswn99yq",
+        "host_time": 104.25,
+        "native_publish_sequence": 2,
+        "seq": 1,
+        "source_generation": 1,
+        "source_pts": 5033333333,
+        "stream_epoch": 0,
+        "worker_boot_id": "boot-b"
+      },
+      "call": "observe",
+      "label": "steady frame",
+      "returned": null,
+      "state_after": {
+        "last_actual": {
+          "host_time": 104.25,
+          "identity": {
+            "camera_id": "cmsnw6rjc01vhlh01oswn99yq",
+            "source_generation": 1,
+            "stream_epoch": 0,
+            "worker_boot_id": "boot-b"
+          },
+          "native_publish_sequence": 2,
+          "seq": 1,
+          "source_pts_ns": 5033333333
+        },
+        "open_gap": null
+      },
+      "step": 12
+    },
+    {
+      "arguments": {
+        "host_time": 105.0
+      },
+      "call": "detect_gap",
+      "label": "gap opens before a stream-epoch change",
+      "returned": {
+        "identity": {
+          "camera_id": "cmsnw6rjc01vhlh01oswn99yq",
+          "source_generation": 1,
+          "stream_epoch": 0,
+          "worker_boot_id": "boot-b"
+        },
+        "last_actual": {
+          "host_time": 104.25,
+          "identity": {
+            "camera_id": "cmsnw6rjc01vhlh01oswn99yq",
+            "source_generation": 1,
+            "stream_epoch": 0,
+            "worker_boot_id": "boot-b"
+          },
+          "native_publish_sequence": 2,
+          "seq": 1,
+          "source_pts_ns": 5033333333
+        },
+        "loss_detected_host_time": 105.0
+      },
+      "state_after": {
+        "last_actual": {
+          "host_time": 104.25,
+          "identity": {
+            "camera_id": "cmsnw6rjc01vhlh01oswn99yq",
+            "source_generation": 1,
+            "stream_epoch": 0,
+            "worker_boot_id": "boot-b"
+          },
+          "native_publish_sequence": 2,
+          "seq": 1,
+          "source_pts_ns": 5033333333
+        },
+        "open_gap": {
+          "identity": {
+            "camera_id": "cmsnw6rjc01vhlh01oswn99yq",
+            "source_generation": 1,
+            "stream_epoch": 0,
+            "worker_boot_id": "boot-b"
+          },
+          "last_actual": {
+            "host_time": 104.25,
+            "identity": {
+              "camera_id": "cmsnw6rjc01vhlh01oswn99yq",
+              "source_generation": 1,
+              "stream_epoch": 0,
+              "worker_boot_id": "boot-b"
+            },
+            "native_publish_sequence": 2,
+            "seq": 1,
+            "source_pts_ns": 5033333333
+          },
+          "loss_detected_host_time": 105.0
+        }
+      },
+      "step": 13
+    },
+    {
+      "arguments": {
+        "binding": {
+          "camera_id": "cmsnw6rjc01vhlh01oswn99yq",
+          "child_instance_id": "00000000-0000-0000-0000-000000000001",
+          "source_generation": 1,
+          "stream_epoch": 1,
+          "transform_id": "transform-identity",
+          "worker_boot_id": "boot-b"
+        }
+      },
+      "call": "rebind",
+      "label": "rebind to a new stream epoch",
+      "returned": null,
+      "state_after": {
+        "last_actual": {
+          "host_time": 104.25,
+          "identity": {
+            "camera_id": "cmsnw6rjc01vhlh01oswn99yq",
+            "source_generation": 1,
+            "stream_epoch": 0,
+            "worker_boot_id": "boot-b"
+          },
+          "native_publish_sequence": 2,
+          "seq": 1,
+          "source_pts_ns": 5033333333
+        },
+        "open_gap": {
+          "identity": {
+            "camera_id": "cmsnw6rjc01vhlh01oswn99yq",
+            "source_generation": 1,
+            "stream_epoch": 0,
+            "worker_boot_id": "boot-b"
+          },
+          "last_actual": {
+            "host_time": 104.25,
+            "identity": {
+              "camera_id": "cmsnw6rjc01vhlh01oswn99yq",
+              "source_generation": 1,
+              "stream_epoch": 0,
+              "worker_boot_id": "boot-b"
+            },
+            "native_publish_sequence": 2,
+            "seq": 1,
+            "source_pts_ns": 5033333333
+          },
+          "loss_detected_host_time": 105.0
+        }
+      },
+      "step": 14
+    },
+    {
+      "arguments": {
+        "camera_id": "cmsnw6rjc01vhlh01oswn99yq",
+        "host_time": 105.5,
+        "native_publish_sequence": 3,
+        "seq": 0,
+        "source_generation": 1,
+        "source_pts": 200000000,
+        "stream_epoch": 1,
+        "worker_boot_id": "boot-b"
+      },
+      "call": "observe",
+      "label": "recovery with a stream-epoch change",
+      "returned": {
+        "gap": {
+          "identity": {
+            "camera_id": "cmsnw6rjc01vhlh01oswn99yq",
+            "source_generation": 1,
+            "stream_epoch": 0,
+            "worker_boot_id": "boot-b"
+          },
+          "last_actual": {
+            "host_time": 104.25,
+            "identity": {
+              "camera_id": "cmsnw6rjc01vhlh01oswn99yq",
+              "source_generation": 1,
+              "stream_epoch": 0,
+              "worker_boot_id": "boot-b"
+            },
+            "native_publish_sequence": 2,
+            "seq": 1,
+            "source_pts_ns": 5033333333
+          },
+          "loss_detected_host_time": 105.0
+        },
+        "host_observation_duration": 1.25,
+        "native_publish_sequence_gap": null,
+        "next_actual": {
+          "host_time": 105.5,
+          "identity": {
+            "camera_id": "cmsnw6rjc01vhlh01oswn99yq",
+            "source_generation": 1,
+            "stream_epoch": 1,
+            "worker_boot_id": "boot-b"
+          },
+          "native_publish_sequence": 3,
+          "seq": 0,
+          "source_pts_ns": 200000000
+        },
+        "source_duration_ns": null
+      },
+      "state_after": {
+        "last_actual": {
+          "host_time": 105.5,
+          "identity": {
+            "camera_id": "cmsnw6rjc01vhlh01oswn99yq",
+            "source_generation": 1,
+            "stream_epoch": 1,
+            "worker_boot_id": "boot-b"
+          },
+          "native_publish_sequence": 3,
+          "seq": 0,
+          "source_pts_ns": 200000000
+        },
+        "open_gap": null
+      },
+      "step": 15
+    },
+    {
+      "arguments": {
+        "camera_id": "cmsnw6rjc01vhlh01oswn99yq",
+        "host_time": 105.75,
+        "native_publish_sequence": 4,
+        "seq": 1,
+        "source_generation": 1,
+        "source_pts": 233333333,
+        "stream_epoch": 1,
+        "worker_boot_id": "boot-b"
+      },
+      "call": "observe",
+      "label": "steady frame",
+      "returned": null,
+      "state_after": {
+        "last_actual": {
+          "host_time": 105.75,
+          "identity": {
+            "camera_id": "cmsnw6rjc01vhlh01oswn99yq",
+            "source_generation": 1,
+            "stream_epoch": 1,
+            "worker_boot_id": "boot-b"
+          },
+          "native_publish_sequence": 4,
+          "seq": 1,
+          "source_pts_ns": 233333333
+        },
+        "open_gap": null
+      },
+      "step": 16
+    },
+    {
+      "arguments": {
+        "host_time": 106.0
+      },
+      "call": "detect_gap",
+      "label": "gap opens before a pts regression",
+      "returned": {
+        "identity": {
+          "camera_id": "cmsnw6rjc01vhlh01oswn99yq",
+          "source_generation": 1,
+          "stream_epoch": 1,
+          "worker_boot_id": "boot-b"
+        },
+        "last_actual": {
+          "host_time": 105.75,
+          "identity": {
+            "camera_id": "cmsnw6rjc01vhlh01oswn99yq",
+            "source_generation": 1,
+            "stream_epoch": 1,
+            "worker_boot_id": "boot-b"
+          },
+          "native_publish_sequence": 4,
+          "seq": 1,
+          "source_pts_ns": 233333333
+        },
+        "loss_detected_host_time": 106.0
+      },
+      "state_after": {
+        "last_actual": {
+          "host_time": 105.75,
+          "identity": {
+            "camera_id": "cmsnw6rjc01vhlh01oswn99yq",
+            "source_generation": 1,
+            "stream_epoch": 1,
+            "worker_boot_id": "boot-b"
+          },
+          "native_publish_sequence": 4,
+          "seq": 1,
+          "source_pts_ns": 233333333
+        },
+        "open_gap": {
+          "identity": {
+            "camera_id": "cmsnw6rjc01vhlh01oswn99yq",
+            "source_generation": 1,
+            "stream_epoch": 1,
+            "worker_boot_id": "boot-b"
+          },
+          "last_actual": {
+            "host_time": 105.75,
+            "identity": {
+              "camera_id": "cmsnw6rjc01vhlh01oswn99yq",
+              "source_generation": 1,
+              "stream_epoch": 1,
+              "worker_boot_id": "boot-b"
+            },
+            "native_publish_sequence": 4,
+            "seq": 1,
+            "source_pts_ns": 233333333
+          },
+          "loss_detected_host_time": 106.0
+        }
+      },
+      "step": 17
+    },
+    {
+      "arguments": {
+        "camera_id": "cmsnw6rjc01vhlh01oswn99yq",
+        "host_time": 106.5,
+        "native_publish_sequence": 6,
+        "seq": 2,
+        "source_generation": 1,
+        "source_pts": 100000000,
+        "stream_epoch": 1,
+        "worker_boot_id": "boot-b"
+      },
+      "call": "observe",
+      "label": "recovery with a pts regression",
+      "returned": {
+        "gap": {
+          "identity": {
+            "camera_id": "cmsnw6rjc01vhlh01oswn99yq",
+            "source_generation": 1,
+            "stream_epoch": 1,
+            "worker_boot_id": "boot-b"
+          },
+          "last_actual": {
+            "host_time": 105.75,
+            "identity": {
+              "camera_id": "cmsnw6rjc01vhlh01oswn99yq",
+              "source_generation": 1,
+              "stream_epoch": 1,
+              "worker_boot_id": "boot-b"
+            },
+            "native_publish_sequence": 4,
+            "seq": 1,
+            "source_pts_ns": 233333333
+          },
+          "loss_detected_host_time": 106.0
+        },
+        "host_observation_duration": 0.75,
+        "native_publish_sequence_gap": 1,
+        "next_actual": {
+          "host_time": 106.5,
+          "identity": {
+            "camera_id": "cmsnw6rjc01vhlh01oswn99yq",
+            "source_generation": 1,
+            "stream_epoch": 1,
+            "worker_boot_id": "boot-b"
+          },
+          "native_publish_sequence": 6,
+          "seq": 2,
+          "source_pts_ns": 100000000
+        },
+        "source_duration_ns": null
+      },
+      "state_after": {
+        "last_actual": {
+          "host_time": 106.5,
+          "identity": {
+            "camera_id": "cmsnw6rjc01vhlh01oswn99yq",
+            "source_generation": 1,
+            "stream_epoch": 1,
+            "worker_boot_id": "boot-b"
+          },
+          "native_publish_sequence": 6,
+          "seq": 2,
+          "source_pts_ns": 100000000
+        },
+        "open_gap": null
+      },
+      "step": 18
+    },
+    {
+      "arguments": {
+        "host_time": 107.0
+      },
+      "call": "detect_gap",
+      "label": "gap opens before a host-time regression",
+      "returned": {
+        "identity": {
+          "camera_id": "cmsnw6rjc01vhlh01oswn99yq",
+          "source_generation": 1,
+          "stream_epoch": 1,
+          "worker_boot_id": "boot-b"
+        },
+        "last_actual": {
+          "host_time": 106.5,
+          "identity": {
+            "camera_id": "cmsnw6rjc01vhlh01oswn99yq",
+            "source_generation": 1,
+            "stream_epoch": 1,
+            "worker_boot_id": "boot-b"
+          },
+          "native_publish_sequence": 6,
+          "seq": 2,
+          "source_pts_ns": 100000000
+        },
+        "loss_detected_host_time": 107.0
+      },
+      "state_after": {
+        "last_actual": {
+          "host_time": 106.5,
+          "identity": {
+            "camera_id": "cmsnw6rjc01vhlh01oswn99yq",
+            "source_generation": 1,
+            "stream_epoch": 1,
+            "worker_boot_id": "boot-b"
+          },
+          "native_publish_sequence": 6,
+          "seq": 2,
+          "source_pts_ns": 100000000
+        },
+        "open_gap": {
+          "identity": {
+            "camera_id": "cmsnw6rjc01vhlh01oswn99yq",
+            "source_generation": 1,
+            "stream_epoch": 1,
+            "worker_boot_id": "boot-b"
+          },
+          "last_actual": {
+            "host_time": 106.5,
+            "identity": {
+              "camera_id": "cmsnw6rjc01vhlh01oswn99yq",
+              "source_generation": 1,
+              "stream_epoch": 1,
+              "worker_boot_id": "boot-b"
+            },
+            "native_publish_sequence": 6,
+            "seq": 2,
+            "source_pts_ns": 100000000
+          },
+          "loss_detected_host_time": 107.0
+        }
+      },
+      "step": 19
+    },
+    {
+      "arguments": {
+        "camera_id": "cmsnw6rjc01vhlh01oswn99yq",
+        "host_time": 106.25,
+        "native_publish_sequence": 7,
+        "seq": 3,
+        "source_generation": 1,
+        "source_pts": 133333333,
+        "stream_epoch": 1,
+        "worker_boot_id": "boot-b"
+      },
+      "call": "observe",
+      "label": "recovery with a host-time regression",
+      "returned": {
+        "gap": {
+          "identity": {
+            "camera_id": "cmsnw6rjc01vhlh01oswn99yq",
+            "source_generation": 1,
+            "stream_epoch": 1,
+            "worker_boot_id": "boot-b"
+          },
+          "last_actual": {
+            "host_time": 106.5,
+            "identity": {
+              "camera_id": "cmsnw6rjc01vhlh01oswn99yq",
+              "source_generation": 1,
+              "stream_epoch": 1,
+              "worker_boot_id": "boot-b"
+            },
+            "native_publish_sequence": 6,
+            "seq": 2,
+            "source_pts_ns": 100000000
+          },
+          "loss_detected_host_time": 107.0
+        },
+        "host_observation_duration": null,
+        "native_publish_sequence_gap": 0,
+        "next_actual": {
+          "host_time": 106.25,
+          "identity": {
+            "camera_id": "cmsnw6rjc01vhlh01oswn99yq",
+            "source_generation": 1,
+            "stream_epoch": 1,
+            "worker_boot_id": "boot-b"
+          },
+          "native_publish_sequence": 7,
+          "seq": 3,
+          "source_pts_ns": 133333333
+        },
+        "source_duration_ns": 33333333
+      },
+      "state_after": {
+        "last_actual": {
+          "host_time": 106.25,
+          "identity": {
+            "camera_id": "cmsnw6rjc01vhlh01oswn99yq",
+            "source_generation": 1,
+            "stream_epoch": 1,
+            "worker_boot_id": "boot-b"
+          },
+          "native_publish_sequence": 7,
+          "seq": 3,
+          "source_pts_ns": 133333333
+        },
+        "open_gap": null
+      },
+      "step": 20
+    },
+    {
+      "arguments": {
+        "host_time": 108.0
+      },
+      "call": "detect_gap",
+      "label": "gap opens before a frame without pts",
+      "returned": {
+        "identity": {
+          "camera_id": "cmsnw6rjc01vhlh01oswn99yq",
+          "source_generation": 1,
+          "stream_epoch": 1,
+          "worker_boot_id": "boot-b"
+        },
+        "last_actual": {
+          "host_time": 106.25,
+          "identity": {
+            "camera_id": "cmsnw6rjc01vhlh01oswn99yq",
+            "source_generation": 1,
+            "stream_epoch": 1,
+            "worker_boot_id": "boot-b"
+          },
+          "native_publish_sequence": 7,
+          "seq": 3,
+          "source_pts_ns": 133333333
+        },
+        "loss_detected_host_time": 108.0
+      },
+      "state_after": {
+        "last_actual": {
+          "host_time": 106.25,
+          "identity": {
+            "camera_id": "cmsnw6rjc01vhlh01oswn99yq",
+            "source_generation": 1,
+            "stream_epoch": 1,
+            "worker_boot_id": "boot-b"
+          },
+          "native_publish_sequence": 7,
+          "seq": 3,
+          "source_pts_ns": 133333333
+        },
+        "open_gap": {
+          "identity": {
+            "camera_id": "cmsnw6rjc01vhlh01oswn99yq",
+            "source_generation": 1,
+            "stream_epoch": 1,
+            "worker_boot_id": "boot-b"
+          },
+          "last_actual": {
+            "host_time": 106.25,
+            "identity": {
+              "camera_id": "cmsnw6rjc01vhlh01oswn99yq",
+              "source_generation": 1,
+              "stream_epoch": 1,
+              "worker_boot_id": "boot-b"
+            },
+            "native_publish_sequence": 7,
+            "seq": 3,
+            "source_pts_ns": 133333333
+          },
+          "loss_detected_host_time": 108.0
+        }
+      },
+      "step": 21
+    },
+    {
+      "arguments": {
+        "camera_id": "cmsnw6rjc01vhlh01oswn99yq",
+        "host_time": 108.5,
+        "native_publish_sequence": 8,
+        "seq": 4,
+        "source_generation": 1,
+        "source_pts": null,
+        "stream_epoch": 1,
+        "worker_boot_id": "boot-b"
+      },
+      "call": "observe",
+      "label": "recovery with no source pts",
+      "returned": {
+        "gap": {
+          "identity": {
+            "camera_id": "cmsnw6rjc01vhlh01oswn99yq",
+            "source_generation": 1,
+            "stream_epoch": 1,
+            "worker_boot_id": "boot-b"
+          },
+          "last_actual": {
+            "host_time": 106.25,
+            "identity": {
+              "camera_id": "cmsnw6rjc01vhlh01oswn99yq",
+              "source_generation": 1,
+              "stream_epoch": 1,
+              "worker_boot_id": "boot-b"
+            },
+            "native_publish_sequence": 7,
+            "seq": 3,
+            "source_pts_ns": 133333333
+          },
+          "loss_detected_host_time": 108.0
+        },
+        "host_observation_duration": 2.25,
+        "native_publish_sequence_gap": 0,
+        "next_actual": {
+          "host_time": 108.5,
+          "identity": {
+            "camera_id": "cmsnw6rjc01vhlh01oswn99yq",
+            "source_generation": 1,
+            "stream_epoch": 1,
+            "worker_boot_id": "boot-b"
+          },
+          "native_publish_sequence": 8,
+          "seq": 4,
+          "source_pts_ns": null
+        },
+        "source_duration_ns": null
+      },
+      "state_after": {
+        "last_actual": {
+          "host_time": 108.5,
+          "identity": {
+            "camera_id": "cmsnw6rjc01vhlh01oswn99yq",
+            "source_generation": 1,
+            "stream_epoch": 1,
+            "worker_boot_id": "boot-b"
+          },
+          "native_publish_sequence": 8,
+          "seq": 4,
+          "source_pts_ns": null
+        },
+        "open_gap": null
+      },
+      "step": 22
+    }
+  ]
+}

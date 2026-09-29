@@ -1,0 +1,217 @@
+{
+  "backend": {
+    "as_response": {
+      "camera_id": "cmsnw6rjc01vhlh01oswn99yq",
+      "clip_id": "cmsnw6rjc01vhlh01oswn99yq-20260820T172057197192Z-00b200000001",
+      "codec": "",
+      "detected_at": "2026-08-20T17:20:58.197192Z",
+      "duration_s": 2.0,
+      "event_ref": "00000000-0000-4000-8000-00000000e0a1",
+      "event_type": "fall",
+      "extension": null,
+      "finalized": true,
+      "path": null,
+      "size_bytes": null,
+      "started_at": "2026-08-20T17:20:57.197192Z",
+      "thumbnail_available": false,
+      "truncation_reasons": [],
+      "video_available": false,
+      "video_error": "ENCODER_FAILED"
+    },
+    "event_refs": [
+      "00000000-0000-4000-8000-00000000e0a1"
+    ],
+    "verdict": "parsed"
+  },
+  "case": "unavailable",
+  "clip_store_listing": [
+    {
+      "kind": "dir",
+      "path": "clips"
+    },
+    {
+      "kind": "dir",
+      "path": "clips/.staging"
+    },
+    {
+      "kind": "dir",
+      "path": "clips/cmsnw6rjc01vhlh01oswn99yq-20260820T172057197192Z-00b200000001"
+    },
+    {
+      "kind": "file",
+      "path": "clips/cmsnw6rjc01vhlh01oswn99yq-20260820T172057197192Z-00b200000001/manifest.json",
+      "size_bytes": 752
+    },
+    {
+      "kind": "file",
+      "path": "clips/cmsnw6rjc01vhlh01oswn99yq-20260820T172057197192Z-00b200000001/terminal-outcome.json",
+      "size_bytes": 249
+    },
+    {
+      "kind": "dir",
+      "path": "clips/cmsnw6rjc01vhlh01oswn99yq-20260820T172057197192Z-00b200000001/terminal-outcomes"
+    },
+    {
+      "kind": "file",
+      "path": "clips/cmsnw6rjc01vhlh01oswn99yq-20260820T172057197192Z-00b200000001/terminal-outcomes/b7dd77b67d0c9073d728f3d9efe2fecfc0be7a2a8c6c830c090eca436a76888e.json",
+      "size_bytes": 246
+    }
+  ],
+  "inputs": {
+    "metadata": {
+      "camera_id": "cmsnw6rjc01vhlh01oswn99yq",
+      "clip_end_at": "2026-08-20T17:20:59.197192+00:00",
+      "clip_start_at": "2026-08-20T17:20:57.197192+00:00",
+      "decision_trace_id": null,
+      "detected_at": "2026-08-20T17:20:58.197192+00:00",
+      "domain": "fall",
+      "duration_s": 2.0,
+      "encoder": "ffmpeg",
+      "event_refs": [
+        "00000000-0000-4000-8000-00000000e0a1"
+      ],
+      "event_type": "fall",
+      "extension": null,
+      "facility_id": "facility-1",
+      "finalized_at": "2026-08-20T17:21:00.197192+00:00",
+      "runtime_manifest_sha256": null,
+      "source_error_reason": "encoder_failed",
+      "source_media": null,
+      "started_at": "2026-08-20T17:20:57.197192+00:00",
+      "time_origin": null,
+      "truncation_reasons": []
+    },
+    "reason_code": "ENCODER_FAILED",
+    "reservation": {
+      "camera_id": "cmsnw6rjc01vhlh01oswn99yq",
+      "clip_id": "cmsnw6rjc01vhlh01oswn99yq-20260820T172057197192Z-00b200000001",
+      "final_dir": "<work>/unavailable/store/clips/cmsnw6rjc01vhlh01oswn99yq-20260820T172057197192Z-00b200000001",
+      "staging_dir": "<work>/unavailable/store/clips/.staging/cmsnw6rjc01vhlh01oswn99yq-20260820T172057197192Z-00b200000001"
+    }
+  },
+  "manifest": {
+    "equals_sorted_compact_json_plus_newline": true,
+    "payload_file": "d/clip-manifests/unavailable.manifest.json",
+    "sha256": "58f9bd00c4a7a3623e60401c62840f11f3bd500943f7689efa30255cd0dc5ab8",
+    "size_bytes": 752,
+    "state_version": 2
+  },
+  "media_facts_informational": null,
+  "outcome": {
+    "published": {
+      "clip_id": "cmsnw6rjc01vhlh01oswn99yq-20260820T172057197192Z-00b200000001",
+      "manifest": {
+        "camera_id": "cmsnw6rjc01vhlh01oswn99yq",
+        "clip_end_at": "2026-08-20T17:20:59.197Z",
+        "clip_id": "cmsnw6rjc01vhlh01oswn99yq-20260820T172057197192Z-00b200000001",
+        "clip_start_at": "2026-08-20T17:20:57.197Z",
+        "decision_trace_id": null,
+        "detected_at": null,
+        "domain": null,
+        "duration_s": null,
+        "encoder": null,
+        "event_ref": null,
+        "event_refs": [
+          "00000000-0000-4000-8000-00000000e0a1"
+        ],
+        "event_type": null,
+        "extension": null,
+        "finalized": null,
+        "finalized_at": "2026-08-20T17:21:00.197Z",
+        "manifest_schema_version": 2,
+        "path": null,
+        "reason_code": "ENCODER_FAILED",
+        "recovery_state": null,
+        "runtime_manifest_sha256": null,
+        "source_error_reason": null,
+        "source_media": null,
+        "started_at": null,
+        "state": "UNAVAILABLE",
+        "state_version": 2,
+        "time_origin": null,
+        "truncation_reasons": [],
+        "video_available": null
+      },
+      "manifest_path": "<work>/unavailable/store/clips/cmsnw6rjc01vhlh01oswn99yq-20260820T172057197192Z-00b200000001/manifest.json",
+      "video_path": null
+    },
+    "verdict": "published"
+  },
+  "ports": {
+    "clip_id_factory": [
+      {
+        "camera_id": "cmsnw6rjc01vhlh01oswn99yq"
+      }
+    ],
+    "delivery_queue": [
+      {
+        "call": "DeliveryQueue",
+        "directory": "<work>/unavailable/store/delivery-queue"
+      },
+      {
+        "call": "try_admit",
+        "entry": {
+          "camera_id": "cmsnw6rjc01vhlh01oswn99yq",
+          "clip_end_at": "2026-08-20T17:20:59.197Z",
+          "clip_id": "cmsnw6rjc01vhlh01oswn99yq-20260820T172057197192Z-00b200000001",
+          "clip_start_at": "2026-08-20T17:20:57.197Z",
+          "codec": null,
+          "duration_ms": null,
+          "entry_id": "clip-7946e34b2e1cc316eff64a1793a2b7aaa765c33d6d9dfb622f5ecdd72974f22d",
+          "event_ids": [
+            "00000000-0000-4000-8000-00000000e0a1"
+          ],
+          "facility_id": "facility-1",
+          "finalized_at": "2026-08-20T17:21:00.197Z",
+          "local_state": "UNAVAILABLE",
+          "media_reference": null,
+          "mime_type": null,
+          "sha256": null,
+          "size_bytes": null,
+          "state_version": 2,
+          "unavailable_reason": "ENCODER_FAILED"
+        },
+        "entry_class": "ClipEntry"
+      }
+    ],
+    "on_ready": [],
+    "playback_rendition": [],
+    "thumbnail_generator": []
+  },
+  "provenance": "synthetic-only",
+  "recipe": {
+    "camera_id": "cmsnw6rjc01vhlh01oswn99yq",
+    "clock": {
+      "datetimes": "literal UTC",
+      "time.time": 1787000000.0,
+      "uuid.uuid4": "counter UUID(int=n, version=4)"
+    },
+    "event_refs": [
+      "00000000-0000-4000-8000-00000000e0a1",
+      "00000000-0000-4000-8000-00000000e0b2"
+    ],
+    "facility_id": "facility-1",
+    "ffmpeg_version": "ffmpeg version 9.0.2 Copyright (c) 2000-2026 the FFmpeg developers",
+    "ports": "in-process fakes: DeliveryQueue(dir).try_admit, ClipIdFactory, ThumbnailGenerator.generate, on_ready, schedule_playback_rendition; each records its call arguments",
+    "source_mp4": "-f lavfi -i testsrc=size=320x240:rate=10 -t 2 -pix_fmt yuv420p -fflags +bitexact -flags:v +bitexact -map_metadata -1 -movflags +faststart <work>/<case>/source.mp4 (bytes never recorded)"
+  },
+  "recorder_sha256": "c010106dd0e67939bcd0112caac6c7f3cd1a1705212fe50932c283dd6d32d49c",
+  "repo_head": "030aaf1dc2c4a114b5d1f83ae391757ddbc3da2c",
+  "review": {
+    "independent_oracle": [
+      "worker/pipeline/output/evidence/clip_publication.py:178 ClipPublisher.publish_unavailable @030aaf1",
+      "backend/app/features/clips/manifest.py:139 parse_manifest_bytes, :85 ClipManifest.as_response, :243 _event_refs @030aaf1",
+      "worker/pipeline/output/evidence/evidence_manifest.py:100 parse_manifest @030aaf1"
+    ],
+    "note": "manifest.json bytes are the production writer output; the backend parser and the worker parser are the independent readers. clip.mp4 facts (size, sha256, codec, duration) come from ffmpeg and are informational."
+  },
+  "schema": "b24-clip-manifest-case/v1",
+  "worker": {
+    "model": "UnavailableClipManifest",
+    "reason_code": "ENCODER_FAILED",
+    "state": "UNAVAILABLE",
+    "state_version": 2,
+    "verdict": "parsed"
+  },
+  "writer": "worker/pipeline/output/evidence/clip_publication.py:178 ClipPublisher.publish_unavailable"
+}
