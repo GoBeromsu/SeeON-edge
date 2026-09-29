@@ -216,25 +216,13 @@ type = "independence"
 modules = ["backend", "worker"]
 
 [[tool.importlinter.contracts]]
-# The create-only bootstrap is the sole module that executes DDL. Runtime
-# packages open an already-bootstrapped schema-19 database and never reach it.
-name = "runtime packages cannot import edge database DDL"
+# The schema-19 SQLite source is a migration test fixture only. PostgreSQL is
+# the sole durable store, so no runtime package may reach the fixture that
+# recreates the old database (also scanned by tests/test_edge_db_ddl_boundary.py).
+name = "runtime packages cannot import the SQLite source fixture"
 type = "forbidden"
-source_modules = ["backend", "worker"]
-forbidden_modules = ["backend.app.edge_db.bootstrap"]
-
-[[tool.importlinter.contracts]]
-# Serving/runtime schema-compatibility validates the schema-19 structural
-# manifest from current-schema DDL alone. The broad contract above uses the
-# whole `backend` package as source, which does not catch intra-edge_db chains;
-# this one pins the exact serving leaf.
-name = "runtime compatibility stays free of the bootstrap DDL owner"
-type = "forbidden"
-source_modules = [
-    "backend.app.edge_db.compatibility",
-    "backend.app.edge_db.schema18_manifest",
-]
-forbidden_modules = ["backend.app.edge_db.bootstrap"]
+source_modules = ["backend", "worker", "contracts", "shared"]
+forbidden_modules = ["tests_support"]
 
 [[tool.importlinter.contracts]]
 name = "contracts is a leaf (imports nothing internal)"

@@ -1,4 +1,4 @@
-"""File proof and existing-owner rollback; not native PostgreSQL receipt qualification."""
+"""File proof, and native PostgreSQL receipt rollback when a clip file changes mid-receipt."""
 
 from __future__ import annotations
 
@@ -6,17 +6,17 @@ import errno
 import hashlib
 import json
 import os
-import sqlite3
+from concurrent.futures import ThreadPoolExecutor
 from threading import Event, Thread
+from time import monotonic
 
 import pytest
 
+from backend.app.edge_db.authority import require_authority
 from backend.app.features.clips.descriptor_files import open_contained_regular_file
 from backend.app.features.clips.manifest import parse_manifest_bytes, read_manifest_file
 from backend.app.features.clips.store import ClipStore
-from backend.app.features.evidence.compact_receipts import (
-    CompactArtifactReceiptStore,
-)
+from backend.app.features.evidence.postgres_receipts import PostgresArtifactReceiptStore
 from backend.app.features.evidence.receipt_files import (
     ReceiptFiles,
     ReceiptHooks,
@@ -28,8 +28,8 @@ from backend.app.features.evidence.receipt_store import (
     ArtifactReceiptVerificationError,
     verified_artifact,
 )
-from tests_support.compact_authority_db import prepare_compact_database
 
+pytest_plugins = ("tests_support.postgres_sandbox",)
 _TIME = "2026-07-06T00:00:00Z"
 
 
@@ -66,26 +66,34 @@ def clip(tmp_path):
 
 
 @pytest.fixture
-def database(tmp_path):
-    database = prepare_compact_database(tmp_path / "edge.sqlite3")
-    with sqlite3.connect(database) as connection:
+def sandbox(postgres_product_sandbox):
+    sandbox = postgres_product_sandbox
+
+    def seed(connection):
+        require_authority(connection, sandbox.authority)
         connection.execute(
             "INSERT INTO incidents (incident_id,edge_event_id,facility_id,camera_id,event_type,"
             "probability,detected_at,lifecycle_state,provenance_state,provenance_missing_reason,"
             "review_version,revision,created_at,updated_at) "
-            "VALUES ('incident:event-1','event-1','facility-1','camera-1','fall',0.8,?,'OPEN',"
-            "'MISSING','NOT_RECORDED',0,1,?,?)",
+            "VALUES ('incident:event-1','event-1','facility-1','camera-1','fall',0.8,%s,'OPEN',"
+            "'MISSING','NOT_RECORDED',0,1,%s,%s)",
             (_TIME, _TIME, _TIME),
         )
-    return database
+
+    sandbox.database.transact(seed)
+    return sandbox
 
 
-def _rows(database):
-    with sqlite3.connect(database) as connection:
-        return {
-            table: connection.execute("SELECT * FROM " + table + " ORDER BY 1").fetchall()
-            for table in ("clips", "incidents", "artifacts")
-        }
+def _store(sandbox, root, hooks=None):
+    return PostgresArtifactReceiptStore(sandbox.database, sandbox.authority, root, hooks)
+
+
+def _rows(sandbox):
+    """Read durable receipt state on the admin connection, independent of the store's pool."""
+    return {
+        table: sandbox.admin.execute("SELECT * FROM " + table + " ORDER BY 1").fetchall()
+        for table in ("clips", "incidents", "artifacts", "audit_events")
+    }
 
 
 def _mutate(path, kind):
@@ -162,17 +170,17 @@ def test_location_and_hashed_descriptor_cannot_describe_different_manifests(clip
         ReceiptManifest.capture(store, "clip-1")
 
 
+# Rewrite, inode, symlink and missing swaps are covered by
+# test_postgres_receipts::test_file_races_leave_no_partial_native_rows_or_callback.
 @pytest.mark.parametrize("phase", ["after_preflight", "before_final_check"])
 @pytest.mark.parametrize("subject", ["manifest", "media"])
-@pytest.mark.parametrize("kind", ["rewrite", "inode", "symlink", "missing", "fifo"])
-def test_file_change_aborts_existing_owner_without_audit_or_partial_rows(
-    clip, database, phase, subject, kind
+def test_fifo_swap_aborts_native_receipt_without_audit_or_partial_rows(
+    clip, sandbox, phase, subject
 ):
     root, manifest_path, media, receipt = clip
-    before, callbacks = _rows(database), []
+    before, callbacks = _rows(sandbox), []
     target = manifest_path if subject == "manifest" else media
-    hooks = ReceiptHooks(**{phase: lambda: _mutate(target, kind)})
-    store = CompactArtifactReceiptStore(database, root, hooks)
+    store = _store(sandbox, root, ReceiptHooks(**{phase: lambda: _mutate(target, "fifo")}))
     with media.open("rb") as source:
         verified = verified_artifact(source)
         with pytest.raises(ArtifactReceiptVerificationError):
@@ -180,26 +188,24 @@ def test_file_change_aborts_existing_owner_without_audit_or_partial_rows(
                 receipt, verified, after_write=lambda connection: callbacks.append(True)
             )
         assert not source.closed
-    assert callbacks == [] and _rows(database) == before
+    assert callbacks == [] and _rows(sandbox) == before
 
 
 @pytest.mark.parametrize("phase", ["after_preflight", "before_final_check"])
-def test_same_parsed_manifest_with_different_bytes_cannot_change_the_receipt(clip, database, phase):
+def test_same_parsed_manifest_with_different_bytes_cannot_change_the_receipt(clip, sandbox, phase):
     root, manifest_path, _, receipt = clip
-    before = _rows(database)
+    before = _rows(sandbox)
     original = read_manifest_file(manifest_path)
-    store = CompactArtifactReceiptStore(
-        database, root, ReceiptHooks(**{phase: lambda: _mutate(manifest_path, "whitespace")})
-    )
+    hooks = ReceiptHooks(**{phase: lambda: _mutate(manifest_path, "whitespace")})
     with pytest.raises(ArtifactReceiptVerificationError):
-        store.commit(receipt)
+        _store(sandbox, root, hooks).commit(receipt)
     assert read_manifest_file(manifest_path) == original
-    assert _rows(database) == before
+    assert _rows(sandbox) == before
 
 
-def test_valid_receipt_and_matching_retry_keep_callback_and_hash_contracts(clip, database):
+def test_valid_receipt_and_matching_retry_keep_callback_and_hash_contracts(clip, sandbox):
     root, manifest_path, _, receipt = clip
-    store = CompactArtifactReceiptStore(database, root)
+    store = _store(sandbox, root)
     callbacks = []
 
     def after_write(connection):
@@ -208,68 +214,51 @@ def test_valid_receipt_and_matching_retry_keep_callback_and_hash_contracts(clip,
         callbacks.append(True)
 
     assert store.commit(receipt, after_write=after_write) == receipt
-    first = _rows(database)
+    first = _rows(sandbox)
     assert store.commit(receipt, after_write=after_write) == receipt
-    assert callbacks == [True, True] and _rows(database) == first
-    with sqlite3.connect(database) as connection:
-        assert connection.execute(
-            "SELECT manifest_sha256,manifest_size_bytes FROM clips"
-        ).fetchone() == (
-            hashlib.sha256(manifest_path.read_bytes()).hexdigest(),
-            manifest_path.stat().st_size,
-        )
+    assert callbacks == [True, True] and _rows(sandbox) == first
+    assert sandbox.admin.execute(
+        "SELECT manifest_sha256,manifest_size_bytes FROM clips"
+    ).fetchone() == (
+        hashlib.sha256(manifest_path.read_bytes()).hexdigest(),
+        manifest_path.stat().st_size,
+    )
 
 
-def test_unavailable_receipt_rechecks_manifest_after_mutation(clip, database, monkeypatch):
-    from backend.app.features.evidence import compact_receipts
-
+def test_unavailable_receipt_rechecks_manifest_after_writing(clip, sandbox):
     root, manifest_path, media, _ = clip
     media.unlink()  # Unavailable receipts must not require a media descriptor.
-    before = _rows(database)
-    original = compact_receipts.commit_unavailable_primary
-    mutations = []
-
-    def change_manifest(*args, **kwargs):
-        original(*args, **kwargs)
-        connection = args[0]
-        assert connection.execute(
-            "SELECT lifecycle_state,failure_reason FROM incidents WHERE edge_event_id='event-1'"
-        ).fetchone() == ("FAILED", "NO_FRAMES")
-        assert connection.execute("SELECT state,reason FROM artifacts").fetchone() == (
-            "UNAVAILABLE",
-            "NO_FRAMES",
-        )
-        mutations.append(True)
+    admin = sandbox.admin
+    # Test-only pause: the FAILED transition waits on an advisory lock this test holds,
+    # so the manifest changes after the receipt's first check but before it commits.
+    admin.execute(
+        "CREATE FUNCTION receipt_pause() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN "
+        "PERFORM pg_advisory_xact_lock(1, hashtext(TG_TABLE_SCHEMA)); RETURN NULL; END $$"
+    )
+    admin.execute(
+        "CREATE TRIGGER receipt_pause AFTER UPDATE ON incidents FOR EACH ROW "
+        "WHEN (NEW.lifecycle_state = 'FAILED') EXECUTE FUNCTION receipt_pause()"
+    )
+    before = _rows(sandbox)
+    (holder,) = admin.execute("SELECT pg_backend_pid()").fetchone()
+    admin.execute("SELECT pg_advisory_lock(1, hashtext(%s::text))", (sandbox.schema,))
+    executor = ThreadPoolExecutor(max_workers=1)
+    try:
+        future = executor.submit(_store(sandbox, root).commit_unavailable, "clip-1", "NO_FRAMES")
+        deadline, pacing = monotonic() + 1.5, Event()
+        while not admin.execute(
+            "SELECT EXISTS (SELECT 1 FROM pg_stat_activity WHERE %s = ANY(pg_blocking_pids(pid)))",
+            (holder,),
+        ).fetchone()[0]:
+            assert monotonic() < deadline, "receipt never reached the paused FAILED transition"
+            pacing.wait(0.01)
         _mutate(manifest_path, "rewrite")
-
-    monkeypatch.setattr(compact_receipts, "commit_unavailable_primary", change_manifest)
+    finally:
+        admin.execute("SELECT pg_advisory_unlock(1, hashtext(%s::text))", (sandbox.schema,))
+        executor.shutdown(wait=True)
     with pytest.raises(ArtifactReceiptVerificationError):
-        CompactArtifactReceiptStore(database, root).commit_unavailable("clip-1", "NO_FRAMES")
-    assert mutations == [True]
-    assert _rows(database) == before
-
-
-def test_unavailable_receipt_succeeds_and_retries_without_media(clip, database):
-    root, _, media, _ = clip
-    media.unlink()
-    store = CompactArtifactReceiptStore(database, root)
-    store.commit_unavailable("clip-1", "NO_FRAMES")
-    with sqlite3.connect(database) as connection:
-        assert connection.execute("SELECT count(*) FROM clips").fetchone() == (0,)
-        assert connection.execute(
-            "SELECT clip_id,state,reason,revision FROM artifacts"
-        ).fetchone() == (
-            None,
-            "UNAVAILABLE",
-            "NO_FRAMES",
-            1,
-        )
-        assert connection.execute(
-            "SELECT lifecycle_state,failure_reason,revision FROM incidents"
-        ).fetchone() == ("FAILED", "NO_FRAMES", 2)
-    first = _rows(database)
-    store.commit_unavailable("clip-1", "NO_FRAMES")
-    assert not media.exists() and _rows(database) == first
+        future.result(timeout=2)
+    assert _rows(sandbox) == before
 
 
 @pytest.mark.parametrize("content", [b"not-json", b"{}", b"[]"])

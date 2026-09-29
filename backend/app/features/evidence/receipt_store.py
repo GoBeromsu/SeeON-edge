@@ -15,11 +15,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, BinaryIO, Protocol, runtime_checkable
 
-from backend.app.features.clips.catalog import CatalogConflictError, CatalogStore
-
 if TYPE_CHECKING:
-    from fastapi import FastAPI
-
     from backend.app.features.clips.manifest import ClipManifest
 
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
@@ -122,35 +118,6 @@ def verified_artifact(handle: BinaryIO) -> VerifiedArtifact:
     )
 
 
-class CatalogArtifactReceiptStore:
-    """Receipt adapter over the existing API-owned ``clips`` catalog table."""
-
-    def __init__(self, catalog: CatalogStore) -> None:
-        self._catalog = catalog
-
-    @classmethod
-    def from_app(cls, app: FastAPI) -> CatalogArtifactReceiptStore:
-        from backend.app.features.clips.catalog import get_catalog_store
-
-        catalog = get_catalog_store(app)
-        if catalog is None:
-            raise ArtifactReceiptPersistenceError("clip catalog is unavailable")
-        return cls(catalog)
-
-    def commit(self, receipt: ArtifactReceipt) -> ArtifactReceipt:
-        try:
-            sha256, size_bytes, accepted = self._catalog.commit_artifact_receipt(
-                receipt.artifact_id, receipt.sha256, receipt.size_bytes
-            )
-        except CatalogConflictError as exc:
-            raise ArtifactReceiptConflictError(str(exc)) from exc
-        return ArtifactReceipt(receipt.artifact_id, sha256, size_bytes, accepted)
-
-    def get(self, artifact_id: str) -> ArtifactReceipt | None:
-        row = self._catalog.artifact_receipt(artifact_id)
-        return None if row is None else ArtifactReceipt(artifact_id, *row)
-
-
 def verify_artifact(path: Path, receipt: ArtifactReceipt) -> None:
     """Require a current regular-file size and SHA-256 match before use."""
     try:
@@ -176,7 +143,6 @@ __all__ = [
     "ArtifactReceiptPersistenceError",
     "ArtifactReceiptStore",
     "ArtifactReceiptVerificationError",
-    "CatalogArtifactReceiptStore",
     "ClipProjection",
     "ReceiptMissingIncidentError",
     "VerifiedArtifact",
