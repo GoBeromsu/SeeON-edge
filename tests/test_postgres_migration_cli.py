@@ -9,6 +9,7 @@ import pytest
 from psycopg.conninfo import make_conninfo
 
 from backend.app.edge_db.migration.cli import main
+from backend.app.edge_db.migration.sqlite_fence import fence_sqlite
 from backend.app.edge_db.migration.transfer import pending_authority_path
 from tests_support.postgres_migration import (
     MigrationNames,
@@ -80,6 +81,9 @@ def test_cli_runs_the_cutover_and_reports_failure_by_exit_code(
     reports = tmp_path / "reports"
     reports.mkdir()
     bound, unfenced = reports / "reconcile.json", reports / "reconcile-after-transfer.json"
+    receipts = tmp_path / "receipts"
+    receipts.mkdir(mode=0o700)
+    receipt = str(receipts / "fence.json")
     output: list[str] = []
 
     def run(*argv: str) -> tuple[int, str, str]:
@@ -97,6 +101,9 @@ def test_cli_runs_the_cutover_and_reports_failure_by_exit_code(
         authority,
     )
     exported = run("export", "--source", str(source), "--snapshot", str(snapshot))
+    # The operator stamps the stopped old database at the provisioned generation.
+    generation, _ = authority_file_token(Path(authority))
+    fence_sqlite(source, snapshot=snapshot, generation=generation, receipt=Path(receipt))
     digested = run("queue-digest", "--worker-state-dir", state)
     queue_sha256 = digested[1].rsplit("sha256=", 1)[1].strip()
     imported = run("import", *owner, "--snapshot", str(snapshot))
@@ -109,6 +116,8 @@ def test_cli_runs_the_cutover_and_reports_failure_by_exit_code(
         str(bound),
         "--source",
         str(source),
+        "--fence-receipt",
+        receipt,
         "--worker-state-dir",
         state,
         "--expect-delivery-queue-sha256",
@@ -118,9 +127,10 @@ def test_cli_runs_the_cutover_and_reports_failure_by_exit_code(
         "transfer", *owner, "--authority-file", authority, "--worker-state-dir", state
     )
     stale = run("reconcile", *owner, "--snapshot", str(snapshot), "--report", str(unfenced))
-    live = run("rollback-check", *owner, "--snapshot", str(snapshot))
+    rollback = ("--snapshot", str(snapshot), "--source", str(source), "--fence-receipt", receipt)
+    live = run("rollback-check", *owner, *rollback)
     frozen = run("freeze", *owner, "--authority-file", authority)
-    fenced = run("rollback-check", *owner, "--snapshot", str(snapshot))
+    fenced = run("rollback-check", *owner, *rollback)
 
     report_text = bound.read_text(encoding="utf-8") + unfenced.read_text(encoding="utf-8")
     text = "".join(output) + report_text
