@@ -1,0 +1,157 @@
+{
+  "cases": {
+    "legacy-bed-exit-truncated": {
+      "backend": {
+        "parser": "scripts/ops/replay-runtime-analysis.py:parse_worker_replay",
+        "refused": {
+          "error_class": "ReplayResponseError",
+          "message": "worker refused incomplete replay input"
+        }
+      },
+      "request": {
+        "body": {
+          "module_id": "bed_exit",
+          "policy": {
+            "camera_revision_id": null,
+            "effective_policy_id": "0c4e5085b77a3fc99a62673fe52eb363b5c4557ab96f906efa4f52d762ffa8e0",
+            "facility_revision_id": null,
+            "module_id": "bed_exit",
+            "module_version": 1,
+            "schema_id": "bed_exit.policy",
+            "schema_version": 1,
+            "source": "image-default",
+            "values": {
+              "grace_frames": 1,
+              "hold_frames": 1,
+              "min_containment": 0.5
+            }
+          },
+          "trace": {
+            "camera_id": "camera-replay-http",
+            "frames": [
+              {
+                "bed_region_provenance": "empty",
+                "beds": [],
+                "components": [],
+                "frame_height": 480,
+                "frame_key": [
+                  "boot-replay-http",
+                  "camera-replay-http",
+                  1,
+                  1
+                ],
+                "frame_width": 640,
+                "persons": [],
+                "pts": {
+                  "missing_reason": null,
+                  "value": 1.0
+                },
+                "schema_version": 1,
+                "source_time": {
+                  "missing_reason": null,
+                  "value": 1.0
+                },
+                "trace_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+              }
+            ],
+            "truncation": {
+              "detail_unavailable_reason": null,
+              "handoff_dropped_frames": 2,
+              "newest_retained_key": [
+                "boot-replay-http",
+                "camera-replay-http",
+                1,
+                1
+              ],
+              "newest_retained_seq": 1,
+              "oldest_retained_key": [
+                "boot-replay-http",
+                "camera-replay-http",
+                1,
+                1
+              ],
+              "oldest_retained_seq": 1,
+              "persistence_failed_frames": 0,
+              "pruned_frames": 1,
+              "retention_blocked_frames": 0
+            }
+          }
+        },
+        "body_raw": "{\"module_id\":\"bed_exit\",\"policy\":{\"camera_revision_id\":null,\"effective_policy_id\":\"0c4e5085b77a3fc99a62673fe52eb363b5c4557ab96f906efa4f52d762ffa8e0\",\"facility_revision_id\":null,\"module_id\":\"bed_exit\",\"module_version\":1,\"schema_id\":\"bed_exit.policy\",\"schema_version\":1,\"source\":\"image-default\",\"values\":{\"grace_frames\":1,\"hold_frames\":1,\"min_containment\":0.5}},\"trace\":{\"camera_id\":\"camera-replay-http\",\"frames\":[{\"bed_region_provenance\":\"empty\",\"beds\":[],\"components\":[],\"frame_height\":480,\"frame_key\":[\"boot-replay-http\",\"camera-replay-http\",1,1],\"frame_width\":640,\"persons\":[],\"pts\":{\"missing_reason\":null,\"value\":1.0},\"schema_version\":1,\"source_time\":{\"missing_reason\":null,\"value\":1.0},\"trace_id\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"}],\"truncation\":{\"detail_unavailable_reason\":null,\"handoff_dropped_frames\":2,\"newest_retained_key\":[\"boot-replay-http\",\"camera-replay-http\",1,1],\"newest_retained_seq\":1,\"oldest_retained_key\":[\"boot-replay-http\",\"camera-replay-http\",1,1],\"oldest_retained_seq\":1,\"persistence_failed_frames\":0,\"pruned_frames\":1,\"retention_blocked_frames\":0}}}",
+        "headers": {
+          "content-type": "application/json",
+          "x-edge-relay-token": "<relay-token>"
+        },
+        "method": "POST",
+        "path": "/replay"
+      },
+      "response": {
+        "body": {
+          "boot_ids": [
+            "boot-replay-http"
+          ],
+          "camera_id": "camera-replay-http",
+          "effective_policy_id": "0c4e5085b77a3fc99a62673fe52eb363b5c4557ab96f906efa4f52d762ffa8e0",
+          "event_count": 0,
+          "frames": [
+            {
+              "analysis_trace_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+              "events": [],
+              "frame_key": [
+                "boot-replay-http",
+                "camera-replay-http",
+                1,
+                1
+              ],
+              "snapshots": [
+                {
+                  "bed_id": null,
+                  "current_state": "no-decision",
+                  "missing_values": {
+                    "bed_id": "bed-region-unavailable",
+                    "containment_ratio": "bed-region-unavailable"
+                  },
+                  "previous_state": "unknown",
+                  "reason": "bed-region-unavailable",
+                  "track_id": null,
+                  "triggered": false,
+                  "values": {}
+                }
+              ]
+            }
+          ],
+          "module_qualified_id": "bed_exit.v1",
+          "non_reproducible_reason": "legacy-trace-liveness; truncated-or-incomplete-initial-state: handoff_dropped_frames=2, pruned_frames=1",
+          "policy_qualified_id": "bed_exit.policy.v1",
+          "reproducible": false,
+          "truncation": {
+            "detail_unavailable_reason": null,
+            "handoff_dropped_frames": 2,
+            "newest_retained_key": [
+              "boot-replay-http",
+              "camera-replay-http",
+              1,
+              1
+            ],
+            "newest_retained_seq": 1,
+            "oldest_retained_key": [
+              "boot-replay-http",
+              "camera-replay-http",
+              1,
+              1
+            ],
+            "oldest_retained_seq": 1,
+            "persistence_failed_frames": 0,
+            "pruned_frames": 1,
+            "retention_blocked_frames": 0
+          }
+        },
+        "headers": {
+          "content-length": "1174",
+          "content-type": "application/json"
+        },
+        "status": 200
+      }
+    }
+  }
+}

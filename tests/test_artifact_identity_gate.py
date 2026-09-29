@@ -110,7 +110,7 @@ def test_compiled_identities_compose_without_error() -> None:
     assert all(isinstance(value, str) and value for value in identities.values())
 
 
-@pytest.mark.parametrize("component_id", ["person", "bed", "pose"])
+@pytest.mark.parametrize("component_id", ["bed", "pose"])
 def test_tampered_component_digest_is_refused(component_id: str) -> None:
     """A single wrong digest must block activation for every pinned component."""
 

@@ -2,11 +2,10 @@
 
 from __future__ import annotations
 
-from contextlib import closing
 from dataclasses import dataclass
-from pathlib import Path
 
-from backend.app.edge_db.configuration import open_configuration_database
+import psycopg
+
 from backend.app.features.detection_settings.policy_models import PolicyDiff
 from backend.app.features.detection_settings.policy_rows import (
     database_camera_id,
@@ -33,7 +32,7 @@ class PolicyProposal:
     values: object
 
 
-def build_policy_diff(path: Path, proposal: PolicyProposal) -> PolicyDiff:
+def build_policy_diff(connection: psycopg.Connection, proposal: PolicyProposal) -> PolicyDiff:
     if proposal.values is None and proposal.camera_id is None:
         raise PolicyDocumentError("facility default policy values cannot be null")
     parsed = (
@@ -47,29 +46,28 @@ def build_policy_diff(path: Path, proposal: PolicyProposal) -> PolicyDiff:
             values=proposal.values,
         )
     )
-    with closing(open_configuration_database(path)) as connection:
-        camera_key = database_camera_id(connection, proposal.camera_id)
-        record = policy_record(
-            connection,
-            proposal.facility_id,
-            camera_key,
-            proposal.module_id,
-            proposal.module_version,
-        )
-        current = effective_policy(
-            connection,
-            proposal.facility_id,
-            camera_key,
-            proposal.module_id,
-            proposal.module_version,
-        )
-        facility = effective_policy(
-            connection,
-            proposal.facility_id,
-            None,
-            proposal.module_id,
-            proposal.module_version,
-        )
+    camera_key = database_camera_id(connection, proposal.camera_id)
+    record = policy_record(
+        connection,
+        proposal.facility_id,
+        camera_key,
+        proposal.module_id,
+        proposal.module_version,
+    )
+    current = effective_policy(
+        connection,
+        proposal.facility_id,
+        camera_key,
+        proposal.module_id,
+        proposal.module_version,
+    )
+    facility = effective_policy(
+        connection,
+        proposal.facility_id,
+        None,
+        proposal.module_id,
+        proposal.module_version,
+    )
     proposed = (
         facility
         if parsed is None

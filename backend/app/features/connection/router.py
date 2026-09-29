@@ -8,7 +8,7 @@ from pydantic import UUID4, BaseModel, ConfigDict, Field
 
 from backend.app.core.config import get_settings
 from backend.app.features.audit.catalog import AuditAction, empty_detail
-from backend.app.features.audit.http import append_transactional
+from backend.app.features.audit.http import mutation_audit
 from backend.app.features.audit.store import AuditEvent, utc_now
 from backend.app.features.cameras.roster_sync import sync_camera_roster
 from backend.app.features.cameras.router import _authorize
@@ -18,7 +18,7 @@ from backend.app.features.connection.enrollment import (
     EnrollmentVerificationFailure,
     verify_enrollment,
 )
-from backend.app.features.connection.store import ConnectionSettingsStore
+from backend.app.features.connection.store import get_connection_settings_store
 from backend.app.features.connection.topology_retry_coordinator import (
     TopologySyncErrorClass,
     TopologySyncStatus,
@@ -114,11 +114,24 @@ def put_connection(
     background_tasks: BackgroundTasks,
 ) -> dict[str, object]:
     actor = _authorize(request)
-    store = ConnectionSettingsStore.from_env()
+    store = get_connection_settings_store(request.app)
     credentials = _credentials(payload)
+    audit = mutation_audit(
+        request,
+        lambda: AuditEvent(
+            occurred_at=utc_now(),
+            actor_id=actor,
+            action=AuditAction.CONNECTION_UPDATE,
+            target_id=verified.facility.facility_id,
+            detail=empty_detail(AuditAction.CONNECTION_UPDATE),
+        ),
+    )
+    audit.require_admission(store)
+    events_url = store.load().events_url
+    audit.require_admission(store)
     try:
         verified = verify_enrollment(
-            store.load().events_url,
+            events_url,
             credentials,
             timeout_sec=get_settings().connection_test_timeout_s,
         )
@@ -127,25 +140,18 @@ def put_connection(
             status_code=exc.status_code,
             detail=_ENROLLMENT_DETAIL[exc.error_class],
         ) from None
-    store.save(
-        {
-            "facility_code": credentials.facility_code,
-            "client_installation_ref": credentials.client_installation_ref,
-            "facility_token": credentials.facility_token,
-            "facility_id": verified.facility.facility_id,
-            "edge_installation_id": verified.principal.edge_installation_id,
-            "enrollment_generation": verified.principal.enrollment_generation,
-        },
-        after_write=lambda connection: append_transactional(
-            request,
-            connection,
-            AuditEvent(
-                occurred_at=utc_now(),
-                actor_id=actor,
-                action=AuditAction.CONNECTION_UPDATE,
-                target_id=verified.facility.facility_id,
-                detail=empty_detail(AuditAction.CONNECTION_UPDATE),
-            ),
+    audit.apply(
+        store,
+        lambda append: store.save(
+            {
+                "facility_code": credentials.facility_code,
+                "client_installation_ref": credentials.client_installation_ref,
+                "facility_token": credentials.facility_token,
+                "facility_id": verified.facility.facility_id,
+                "edge_installation_id": verified.principal.edge_installation_id,
+                "enrollment_generation": verified.principal.enrollment_generation,
+            },
+            after_write=append,
         ),
     )
     apply_connection_settings(request.app)
@@ -162,7 +168,7 @@ def test_connection(
     _authorize(request)
     try:
         verified = verify_enrollment(
-            ConnectionSettingsStore.from_env().load().events_url,
+            get_connection_settings_store(request.app).load().events_url,
             _credentials(payload),
             timeout_sec=get_settings().connection_test_timeout_s,
         )
@@ -187,10 +193,9 @@ def sync_cameras(request: Request) -> dict[str, object]:
     actor = _authorize(request)
     result = sync_camera_roster(
         request.app,
-        after_write=lambda connection: append_transactional(
+        audit=mutation_audit(
             request,
-            connection,
-            AuditEvent(
+            lambda: AuditEvent(
                 occurred_at=utc_now(),
                 actor_id=actor,
                 action=AuditAction.CONNECTION_SYNC,
@@ -218,7 +223,7 @@ def _credentials(payload: ConnectionEnrollmentRequest) -> EnrollmentCredentials:
 
 
 def _status_response(app: FastAPI) -> dict[str, object]:
-    settings = ConnectionSettingsStore.from_env().load()
+    settings = get_connection_settings_store(app).load()
     enrolled = all(
         value is not None
         for value in (

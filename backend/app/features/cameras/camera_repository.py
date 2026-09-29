@@ -1,12 +1,16 @@
-"""Typed SQL projection helpers for the compact camera registry."""
+"""Native SQL on borrowed transactions; writers hold the edge_site row lock."""
 
 from __future__ import annotations
 
-import sqlite3
-from collections.abc import Iterator, Mapping
-from contextlib import contextmanager
+from collections.abc import Mapping
+from datetime import UTC, datetime
+from typing import cast
+from uuid import UUID
 
-from backend.app.edge_db.configuration import ensure_edge_site, utc_now
+import psycopg
+from psycopg.rows import dict_row
+
+from backend.app.edge_db.postgres import PostgresError
 from backend.app.features.cameras.camera_values import (
     CameraRegistryData,
     CameraStatus,
@@ -14,60 +18,114 @@ from backend.app.features.cameras.camera_values import (
     parse_legacy_floor,
 )
 
-_CAMERA_SELECT = (
-    "SELECT camera_id,label,rtsp_url,space_id,backend_camera_id,mapping_state,"
-    "decode_backend,floor_override,created_at,last_probed_at,last_ok_at,never_connected,"
-    "edge_ref,room_location_id FROM cameras"
+_CAMERA_COLUMNS = (
+    "c.camera_id,c.incarnation,c.label,c.rtsp_url,c.space_id,c.backend_camera_id,c.mapping_state,"
+    "c.decode_backend,c.floor_override,c.created_at,c.last_probed_at,c.last_ok_at,"
+    "c.never_connected,c.edge_ref,c.room_location_id"
 )
+_CAMERA_SELECT = "SELECT " + _CAMERA_COLUMNS + " FROM cameras AS c"
+
+
+class CameraRegistryNotInitialized(PostgresError):
+    def __init__(self) -> None:
+        super().__init__("camera registry bootstrap row is missing")
+
+
+class CameraRegistryWriteError(PostgresError):
+    def __init__(self) -> None:
+        super().__init__("camera registry write rejected by a database constraint")
+
+
+def utc_now() -> str:
+    return datetime.now(UTC).isoformat(timespec="milliseconds").replace("+00:00", "Z")
+
+
+def lock_registry(connection: psycopg.Connection) -> None:
+    """Serialize writers after authority admission, before any registry row access."""
+    row = connection.execute("SELECT id FROM edge_site WHERE id=1 FOR UPDATE").fetchone()
+    if row is None:
+        raise CameraRegistryNotInitialized()
 
 
 def read_registry(
-    connection: sqlite3.Connection, statuses: Mapping[str, CameraStatus]
+    connection: psycopg.Connection, statuses: Mapping[str, tuple[UUID, CameraStatus]]
 ) -> CameraRegistryData:
-    version_row = connection.execute("SELECT registry_version FROM edge_site WHERE id=1").fetchone()
-    rows = connection.execute(_CAMERA_SELECT + " ORDER BY camera_id").fetchall()
-    cameras = [camera_from_row(row) for row in rows]
-    for camera in cameras:
-        camera["status"] = statuses.get(str(camera["id"]), "unknown")
+    # A single statement has one MVCC snapshot even under READ COMMITTED.
+    # LEFT JOIN retains the bootstrap row when the registry is empty.
+    with connection.cursor(row_factory=dict_row) as cursor:
+        rows = cursor.execute(
+            "SELECT s.registry_version,"
+            + _CAMERA_COLUMNS
+            + " FROM edge_site AS s LEFT JOIN cameras AS c ON true "
+            'WHERE s.id=1 ORDER BY c.camera_id COLLATE "C"'
+        ).fetchall()
+    if not rows:
+        raise CameraRegistryNotInitialized()
+    cameras = []
+    for row in rows:
+        if row["camera_id"] is None:
+            continue
+        camera = camera_from_row(row)
+        camera["status"] = _cached_status(row, statuses)
+        cameras.append(camera)
     return {
-        "registry_version": 0 if version_row is None else int(version_row[0]),
+        "registry_version": int(rows[0]["registry_version"]),
         "cameras": cameras,
     }
 
 
 def get_camera(
-    connection: sqlite3.Connection,
+    connection: psycopg.Connection,
     camera_id: str,
-    statuses: Mapping[str, CameraStatus],
-) -> dict[str, object] | None:
-    row = connection.execute(_CAMERA_SELECT + " WHERE camera_id=?", (camera_id,)).fetchone()
+    statuses: Mapping[str, tuple[UUID, CameraStatus]],
+) -> tuple[UUID, dict[str, object]] | None:
+    """Keep the persisted incarnation separate from the public record."""
+    with connection.cursor(row_factory=dict_row) as cursor:
+        row = cursor.execute(
+            "SELECT "
+            + _CAMERA_COLUMNS
+            + " FROM edge_site AS s LEFT JOIN cameras AS c ON c.camera_id=%s WHERE s.id=1",
+            (camera_id,),
+        ).fetchone()
     if row is None:
+        raise CameraRegistryNotInitialized()
+    if row["camera_id"] is None:
         return None
     record = camera_from_row(row)
-    record["status"] = statuses.get(camera_id, "unknown")
-    return record
+    record["status"] = _cached_status(row, statuses)
+    return cast(UUID, row["incarnation"]), record
+
+
+def _cached_status(
+    row: Mapping[str, object], statuses: Mapping[str, tuple[UUID, CameraStatus]]
+) -> CameraStatus:
+    cached = statuses.get(str(row["camera_id"]))
+    if cached is not None and cached[0] == row["incarnation"]:
+        return cached[1]
+    return "unknown"
 
 
 def find_duplicate(
-    connection: sqlite3.Connection,
+    connection: psycopg.Connection,
     rtsp_url: str,
     *,
     exclude_camera_id: str | None = None,
 ) -> dict[str, object] | None:
     identity = normalize_stream_identity(rtsp_url)
-    if exclude_camera_id is None:
-        row = connection.execute(
-            _CAMERA_SELECT + " WHERE normalized_stream_identity=?", (identity,)
-        ).fetchone()
-    else:
-        row = connection.execute(
-            _CAMERA_SELECT + " WHERE normalized_stream_identity=? AND camera_id<>?",
-            (identity, exclude_camera_id),
-        ).fetchone()
+    with connection.cursor(row_factory=dict_row) as cursor:
+        if exclude_camera_id is None:
+            row = cursor.execute(
+                _CAMERA_SELECT + " WHERE c.normalized_stream_identity=%s", (identity,)
+            ).fetchone()
+        else:
+            row = cursor.execute(
+                _CAMERA_SELECT + " WHERE c.normalized_stream_identity=%s AND c.camera_id<>%s",
+                (identity, exclude_camera_id),
+            ).fetchone()
     return None if row is None else camera_from_row(row)
 
 
-def migrate_legacy_floors(connection: sqlite3.Connection) -> list[dict[str, object]]:
+def migrate_legacy_floors(connection: psycopg.Connection) -> list[dict[str, object]]:
     changes: list[dict[str, object]] = []
     rows = connection.execute(
         "SELECT camera_id,floor_override FROM cameras WHERE floor_override IS NOT NULL"
@@ -77,8 +135,8 @@ def migrate_legacy_floors(connection: sqlite3.Connection) -> list[dict[str, obje
         if parsed is None or str(stored_floor) == str(parsed):
             continue
         connection.execute(
-            "UPDATE cameras SET floor_override=?,revision=revision+1,updated_at=? "
-            "WHERE camera_id=?",
+            "UPDATE cameras SET floor_override=%s,revision=revision+1,updated_at=%s "
+            "WHERE camera_id=%s",
             (str(parsed), utc_now(), str(camera_id)),
         )
         changes.append({"camera_id": str(camera_id), "old": stored_floor, "new": parsed})
@@ -87,42 +145,42 @@ def migrate_legacy_floors(connection: sqlite3.Connection) -> list[dict[str, obje
     return changes
 
 
-def record_registry_mutation(connection: sqlite3.Connection) -> None:
-    ensure_edge_site(connection)
+def record_registry_mutation(connection: psycopg.Connection) -> None:
+    """Bump the revision under the caller's authority and singleton row locks."""
     now = utc_now()
-    connection.execute(
+    cursor = connection.execute(
         "UPDATE edge_site SET registry_version=registry_version+1,"
         "topology_dirty_registry_version=registry_version+1,"
-        "topology_dirty_created_at=?,updated_at=? WHERE id=1",
+        "topology_dirty_created_at=%s,updated_at=%s WHERE id=1",
         (now, now),
     )
+    if cursor.rowcount != 1:
+        raise CameraRegistryNotInitialized()
 
 
-@contextmanager
-def camera_transaction(connection: sqlite3.Connection) -> Iterator[sqlite3.Connection]:
-    connection.execute("BEGIN IMMEDIATE")
-    with connection:
-        yield connection
-
-
-def camera_from_row(row: tuple[object, ...]) -> dict[str, object]:
-    floor = None if row[7] is None else parse_legacy_floor(str(row[7]), camera_id=str(row[0]))
+def camera_from_row(row: Mapping[str, object]) -> dict[str, object]:
+    camera_id = str(row["camera_id"])
+    floor = (
+        None
+        if row["floor_override"] is None
+        else parse_legacy_floor(str(row["floor_override"]), camera_id=camera_id)
+    )
     return {
-        "id": str(row[0]),
-        "label": str(row[1]),
-        "rtsp_url": str(row[2]),
-        "space_id": _text(row[3]),
-        "backend_camera_id": _text(row[4]),
-        "mapping_pending": row[5] == "PENDING",
+        "id": camera_id,
+        "label": str(row["label"]),
+        "rtsp_url": str(row["rtsp_url"]),
+        "space_id": _text(row["space_id"]),
+        "backend_camera_id": _text(row["backend_camera_id"]),
+        "mapping_pending": row["mapping_state"] == "PENDING",
         "status": "unknown",
-        "decode_backend": _text(row[6]),
+        "decode_backend": _text(row["decode_backend"]),
         "floor": floor,
-        "created_at": str(row[8]),
-        "last_probed_at": _text(row[9]),
-        "last_ok_at": _text(row[10]),
-        "never_connected": bool(row[11]),
-        "edge_ref": _text(row[12]),
-        "room_edge_ref": _text(row[13]),
+        "created_at": str(row["created_at"]),
+        "last_probed_at": _text(row["last_probed_at"]),
+        "last_ok_at": _text(row["last_ok_at"]),
+        "never_connected": bool(row["never_connected"]),
+        "edge_ref": _text(row["edge_ref"]),
+        "room_edge_ref": _text(row["room_location_id"]),
     }
 
 
@@ -131,10 +189,13 @@ def _text(value: object) -> str | None:
 
 
 __all__ = [
-    "camera_transaction",
+    "CameraRegistryNotInitialized",
+    "CameraRegistryWriteError",
     "find_duplicate",
     "get_camera",
+    "lock_registry",
     "migrate_legacy_floors",
     "read_registry",
     "record_registry_mutation",
+    "utc_now",
 ]

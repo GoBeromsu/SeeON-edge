@@ -1,0 +1,34 @@
+{
+  "cameras": [],
+  "clip_export": {
+    "enabled": false,
+    "version": 0
+  },
+  "clip_recorder": {
+    "active_clips": null,
+    "available": false,
+    "dropped_events": null,
+    "dropped_frames": null,
+    "encoder": null,
+    "failed_writes": null,
+    "finalized_clips": null,
+    "video_unavailable_clips": null
+  },
+  "facility_id": "facility-1",
+  "generation": null,
+  "gpu": {
+    "captured_at_sec": 1787000000.0,
+    "cuda_context_ok": false,
+    "device_name": null,
+    "driver_version": null,
+    "nvml_available": false,
+    "nvml_error": "NVML Shared Library Not Found"
+  },
+  "seq": 1,
+  "worker": {
+    "alive": false,
+    "pid": 4242,
+    "profile_boot_error": "cuda_unavailable",
+    "started_at_sec": 1786999999.0
+  }
+}

@@ -1,58 +1,65 @@
-"""Clip storage selection projected from the schema-18 site singleton."""
+"""Clip storage selection on the API-owned PostgreSQL pool.
+
+Only persistence lives here, not filesystem validation or recording policy.
+Bootstrap owns the site singleton; lifespan owns the borrowed pool.
+"""
 
 from __future__ import annotations
 
-import sqlite3
 from collections.abc import Callable
-from pathlib import Path
-from threading import Lock
+from datetime import UTC, datetime
 
-from backend.app.edge_db import EDGE_DATABASE_PATH
-from backend.app.edge_db.configuration import (
-    ensure_edge_site,
-    open_configuration_database,
-    utc_now,
-)
+import psycopg
+
+from backend.app.edge_db.authority import AuthorityToken, require_authority
+from backend.app.edge_db.postgres import PostgresDatabase, PostgresError
+
+
+class ClipStorageLocationNotInitialized(PostgresError):
+    def __init__(self) -> None:
+        super().__init__("clip storage location bootstrap row is missing")
 
 
 class ClipStorageLocationStore:
-    def __init__(self, path: str | Path) -> None:
-        self.path = Path(path)
-        self._lock = Lock()
-        self._connection = open_configuration_database(self.path)
+    """Borrow transactions only; pool lifecycle belongs to the API."""
 
-    @classmethod
-    def from_env(cls) -> ClipStorageLocationStore:
-        return cls(EDGE_DATABASE_PATH)
+    def __init__(self, database: PostgresDatabase, authority: AuthorityToken) -> None:
+        self.database = database
+        self.authority = authority
 
     def get(self) -> str:
-        with self._lock:
-            row = self._connection.execute(
+        def read(connection: psycopg.Connection) -> str:
+            row = connection.execute(
                 "SELECT clip_store_subdir FROM edge_site WHERE id=1"
             ).fetchone()
-        return "" if row is None or row[0] is None else str(row[0])
+            if row is None:
+                raise ClipStorageLocationNotInitialized()
+            return "" if row[0] is None else str(row[0])
+
+        return self.database.read(read)
 
     def put(
         self,
         selected_path: str,
         *,
-        after_write: Callable[[sqlite3.Connection], None] | None = None,
+        after_write: Callable[[psycopg.Connection], None] | None = None,
     ) -> str:
-        with self._lock:
-            self._connection.execute("BEGIN IMMEDIATE")
-            try:
-                ensure_edge_site(self._connection)
-                self._connection.execute(
-                    "UPDATE edge_site SET clip_store_subdir=?,updated_at=? WHERE id=1",
-                    (selected_path or None, utc_now()),
-                )
-                if after_write is not None:
-                    after_write(self._connection)
-                self._connection.execute("COMMIT")
-            except BaseException:
-                self._connection.execute("ROLLBACK")
-                raise
-        return selected_path
+        def persist(connection: psycopg.Connection) -> str:
+            require_authority(connection, self.authority)
+            row = connection.execute("SELECT id FROM edge_site WHERE id=1 FOR UPDATE").fetchone()
+            if row is None:
+                raise ClipStorageLocationNotInitialized()
+            now = datetime.now(UTC).isoformat(timespec="milliseconds").replace("+00:00", "Z")
+            connection.execute(
+                "UPDATE edge_site SET clip_store_subdir=%s,updated_at=%s WHERE id=1",
+                (selected_path or None, now),
+            )
+            if after_write is not None:
+                after_write(connection)
+            return selected_path
+
+        # Never reread after COMMIT or publish a candidate after an unknown outcome.
+        return self.database.transact(persist)
 
 
-__all__ = ["ClipStorageLocationStore"]
+__all__ = ["ClipStorageLocationNotInitialized", "ClipStorageLocationStore"]

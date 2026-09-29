@@ -1,17 +1,18 @@
-"""Schema-18 incident query and incident-local review authority."""
+"""Native incident query and incident-local review authority."""
 
 from __future__ import annotations
 
 import base64
 import binascii
-import sqlite3
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime
-from pathlib import Path
 from typing import assert_never
 
-from backend.app.edge_db.connection import RuntimeActor, open_runtime_database, write_transaction
+import psycopg
+
+from backend.app.edge_db.authority import AuthorityToken, require_authority
+from backend.app.edge_db.postgres import PostgresDatabase
 from backend.app.edge_db.reviews import EvidenceReview, ReviewDisposition
 
 
@@ -50,11 +51,19 @@ class EvidenceReviewConflictError(RuntimeError):
         )
 
 
+class EvidenceProjectionUnavailable(RuntimeError):
+    """An incident lacks a required durable delivery obligation."""
+
+
 class CentralEvidenceReviewStore:
     """Compare-and-swap the review columns owned by one incident row."""
 
-    def __init__(self, database_path: Path) -> None:
-        self.database_path = database_path
+    def __init__(self, database: PostgresDatabase, authority: AuthorityToken) -> None:
+        if not isinstance(database, PostgresDatabase):
+            raise TypeError("native incident reviews require a PostgreSQL owner")
+        if not isinstance(authority, AuthorityToken):
+            raise TypeError("native incident reviews require deployment authority")
+        self.database, self.authority = database, authority
 
     def update(
         self,
@@ -65,7 +74,7 @@ class CentralEvidenceReviewStore:
         reviewed_at: str,
         disposition: ReviewDisposition,
         notes: str | None,
-        after_write: Callable[[sqlite3.Connection], None] | None = None,
+        after_write: Callable[[psycopg.Connection], None] | None = None,
     ) -> EvidenceReview:
         _validate_review_input(incident_id, expected_version, actor_id, reviewed_at, notes)
         match disposition:
@@ -75,66 +84,63 @@ class CentralEvidenceReviewStore:
                 database_disposition = "FP"
             case unreachable:
                 assert_never(unreachable)
-        connection = open_runtime_database(self.database_path, actor=RuntimeActor.API)
-        try:
-            with write_transaction(connection):
-                changed = connection.execute(
-                    """
-                    UPDATE incidents
-                    SET review_version = review_version + 1,
-                        review_disposition = ?, review_actor = ?, review_at = ?,
-                        review_notes = ?, revision = revision + 1, updated_at = ?
-                    WHERE incident_id = ? AND review_version = ?
-                    """,
-                    (
-                        database_disposition,
-                        actor_id,
-                        reviewed_at,
-                        notes,
-                        reviewed_at,
-                        incident_id,
-                        expected_version,
-                    ),
-                ).rowcount
-                if changed != 1:
-                    raise EvidenceReviewConflictError(incident_id, expected_version)
-                clip_row = connection.execute(
-                    "SELECT clip_id FROM artifacts WHERE incident_id = ? AND kind = 'PRIMARY_CLIP'",
-                    (incident_id,),
-                ).fetchone()
-                if after_write is not None:
-                    after_write(connection)
-        finally:
-            connection.close()
-        version = expected_version + 1
-        return EvidenceReview(
-            review_id=f"{incident_id}:review:{version}",
-            incident_id=incident_id,
-            clip_id=None if clip_row is None else _text(clip_row[0]),
-            version=version,
-            actor_id=actor_id,
-            reviewed_at=reviewed_at,
-            disposition=disposition,
-            notes=notes,
-        )
+
+        def write(connection: psycopg.Connection) -> EvidenceReview:
+            require_authority(connection, self.authority)
+            changed = connection.execute(
+                "UPDATE incidents SET review_version=review_version+1,"
+                "review_disposition=%s,review_actor=%s,review_at=%s,review_notes=%s,"
+                "revision=revision+1,updated_at=%s WHERE incident_id=%s AND review_version=%s",
+                (
+                    database_disposition,
+                    actor_id,
+                    reviewed_at,
+                    notes,
+                    reviewed_at,
+                    incident_id,
+                    expected_version,
+                ),
+            ).rowcount
+            if changed != 1:
+                raise EvidenceReviewConflictError(incident_id, expected_version)
+            clip_row = connection.execute(
+                "SELECT clip_id FROM artifacts WHERE incident_id=%s AND kind='PRIMARY_CLIP'",
+                (incident_id,),
+            ).fetchone()
+            if after_write is not None:
+                after_write(connection)
+            version = expected_version + 1
+            return EvidenceReview(
+                review_id=f"{incident_id}:review:{version}",
+                incident_id=incident_id,
+                clip_id=None if clip_row is None else _text(clip_row[0]),
+                version=version,
+                actor_id=actor_id,
+                reviewed_at=reviewed_at,
+                disposition=disposition,
+                notes=notes,
+            )
+
+        return self.database.transact(write)
 
 
 class CentralEvidenceQuery:
-    """Read privacy-bounded incident projections from compact authorities."""
+    """Read privacy-bounded incident projections from native authorities."""
 
-    def __init__(self, database_path: Path) -> None:
-        self.database_path = database_path
+    def __init__(self, database: PostgresDatabase) -> None:
+        if not isinstance(database, PostgresDatabase):
+            raise TypeError("native incident queries require a PostgreSQL owner")
+        self.database = database
 
     def get(self, identity: str) -> CentralEvidenceSummary | None:
-        connection = open_runtime_database(self.database_path, actor=RuntimeActor.API)
-        try:
+        def read(connection: psycopg.Connection) -> CentralEvidenceSummary | None:
             row = connection.execute(
-                _SUMMARY_SELECT + " WHERE incident.incident_id = ? OR incident.edge_event_id = ?",
+                _SUMMARY_SELECT + " WHERE incident.incident_id = %s OR incident.edge_event_id = %s",
                 (identity, identity),
             ).fetchone()
-        finally:
-            connection.close()
-        return None if row is None else _summary_from_row(row)
+            return None if row is None else _summary_from_row(row)
+
+        return self.database.read(read)
 
     def list(
         self,
@@ -149,21 +155,21 @@ class CentralEvidenceQuery:
         if cursor is not None:
             detected_at, incident_id = _parse_cursor(cursor)
             where = (
-                " WHERE incident.detected_at < ? OR "
-                "(incident.detected_at = ? AND incident.incident_id < ?)"
+                " WHERE incident.detected_at < %s OR "
+                "(incident.detected_at = %s AND incident.incident_id < %s)"
             )
             params.extend((detected_at, detected_at, incident_id))
         params.append(limit + 1)
-        connection = open_runtime_database(self.database_path, actor=RuntimeActor.API)
-        try:
-            rows = connection.execute(
+
+        def read(connection: psycopg.Connection) -> list[tuple[object, ...]]:
+            return connection.execute(
                 _SUMMARY_SELECT
                 + where
-                + " ORDER BY incident.detected_at DESC, incident.incident_id DESC LIMIT ?",
+                + " ORDER BY incident.detected_at DESC, incident.incident_id DESC LIMIT %s",
                 tuple(params),
             ).fetchall()
-        finally:
-            connection.close()
+
+        rows = self.database.read(read)
         page = rows[:limit]
         summaries = tuple(_summary_from_row(row) for row in page)
         next_cursor = None
@@ -181,7 +187,7 @@ SELECT incident.incident_id, incident.edge_event_id, incident.camera_id,
        primary_artifact.clip_id, primary_artifact.state, snapshot_artifact.state,
        clip.publish_state, clip.retention_state,
        incident.review_version, incident.review_actor, incident.review_at,
-       incident.review_disposition, incident.review_notes
+       incident.review_disposition, incident.review_notes, delivery.state
 FROM incidents AS incident
 LEFT JOIN artifacts AS primary_artifact
   ON primary_artifact.incident_id = incident.incident_id
@@ -190,10 +196,13 @@ LEFT JOIN artifacts AS snapshot_artifact
   ON snapshot_artifact.incident_id = incident.incident_id
  AND snapshot_artifact.kind = 'SNAPSHOT'
 LEFT JOIN clips AS clip ON clip.clip_id = primary_artifact.clip_id
+LEFT JOIN event_outbox AS delivery ON delivery.edge_event_id = incident.edge_event_id
 """
 
 
-def _summary_from_row(row: sqlite3.Row | tuple[object, ...]) -> CentralEvidenceSummary:
+def _summary_from_row(row: tuple[object, ...]) -> CentralEvidenceSummary:
+    if row[21] is None:
+        raise EvidenceProjectionUnavailable("incident delivery obligation is missing")
     review_version = _integer(row[16])
     review = None
     if review_version > 0:
@@ -227,7 +236,7 @@ def _summary_from_row(row: sqlite3.Row | tuple[object, ...]) -> CentralEvidenceS
         primary_clip_id=_text(row[11]),
         primary_artifact_state=_text(row[12]),
         snapshot_artifact_state=_text(row[13]),
-        event_delivery_state="ACKED",
+        event_delivery_state=str(row[21]),
         clip_publish_state=_text(row[14]),
         retention_state=_text(row[15]),
         review=review,
@@ -282,6 +291,7 @@ __all__ = [
     "CentralEvidenceQuery",
     "CentralEvidenceReviewStore",
     "CentralEvidenceSummary",
+    "EvidenceProjectionUnavailable",
     "EvidenceReview",
     "EvidenceReviewConflictError",
     "ReviewDisposition",

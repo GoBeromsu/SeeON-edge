@@ -2,13 +2,12 @@
 
 from __future__ import annotations
 
-import sqlite3
-from collections.abc import Callable
 from typing import TypeAlias
 
 from fastapi import FastAPI
 from pydantic import JsonValue
 
+from backend.app.features.audit.postgres_runtime import AuditMutation
 from backend.app.features.connection.topology_retry_coordinator import (
     TopologyRetryResult,
     TopologySyncStatus,
@@ -25,14 +24,14 @@ def sync_camera_roster(
     _now: float | None = None,
     _force: bool = False,
     _refresh: bool = False,
-    after_write: Callable[[sqlite3.Connection], None] | None = None,
+    audit: AuditMutation | None = None,
 ) -> RosterSyncResult:
     """Publish at most one durable snapshot for this explicit event."""
     return topology_retry_coordinator(app).trigger(
         force=_force,
         refresh=_refresh,
         now_epoch=_now,
-        after_write=after_write,
+        audit=audit,
     )
 
 

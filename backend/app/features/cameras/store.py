@@ -1,22 +1,23 @@
-"""Schema-18 camera registry and location authority."""
+"""Camera registry and location authority on the API-owned PostgreSQL pool."""
 
 from __future__ import annotations
 
-import sqlite3
 import uuid
 from collections.abc import Callable
-from pathlib import Path
 from threading import Lock
+from typing import cast
 
-from backend.app.edge_db import EDGE_DATABASE_PATH
-from backend.app.edge_db.configuration import open_configuration_database, utc_now
+import psycopg
+
+from backend.app.edge_db.authority import AuthorityToken
+from backend.app.edge_db.postgres import PostgresDatabase, PostgresError
 from backend.app.features.cameras import camera_values
 from backend.app.features.cameras.camera_repository import (
-    camera_transaction,
     find_duplicate,
     get_camera,
     read_registry,
     record_registry_mutation,
+    utc_now,
 )
 from backend.app.features.cameras.camera_values import (
     CameraRegistryData,
@@ -48,22 +49,19 @@ def _text(value: object) -> str | None:
 
 
 class CameraRegistryStore(CameraLocationOperations):
-    """Relational camera registry backed only by ``edge_site`` and ``cameras``."""
+    """Borrow transactions; own only process-local status, never a connection."""
 
-    def __init__(self, path: str | Path) -> None:
-        self.path = Path(path)
+    def __init__(self, database: PostgresDatabase, authority: AuthorityToken) -> None:
+        self.database = database
+        self.authority = authority
+        # This lock orders local status publication, not database clients.
         self._lock = Lock()
-        self._connection = open_configuration_database(self.path)
         self._topology = CameraTopologyStore()
-        self._statuses: dict[str, CameraStatus] = {}
-
-    @classmethod
-    def from_env(cls) -> CameraRegistryStore:
-        return cls(EDGE_DATABASE_PATH)
+        self._statuses: dict[str, tuple[uuid.UUID, CameraStatus]] = {}
 
     def snapshot(self) -> CameraRegistryData:
         with self._lock:
-            return read_registry(self._connection, self._statuses)
+            return self.database.read(lambda connection: read_registry(connection, self._statuses))
 
     def create(
         self,
@@ -82,9 +80,9 @@ class CameraRegistryStore(CameraLocationOperations):
         never_connected: bool = True,
         edge_ref: str | None = None,
         room_edge_ref: str | None = None,
-        after_write: Callable[[sqlite3.Connection], None] | None = None,
+        after_write: Callable[[psycopg.Connection], None] | None = None,
     ) -> dict[str, object]:
-        with self._lock, camera_transaction(self._connection) as connection:
+        def persist(connection: psycopg.Connection) -> tuple[uuid.UUID, dict[str, object]]:
             duplicate = find_duplicate(connection, rtsp_url)
             if duplicate is not None:
                 raise DuplicateCameraError(duplicate)
@@ -99,7 +97,7 @@ class CameraRegistryStore(CameraLocationOperations):
                 "INSERT INTO cameras(camera_id,backend_camera_id,label,rtsp_url,"
                 "normalized_stream_identity,space_id,mapping_state,decode_backend,floor_override,"
                 "never_connected,last_probed_at,last_ok_at,revision,created_at,updated_at) "
-                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,1,?,?)",
+                "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,1,%s,%s)",
                 (
                     identifier,
                     backend_camera_id,
@@ -126,11 +124,16 @@ class CameraRegistryStore(CameraLocationOperations):
             record_registry_mutation(connection)
             if after_write is not None:
                 after_write(connection)
-            record = get_camera(connection, identifier, self._statuses)
-            if record is None:
-                raise sqlite3.DatabaseError("camera insert returned no row")
-            self._statuses[identifier] = status
+            candidate = get_camera(connection, identifier, self._statuses)
+            if candidate is None:
+                raise PostgresError("camera insert returned no row")
+            incarnation, record = candidate
             record["status"] = status
+            return incarnation, record
+
+        with self._lock:
+            incarnation, record = self._mutate(persist)
+            self._statuses[str(record["id"])] = (incarnation, status)
             return record
 
     def update(
@@ -138,18 +141,21 @@ class CameraRegistryStore(CameraLocationOperations):
         camera_id: str,
         updates: dict[str, object],
         *,
-        after_write: Callable[[sqlite3.Connection], None] | None = None,
+        after_write: Callable[[psycopg.Connection], None] | None = None,
     ) -> dict[str, object] | None:
-        with self._lock, camera_transaction(self._connection) as connection:
+        def persist(
+            connection: psycopg.Connection,
+        ) -> tuple[uuid.UUID, dict[str, object]] | None:
             current = get_camera(connection, camera_id, self._statuses)
             if current is None:
                 return None
+            _, current_record = current
             rtsp_url = updates.get("rtsp_url")
             if isinstance(rtsp_url, str):
                 duplicate = find_duplicate(connection, rtsp_url, exclude_camera_id=camera_id)
                 if duplicate is not None:
                     raise DuplicateCameraError(duplicate)
-            values = {**current, **updates}
+            values = {**current_record, **updates}
             backend_id = _text(values.get("backend_camera_id"))
             pending = values.get("mapping_pending") is True
             mapping_state = (
@@ -157,10 +163,10 @@ class CameraRegistryStore(CameraLocationOperations):
             )
             effective_rtsp = str(values["rtsp_url"])
             connection.execute(
-                "UPDATE cameras SET backend_camera_id=?,label=?,rtsp_url=?,"
-                "normalized_stream_identity=?,space_id=?,mapping_state=?,decode_backend=?,"
-                "floor_override=?,never_connected=?,last_probed_at=?,last_ok_at=?,"
-                "revision=revision+1,updated_at=? WHERE camera_id=?",
+                "UPDATE cameras SET backend_camera_id=%s,label=%s,rtsp_url=%s,"
+                "normalized_stream_identity=%s,space_id=%s,mapping_state=%s,decode_backend=%s,"
+                "floor_override=%s,never_connected=%s,last_probed_at=%s,last_ok_at=%s,"
+                "revision=revision+1,updated_at=%s WHERE camera_id=%s",
                 (
                     backend_id,
                     str(values["label"]),
@@ -189,33 +195,49 @@ class CameraRegistryStore(CameraLocationOperations):
             if after_write is not None:
                 after_write(connection)
             updated = get_camera(connection, camera_id, self._statuses)
+            if updated is None:
+                raise PostgresError("camera update returned no row")
+            incarnation, record = updated
             status = updates.get("status")
             if status in {"online", "offline", "starting", "unknown"}:
-                self._statuses[camera_id] = status
-            if updated is not None:
-                updated["status"] = self._statuses.get(camera_id, "unknown")
-            return updated
+                record["status"] = status
+            return incarnation, record
+
+        with self._lock:
+            updated = self._mutate(persist)
+            if updated is None:
+                return None
+            incarnation, record = updated
+            self._statuses[camera_id] = (incarnation, cast(CameraStatus, record["status"]))
+            return record
 
     def delete(
         self,
         camera_id: str,
         *,
-        after_write: Callable[[sqlite3.Connection], None] | None = None,
+        after_write: Callable[[psycopg.Connection], None] | None = None,
     ) -> bool:
-        with self._lock:
-            with camera_transaction(self._connection) as connection:
-                cursor = connection.execute("DELETE FROM cameras WHERE camera_id=?", (camera_id,))
-                if cursor.rowcount == 0:
-                    return False
-                record_registry_mutation(connection)
-                if after_write is not None:
-                    after_write(connection)
-            self._statuses.pop(camera_id, None)
+        def persist(connection: psycopg.Connection) -> bool:
+            cursor = connection.execute("DELETE FROM cameras WHERE camera_id=%s", (camera_id,))
+            if cursor.rowcount == 0:
+                return False
+            record_registry_mutation(connection)
+            if after_write is not None:
+                after_write(connection)
             return True
+
+        with self._lock:
+            changed = self._mutate(persist)
+            if changed:
+                self._statuses.pop(camera_id, None)
+            return changed
 
     def get(self, camera_id: str) -> dict[str, object] | None:
         with self._lock:
-            return get_camera(self._connection, camera_id, self._statuses)
+            result = self.database.read(
+                lambda connection: get_camera(connection, camera_id, self._statuses)
+            )
+            return None if result is None else result[1]
 
 
 __all__ = [

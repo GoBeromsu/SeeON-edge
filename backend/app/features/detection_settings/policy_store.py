@@ -1,15 +1,15 @@
-"""Schema-18 current-plus-previous detection policy authority."""
+"""Current-plus-previous detection policies on the API-owned PostgreSQL pool."""
 
 from __future__ import annotations
 
-import sqlite3
 from collections.abc import Callable
-from contextlib import closing
-from pathlib import Path
+from typing import TypeVar
 
-from backend.app.edge_db import EDGE_DATABASE_PATH
-from backend.app.edge_db.configuration import open_configuration_database, utc_now
-from backend.app.edge_db.connection import write_transaction
+import psycopg
+from psycopg.rows import dict_row
+
+from backend.app.edge_db.authority import AuthorityToken, require_authority
+from backend.app.edge_db.postgres import PostgresDatabase
 from backend.app.features.detection_settings.policy_diff import PolicyProposal, build_policy_diff
 from backend.app.features.detection_settings.policy_models import (
     PolicyActivation,
@@ -21,15 +21,20 @@ from backend.app.features.detection_settings.policy_models import (
 )
 from backend.app.features.detection_settings.policy_mutations import (
     PolicyWrite,
+    current_generation,
     encode_policy,
     next_generation,
     previous_state,
     save_policy,
+    utc_now,
 )
 from backend.app.features.detection_settings.policy_rows import (
+    DetectionPolicyNotInitialized,
+    InvalidPolicyRecord,
     activation,
     database_camera_id,
     decode_policy_record,
+    decode_policy_values,
     effective_policy,
     external_camera_id,
     raw_policy_record,
@@ -37,6 +42,7 @@ from backend.app.features.detection_settings.policy_rows import (
     raw_token,
     record_by_id,
     record_token,
+    require_policy_site,
     try_policy_record,
 )
 from shared.detection_policies import (
@@ -48,26 +54,18 @@ from shared.detection_policies import (
     parse_policy_values,
 )
 
+_Result = TypeVar("_Result")
+
 
 class DetectionPolicyStore:
-    def __init__(self, path: str | Path) -> None:
-        self.path = Path(path)
-        with closing(open_configuration_database(self.path)):
-            pass
-
-    @classmethod
-    def from_env(cls) -> DetectionPolicyStore:
-        return cls(EDGE_DATABASE_PATH)
+    def __init__(self, database: PostgresDatabase, authority: AuthorityToken) -> None:
+        self.database = database
+        self.authority = authority
 
     def generation(self, facility_id: str | None) -> int:
         if facility_id is None:
             return 0
-        with closing(open_configuration_database(self.path)) as connection:
-            row = connection.execute(
-                "SELECT max(activation_generation) FROM policies WHERE facility_id=?",
-                (facility_id,),
-            ).fetchone()
-        return 0 if row is None or row[0] is None else int(row[0])
+        return self._read_snapshot(lambda connection: current_generation(connection, facility_id))
 
     def diff(
         self,
@@ -80,18 +78,16 @@ class DetectionPolicyStore:
         camera_id: str | None,
         values: object,
     ) -> PolicyDiff:
-        return build_policy_diff(
-            self.path,
-            PolicyProposal(
-                facility_id,
-                module_id,
-                module_version,
-                schema_id,
-                schema_version,
-                camera_id,
-                values,
-            ),
+        proposal = PolicyProposal(
+            facility_id,
+            module_id,
+            module_version,
+            schema_id,
+            schema_version,
+            camera_id,
+            values,
         )
+        return self._read_snapshot(lambda connection: build_policy_diff(connection, proposal))
 
     def apply(
         self,
@@ -104,17 +100,14 @@ class DetectionPolicyStore:
         camera_id: str | None,
         values: object | None,
         expected_revision_id: int,
-        after_write: Callable[[sqlite3.Connection], None] | None = None,
+        after_write: Callable[[psycopg.Connection], None] | None = None,
     ) -> PolicyActivation:
-        if expected_revision_id < 0:
-            raise PolicyDocumentError("expected_revision_id must be >= 0")
-        parsed = self._parse_input(
-            module_id, module_version, schema_id, schema_version, camera_id, values
-        )
-        with (
-            closing(open_configuration_database(self.path)) as connection,
-            write_transaction(connection),
-        ):
+        def persist(connection: psycopg.Connection) -> PolicyActivation:
+            if expected_revision_id < 0:
+                raise PolicyDocumentError("expected_revision_id must be >= 0")
+            parsed = self._parse_input(
+                module_id, module_version, schema_id, schema_version, camera_id, values
+            )
             camera_key = database_camera_id(connection, camera_id)
             raw = raw_policy_record(connection, facility_id, camera_key, module_id, module_version)
             record = try_policy_record(raw)
@@ -151,6 +144,8 @@ class DetectionPolicyStore:
                 after_write(connection)
             return activation(saved, camera_id)
 
+        return self._mutate(persist)
+
     def rollback(
         self,
         *,
@@ -159,14 +154,11 @@ class DetectionPolicyStore:
         module_version: int,
         camera_id: str | None,
         expected_revision_id: int,
-        after_write: Callable[[sqlite3.Connection], None] | None = None,
+        after_write: Callable[[psycopg.Connection], None] | None = None,
     ) -> PolicyActivation:
-        if expected_revision_id < 0:
-            raise PolicyDocumentError("expected_revision_id must be >= 0")
-        with (
-            closing(open_configuration_database(self.path)) as connection,
-            write_transaction(connection),
-        ):
+        def persist(connection: psycopg.Connection) -> PolicyActivation:
+            if expected_revision_id < 0:
+                raise PolicyDocumentError("expected_revision_id must be >= 0")
             camera_key = database_camera_id(connection, camera_id)
             raw = raw_policy_record(connection, facility_id, camera_key, module_id, module_version)
             record = None if raw is None else decode_policy_record(raw)
@@ -174,15 +166,19 @@ class DetectionPolicyStore:
                 raise PolicyRevisionConflict(
                     "detection policy activation changed since the submitted rollback"
                 )
-            if record is None or not record.previous_present:
+            if raw is None or record is None or not record.previous_present:
                 raise PolicyRollbackUnavailable("no prior policy state is available for rollback")
+            # Failed records hide values for listing; rollback must validate raw history.
+            previous = decode_policy_values(
+                raw["previous_values_json"], raw["previous_content_sha256"], raw
+            )
+            values_json, digest = encode_policy(previous)
             generation = next_generation(connection, facility_id)
-            values_json, digest = encode_policy(record.previous_values)
             connection.execute(
-                "UPDATE policies SET active_values_json=?,active_content_sha256=?,"
+                "UPDATE policies SET active_values_json=%s,active_content_sha256=%s,"
                 "previous_present=0,previous_values_json=NULL,previous_content_sha256=NULL,"
-                "activation_generation=?,status='pending',refusal_reason=NULL,activated_at=?,"
-                "applied_at=NULL,updated_at=? WHERE policy_id=?",
+                "activation_generation=%s,status='pending',refusal_reason=NULL,activated_at=%s,"
+                "applied_at=NULL,updated_at=%s WHERE policy_id=%s",
                 (values_json, digest, generation, utc_now(), utc_now(), record.policy_id),
             )
             saved = activation(record_by_id(connection, record.policy_id), camera_id)
@@ -190,13 +186,16 @@ class DetectionPolicyStore:
                 after_write(connection)
             return saved
 
+        return self._mutate(persist)
+
     def resolve_bundle(
         self, facility_id: str | None, cameras: tuple[PolicyCameraIdentity, ...]
     ) -> PolicyBundle:
         base = default_policy_bundle(tuple(camera.camera_id for camera in cameras))
         if facility_id is None:
             return base
-        with closing(open_configuration_database(self.path)) as connection:
+
+        def read(connection: psycopg.Connection) -> PolicyBundle:
             try:
                 defaults = {
                     module_id: effective_policy(connection, facility_id, None, module_id, version)
@@ -212,49 +211,102 @@ class DetectionPolicyStore:
                         for module_id, version in LATEST_POLICY_VERSIONS.items()
                     }
                     bundle = bundle.with_camera(camera.camera_id, policies)
-            except (PolicyDocumentError, sqlite3.Error, TypeError, ValueError) as error:
+            except (PolicyDocumentError, TypeError, ValueError) as error:
                 raise PolicyActivationRefused(0, str(error)) from error
-        return bundle
+            return bundle
+
+        return self._read_snapshot(read)
 
     def acknowledge_applied(self, facility_id: str) -> None:
         """Mark every pending activation at or below the latest generation as applied.
 
-        Single-connection combination of a ``generation()``-style read with the
-        write. Every worker heartbeat that acknowledges its running config
-        calls this; opening two separate connections for one
-        read-then-maybe-write sequence doubled needless contention against
-        other writers on the same database file (#579/#580 review, N7).
+        The caller must establish that the heartbeat acknowledges the current
+        desired configuration. This source API has no acknowledged-generation
+        argument: its bound is the latest generation inside this transaction.
         """
-        with closing(open_configuration_database(self.path)) as connection:
-            row = connection.execute(
-                "SELECT max(activation_generation) FROM policies WHERE facility_id=?",
-                (facility_id,),
-            ).fetchone()
-            activation_generation = 0 if row is None or row[0] is None else int(row[0])
-            pending = connection.execute(
-                "SELECT 1 FROM policies WHERE facility_id=? AND status='pending'"
-                " AND activation_generation<=? LIMIT 1",
-                (facility_id, activation_generation),
-            ).fetchone()
+
+        def persist(connection: psycopg.Connection) -> None:
+            activation_generation = current_generation(connection, facility_id)
+            with connection.cursor(row_factory=dict_row) as cursor:
+                pending = cursor.execute(
+                    "SELECT 1 FROM policies WHERE facility_id=%s AND status='pending'"
+                    " AND activation_generation<=%s LIMIT 1",
+                    (facility_id, activation_generation),
+                ).fetchone()
             if pending is None:
                 return
-            with write_transaction(connection):
-                now = utc_now()
-                connection.execute(
-                    "UPDATE policies SET status='applied',refusal_reason=NULL,"
-                    "applied_at=?,updated_at=? "
-                    "WHERE facility_id=? AND status='pending' AND activation_generation<=?",
-                    (now, now, facility_id, activation_generation),
-                )
+            now = utc_now()
+            connection.execute(
+                "UPDATE policies SET status='applied',refusal_reason=NULL,"
+                "applied_at=%s,updated_at=%s "
+                "WHERE facility_id=%s AND status='pending' AND activation_generation<=%s",
+                (now, now, facility_id, activation_generation),
+            )
+
+        self._mutate(persist)
 
     def activations(self, facility_id: str) -> tuple[PolicyActivation, ...]:
-        with closing(open_configuration_database(self.path)) as connection:
-            rows = connection.execute(
-                raw_select() + " WHERE p.facility_id=? ORDER BY p.policy_id", (facility_id,)
-            ).fetchall()
+        def read(connection: psycopg.Connection) -> tuple[PolicyActivation, ...]:
+            with connection.cursor(row_factory=dict_row) as cursor:
+                rows = cursor.execute(
+                    raw_select() + " WHERE p.facility_id=%s ORDER BY p.policy_id", (facility_id,)
+                ).fetchall()
             return tuple(
                 activation(decode_policy_record(row), external_camera_id(row)) for row in rows
             )
+
+        return self._read_snapshot(read)
+
+    def _mutate(self, callback: Callable[[psycopg.Connection], _Result]) -> _Result:
+        def persist(connection: psycopg.Connection) -> _Result:
+            require_authority(connection, self.authority)
+            require_policy_site(connection, lock=True)
+            return callback(connection)
+
+        try:
+            return self.database.transact(persist)
+        except psycopg.Error:
+            # Native diagnostics can include the SQL and complete row values.
+            # Authority, canonical validation and unknown-COMMIT errors are
+            # deliberately not caught here.
+            raise PolicyActivationRefused(0, "policy database operation failed") from None
+
+    def _read_snapshot(self, callback: Callable[[psycopg.Connection], _Result]) -> _Result:
+        def read(connection: psycopg.Connection) -> _Result:
+            require_policy_site(connection)
+            return callback(connection)
+
+        try:
+            return self.database.read_snapshot(read)
+        except InvalidPolicyRecord as error:
+            self._mark_failed(error)
+            raise
+        except psycopg.Error:
+            raise PolicyActivationRefused(0, "policy database operation failed") from None
+
+    def _mark_failed(self, error: InvalidPolicyRecord) -> None:
+        def persist(connection: psycopg.Connection) -> None:
+            observed = error.row
+            current = raw_policy_record(
+                connection,
+                observed["facility_id"],
+                observed["camera_id"],
+                observed["module_id"],
+                observed["module_version"],
+            )
+            # A concurrent repair must never be overwritten by an old read.
+            if current != observed:
+                return
+            # The outward canonical validation error stays intact; persisted
+            # diagnostics must fit PostgreSQL text and the schema's 256-char cap.
+            reason = error.reason.replace("\x00", r"\u0000")[:256]
+            connection.execute(
+                "UPDATE policies SET status='failed',refusal_reason=%s,applied_at=NULL,"
+                "updated_at=%s WHERE policy_id=%s",
+                (reason, utc_now(), error.activation_id),
+            )
+
+        self._mutate(persist)
 
     @staticmethod
     def _parse_input(
@@ -279,6 +331,7 @@ class DetectionPolicyStore:
 
 
 __all__ = [
+    "DetectionPolicyNotInitialized",
     "DetectionPolicyStore",
     "PolicyActivation",
     "PolicyActivationRefused",

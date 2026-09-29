@@ -1,0 +1,7 @@
+{
+  "part_head_template": "--frame\r\nContent-Type: image/jpeg\r\nContent-Length: <content-length>\r\n\r\n",
+  "part_tail": "\r\n",
+  "recorded_part_sha256": "bf046e3b410411a608cf87c523e66240af01a81e953715a6b512911f59807d9c",
+  "recorded_payload_length": 675,
+  "recorded_payload_sha256": "7a2728a4b6b4bb0ab4ffb5c43b0ecee77b05fc663e2ae2a215e4490d4d1c64c5"
+}
