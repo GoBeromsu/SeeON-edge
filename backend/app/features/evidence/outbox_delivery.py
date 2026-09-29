@@ -51,6 +51,17 @@ class DeliveryClaim:
     envelope: str = field(repr=False)
 
 
+@dataclass(frozen=True, slots=True)
+class DeliveryStatus:
+    state: str
+    attempt_count: int
+    lease_active: bool
+    outcome: DeliveryOutcome | None
+    reason: str | None
+    http_status: int | None
+    backend_event_id: str | None
+
+
 class OutboxDelivery:
     def __init__(
         self, database: PostgresDatabase, authority: AuthorityToken, budget: DeliveryBudget
@@ -67,38 +78,87 @@ class OutboxDelivery:
                 "OR (state='IN_FLIGHT' AND lease_until<=clock_timestamp()) "
                 "ORDER BY retry_at,accepted_at,edge_event_id LIMIT 1 FOR UPDATE SKIP LOCKED"
             ).fetchone()
-            if row is None:
-                return None
-            event_id, envelope, camera_id, state, count, active = row
-            if state == "IN_FLIGHT":
-                connection.execute(
-                    "INSERT INTO event_delivery_results (attempt_id,finished_at,outcome,reason) "
-                    "VALUES (%s,clock_timestamp(),'UNKNOWN','LEASE_EXPIRED')",
-                    (active,),
-                )
-            if count >= self.budget.max_attempts:
-                connection.execute(
-                    "UPDATE event_outbox SET state='EXHAUSTED',"
-                    "active_attempt=NULL,lease_until=NULL "
-                    "WHERE edge_event_id=%s",
-                    (event_id,),
-                )
-                return None
-            attempt = uuid4()
-            connection.execute(
-                "INSERT INTO event_delivery_attempts "
-                "(attempt_id,edge_event_id,ordinal,writer_generation,started_at) "
-                "VALUES (%s,%s,%s,%s,clock_timestamp())",
-                (attempt, event_id, count + 1, self.authority.generation),
-            )
-            connection.execute(
-                "UPDATE event_outbox SET state='IN_FLIGHT',attempt_count=%s,active_attempt=%s,"
-                "lease_until=clock_timestamp()+(%s * interval '1 second') WHERE edge_event_id=%s",
-                (count + 1, attempt, self.budget.lease_seconds, event_id),
-            )
-            return DeliveryClaim(attempt, event_id, count + 1, camera_id, envelope)
+            return None if row is None else self._claim_row(connection, row)
 
         return self.database.transact(claim_one)
+
+    def claim_event(self, edge_event_id: str) -> DeliveryClaim | None:
+        """Claim one accepted event for an immediate request-path delivery.
+
+        A PENDING row is claimable before its retry time because the worker's
+        own retry is the caller; a live lease belongs to another sender.
+        """
+
+        def claim_one(connection: psycopg.Connection) -> DeliveryClaim | None:
+            require_authority(connection, self.authority, sender=True)
+            row = connection.execute(
+                "SELECT edge_event_id,envelope,backend_camera_id,"
+                "state,attempt_count,active_attempt "
+                "FROM event_outbox WHERE edge_event_id=%s AND (state='PENDING' "
+                "OR (state='IN_FLIGHT' AND lease_until<=clock_timestamp())) FOR UPDATE",
+                (edge_event_id,),
+            ).fetchone()
+            return None if row is None else self._claim_row(connection, row)
+
+        return self.database.transact(claim_one)
+
+    def _claim_row(self, connection: psycopg.Connection, row: tuple) -> DeliveryClaim | None:
+        event_id, envelope, camera_id, state, count, active = row
+        if state == "IN_FLIGHT":
+            connection.execute(
+                "INSERT INTO event_delivery_results (attempt_id,finished_at,outcome,reason) "
+                "VALUES (%s,clock_timestamp(),'UNKNOWN','LEASE_EXPIRED')",
+                (active,),
+            )
+        if count >= self.budget.max_attempts:
+            connection.execute(
+                "UPDATE event_outbox SET state='EXHAUSTED',"
+                "active_attempt=NULL,lease_until=NULL "
+                "WHERE edge_event_id=%s",
+                (event_id,),
+            )
+            return None
+        attempt = uuid4()
+        connection.execute(
+            "INSERT INTO event_delivery_attempts "
+            "(attempt_id,edge_event_id,ordinal,writer_generation,started_at) "
+            "VALUES (%s,%s,%s,%s,clock_timestamp())",
+            (attempt, event_id, count + 1, self.authority.generation),
+        )
+        connection.execute(
+            "UPDATE event_outbox SET state='IN_FLIGHT',attempt_count=%s,active_attempt=%s,"
+            "lease_until=clock_timestamp()+(%s * interval '1 second') WHERE edge_event_id=%s",
+            (count + 1, attempt, self.budget.lease_seconds, event_id),
+        )
+        return DeliveryClaim(attempt, event_id, count + 1, camera_id, envelope)
+
+    def status(self, edge_event_id: str) -> DeliveryStatus | None:
+        """Read the committed delivery state and the latest attempt's result."""
+
+        def read(connection: psycopg.Connection) -> DeliveryStatus | None:
+            row = connection.execute(
+                "SELECT o.state,o.attempt_count,coalesce(o.lease_until>clock_timestamp(),false),"
+                "r.outcome,r.reason,r.http_status,r.backend_event_id "
+                "FROM event_outbox o LEFT JOIN event_delivery_attempts a "
+                "ON a.edge_event_id=o.edge_event_id AND a.ordinal=o.attempt_count "
+                "LEFT JOIN event_delivery_results r ON r.attempt_id=a.attempt_id "
+                "WHERE o.edge_event_id=%s",
+                (edge_event_id,),
+            ).fetchone()
+            if row is None:
+                return None
+            state, count, leased, outcome, reason, http_status, backend_event_id = row
+            return DeliveryStatus(
+                state,
+                count,
+                leased,
+                None if outcome is None else DeliveryOutcome(outcome),
+                reason,
+                http_status,
+                backend_event_id,
+            )
+
+        return self.database.read(read)
 
     def finish(
         self,

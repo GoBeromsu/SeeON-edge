@@ -8,9 +8,9 @@ Composes the real product seams end to end for a single synthetic
 * E -> B through the real ``/api/v1/relay/alerts`` route, real
   ``EdgeIngestClient``/``BackendEvidenceClient`` and the contract-exact Hub
   fixture served over loopback HTTP;
-* E -> I through the real ``DurableEvidenceStager`` -> ``EvidenceOutbox`` ->
-  central incident staging and the authenticated ``GET /api/v1/incidents``
-  projection.
+* E -> I through the real ``DurableEvidenceStager`` payload, the relay's
+  single PostgreSQL admission transaction (incident + outbox row) and the
+  authenticated ``GET /api/v1/incidents`` projection.
 
 B is captured from the actual fixture receipt; nothing in the join is
 hard-coded. Model/policy attribution stays categorically ``판정 불가``.
@@ -24,9 +24,7 @@ from pathlib import Path
 
 from fastapi.testclient import TestClient
 
-from backend.app.edge_db.bootstrap import bootstrap_database
-from backend.app.features.evidence.record_store import CentralEvidenceQuery
-from backend.app.main import create_app, no_lifespan
+from backend.app.features.audit.postgres_runtime import PostgresAuditRuntime
 from tests_support.alert_amplification_harness import (
     DiagnosticOutcome,
     IncidentProjection,
@@ -34,9 +32,12 @@ from tests_support.alert_amplification_harness import (
     rows_from_relations,
 )
 from tests_support.alert_amplification_runtime import RELAY_TOKEN, ServedFixture, relay_client
+from tests_support.postgres_sandbox import ProductSandbox
 from worker.pipeline.decision.incident_manager import IncidentManager
 from worker.pipeline.output.evidence.evidence_stager import DurableEvidenceStager
 from worker.types import BusinessEvent
+
+pytest_plugins = ("tests_support.postgres_sandbox",)
 
 _DETECTED_AT = "2026-08-16T00:00:00.000Z"
 
@@ -84,10 +85,8 @@ def _stage_incident(queue_directory: Path, edge_event_id: str) -> DurableEvidenc
     return stager
 
 
-def _projections(database: Path) -> list[IncidentProjection]:
-    app = create_app(lifespan=no_lifespan)
-    app.state.central_evidence_query = CentralEvidenceQuery(database)
-    with TestClient(app) as client:
+def _projections(relay: TestClient) -> list[IncidentProjection]:
+    with TestClient(relay.app) as client:
         assert (
             client.post(
                 "/api/v1/auth/session", json={"username": "admin", "password": "admin"}
@@ -125,22 +124,22 @@ def _deliver(client: TestClient, stager: DurableEvidenceStager) -> str:
 
 def test_one_transition_yields_one_edge_backend_and_incident_identity(
     tmp_path: Path,
+    postgres_product_sandbox: ProductSandbox,
+    postgres_audit_runtime: PostgresAuditRuntime,
 ) -> None:
     identity_path = tmp_path / "identities.jsonl"
-    database = tmp_path / "edge.sqlite3"
-    bootstrap_database(database)
 
     edge_event_id = _admit(identity_path, _transition("onset-1"), now_sec=100.0)
     stager = _stage_incident(tmp_path / "delivery-queue", edge_event_id)
 
     with ServedFixture() as served:
-        relay = relay_client(served.origin, tmp_path, database=database)
+        relay = relay_client(served.origin, postgres_product_sandbox, postgres_audit_runtime)
         first_backend = _deliver(relay, stager)
         retry_backend = _deliver(relay, stager)
 
         accepted = served.fixture.accepted_event_ids(edge_event_id)
 
-    projections = _projections(database)
+    projections = _projections(relay)
 
     assert first_backend == retry_backend
     assert len(set(accepted)) == 1
@@ -177,10 +176,10 @@ def test_durable_identity_survives_restart_without_minting_a_second_edge_id(
 
 def test_refire_fault_produces_two_edge_ids_for_one_physical_onset(
     tmp_path: Path,
+    postgres_product_sandbox: ProductSandbox,
+    postgres_audit_runtime: PostgresAuditRuntime,
 ) -> None:
     identity_path = tmp_path / "identities.jsonl"
-    database = tmp_path / "edge.sqlite3"
-    bootstrap_database(database)
 
     # Test-only refire fault: the same physical onset is admitted under two
     # distinct source identities, which is exactly what worker refire looks
@@ -192,12 +191,12 @@ def test_refire_fault_produces_two_edge_ids_for_one_physical_onset(
     second_stager = _stage_incident(tmp_path / "second-queue", second_edge)
 
     with ServedFixture() as served:
-        relay = relay_client(served.origin, tmp_path, database=database)
+        relay = relay_client(served.origin, postgres_product_sandbox, postgres_audit_runtime)
         first_backend = _deliver(relay, first_stager)
         second_backend = _deliver(relay, second_stager)
 
     assert first_backend != second_backend
-    projections = _projections(database)
+    projections = _projections(relay)
     assert len(projections) == 2
 
     rows = rows_from_relations(
