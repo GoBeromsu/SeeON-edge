@@ -163,7 +163,7 @@ def test_unenrolled_store_fails_closed_despite_identity_env(
     postgres_product_sandbox: ProductSandbox,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setenv("API_FACILITY_ID", "87d79f24-b32f-49a3-b534-19f0af7d9135")
+    monkeypatch.setenv("API_FACILITY_ID", "environment-facility")
     monkeypatch.setenv("EDGE_FACILITY_TOKEN", "environment-token")
     app = create_app(lifespan=no_lifespan)
     install_postgres_stores(app, _root(postgres_product_sandbox))

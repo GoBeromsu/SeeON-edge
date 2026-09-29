@@ -6,6 +6,7 @@ import fcntl
 import os
 import stat
 from collections.abc import Callable
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 import psycopg
@@ -19,6 +20,7 @@ from backend.app.edge_db.migration.mapping import diagnostics_schema_name
 from backend.app.edge_db.migration.reconcile import reconcile
 from backend.app.edge_db.migration.rollback import rollback_check
 from backend.app.edge_db.migration.snapshot import export_snapshot
+from backend.app.edge_db.migration.sqlite_fence import fence_sqlite
 from backend.app.edge_db.migration.transfer import freeze, pending_authority_path, transfer
 from backend.app.edge_db.migration.worker_state import queue_digest
 from backend.app.edge_db.postgres import PoolBudget
@@ -63,10 +65,26 @@ class _ProcessDeath(BaseException):
     """The migration process dies at the COMMIT boundary."""
 
 
+@dataclass(frozen=True)
+class _Legacy:
+    """The stopped old database, its snapshot and where its fence receipt goes."""
+
+    source: Path
+    snapshot: Path
+    receipt: Path
+
+
 @pytest.fixture
-def snapshot(tmp_path: Path) -> Path:
+def legacy(tmp_path: Path) -> _Legacy:
     source, destination = source_and_destination(tmp_path)
-    return export_snapshot(source, destination).path
+    receipts = tmp_path / "receipts"
+    receipts.mkdir(mode=0o700)
+    return _Legacy(source, export_snapshot(source, destination).path, receipts / "fence.json")
+
+
+@pytest.fixture
+def snapshot(legacy: _Legacy) -> Path:
+    return legacy.snapshot
 
 
 @pytest.fixture
@@ -130,6 +148,26 @@ def _fresh_source(root: Path) -> Path:
 
 def _fresh_install(target: MigrationTarget, root: Path) -> AuthorityToken:
     return _transfer(target, fresh_install_source=_fresh_source(root))
+
+
+def _fence(target: MigrationTarget, legacy: _Legacy) -> None:
+    """Stamp the old database at the current generation, as the operator does after export.
+
+    An absent old database is fenced without a snapshot, as on a fresh install.
+    """
+    generation, _ = authority_file_token(target.authority_path)
+    snapshot = legacy.snapshot if legacy.source.exists() else None
+    fence_sqlite(legacy.source, snapshot=snapshot, generation=generation, receipt=legacy.receipt)
+
+
+def _rollback(target: MigrationTarget, legacy: _Legacy) -> dict[str, object]:
+    return rollback_check(
+        target.database,
+        schema=target.schema,
+        snapshot_path=legacy.snapshot,
+        source=legacy.source,
+        fence_receipt=legacy.receipt,
+    )
 
 
 def _file_token(path: Path) -> AuthorityToken:
@@ -359,19 +397,20 @@ def test_queued_alerts_survive_the_cutover_bound_by_digest(
 
 
 def test_in_flight_delivery_blocks_transfer_and_rollback(
-    imported: MigrationTarget, snapshot: Path
+    imported: MigrationTarget, legacy: _Legacy
 ) -> None:
     target = imported
+    _fence(target, legacy)
     insert_in_flight_outbox(target.admin, target.schema)
     generation, token = authority_file_token(target.authority_path)
 
-    report = reconcile(target.database, schema=target.schema, snapshot_path=snapshot)
+    report = reconcile(target.database, schema=target.schema, snapshot_path=legacy.snapshot)
     with pytest.raises(
         MigrationError,
         match="^delivery tables are not empty: event_outbox, event_delivery_attempts$",
     ):
         _transfer(target)
-    verdict = rollback_check(target.database, schema=target.schema, snapshot_path=snapshot)
+    verdict = _rollback(target, legacy)
 
     assert report["result"] == "FAIL"
     assert report["failures"] == ["pending:event_outbox", "pending:event_delivery_attempts"]
@@ -386,14 +425,15 @@ def test_in_flight_delivery_blocks_transfer_and_rollback(
 
 
 def test_rollback_is_denied_for_a_live_authority_or_postgres_only_history(
-    imported: MigrationTarget, snapshot: Path
+    imported: MigrationTarget, legacy: _Legacy
 ) -> None:
     target = imported
 
     def verdict() -> tuple[object, object]:
-        decision = rollback_check(target.database, schema=target.schema, snapshot_path=snapshot)
+        decision = _rollback(target, legacy)
         return decision["result"], decision["reasons"]
 
+    _fence(target, legacy)
     after_import = verdict()
     _transfer(target)
     after_transfer = verdict()
@@ -413,16 +453,17 @@ def test_rollback_is_denied_for_a_live_authority_or_postgres_only_history(
     assert after_status_flip == ("DENY", ["target_history:policies"])
 
 
-def test_live_diagnostics_writes_keep_rollback_allowed_but_product_history_denies(
-    imported: MigrationTarget, snapshot: Path
+def test_live_diagnostics_and_product_writes_each_deny(
+    imported: MigrationTarget, legacy: _Legacy
 ) -> None:
     target = imported
     diagnostics = diagnostics_schema_name(target.schema)
 
     def verdict() -> tuple[object, object]:
-        decision = rollback_check(target.database, schema=target.schema, snapshot_path=snapshot)
+        decision = _rollback(target, legacy)
         return decision["result"], decision["reasons"]
 
+    _fence(target, legacy)
     _transfer(target)
     with runtime_role_database(
         target.dsn, diagnostics, target.runtime_role, DIAGNOSTICS_POOL_BUDGET
@@ -436,16 +477,20 @@ def test_live_diagnostics_writes_keep_rollback_allowed_but_product_history_denie
         for table, count in table_counts(target.admin, diagnostics).items()
         if count and table != "schema_migrations"
     )
-    # The counterfactual: the same live write aimed at the product schema.
+    # Diagnostics are never imported, so each written table is history SQLite never saw.
+    history = [f"diagnostics_history:{table}" for table in written]
+    # The same live write aimed at the product schema adds product history on top.
     with runtime_role_database(target.dsn, target.schema, target.runtime_role) as product:
         ingest_live_record(product, "live-1")
     after_product_write = verdict()
 
     assert "execution_records" in written
-    assert while_live == ("DENY", ["authority_not_fenced"])
-    assert after_freeze == ("ALLOW", [])
+    assert while_live == ("DENY", ["authority_not_fenced", *history])
+    assert after_freeze == ("DENY", history)
     assert after_product_write[0] == "DENY"
-    assert sorted(after_product_write[1]) == [f"target_history:{table}" for table in written]
+    assert sorted(after_product_write[1]) == sorted(
+        [*history, *(f"target_history:{table}" for table in written)]
+    )
 
 
 def _root_environ(target: MigrationTarget, root: Path) -> dict[str, str]:
@@ -664,17 +709,21 @@ def test_import_refuses_after_fresh_install(
 
 
 def test_rollback_check_denies_after_fresh_install(
-    migration_target: MigrationTarget, snapshot: Path, tmp_path: Path
+    migration_target: MigrationTarget, legacy: _Legacy, tmp_path: Path
 ) -> None:
     target = migration_target
+    fresh = replace(legacy, source=_fresh_source(tmp_path))
 
     def verdict() -> tuple[object, object]:
-        decision = rollback_check(target.database, schema=target.schema, snapshot_path=snapshot)
+        decision = _rollback(target, fresh)
         return decision["result"], decision["reasons"]
 
-    provisioned = verdict()
     _fresh_install(target, tmp_path)
+    # A fresh install refuses a path that already holds a file, so the fence follows it.
+    _fence(target, fresh)
     activated = verdict()
+    freeze(target.database, target.authority_path)
+    frozen = verdict()
 
-    assert provisioned == ("ALLOW", [])
-    assert activated == ("DENY", ["authority_not_fenced"])
+    assert activated == ("DENY", ["authority_not_fenced", "sqlite:source_absent"])
+    assert frozen == ("DENY", ["sqlite:source_absent"])
