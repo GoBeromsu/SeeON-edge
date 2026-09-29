@@ -1,20 +1,27 @@
-"""``GET /clips`` serves pages from the catalogue; the store is walked once per request."""
+"""``GET /clips`` serves pages from the PostgreSQL catalogue; only the indexer walks the store."""
 
 from __future__ import annotations
 
 import json
 import shutil
-import sqlite3
-import time
+from collections.abc import Callable
 from pathlib import Path
 
 import pytest
+from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from backend.app.features.clips import compact_listing
-from backend.app.features.clips import store as store_module
+from backend.app.features.audit.postgres_runtime import PostgresAuditRuntime
+from backend.app.features.clips import catalog_indexer
+from backend.app.features.clips.catalog_indexer import ReconcileOutcome
 from backend.app.features.clips.store import ClipStore
-from backend.app.main import create_app, no_lifespan
+from tests_support.postgres_api_app import postgres_api_app
+from tests_support.postgres_clip_app import index_clips
+from tests_support.postgres_sandbox import ProductSandbox
+
+pytest_plugins = ("tests_support.postgres_sandbox",)
+
+_STATE_SQL = "SELECT local_state, local_reason FROM clips WHERE clip_id = %s"
 
 
 def _write_clip(
@@ -49,193 +56,197 @@ def _write_clip(
     return clip_id
 
 
-def _client(app) -> TestClient:
+def _client(app: FastAPI) -> TestClient:
     client = TestClient(app)
     login = client.post("/api/v1/auth/session", json={"username": "admin", "password": "admin"})
     assert login.status_code == 204
     return client
 
 
-def _app(root: Path, monkeypatch: pytest.MonkeyPatch):
-    monkeypatch.setenv("CLIP_STORE_DIR", str(root))
-    app = create_app(lifespan=no_lifespan)
-    app.state.clip_store = ClipStore(root)
-    return app
+@pytest.fixture
+def make_app(
+    monkeypatch: pytest.MonkeyPatch,
+    postgres_product_sandbox: ProductSandbox,
+    postgres_audit_runtime: PostgresAuditRuntime,
+) -> Callable[[Path], FastAPI]:
+    def make(root: Path) -> FastAPI:
+        monkeypatch.setenv("CLIP_STORE_DIR", str(root))
+        app = postgres_api_app(postgres_product_sandbox, postgres_audit_runtime)
+        app.state.clip_store = ClipStore(root)
+        return app
+
+    return make
 
 
-def _catalogue_everything(client: TestClient, count: int) -> int:
-    """Drive reconciliation until every clip is catalogued; return the call count."""
-    calls = 0
-    while True:
-        response = client.get("/api/v1/clips", params={"limit": 1})
-        assert response.status_code == 200
-        calls += 1
-        if response.json()["pagination"]["total"] == count:
-            return calls
-        assert calls <= count, "catalogue never converged"
+def _listed(client: TestClient) -> tuple[int, list[str]]:
+    response = client.get("/api/v1/clips", params={"limit": 10})
+    assert response.status_code == 200
+    body = response.json()
+    return body["pagination"]["total"], [clip["clip_id"] for clip in body["clips"]]
 
 
 def test_listing_walks_the_store_once_and_never_relocates_per_clip(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, make_app: Callable[[Path], FastAPI]
 ) -> None:
+    """Pages come from the catalogue: a GET neither walks the store nor locates a clip."""
     root = tmp_path / "clip-store"
     count = 500
     for index in range(count):
         _write_clip(root, index)
-    app = _app(root, monkeypatch)
+    app = make_app(root)
+    index_clips(app)
     root_walks = 0
     locates = 0
-    real_roots = store_module.bounded_clip_roots
+    real_scan = ClipStore.scan_manifest_partition
     real_locate = ClipStore.locate_manifest
 
-    def counting_roots(store_root: Path):
+    def counting_scan(self: ClipStore):
         nonlocal root_walks
         root_walks += 1
-        return real_roots(store_root)
+        return real_scan(self)
 
-    def counting_locate(self, clip_id: str):
+    def counting_locate(self: ClipStore, clip_id: str):
         nonlocal locates
         locates += 1
         return real_locate(self, clip_id)
 
-    monkeypatch.setattr(store_module, "bounded_clip_roots", counting_roots)
+    monkeypatch.setattr(ClipStore, "scan_manifest_partition", counting_scan)
     monkeypatch.setattr(ClipStore, "locate_manifest", counting_locate)
     with _client(app) as client:
-        _catalogue_everything(client, count)
-        root_walks = 0
-        locates = 0
         response = client.get("/api/v1/clips", params={"limit": 20})
         assert response.status_code == 200
         assert len(response.json()["clips"]) == 20
         assert response.json()["pagination"]["total"] == count
-        assert root_walks <= 1, "one store walk per request, not one per clip"
+        assert root_walks == 0, "a listing request does not walk the store"
         assert locates == 0, "no per-clip locate_manifest on the listing path"
 
-        root_walks = 0
         cursor = response.json()["pagination"]["next_cursor"]
         second = client.get("/api/v1/clips", params={"limit": 20, "cursor": cursor})
         assert second.status_code == 200
-        assert root_walks <= 1
+        assert len(second.json()["clips"]) == 20
+        assert root_walks == 0
         assert locates == 0
 
 
-def test_listing_two_thousand_clips_stays_within_two_seconds(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    root = tmp_path / "clip-store"
-    count = 2000
-    for index in range(count):
-        _write_clip(root, index)
-    app = _app(root, monkeypatch)
-    with _client(app) as client:
-        durations: list[float] = []
-        total = 0
-        while total < count:
-            started = time.perf_counter()
-            response = client.get("/api/v1/clips", params={"limit": 20})
-            durations.append(time.perf_counter() - started)
-            assert response.status_code == 200
-            total = response.json()["pagination"]["total"]
-            assert len(durations) <= count // compact_listing.EXAMINE_BUDGET + 1
-        started = time.perf_counter()
-        steady = client.get("/api/v1/clips", params={"limit": 20})
-        steady_duration = time.perf_counter() - started
-    assert steady.status_code == 200
-    assert steady.json()["pagination"]["total"] == count
-    assert steady_duration < 2.0, f"steady-state listing took {steady_duration:.2f}s"
-    assert max(durations) < 2.0, f"slowest reconciling call took {max(durations):.2f}s"
-
-
 def test_new_clip_is_examined_and_visible_on_the_next_call(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, make_app: Callable[[Path], FastAPI]
 ) -> None:
     root = tmp_path / "clip-store"
     for index in range(5):
         _write_clip(root, index)
-    app = _app(root, monkeypatch)
+    app = make_app(root)
     hashed: list[str] = []
-    real_hash = compact_listing._hash_regular
+    real_hash = catalog_indexer._hash_regular
 
-    def counting_hash(store_root: Path, path: Path):
-        if path.name == "clip.mp4":
-            hashed.append(path.parent.name)
-        return real_hash(store_root, path)
+    def counting_hash(store_root: Path, path: Path) -> tuple[str, int]:
+        identity = real_hash(store_root, path)
+        hashed.append(f"{path.parent.name}/{path.name}")
+        return identity
 
-    monkeypatch.setattr(compact_listing, "_hash_regular", counting_hash)
+    monkeypatch.setattr(catalog_indexer, "_hash_regular", counting_hash)
+    index_clips(app)
+    assert sorted(hashed) == [
+        f"clip-{index:05d}/{name}" for index in range(5) for name in ("clip.mp4", "manifest.json")
+    ]
     with _client(app) as client:
-        first = client.get("/api/v1/clips", params={"limit": 10})
-        assert first.status_code == 200
-        assert first.json()["pagination"]["total"] == 5
-        assert sorted(hashed) == [f"clip-{index:05d}" for index in range(5)]
+        assert _listed(client)[0] == 5
 
         hashed.clear()
         new_id = _write_clip(root, 900)
+        index_clips(app)
         second = client.get("/api/v1/clips", params={"limit": 10})
         assert second.status_code == 200
         assert second.json()["pagination"]["total"] == 6
         assert second.json()["clips"][0]["clip_id"] == new_id
         assert second.json()["clips"][0]["video_available"] is True
-        assert hashed == [new_id], "only the new clip's media is hashed"
+        assert sorted(hashed) == [f"{new_id}/clip.mp4", f"{new_id}/manifest.json"], (
+            "only the new clip is examined; catalogued clips are not re-read"
+        )
 
         hashed.clear()
-        third = client.get("/api/v1/clips", params={"limit": 10})
-        assert third.status_code == 200
+        index_clips(app)
+        assert _listed(client)[0] == 6
         assert hashed == []
 
 
 def test_changed_media_still_conflicts_and_deleted_clip_disappears(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path,
+    make_app: Callable[[Path], FastAPI],
+    postgres_product_sandbox: ProductSandbox,
 ) -> None:
     root = tmp_path / "clip-store"
     for index in range(4):
         _write_clip(root, index)
-    app = _app(root, monkeypatch)
+    app = make_app(root)
+    admin = postgres_product_sandbox.admin
+    identity_sql = "SELECT media_sha256, media_size_bytes FROM clips WHERE clip_id = %s"
+    index_clips(app)
+    before = admin.execute(identity_sql, ("clip-00002",)).fetchone()
     with _client(app) as client:
-        first = client.get("/api/v1/clips", params={"limit": 10})
-        assert first.status_code == 200
-        assert first.json()["pagination"]["total"] == 4
+        assert _listed(client)[0] == 4
 
         (root / "clips" / "clip-00002" / "clip.mp4").write_bytes(b"different bytes now")
-        conflict = client.get("/api/v1/clips", params={"limit": 10})
-        assert conflict.status_code == 503
+        index_clips(app)
+        assert _listed(client)[0] == 4
+        assert admin.execute(identity_sql, ("clip-00002",)).fetchone() == before
+        assert admin.execute(_STATE_SQL, ("clip-00002",)).fetchone() == (
+            "CORRUPT",
+            "IDENTITY_CONFLICT",
+        )
 
         shutil.rmtree(root / "clips" / "clip-00002")
-        after_delete = client.get("/api/v1/clips", params={"limit": 10})
-        assert after_delete.status_code == 200
-        assert after_delete.json()["pagination"]["total"] == 3
-        assert "clip-00002" not in {clip["clip_id"] for clip in after_delete.json()["clips"]}
-    from backend.app.features.clips import router as router_module
-
-    with sqlite3.connect(router_module.EDGE_DATABASE_PATH) as connection:
-        assert connection.execute(
-            "SELECT count(*) FROM clips WHERE clip_id='clip-00002'"
-        ).fetchone() == (0,)
+        index_clips(app)
+        total, clip_ids = _listed(client)
+        assert total == 3
+        assert "clip-00002" not in clip_ids
+    assert admin.execute(
+        "SELECT count(*) FROM clips WHERE clip_id = %s", ("clip-00002",)
+    ).fetchone() == (0,)
 
 
 def test_examination_is_bounded_per_call_and_converges(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, make_app: Callable[[Path], FastAPI]
 ) -> None:
     root = tmp_path / "clip-store"
-    monkeypatch.setattr(compact_listing, "EXAMINE_BUDGET", 7)
+    monkeypatch.setattr(catalog_indexer, "EXAMINE_BUDGET", 7)
     count = 20
     for index in range(count):
         _write_clip(root, index)
-    app = _app(root, monkeypatch)
+    app = make_app(root)
+    first_pass = app.state.clip_catalog_indexer.reconcile(ClipStore(root))
+    assert first_pass == ReconcileOutcome(examined=7, remaining=13, isolated=0)
     with _client(app) as client:
         first = client.get("/api/v1/clips", params={"limit": 5})
         assert first.status_code == 200
         assert first.json()["pagination"]["total"] == 7
         assert first.json()["clips"][0]["clip_id"] == "clip-00019"
-        calls = _catalogue_everything(client, count)
-    assert calls == 2  # ceil(20 / 7) - 1 further calls after the first
+
+        assert index_clips(app) == (
+            ReconcileOutcome(examined=7, remaining=6, isolated=0),
+            ReconcileOutcome(examined=6, remaining=0, isolated=0),
+        )
+        assert _listed(client)[0] == count
 
 
-def _park_as_manifest_missing(clip_id: str) -> None:
-    """Put a row in the state ``_apply`` leaves when a referenced clip's manifest vanishes."""
-    from backend.app.features.clips import router as router_module
+def test_parked_row_whose_manifest_reappears_is_restored_not_refused(
+    tmp_path: Path,
+    make_app: Callable[[Path], FastAPI],
+    postgres_product_sandbox: ProductSandbox,
+) -> None:
+    """A row parked UNAVAILABLE/MANIFEST_MISSING carries no identity. When the
+    manifest is back on disk the catalogue must restore it, not report a content
+    change: one such row made every ``GET /clips`` answer 503 in production."""
+    root = tmp_path / "clip-store"
+    for index in range(3):
+        _write_clip(root, index)
+    app = make_app(root)
+    admin = postgres_product_sandbox.admin
+    index_clips(app)
+    with _client(app) as client:
+        assert _listed(client)[0] == 3
 
-    with sqlite3.connect(router_module.EDGE_DATABASE_PATH) as connection:
-        _ = connection.execute(
+        # The state the indexer leaves when a referenced clip's manifest vanishes.
+        _ = admin.execute(
             """
             UPDATE clips SET
                 manifest_relpath=NULL, media_relpath=NULL, thumbnail_relpath=NULL,
@@ -243,40 +254,25 @@ def _park_as_manifest_missing(clip_id: str) -> None:
                 manifest_size_bytes=NULL, media_size_bytes=NULL, thumbnail_size_bytes=NULL,
                 local_state='UNAVAILABLE', local_reason='MANIFEST_MISSING',
                 revision=revision+1
-            WHERE clip_id=?
+            WHERE clip_id=%s
             """,
-            (clip_id,),
+            ("clip-00001",),
         )
+        parked_total, parked_ids = _listed(client)
+        assert parked_total == 2
+        assert "clip-00001" not in parked_ids
 
+        index_clips(app)
+        restored_total, restored_ids = _listed(client)
+        assert restored_total == 3
+        assert "clip-00001" in restored_ids
 
-def test_parked_row_whose_manifest_reappears_is_restored_not_refused(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """A row parked UNAVAILABLE/MANIFEST_MISSING carries no identity. When the
-    manifest is back on disk the listing must restore it, not report a content
-    change: one such row made every ``GET /clips`` answer 503 in production."""
-    root = tmp_path / "clip-store"
-    for index in range(3):
-        _write_clip(root, index)
-    app = _app(root, monkeypatch)
-    with _client(app) as client:
-        first = client.get("/api/v1/clips", params={"limit": 10})
-        assert first.status_code == 200
-        assert first.json()["pagination"]["total"] == 3
-
-        _park_as_manifest_missing("clip-00001")
-        parked = client.get("/api/v1/clips", params={"limit": 10})
-        assert parked.status_code == 200
-        assert parked.json()["pagination"]["total"] == 3
-        assert "clip-00001" in {clip["clip_id"] for clip in parked.json()["clips"]}
-
-    from backend.app.features.clips import router as router_module
-
-    with sqlite3.connect(router_module.EDGE_DATABASE_PATH) as connection:
-        row = connection.execute(
-            "SELECT local_state, local_reason, manifest_relpath, media_sha256, revision "
-            "FROM clips WHERE clip_id='clip-00001'"
-        ).fetchone()
+    row = admin.execute(
+        "SELECT local_state, local_reason, manifest_relpath, media_sha256, revision "
+        "FROM clips WHERE clip_id = %s",
+        ("clip-00001",),
+    ).fetchone()
+    assert row is not None
     assert row[0] == "AVAILABLE"
     assert row[1] is None
     assert row[2] == "clips/clip-00001/manifest.json"
@@ -285,22 +281,34 @@ def test_parked_row_whose_manifest_reappears_is_restored_not_refused(
 
 
 def test_corrupt_row_whose_media_reappears_is_restored(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path,
+    make_app: Callable[[Path], FastAPI],
+    postgres_product_sandbox: ProductSandbox,
 ) -> None:
     root = tmp_path / "clip-store"
     media = b"stable media bytes"
     _write_clip(root, 0, media=media)
-    app = _app(root, monkeypatch)
+    app = make_app(root)
+    admin = postgres_product_sandbox.admin
     media_path = root / "clips" / "clip-00000" / "clip.mp4"
     media_path.unlink()
+    index_clips(app)
     with _client(app) as client:
-        corrupt = client.get("/api/v1/clips", params={"limit": 10})
-        assert corrupt.status_code == 200
-        assert corrupt.json()["clips"][0]["clip_id"] == "clip-00000"
+        assert _listed(client)[1] == ["clip-00000"]
+        assert admin.execute(_STATE_SQL, ("clip-00000",)).fetchone() == (
+            "CORRUPT",
+            "MEDIA_MISSING",
+        )
+
         _ = media_path.write_bytes(media)
-        restored = client.get("/api/v1/clips", params={"limit": 10})
-        assert restored.status_code == 200
-        assert [clip["clip_id"] for clip in restored.json()["clips"]] == ["clip-00000"]
+        index_clips(app)
+        assert _listed(client)[1] == ["clip-00000"]
+        assert admin.execute(_STATE_SQL, ("clip-00000",)).fetchone() == ("AVAILABLE", None)
 
         _ = media_path.write_bytes(b"different bytes now")
-        assert client.get("/api/v1/clips", params={"limit": 10}).status_code == 503
+        index_clips(app)
+        assert _listed(client)[1] == ["clip-00000"]
+        assert admin.execute(_STATE_SQL, ("clip-00000",)).fetchone() == (
+            "CORRUPT",
+            "IDENTITY_CONFLICT",
+        )

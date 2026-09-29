@@ -1,53 +1,48 @@
-import sqlite3
-import stat
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import pytest
+from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from backend.app.edge_db.bootstrap import bootstrap_database
-from backend.app.features.cameras.store import CameraRegistryStore
-from backend.app.main import create_app, no_lifespan
+from backend.app.features.audit.postgres_runtime import PostgresAuditRuntime
 from backend.app.shared.dashboard_auth import (
     API_DASHBOARD_PASSWORD_ENV,
     API_DASHBOARD_USERNAME_ENV,
     DEFAULT_DASHBOARD_PASSWORD,
     DEFAULT_DASHBOARD_USERNAME,
 )
-from backend.app.shared.dashboard_credentials import (
-    DashboardCredentialsStore,
-    DashboardCredentialsStoreError,
-)
+from tests_support.postgres_api_app import postgres_api_app
+from tests_support.postgres_sandbox import ProductSandbox
+
+pytest_plugins = ("tests_support.postgres_sandbox",)
 
 
-@pytest.fixture(autouse=True)
-def _migrated_compact_database(tmp_path: Path) -> None:
-    bootstrap_database(tmp_path / "catalog.sqlite3")
+@pytest.fixture
+def sandbox(postgres_product_sandbox: ProductSandbox) -> ProductSandbox:
+    return postgres_product_sandbox
 
 
-def _app(tmp_path, **state):
-    app = create_app(lifespan=no_lifespan)
-    registry = state.pop("camera_registry", None)
-    app.state.camera_registry = (
-        registry
-        if isinstance(registry, CameraRegistryStore)
-        else CameraRegistryStore(tmp_path / "catalog.sqlite3")
-    )
-    app.state.edge_relay_token = "worker-secret"
-    for key, value in state.items():
-        setattr(app.state, key, value)
-    return app
+@pytest.fixture
+def build_app(sandbox: ProductSandbox, postgres_audit_runtime: PostgresAuditRuntime):
+    """Build a no-lifespan app on the shared sandbox; a second call is a restart."""
+
+    def _build(**state) -> FastAPI:
+        app = postgres_api_app(sandbox, postgres_audit_runtime)
+        app.state.edge_relay_token = "worker-secret"
+        for key, value in state.items():
+            setattr(app.state, key, value)
+        return app
+
+    return _build
 
 
-def _client(tmp_path):
-    return TestClient(
-        _app(tmp_path, dashboard_username="operator", dashboard_password="correct horse")
-    )
+def _client(build_app):
+    return TestClient(build_app(dashboard_username="operator", dashboard_password="correct horse"))
 
 
-def test_dashboard_login_uses_httponly_cookie_for_protected_routes(tmp_path) -> None:
-    with _client(tmp_path) as client:
+def test_dashboard_login_uses_httponly_cookie_for_protected_routes(build_app) -> None:
+    with _client(build_app) as client:
         response = client.post(
             "/api/v1/auth/session",
             json={"username": "operator", "password": "correct horse"},
@@ -61,8 +56,8 @@ def test_dashboard_login_uses_httponly_cookie_for_protected_routes(tmp_path) -> 
         assert client.get("/api/v1/cameras").status_code == 200
 
 
-def test_dashboard_rejects_invalid_login_and_worker_token(tmp_path) -> None:
-    with _client(tmp_path) as client:
+def test_dashboard_rejects_invalid_login_and_worker_token(build_app) -> None:
+    with _client(build_app) as client:
         invalid = client.post(
             "/api/v1/auth/session",
             json={"username": "operator", "password": "wrong"},
@@ -77,9 +72,9 @@ def test_dashboard_rejects_invalid_login_and_worker_token(tmp_path) -> None:
 
 
 def test_worker_config_keeps_dedicated_relay_auth_when_dashboard_sessions_are_enabled(
-    tmp_path,
+    build_app,
 ) -> None:
-    with _client(tmp_path) as client:
+    with _client(build_app) as client:
         accepted = client.get(
             "/api/v1/cameras/worker-config",
             headers={"X-Edge-Relay-Token": "worker-secret"},
@@ -94,10 +89,10 @@ def test_worker_config_keeps_dedicated_relay_auth_when_dashboard_sessions_are_en
 
 
 def test_dashboard_routes_ignore_relay_credentials_even_with_legacy_opt_in(
-    tmp_path, monkeypatch
+    build_app, monkeypatch
 ) -> None:
     monkeypatch.setenv("API_ALLOW_LEGACY_DASHBOARD_AUTH", "1")
-    app = _app(tmp_path)
+    app = build_app()
 
     with TestClient(app) as client:
         bearer_response = client.get(
@@ -113,8 +108,8 @@ def test_dashboard_routes_ignore_relay_credentials_even_with_legacy_opt_in(
     assert relay_header_response.status_code == 401
 
 
-def test_concurrent_first_logins_share_one_session_store(tmp_path) -> None:
-    app = _app(tmp_path, dashboard_username="operator", dashboard_password="correct horse")
+def test_concurrent_first_logins_share_one_session_store(build_app) -> None:
+    app = build_app(dashboard_username="operator", dashboard_password="correct horse")
 
     def login_and_query(_index: int) -> tuple[int, int]:
         with TestClient(app) as client:
@@ -131,8 +126,8 @@ def test_concurrent_first_logins_share_one_session_store(tmp_path) -> None:
     assert statuses == [(204, 200)] * 16
 
 
-def test_dashboard_logout_revokes_session(tmp_path) -> None:
-    with _client(tmp_path) as client:
+def test_dashboard_logout_revokes_session(build_app) -> None:
+    with _client(build_app) as client:
         login = client.post(
             "/api/v1/auth/session",
             json={"username": "operator", "password": "correct horse"},
@@ -143,22 +138,10 @@ def test_dashboard_logout_revokes_session(tmp_path) -> None:
         assert client.get("/api/v1/cameras").status_code == 401
 
 
-def test_credentials_store_returns_none_on_zero_rows(tmp_path) -> None:
-    store = DashboardCredentialsStore(tmp_path / "catalog.sqlite3")
-
-    assert store.load() is None
-
-    store.save(username="operator", password="bootstrap-secret")
-    persisted = store.load()
-    assert persisted is not None
-    assert persisted.username == "operator"
-    assert persisted.verify_password("bootstrap-secret")
-
-
-def test_zero_config_edge_box_refuses_built_in_admin_default(tmp_path, monkeypatch) -> None:
+def test_zero_config_edge_box_refuses_built_in_admin_default(build_app, monkeypatch) -> None:
     monkeypatch.delenv(API_DASHBOARD_USERNAME_ENV, raising=False)
     monkeypatch.delenv(API_DASHBOARD_PASSWORD_ENV, raising=False)
-    app = _app(tmp_path)
+    app = build_app()
     with TestClient(app) as client:
         login = client.post(
             "/api/v1/auth/session",
@@ -171,8 +154,8 @@ def test_zero_config_edge_box_refuses_built_in_admin_default(tmp_path, monkeypat
         assert "not configured" in login.json()["detail"]
 
 
-def test_explicit_env_bootstrap_pair_accepts_login(tmp_path) -> None:
-    app = _app(tmp_path, dashboard_username="operator", dashboard_password="correct horse")
+def test_explicit_env_bootstrap_pair_accepts_login(build_app) -> None:
+    app = build_app(dashboard_username="operator", dashboard_password="correct horse")
     with TestClient(app) as client:
         default_rejected = client.post(
             "/api/v1/auth/session",
@@ -190,14 +173,8 @@ def test_explicit_env_bootstrap_pair_accepts_login(tmp_path) -> None:
         assert env_accepted.status_code == 204
 
 
-def test_credential_rotation_changes_login_and_revokes_other_sessions(tmp_path) -> None:
-    store_path = tmp_path / "catalog.sqlite3"
-    app = _app(
-        tmp_path,
-        dashboard_credentials_store=DashboardCredentialsStore(store_path),
-        dashboard_username="operator",
-        dashboard_password="bootstrap-secret",
-    )
+def test_credential_rotation_changes_login_and_revokes_other_sessions(build_app) -> None:
+    app = build_app(dashboard_username="operator", dashboard_password="bootstrap-secret")
 
     with TestClient(app) as bystander:
         bystander_login = bystander.post(
@@ -240,17 +217,11 @@ def test_credential_rotation_changes_login_and_revokes_other_sessions(tmp_path) 
         assert bystander.get("/api/v1/cameras").status_code == 401
 
 
-def test_rotation_to_a_non_ascii_username_logs_in_and_survives_a_restart(tmp_path) -> None:
-    store_path = tmp_path / "catalog.sqlite3"
+def test_rotation_to_a_non_ascii_username_logs_in_and_survives_a_restart(build_app) -> None:
     korean_username = "관리자"
 
     with TestClient(
-        _app(
-            tmp_path,
-            dashboard_credentials_store=DashboardCredentialsStore(store_path),
-            dashboard_username="operator",
-            dashboard_password="bootstrap-secret",
-        )
+        build_app(dashboard_username="operator", dashboard_password="bootstrap-secret")
     ) as client:
         login = client.post(
             "/api/v1/auth/session",
@@ -280,12 +251,7 @@ def test_rotation_to_a_non_ascii_username_logs_in_and_survives_a_restart(tmp_pat
         assert stale_bootstrap.status_code == 401
 
     with TestClient(
-        _app(
-            tmp_path,
-            dashboard_credentials_store=DashboardCredentialsStore(store_path),
-            dashboard_username="operator",
-            dashboard_password="bootstrap-secret",
-        )
+        build_app(dashboard_username="operator", dashboard_password="bootstrap-secret")
     ) as client:
         rejected = client.post(
             "/api/v1/auth/session",
@@ -301,15 +267,9 @@ def test_rotation_to_a_non_ascii_username_logs_in_and_survives_a_restart(tmp_pat
 
 
 def test_unauthenticated_credential_rotation_is_rejected_without_touching_the_store(
-    tmp_path,
+    build_app, sandbox: ProductSandbox
 ) -> None:
-    store_path = tmp_path / "catalog.sqlite3"
-    app = _app(
-        tmp_path,
-        dashboard_credentials_store=DashboardCredentialsStore(store_path),
-        dashboard_username="operator",
-        dashboard_password="bootstrap-secret",
-    )
+    app = build_app(dashboard_username="operator", dashboard_password="bootstrap-secret")
 
     with TestClient(app) as client:
         rejected = client.put(
@@ -317,12 +277,7 @@ def test_unauthenticated_credential_rotation_is_rejected_without_touching_the_st
             json={"new_password": "new-secret-pw"},
         )
         assert rejected.status_code == 401
-        connection = sqlite3.connect(store_path)
-        try:
-            count = connection.execute("SELECT COUNT(*) FROM credentials").fetchone()[0]
-        finally:
-            connection.close()
-        assert count == 0
+        assert sandbox.admin.execute("SELECT count(*) FROM credentials").fetchone() == (0,)
 
         still_bootstrap = client.post(
             "/api/v1/auth/session",
@@ -331,16 +286,9 @@ def test_unauthenticated_credential_rotation_is_rejected_without_touching_the_st
         assert still_bootstrap.status_code == 204
 
 
-def test_persisted_file_wins_over_env_after_store_reresolution(tmp_path) -> None:
-    store_path = tmp_path / "catalog.sqlite3"
-
+def test_persisted_row_wins_over_env_after_store_reresolution(build_app) -> None:
     with TestClient(
-        _app(
-            tmp_path,
-            dashboard_credentials_store=DashboardCredentialsStore(store_path),
-            dashboard_username="operator",
-            dashboard_password="correct horse",
-        )
+        build_app(dashboard_username="operator", dashboard_password="correct horse")
     ) as client:
         login = client.post(
             "/api/v1/auth/session",
@@ -354,60 +302,30 @@ def test_persisted_file_wins_over_env_after_store_reresolution(tmp_path) -> None
         assert rotate.status_code == 204
 
     with TestClient(
-        _app(
-            tmp_path,
-            dashboard_credentials_store=DashboardCredentialsStore(store_path),
-            dashboard_username="operator",
-            dashboard_password="correct horse",
-        )
+        build_app(dashboard_username="operator", dashboard_password="correct horse")
     ) as client:
         env_rejected = client.post(
             "/api/v1/auth/session",
             json={"username": "operator", "password": "correct horse"},
         )
-        file_accepted = client.post(
+        persisted_accepted = client.post(
             "/api/v1/auth/session",
             json={"username": "operator", "password": "rotated-pw"},
         )
 
         assert env_rejected.status_code == 401
-        assert file_accepted.status_code == 204
+        assert persisted_accepted.status_code == 204
 
 
-def test_persisted_credentials_file_is_written_with_mode_0600(tmp_path) -> None:
-    store_path = tmp_path / "catalog.sqlite3"
-    app = _app(
-        tmp_path,
-        dashboard_credentials_store=DashboardCredentialsStore(store_path),
-        dashboard_username="operator",
-        dashboard_password="bootstrap-secret",
-    )
-
-    with TestClient(app) as client:
-        login = client.post(
-            "/api/v1/auth/session",
-            json={"username": "operator", "password": "bootstrap-secret"},
-        )
-        assert login.status_code == 204
-        rotate = client.put(
-            "/api/v1/auth/credentials",
-            json={"new_password": "new-secret-pw"},
-        )
-        assert rotate.status_code == 204
-
-    assert stat.S_IMODE(store_path.stat().st_mode) == 0o600
-
-
-def test_corrupt_credentials_store_fails_closed_without_env_fallback(tmp_path, monkeypatch) -> None:
-    store_path = tmp_path / "catalog.sqlite3"
-    store_path.write_bytes(b"not a sqlite database")
+def test_corrupt_credentials_store_fails_closed_without_env_fallback(
+    build_app, sandbox: ProductSandbox, monkeypatch
+) -> None:
     monkeypatch.setenv(API_DASHBOARD_USERNAME_ENV, "operator")
     monkeypatch.setenv(API_DASHBOARD_PASSWORD_ENV, "env-secret-should-not-apply")
-    app = _app(
-        tmp_path,
-        dashboard_credentials_store=DashboardCredentialsStore(store_path),
-        camera_registry=CameraRegistryStore(tmp_path / ".central-fixture" / "edge.sqlite3"),
-    )
+    app = build_app()
+    app.state.dashboard_credentials_store.save(username="operator", password="persisted-secret")
+    sandbox.admin.execute("ALTER TABLE credentials DROP CONSTRAINT credentials_algorithm_check")
+    sandbox.admin.execute("UPDATE credentials SET algorithm=%s WHERE id=1", ("other",))
 
     with TestClient(app) as client:
         response = client.post(
@@ -415,20 +333,7 @@ def test_corrupt_credentials_store_fails_closed_without_env_fallback(tmp_path, m
             json={"username": "operator", "password": "env-secret-should-not-apply"},
         )
 
-    assert response.status_code == 503
-    assert "unreadable" in response.json()["detail"]
-
-
-def test_credentials_store_load_raises_on_corrupt_file(tmp_path) -> None:
-    store_path = tmp_path / "catalog.sqlite3"
-    store_path.write_bytes(b"not a sqlite database")
-    store = DashboardCredentialsStore(store_path)
-    try:
-        store.load()
-        raised = False
-    except DashboardCredentialsStoreError:
-        raised = True
-    assert raised
+    assert (response.status_code, response.content) == (503, b"")
 
 
 def test_compose_edge_requires_dashboard_and_rtsp_policy_flags() -> None:

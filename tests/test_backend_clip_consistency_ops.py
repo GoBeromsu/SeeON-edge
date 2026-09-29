@@ -11,7 +11,6 @@ from pathlib import Path
 
 import pytest
 
-from backend.app.edge_db.bootstrap import bootstrap_database
 from backend.app.edge_db.ownership import Writer, writer_for_table
 from backend.app.features.clips import consistency_ops
 from backend.app.features.clips.consistency_ops import (
@@ -21,6 +20,7 @@ from backend.app.features.clips.consistency_ops import (
     repair_clip_consistency,
 )
 from shared.release_identity import EDGE_DATABASE_SCHEMA_VERSION
+from tests_support.sqlite_source import create_schema19_source
 
 
 def _layout(tmp_path: Path) -> tuple[Path, Path, Path, Path]:
@@ -33,7 +33,7 @@ def _layout(tmp_path: Path) -> tuple[Path, Path, Path, Path]:
     (store / "clips" / ".staging").mkdir(mode=0o755)
     maintenance.mkdir(mode=0o700)
     database = state / "edge.sqlite3"
-    bootstrap_database(database)
+    create_schema19_source(database)
     return database, store, maintenance, maintenance / "quiescence.json"
 
 

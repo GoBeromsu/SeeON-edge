@@ -7,6 +7,7 @@ import json
 import logging
 import math
 import os
+import random
 import sys
 import urllib.request
 from collections.abc import AsyncIterator
@@ -20,19 +21,26 @@ from typing import Protocol, TypeGuard
 from fastapi import FastAPI
 
 from backend.app.core.config import get_settings, reject_retired_backend_environment
-from backend.app.edge_db import (
-    DIAGNOSTICS_DATABASE_FILENAME,
-    EDGE_DATABASE_PATH,
-    open_diagnostics_database,
-)
+from backend.app.edge_db.postgres import PostgresDatabase
 from backend.app.features.audit.startup import (
     close_audit_session,
     configure_audit_readiness,
+    start_audit_verification,
 )
-from backend.app.features.cameras.store import CameraRegistryStore
-from backend.app.features.clips.catalog import CatalogStore
+from backend.app.features.clips.catalog_indexer import (
+    start_clip_catalog_indexer,
+    stop_clip_catalog_indexer,
+)
+from backend.app.features.diagnostics.postgres_database import open_diagnostics_database
 from backend.app.features.diagnostics.retention import RetentionBudget
 from backend.app.features.diagnostics.store import ExecutionRecordStore
+from backend.app.features.evidence.outbox_delivery import OutboxDelivery
+from backend.app.features.evidence.outbox_dispatch import (
+    SENDER_BASE_INTERVAL_SEC,
+    OutboxSenderStatus,
+    send_outbox_once,
+    sender_delay,
+)
 from backend.app.features.status.backend_heartbeat_relay import (
     effective_relay_interval_sec,
     get_heartbeat_relay_state,
@@ -40,6 +48,12 @@ from backend.app.features.status.backend_heartbeat_relay import (
 )
 from backend.app.features.status.heartbeat_store import DEFAULT_STALE_AFTER_SEC, HeartbeatStore
 from backend.app.features.status.runtime_status_store import RuntimeStatusStore
+from backend.app.postgres_root import (
+    PostgresRoot,
+    close_postgres_database,
+    install_postgres_stores,
+    open_postgres_root,
+)
 from backend.app.shared.backend_client_bundle import (
     BackendClientBundle,
     backend_client_bundle,
@@ -57,7 +71,6 @@ from shared.events.edge_ingest_client import (
     EdgeIngestClient,
 )
 
-API_BACKEND_EVENTS_URL_ENV = "API_BACKEND_EVENTS_URL"
 API_EDGE_RELAY_TOKEN_ENV = "API_EDGE_RELAY_TOKEN"
 API_BACKEND_INGEST_TIMEOUT_SEC_ENV = "API_BACKEND_INGEST_TIMEOUT_SEC"
 API_HEARTBEAT_STALE_AFTER_SEC_ENV = "API_HEARTBEAT_STALE_AFTER_SEC"
@@ -67,6 +80,7 @@ ML_API_BUILD_REVISION_ENV = "ML_API_BUILD_REVISION"
 
 BACKEND_CONFIG_SHUTDOWN_WAIT_SEC = 1.0
 BACKEND_HEARTBEAT_RELAY_SHUTDOWN_WAIT_SEC = 1.0
+BACKEND_OUTBOX_SENDER_SHUTDOWN_WAIT_SEC = 1.0
 
 
 class InvalidBackendIngestTimeoutError(ValueError):
@@ -78,22 +92,37 @@ logger = logging.getLogger(__name__)
 
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
-    """Boot ml-api as a thin backend gateway (ADR)."""
+    """Boot ml-api as a thin backend gateway (ADR).
+
+    The PostgreSQL root opens first and closes last, so every task that
+    reads or writes product state has stopped before the pool drains.
+    """
     reject_retired_backend_environment(os.environ)
+    owned = _configure_postgres(app)
+    try:
+        async with _gateway_lifespan(app):
+            yield
+    finally:
+        if owned is not None:
+            await _release_postgres(app, owned)
+
+
+@asynccontextmanager
+async def _gateway_lifespan(app: FastAPI) -> AsyncIterator[None]:
     logger.info("ml-api state directory resolved to %s", resolve_state_dir("ml-api"))
     _load_config(app)
 
-    audit_healthy = configure_audit_readiness(app, EDGE_DATABASE_PATH)
+    configure_audit_readiness(app)
 
     if not isinstance(getattr(app.state, "heartbeat_store", None), HeartbeatStore):
         app.state.heartbeat_store = HeartbeatStore(stale_after_sec=_heartbeat_stale_after_sec())
     if not isinstance(getattr(app.state, "runtime_status_store", None), RuntimeStatusStore):
         app.state.runtime_status_store = RuntimeStatusStore()
 
-    if not isinstance(getattr(app.state, "camera_registry", None), CameraRegistryStore):
-        app.state.camera_registry = CameraRegistryStore.from_env()
-    _configure_execution_record_store(app)
+    diagnostics_database = _configure_execution_record_store(app)
     _configure_backend_ingest(app)
+    _require_outbox_delivery(app)
+    await start_clip_catalog_indexer(app)
     bundle = backend_client_bundle(app)
     app.state.backend_configured = bundle is not None
     app.state.backend_reachable = getattr(app.state, "backend_reachable", None)
@@ -150,15 +179,30 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         app.state.backend_heartbeat_relay_executor = None
         app.state.backend_heartbeat_relay_task = None
 
-    app.state.readiness = (
-        {"ready": True, "status": "ready"}
-        if audit_healthy
-        else {"ready": False, "status": "degraded", "reason": "audit unavailable"}
-    )
+    # The only background alert sender: it drains committed event_outbox
+    # obligations the relay route could not deliver right after its COMMIT.
+    outbox_stop = asyncio.Event()
+    app.state.backend_outbox_sender_executor = None
+    app.state.backend_outbox_sender_task = None
+    if getattr(app.state, "backend_ingest_client", None) is None:
+        app.state.backend_outbox_sender_status = OutboxSenderStatus(
+            enabled=False, reason="backend ingest client not configured"
+        )
+    else:
+        app.state.backend_outbox_sender_status = OutboxSenderStatus(enabled=True)
+        outbox_executor = ThreadPoolExecutor(
+            max_workers=1, thread_name_prefix="backend-outbox-sender"
+        )
+        app.state.backend_outbox_sender_executor = outbox_executor
+        app.state.backend_outbox_sender_task = asyncio.create_task(
+            _backend_outbox_sender_loop(app, outbox_stop, outbox_executor),
+            name="backend-outbox-sender",
+        )
+
+    start_audit_verification(app)
     try:
         yield
     finally:
-        close_audit_session(app)
         refresh_stop.set()
         refresh_task = app.state.backend_config_refresh_task
         try:
@@ -186,18 +230,71 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             app.state.backend_heartbeat_relay_executor = None
             app.state.backend_heartbeat_relay_task = None
 
-        catalog_store = getattr(app.state, "catalog_store", None)
-        if isinstance(catalog_store, CatalogStore):
-            catalog_store.close()
+        outbox_stop.set()
+        outbox_task = app.state.backend_outbox_sender_task
+        if outbox_task is not None:
+            try:
+                await asyncio.wait_for(
+                    asyncio.shield(outbox_task), timeout=BACKEND_OUTBOX_SENDER_SHUTDOWN_WAIT_SEC
+                )
+            except TimeoutError:
+                outbox_task.cancel()
+            # An unfinished send keeps its lease; the next claim resends it
+            # under the same edge event id, which the Hub deduplicates.
+            outbox_executor = app.state.backend_outbox_sender_executor
+            if outbox_executor is not None:
+                outbox_executor.shutdown(wait=False, cancel_futures=True)
+            app.state.backend_outbox_sender_executor = None
+            app.state.backend_outbox_sender_task = None
+
+        # Audit writers have stopped; close the session before the pool drains.
+        await asyncio.to_thread(close_audit_session, app)
+
+        await stop_clip_catalog_indexer(app)
+
+        if diagnostics_database is not None:
+            # Only the store this lifespan built goes away with its pool; an
+            # injected store stays owned by its injector.
+            if hasattr(app.state, "execution_record_store"):
+                delattr(app.state, "execution_record_store")
+            await asyncio.to_thread(close_postgres_database, diagnostics_database)
 
 
-def _configure_execution_record_store(app: FastAPI) -> None:
-    """Construct the diagnostics store only when the feature is explicitly enabled."""
+@dataclass(frozen=True, slots=True)
+class _OwnedPostgres:
+    database: PostgresDatabase
+    installed: tuple[str, ...]
+
+
+def _configure_postgres(app: FastAPI) -> _OwnedPostgres | None:
+    """Install PostgreSQL stores; an injected root stays owned by its injector."""
+    injected = getattr(app.state, "postgres_root", None)
+    if isinstance(injected, PostgresRoot):
+        install_postgres_stores(app, injected)
+        return None
+    root = open_postgres_root()
+    app.state.postgres_root = root
+    return _OwnedPostgres(root.database, ("postgres_root", *install_postgres_stores(app, root)))
+
+
+async def _release_postgres(app: FastAPI, owned: _OwnedPostgres) -> None:
+    for name in owned.installed:
+        if hasattr(app.state, name):
+            delattr(app.state, name)
+    await asyncio.to_thread(close_postgres_database, owned.database)
+
+
+def _configure_execution_record_store(app: FastAPI) -> PostgresDatabase | None:
+    """Construct the diagnostics store only when the feature is explicitly enabled.
+
+    Returns the database this lifespan opened so it can close it; an injected
+    store or a disabled feature returns None.
+    """
     settings = get_settings()
     if not settings.execution_records_enabled:
         if hasattr(app.state, "execution_record_store"):
             delattr(app.state, "execution_record_store")
-        return
+        return None
     budget_bytes = settings.execution_records_budget_bytes
     if budget_bytes is None:
         raise ValueError(
@@ -211,19 +308,15 @@ def _configure_execution_record_store(app: FastAPI) -> None:
         )
     app.state.backend_build_revision = revision
     if isinstance(getattr(app.state, "execution_record_store", None), ExecutionRecordStore):
-        return
+        return None
+    # Its own schema and pool, not the product pool: execution-record
+    # telemetry is written and pruned on every worker flush and must never
+    # compete with alert/incident/policy writes for product connections.
+    database = open_diagnostics_database()
     app.state.execution_record_store = ExecutionRecordStore(
-        # Its own SQLite file, not edge.sqlite3: execution-record telemetry is
-        # written on every worker flush and pruned on that same hot path, and
-        # must never share a writer lock with alerts/incidents/policy writes.
-        # EDGE_DATABASE_PATH is read fresh inside the lambda (not captured
-        # into a module-level constant) so tests that monkeypatch it also
-        # redirect this file.
-        lambda: open_diagnostics_database(
-            EDGE_DATABASE_PATH.parent / DIAGNOSTICS_DATABASE_FILENAME
-        ),
-        RetentionBudget(total_bytes=budget_bytes),
+        database, RetentionBudget(total_bytes=budget_bytes)
     )
+    return database
 
 
 def _configure_backend_ingest(app: FastAPI) -> None:
@@ -247,11 +340,18 @@ def _configure_backend_ingest(app: FastAPI) -> None:
     apply_connection_settings(app)
 
 
+def _require_outbox_delivery(app: FastAPI) -> None:
+    """Refuse to boot a Hub client whose alerts would have no durable sender."""
+    wired = isinstance(getattr(app.state, "event_outbox_delivery", None), OutboxDelivery)
+    if getattr(app.state, "backend_ingest_client", None) is not None and not wired:
+        raise RuntimeError("backend ingest client is configured without event_outbox_delivery")
+
+
 def apply_connection_settings(app: FastAPI) -> None:
     """Atomically publish all cloud clients for one persisted enrollment generation."""
-    from backend.app.features.connection.store import ConnectionSettingsStore
+    from backend.app.features.connection.store import get_connection_settings_store
 
-    settings = ConnectionSettingsStore.from_env().load()
+    settings = get_connection_settings_store(app).load()
     required = (
         settings.events_url,
         settings.config_url,
@@ -398,6 +498,37 @@ async def _backend_heartbeat_relay_loop(
         if stop_event.is_set():
             break
         await asyncio.get_running_loop().run_in_executor(executor, relay_heartbeats_once, app)
+
+
+async def _backend_outbox_sender_loop(
+    app: FastAPI, stop_event: asyncio.Event, executor: ThreadPoolExecutor
+) -> None:
+    """Drain due outbox obligations, backing off while the Hub keeps failing.
+
+    It waits before each tick, so the relay route usually delivers its own row
+    right after COMMIT. A lost race is harmless: the route answers "pending"
+    and the worker's same-ID retry reads the stored outcome.
+    """
+    status: OutboxSenderStatus = app.state.backend_outbox_sender_status
+    retry_after: float | None = None
+    while not stop_event.is_set():
+        wait_sec = sender_delay(
+            SENDER_BASE_INTERVAL_SEC, status.consecutive_failures, retry_after, random.random()
+        )
+        try:
+            await asyncio.wait_for(stop_event.wait(), timeout=wait_sec)
+        except TimeoutError:
+            pass
+        if stop_event.is_set():
+            break
+        try:
+            failure = await asyncio.get_running_loop().run_in_executor(
+                executor, send_outbox_once, app
+            )
+        except Exception:
+            logger.exception("backend outbox sender tick failed")
+            failure = None
+        retry_after = failure.retry_after_seconds if failure is not None else None
 
 
 def _backend_config_refresh_is_current(app: FastAPI, stop_token: asyncio.Event | None) -> bool:
