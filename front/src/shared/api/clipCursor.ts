@@ -44,13 +44,14 @@ export function decodeClipCursor(cursor: string): ClipCursorKey | null {
 const UTF8 = new TextEncoder();
 
 /**
- * Ascending SQLite BINARY comparison: unsigned UTF-8 byte order, shorter-is-less on a common prefix.
+ * Ascending byte comparison: unsigned UTF-8 byte order, shorter-is-less on a common prefix.
  *
- * Schema 18 allows any 1-128 character NUL-free TEXT clip id, and SQLite's default collation orders
- * those by their UTF-8 bytes. JavaScript relational operators instead order by UTF-16 code units,
- * which disagrees for every non-BMP id: U+10000 is the surrogate pair D800/DC00 and sorts BELOW
- * U+E000 in UTF-16, but is F0 90 80 80 and sorts ABOVE U+E000's EE 80 80 in UTF-8. Using the UTF-16
- * order here would let a synthesized boundary disagree with the backend predicate and skip a row.
+ * `clips.clip_id` admits any 1-128 character text id, and the catalog orders it with `COLLATE "C"`
+ * on a UTF-8 server (`backend/app/features/clips/catalog_indexer.py`), i.e. by UTF-8 bytes.
+ * JavaScript relational operators instead order by UTF-16 code units, which disagrees for every
+ * non-BMP id: U+10000 is the surrogate pair D800/DC00 and sorts BELOW U+E000 in UTF-16, but is
+ * F0 90 80 80 and sorts ABOVE U+E000's EE 80 80 in UTF-8. Using the UTF-16 order here would let a
+ * synthesized boundary disagree with the backend predicate and skip a row.
  */
 function compareBinaryAscending(left: string, right: string): number {
   const leftBytes = UTF8.encode(left);
@@ -68,9 +69,10 @@ function compareBinaryAscending(left: string, right: string): number {
  *
  * `started_at` stays a plain string comparison because the backend admits a row into `clips` only
  * after `_valid_timestamp` parses it as RFC3339 UTC ending in `Z` at 20-30 characters
- * (`backend/app/features/clips/compact_listing.py`), which is ASCII-only -- and over ASCII, UTF-16
- * code-unit order and UTF-8 byte order are identical. The clip id has no such restriction, so it
- * must go through the BINARY comparison.
+ * (`backend/app/features/clips/catalog_indexer.py`), and the `clips.started_at` CHECK
+ * `seeon_utc_timestamp` (`backend/app/edge_db/postgres_product.sql`) holds the same form, which is
+ * ASCII-only -- and over ASCII, UTF-16 code-unit order and UTF-8 byte order are identical. The clip
+ * id has no such restriction, so it must go through the byte comparison.
  */
 export function compareClipKeysDescending(left: ClipCursorKey, right: ClipCursorKey): number {
   if (left.startedAt !== right.startedAt) return left.startedAt < right.startedAt ? 1 : -1;

@@ -226,6 +226,25 @@ source_modules = ["backend", "worker", "contracts", "shared"]
 forbidden_modules = ["tests_support"]
 
 [[tool.importlinter.contracts]]
+# The retired edge.sqlite3 is read once, by the migration, and never at runtime
+# (also probed by tests/test_edge_db_ddl_boundary.py in a fresh interpreter).
+name = "only the one-time migration imports sqlite3"
+type = "forbidden"
+source_modules = ["backend", "contracts", "shared", "worker"]
+forbidden_modules = ["sqlite3"]
+ignore_imports = ["backend.app.edge_db.migration.** -> sqlite3"]
+
+[[tool.importlinter.contracts]]
+# The sqlite3 contract ignores the migration's own imports, so a runtime module
+# importing the migration would load sqlite3 unseen. Only the migration package
+# itself (its CLI entry and modules) may import it; tests_support is outside the
+# root packages.
+name = "runtime packages cannot import the one-time migration"
+type = "protected"
+protected_modules = ["backend.app.edge_db.migration"]
+allowed_importers = ["backend.app.edge_db.migration"]
+
+[[tool.importlinter.contracts]]
 name = "contracts is a leaf (imports nothing internal)"
 type = "forbidden"
 source_modules = ["contracts"]

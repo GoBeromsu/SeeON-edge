@@ -6,13 +6,13 @@ from pathlib import Path
 import pytest
 
 from backend.app.edge_db.compact_schema import SCHEMA_18_STATEMENTS
-from backend.app.edge_db.compatibility import SchemaLedgerError
-from backend.app.edge_db.connection import RuntimeActor, open_runtime_database
-from backend.app.edge_db.schema18_manifest import (
+from backend.app.edge_db.migration.compatibility import SchemaLedgerError
+from backend.app.edge_db.migration.schema18_manifest import (
     compile_schema18_manifest,
     compile_schema19_manifest,
     read_schema_manifest,
 )
+from backend.app.edge_db.migration.snapshot import export_snapshot
 from tests_support.sqlite_source import create_schema19_source
 
 
@@ -148,7 +148,7 @@ def test_compiled_schema18_manifest_matches_schema18_only_database(tmp_path: Pat
         ),
     ],
 )
-def test_runtime_rejects_schema19_structural_mutations(
+def test_migration_rejects_schema19_structural_mutations(
     tmp_path: Path,
     mutate: object,
 ) -> None:
@@ -156,6 +156,9 @@ def test_runtime_rejects_schema19_structural_mutations(
     with sqlite3.connect(database) as connection:
         mutate(connection)
         connection.commit()
+    snapshots = tmp_path / "snapshots"
+    snapshots.mkdir()
 
     with pytest.raises(SchemaLedgerError, match="invalid"):
-        open_runtime_database(database, actor=RuntimeActor.API)
+        export_snapshot(database, snapshots / "edge.snapshot.sqlite3")
+    assert list(snapshots.iterdir()) == []

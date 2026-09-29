@@ -24,9 +24,8 @@ under `models/` and are never committed.
 | `tests` | pytest contracts and boundary coverage. |
 
 `backend` and `worker` do not import each other. HTTP relay is the command/event
-boundary. The backend alone opens `/var/lib/seeon-state/edge.sqlite3` through
-`backend.app.edge_db`; the worker has no database. That file is persistence,
-never polling IPC.
+boundary. The backend alone opens PostgreSQL through `backend.app.edge_db`;
+the worker has no database. That database is persistence, never polling IPC.
 
 Directory names are `front`/`backend`/`worker`. Deployment images keep the
 legacy identity: `ml-api` (`Dockerfile.backend`, `ML_API_`/`API_*`) and
@@ -54,7 +53,7 @@ the sole composition root. The worker is an RTSP client only.
 | Evidence | `worker/pipeline/output/evidence/` | Smart record actor, clip publication, sealed sidecar, durable stager, delivery queue, and snapshot store. |
 | Event wire | `shared/events/` | Schemas and `edge_ingest_client.py` (events and clip receipts to the backend over relay HTTP). |
 | Dashboard | `front/src/app/App.tsx` | `AuthGate` + `Dashboard`. Pages: events, operations, settings. |
-| SQLite foundation | `backend/app/edge_db/` | Schema 19 (compact ten-table plus six execution-record tables), the create-or-extend bootstrap, and ownership. The backend writes the fifteen application tables; the bootstrap alone writes `schema_migrations`. |
+| Edge database | `backend/app/edge_db/` | PostgreSQL is the only durable store (`postgres.py` and the `postgres_*.sql` schemas). `migration/` imports the retired schema-19 `edge.sqlite3` once and is the only code that reads SQLite. |
 
 Read the nearest scoped `AGENTS.md` before changing a package.
 
@@ -82,7 +81,7 @@ exports: `tests/test_contract_symbol_exports.py`. Docs live in
   drift-checks it against the archived `eldercare-dataset-ops`. Domain decision
   math stays worker-internal.
 - Worker→backend command/event traffic is one-way over relay HTTP. The backend's
-  local `edge.sqlite3` is never worker persistence or polling IPC.
+  PostgreSQL database is never worker persistence or polling IPC.
 - Cameras are registered at runtime through the dashboard registry. Do not seed
   them from env, YAML, or a backend `cameras` pull.
 - Use `uv`. Re-run `lint-imports` after any import-boundary change.

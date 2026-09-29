@@ -13,11 +13,11 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Final
 
-from backend.app.edge_db.compatibility import verify_runtime_schema
-from backend.app.edge_db.functions import register_edge_db_functions
 from backend.app.edge_db.migration.authority_file import discard, fsync_directory
+from backend.app.edge_db.migration.compatibility import verify_runtime_schema
 from backend.app.edge_db.migration.errors import MigrationError
 from backend.app.edge_db.migration.mapping import verify_source_tables
+from backend.app.edge_db.migration.sqlite_functions import register_edge_db_functions
 
 # The old runtime holds this lock shared while any connection is open.
 DEPLOYMENT_LOCK_NAME: Final = "deployment.lock"

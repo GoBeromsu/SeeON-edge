@@ -1,9 +1,10 @@
-"""Runtime code never reaches the SQLite DDL owner or the SQLite source fixture.
+"""Runtime code never loads sqlite3 or reaches the SQLite source fixture.
 
-The runtime schema check (`backend.app.edge_db.compatibility`) is reachable from
-every API process that opens the edge database. It proves the schema-19
-structural manifest from the current-schema DDL alone and never imports the
-DDL owner, `tests_support.sqlite_source`.
+Neither runtime entry point loads `sqlite3`; only the one-time migration reads
+the retired SQLite file. Its schema check
+(`backend.app.edge_db.migration.compatibility`) proves the schema-19 structural
+manifest from the current-schema DDL alone and never imports the DDL owner,
+`tests_support.sqlite_source`.
 
 PostgreSQL is the only durable store. The schema-19 SQLite file is recreated
 only by `tests_support.sqlite_source`, for the migration tests, and no runtime
@@ -20,19 +21,23 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pytest
+
 _ROOT = Path(__file__).resolve().parents[1]
 _DDL_OWNER_MODULES = ("tests_support.sqlite_source",)
 _RUNTIME_PACKAGES = ("backend", "worker", "contracts", "shared")
 _SOURCE_FIXTURE_PACKAGE = "tests_support"
 
 
-def _modules_loaded_by(import_target: str) -> frozenset[str]:
-    """Return the DDL-owner modules a fresh interpreter loads importing target."""
+def _modules_loaded_by(
+    import_target: str, watched: tuple[str, ...] = _DDL_OWNER_MODULES
+) -> frozenset[str]:
+    """Return the watched modules a fresh interpreter loads importing target."""
     probe = (
         "import sys\n"
         f"import {import_target}\n"
         "import json\n"
-        f"loaded = [m for m in {_DDL_OWNER_MODULES!r} if m in sys.modules]\n"
+        f"loaded = [m for m in {watched!r} if m in sys.modules]\n"
         "print(json.dumps(loaded))\n"
     )
     completed = subprocess.run(
@@ -44,12 +49,23 @@ def _modules_loaded_by(import_target: str) -> frozenset[str]:
     return frozenset(json.loads(completed.stdout.strip().splitlines()[-1]))
 
 
+@pytest.mark.parametrize("entry_point", ["backend.app.main", "worker.runtime.worker"])
+def test_runtime_entry_points_do_not_load_sqlite3(entry_point: str) -> None:
+    assert _modules_loaded_by(entry_point, watched=("sqlite3",)) == frozenset()
+
+
+def test_the_migration_snapshot_loads_sqlite3() -> None:
+    # Proves the entry-point probe above is not vacuously green.
+    loaded = _modules_loaded_by("backend.app.edge_db.migration.snapshot", watched=("sqlite3",))
+    assert loaded == frozenset({"sqlite3"})
+
+
 def test_compatibility_import_does_not_reach_the_sqlite_ddl_owner() -> None:
-    assert _modules_loaded_by("backend.app.edge_db.compatibility") == frozenset()
+    assert _modules_loaded_by("backend.app.edge_db.migration.compatibility") == frozenset()
 
 
 def test_schema18_manifest_import_does_not_reach_the_sqlite_ddl_owner() -> None:
-    assert _modules_loaded_by("backend.app.edge_db.schema18_manifest") == frozenset()
+    assert _modules_loaded_by("backend.app.edge_db.migration.schema18_manifest") == frozenset()
 
 
 def test_sqlite_source_fixture_reaches_the_ddl_owner() -> None:

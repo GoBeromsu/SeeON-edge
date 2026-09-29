@@ -98,25 +98,6 @@ def test_status_modules_have_no_sqlite_or_retired_ddl() -> None:
     assert offenders == []
 
 
-def test_reintroducing_status_sqlite_fails_this_named_boundary() -> None:
-    kinds = _module_sql_kinds(_STATUS_ROOT / "heartbeat_store.py")
-    injected = ast.parse("import sqlite3\nsqlite3.connect('x')\nCREATE = 'CREATE TABLE x (id INT)'")
-    visitor_kinds = _module_sql_kinds
-    del visitor_kinds
-    found = set(kinds)
-    for node in ast.walk(injected):
-        if isinstance(node, ast.Import):
-            for alias in node.names:
-                if alias.name == "sqlite3":
-                    found.add("import:sqlite3")
-        if isinstance(node, ast.Constant) and isinstance(node.value, str):
-            if "CREATE TABLE" in node.value.upper():
-                found.add("ddl:create-table")
-    assert "import:sqlite3" in found
-    assert "ddl:create-table" in found
-    assert kinds == frozenset()
-
-
 def test_schema19_runtime_has_no_telemetry_qa_or_listing_tables(tmp_path: Path) -> None:
     database = tmp_path / "edge.sqlite3"
     create_schema19_source(database)
@@ -145,25 +126,3 @@ def test_lifespan_boot_does_not_create_retired_tables_or_listing_index() -> None
     body = status.json()
     assert body["cameras"] == {}
     assert body["runtime"]["facilities"] == {}
-
-
-def test_authorizer_denies_telemetry_ddl(tmp_path: Path) -> None:
-    from backend.app.edge_db.connection import RuntimeActor, open_runtime_database
-
-    database = tmp_path / "edge.sqlite3"
-    create_schema19_source(database)
-    connection = open_runtime_database(database, actor=RuntimeActor.API)
-    try:
-        with pytest.raises(sqlite3.DatabaseError):
-            connection.execute(
-                "CREATE TABLE control_heartbeats (camera_id TEXT PRIMARY KEY, "
-                "facility_id TEXT NOT NULL, received_at REAL NOT NULL, "
-                "config_version INTEGER) STRICT"
-            )
-        with pytest.raises(sqlite3.DatabaseError):
-            connection.execute(
-                "CREATE TABLE runtime_latency (facility_id TEXT PRIMARY KEY, "
-                "payload_json TEXT NOT NULL) STRICT"
-            )
-    finally:
-        connection.close()

@@ -15,7 +15,7 @@ import psycopg
 from psycopg.conninfo import conninfo_to_dict
 
 from backend.app.edge_db.authority import AuthorityFenced
-from backend.app.edge_db.compatibility import EdgeDatabaseError
+from backend.app.edge_db.migration.compatibility import EdgeDatabaseError
 from backend.app.edge_db.migration.errors import MigrationError
 from backend.app.edge_db.migration.load import import_snapshot
 from backend.app.edge_db.migration.mapping import diagnostics_schema_name

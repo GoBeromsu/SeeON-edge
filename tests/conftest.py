@@ -1,14 +1,11 @@
 """Cross-suite compatibility fixtures."""
 
-import importlib
 import ipaddress
 import os
 from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
-
-from tests_support.sqlite_source import create_schema19_source
 
 
 @pytest.fixture
@@ -20,41 +17,6 @@ def packaged_fall_bundle(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Pat
     artifact = write_pose_bbox56_bundle(tmp_path / "models" / "fall" / "pose-bbox56-gru")
     monkeypatch.setattr(local_env, "_DEFAULT_ARTIFACT_DIR", str(artifact))
     return artifact
-
-
-@pytest.fixture(autouse=True)
-def isolate_central_edge_database(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> Iterator[None]:
-    database = tmp_path / ".central-fixture" / "edge.sqlite3"
-    create_schema19_source(database)
-    modules = (
-        "backend.app.lifespan",
-        "backend.app.features.audit.store",
-        "backend.app.shared.dashboard_credentials",
-        "backend.app.features.detection_settings.store",
-        "backend.app.features.detection_settings.policy_store",
-        "backend.app.features.cameras.bed_zone_store",
-        "backend.app.features.cameras.store",
-        "backend.app.features.clips.artifacts",
-        "backend.app.features.clips.catalog",
-        "backend.app.features.clips.router",
-        "backend.app.features.clips.storage_location_store",
-        "backend.app.features.evidence.router",
-        "backend.app.features.relay.router",
-        "backend.app.features.status.runtime_status_store",
-        "backend.app.features.runtime_settings.store",
-        "backend.app.features.connection.store",
-        "backend.app.features.evidence.record_store",
-        "worker.runtime.config.lkg_store",
-        "worker.runtime.faults.record",
-        "worker.runtime.worker",
-    )
-    for module_name in modules:
-        module = importlib.import_module(module_name)
-        if hasattr(module, "EDGE_DATABASE_PATH"):
-            monkeypatch.setattr(module, "EDGE_DATABASE_PATH", database)
-    yield
 
 
 @pytest.fixture(autouse=True)
@@ -97,9 +59,7 @@ def isolate_state_dir_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> I
     ``resolve_state_dir``은 의도적으로 "단일 규칙, override 없음"으로
     설계돼 있어 (이슈 #153) 환경변수 주입 지점이 없다 -- 그래서
     ``resolve_state_dir`` 자체는 건드리지 않고, 그 유일한 입력원인
-    ``Path.home()``을 픽스처에서 리다이렉트한다 (``test_clips_catalog.py``의
-    ``test_catalog_from_env_resolves_under_state_dir_and_is_queryable``가
-    이미 쓰던 것과 동일한 패턴을 전역 autouse로 승격한 것).
+    ``Path.home()``을 픽스처에서 리다이렉트한다.
 
     ``HOME`` 환경변수 자체를 바꾸는 대신 ``Path.home``만 monkeypatch하는
     이유: ``HOME``을 바꾸면 uv 캐시, git config, 서브프로세스 등 pytest와
@@ -107,10 +67,9 @@ def isolate_state_dir_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> I
     하면 ``resolve_state_dir``이 참조하는 경로만 격리되고, ``os.path.
     expanduser`` 등 다른 경로 해석 경로는 그대로 실제 홈을 본다.
 
-    이게 없으면 ``app.state.camera_registry``를 tmp_path로 주입하지 않는
-    테스트가 개발자의 실제 ``~/.local/state/ml-api/catalog.sqlite3``를
-    읽고 쓴다 (dev 스택에 카메라가 등록돼 있으면 카메라/설정 테스트가
-    무더기로 거짓 실패한다 -- 이슈 #153).
+    이게 없으면 state 디렉터리를 주입하지 않는 테스트가 개발자의 실제
+    ``~/.local/state/`` 아래 파일(clip 라벨, worker delivery queue, 설정
+    LKG)을 읽고 쓴다 (이슈 #153).
     """
 
     monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path))

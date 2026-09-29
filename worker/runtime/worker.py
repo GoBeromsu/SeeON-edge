@@ -163,7 +163,9 @@ from worker.types.preview import FallPreviewState
 from worker.types.trace import DecisionIdentity
 
 LOGGER: Final = logging.getLogger(__name__)
-# Off the hot path; covers the 5s local SQLite busy_timeout + margin (#579/#580, S6).
+# Off the hot path (#579/#580, S6). Sized for the retired 5 s SQLite busy_timeout and
+# not re-derived for the API's PostgreSQL pool budget (2.0 s acquire + 5 s statement,
+# backend/app/postgres_root.py), whose worst case is longer.
 HEARTBEAT_TIMEOUT_SEC: Final = 6.0
 # Matches edge/runtime/edge_worker.py's DETECTOR_VERSION -- same domain-detector
 # generation, ported wholesale rather than re-derived per worker/AGENTS.md.

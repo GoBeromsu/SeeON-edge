@@ -40,8 +40,8 @@ EdgeEventId = str
 PayloadValue = TypeVar("PayloadValue")
 MAX_LOCAL_EVENT_PAYLOAD_BYTES: Final = 512 * 1024
 
-# A 503 from the edge API's alert-relay route can be the local SQLite writer
-# busy-waiting up to its full busy_timeout before it can even respond, and
+# A 503 from the edge API's alert-relay route can be its PostgreSQL writer
+# waiting up to its statement or lock timeout before it can even respond, and
 # the edge API's own outbound call to the backend ingest API can then take
 # up to its own configured timeout on top of that. A client-side timeout
 # shorter than "edge busy_timeout + backend ingest timeout" fires before the

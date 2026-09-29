@@ -171,8 +171,6 @@ def test_backend_only_sqlite_cutover_is_atomic() -> None:
     assert not (ROOT / "shared" / "edge_db").exists()
     assert scan_slot() == frozenset()
 
-    compatibility = (database_package / "compatibility.py").read_text()
-    assert "EDGE_DATABASE_SCHEMA_VERSION" in compatibility
     # BaseLoader keeps Compose's `!reset` tags as plain scalars.
     services = yaml.load((ROOT / "compose.edge.yaml").read_text(), Loader=yaml.BaseLoader)[
         "services"
@@ -181,7 +179,7 @@ def test_backend_only_sqlite_cutover_is_atomic() -> None:
     assert "worker-local-state:/var/lib/seeon-state" in services["ml-worker"]["volumes"]
     assert not any(volume.startswith("edge-state:") for volume in services["ml-worker"]["volumes"])
 
-    from backend.app.edge_db.compatibility import (  # noqa: PLC0415
+    from backend.app.edge_db.migration.compatibility import (  # noqa: PLC0415
         CURRENT_SCHEMA_RANGE,
         SCHEMA_19_IDENTITY,
     )

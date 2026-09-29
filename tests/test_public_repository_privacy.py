@@ -203,13 +203,6 @@ _SYNTHETIC_RTSP_FIXTURES = {
         "rtsp://user:password@host/stream?profile=main&username=admin&secret=abc",
         "rtsp://***:***@host/stream?profile=%2A%2A%2A&username=%2A%2A%2A&secret=%2A%2A%2A",
     },
-    Path("tests/test_catalog_verify.py"): {
-        "rtsp://operator:fixture-password@192.0.2.10/s",
-        "rtsp://operator:fixture-password@192.0.2.11/s",
-    },
-    Path("tests/test_clips_catalog.py"): {
-        "rtsp://operator:fixture-password@example.test/live",
-    },
     Path("tests/test_postgres_cameras.py"): {
         # PostgreSQL 카메라 저장소가 자격증명을 마스킹하고, 자격증명만 다른 URL 을
         # 같은 스트림으로 식별하는지 증명하는 입력값이다. 호스트는 모두 예약

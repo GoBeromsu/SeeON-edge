@@ -17,8 +17,8 @@ from contextlib import closing, contextmanager
 from pathlib import Path
 
 from backend.app.edge_db.compact_schema import SCHEMA_19_STATEMENTS
-from backend.app.edge_db.compatibility import SCHEMA_19_IDENTITY
-from backend.app.edge_db.functions import register_edge_db_functions
+from backend.app.edge_db.migration.compatibility import SCHEMA_19_IDENTITY
+from backend.app.edge_db.migration.sqlite_functions import register_edge_db_functions
 from shared.release_identity import EDGE_DATABASE_SCHEMA_VERSION
 
 

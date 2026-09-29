@@ -8,7 +8,7 @@ from pathlib import Path
 
 import pytest
 
-from backend.app.edge_db.compatibility import (
+from backend.app.edge_db.migration.compatibility import (
     COMPATIBILITY_MATRIX,
     CURRENT_SCHEMA_RANGE,
     SCHEMA_18_IDENTITY,
@@ -17,6 +17,7 @@ from backend.app.edge_db.compatibility import (
     MigrationRequiredError,
     NewerSchemaError,
     SchemaCompatibility,
+    SchemaLedgerError,
     classify_schema,
     schema19_identity_checksum,
     verify_runtime_schema,
@@ -55,9 +56,10 @@ def test_runtime_refuses_absent_and_out_of_range_schemas(tmp_path: Path) -> None
     # The migration fence runs verify_runtime_schema on every source it opens.
     with (
         closing(sqlite3.connect(tmp_path / "empty.sqlite3")) as empty,
-        pytest.raises(MigrationRequiredError, match="not bootstrapped"),
+        pytest.raises(MigrationRequiredError) as refused,
     ):
         verify_runtime_schema(empty)
+    assert (refused.value.found, refused.value.minimum) == (0, 19)
 
     source = create_schema19_source(tmp_path / "edge-state" / "edge.sqlite3")
     with closing(sqlite3.connect(source)) as connection:
@@ -66,3 +68,17 @@ def test_runtime_refuses_absent_and_out_of_range_schemas(tmp_path: Path) -> None
             verify_runtime_schema(connection, SchemaCompatibility(minimum=20, maximum=20))
         with pytest.raises(NewerSchemaError):
             verify_runtime_schema(connection, SchemaCompatibility(minimum=0, maximum=0))
+
+
+def test_a_forged_schema19_ledger_row_is_refused(tmp_path: Path) -> None:
+    source = create_schema19_source(tmp_path / "edge-state" / "edge.sqlite3")
+    with closing(sqlite3.connect(source)) as connection:
+        with connection:
+            connection.execute(
+                "UPDATE schema_migrations SET name = 'forged', checksum = ? WHERE version = 19",
+                ("f" * 64,),
+            )
+        with pytest.raises(
+            SchemaLedgerError, match="^applied schema ledger does not end at schema 19$"
+        ):
+            verify_runtime_schema(connection)
