@@ -27,6 +27,13 @@ from backend.app.edge_db.migration.provision import (
     set_runtime_password,
 )
 from backend.app.edge_db.postgres import PoolBudget, PostgresDatabase
+from backend.app.features.audit.catalog import (
+    AuditAction,
+    AuditActorType,
+    AuditAuthMechanism,
+    empty_detail,
+)
+from backend.app.features.audit.verification import GENESIS_HASH
 from backend.app.features.diagnostics.records import (
     BatchReceipt,
     ExecutionRecordInput,
@@ -51,7 +58,6 @@ _LIVE_PROVENANCE = Provenance(
     policy_identity="policy-v1",
     backend_build_revision="backend-rev",
 )
-_GENESIS = "0" * 64
 _BUDGET = PoolBudget(
     max_connections=4,
     max_waiting=8,
@@ -449,15 +455,16 @@ def append_audit(connection: sqlite3.Connection) -> None:
     tail = connection.execute(
         "SELECT record_hash FROM audit_events ORDER BY audit_id DESC LIMIT 1"
     ).fetchone()
-    previous = _GENESIS if tail is None else tail[0]
+    previous = GENESIS_HASH if tail is None else tail[0]
+    action = AuditAction.INCIDENT_REVIEW
     values = {
         "occurred_at": NOW,
         "recorded_at": NOW,
         "clock_quality": "trusted",
-        "actor_type": "user",
+        "actor_type": AuditActorType.USER.value,
         "actor_id": "operator-1",
-        "auth_mechanism": "session",
-        "action": "review",
+        "auth_mechanism": AuditAuthMechanism.DASHBOARD_SESSION.value,
+        "action": action.value,
         "target_type": "incident",
         "target_id": "incident-1",
         "outcome": "success",
@@ -466,7 +473,7 @@ def append_audit(connection: sqlite3.Connection) -> None:
         "reason": None,
         "request_id": None,
         "interaction_id": None,
-        "detail_json": None,
+        "detail_json": empty_detail(action).json,
         "hold_reference": None,
     }
     record_hash = audit_record_hash(previous, json.dumps(values))
