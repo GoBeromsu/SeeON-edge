@@ -12,7 +12,7 @@ from typing import Final
 import psycopg
 from psycopg import sql
 
-from backend.app.edge_db.compatibility import verify_runtime_schema
+from backend.app.edge_db.migration.compatibility import verify_runtime_schema
 from backend.app.edge_db.migration.errors import MigrationError
 from backend.app.edge_db.migration.mapping import (
     COPY_TYPES,

@@ -3,7 +3,6 @@ from __future__ import annotations
 import pytest
 from fastapi.testclient import TestClient
 
-from backend.app.features.clips.catalog import CatalogStore, get_catalog_store
 from backend.app.main import create_app, no_lifespan
 from backend.app.shared.state_dir import resolve_state_dir
 
@@ -24,31 +23,6 @@ def test_health_ready_503_while_booting() -> None:
 
     assert response.status_code == 503
     assert response.json()["reason"] == "booting"
-
-
-@pytest.mark.usefixtures("postgres_app_env")
-def test_health_ready_200_when_catalog_path_is_unwritable(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Boot/readiness must never depend on the catalog being writable: the
-    catalog is opened lazily on first relay use (see
-    ``backend.app.features.clips.catalog.get_catalog_store``), never during
-    lifespan boot. No env override exists to force an unwritable path
-    anymore, so this simulates the failure the same way
-    ``test_catalog_open_failure_is_recorded_without_raising`` in
-    ``test_clips_catalog.py`` does: monkeypatching ``CatalogStore.open``.
-    """
-
-    def unavailable(_: object) -> CatalogStore:
-        raise PermissionError("catalog mount unavailable")
-
-    monkeypatch.setattr(CatalogStore, "open", unavailable)
-    app = create_app()
-
-    with TestClient(app) as client:
-        response = client.get("/health/ready")
-
-    assert response.status_code == 200
-    assert not hasattr(app.state, "catalog_store")
-    assert get_catalog_store(app) is None
 
 
 @pytest.mark.usefixtures("postgres_app_env")

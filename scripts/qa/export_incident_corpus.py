@@ -1,4 +1,4 @@
-"""Export a de-identified incident/clip corpus from an edge SQLite snapshot.
+"""Export a de-identified incident/clip corpus from a pre-cutover edge SQLite snapshot.
 
 Clips are bound to incidents through the clip manifests' ``event_refs`` (the
 worker-side truth), not through ``artifacts`` rows: on pre-P0 databases every

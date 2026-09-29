@@ -1,8 +1,8 @@
 # worker/pipeline/diagnostics
 
 Own the Worker-side execution-record buffer and export drain. Producers only
-read existing values and call `try_emit`. The Backend SQLite store is out of
-scope.
+read existing values and call `try_emit`. The backend PostgreSQL store is out
+of scope.
 
 ## Ownership
 

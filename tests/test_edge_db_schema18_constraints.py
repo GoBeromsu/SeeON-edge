@@ -7,7 +7,8 @@ from pathlib import Path
 
 import pytest
 
-from backend.app.edge_db.functions import audit_record_hash, register_edge_db_functions
+from backend.app.edge_db.functions import audit_record_hash
+from backend.app.edge_db.migration.sqlite_functions import register_edge_db_functions
 from tests_support.sqlite_source import create_schema19_source
 
 TS = "2026-08-24T00:00:00Z"

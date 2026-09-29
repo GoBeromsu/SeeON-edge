@@ -12,8 +12,15 @@ from pathlib import Path
 
 import pytest
 
-from backend.app.features.clips.catalog import CatalogStore
+from backend.app.features.clips.catalog_indexer import (
+    ClipCatalogIndexer,
+    ClipCatalogQuery,
+    PostgresClipCatalog,
+)
 from backend.app.features.clips.store import ClipStore
+from tests_support.postgres_sandbox import ProductSandbox
+
+pytest_plugins = ("tests_support.postgres_sandbox",)
 
 _EVENT_ID = "00000000-0000-4000-8000-000000000001"
 
@@ -49,32 +56,35 @@ def _write_manifest(root: Path, payload: dict[str, object]) -> None:
     path.write_text(json.dumps(payload), encoding="utf-8")
 
 
+def _listed(sandbox: ProductSandbox, root: Path) -> list[str]:
+    store = ClipStore(root)
+    outcome = ClipCatalogIndexer(sandbox.database, sandbox.authority).reconcile(store)
+    assert (outcome.remaining, outcome.isolated) == (0, 0)
+    page = PostgresClipCatalog(sandbox.database).page(
+        store, ClipCatalogQuery(camera_id=None, event_type=None, limit=50, cursor=None)
+    )
+    return [clip.manifest.clip_id for clip in page.clips]
+
+
 @pytest.mark.parametrize("detected_at", [None, "2026-09-02T16:43:24.147354Z"])
-def test_backfill_accepts_both_manifest_generations(
-    tmp_path: Path, detected_at: str | None
+def test_catalogue_lists_both_manifest_generations(
+    tmp_path: Path, postgres_product_sandbox: ProductSandbox, detected_at: str | None
 ) -> None:
     root = tmp_path / "clip-store"
     payload = _ready_manifest()
     if detected_at is not None:
         payload["detected_at"] = detected_at
     _write_manifest(root, payload)
-    store = CatalogStore.open(tmp_path / "catalog.sqlite3")
-    try:
-        store.backfill(ClipStore(root))
-        assert [record["clip_id"] for record in store.records("clips")] == ["clip-1"]
-    finally:
-        store.close()
+
+    assert _listed(postgres_product_sandbox, root) == ["clip-1"]
 
 
-def test_backfill_rejects_non_utc_detected_at(tmp_path: Path) -> None:
+def test_catalogue_does_not_list_non_utc_detected_at(
+    tmp_path: Path, postgres_product_sandbox: ProductSandbox
+) -> None:
     root = tmp_path / "clip-store"
     payload = _ready_manifest()
     payload["detected_at"] = "2026-09-02T16:43:24+09:00"
     _write_manifest(root, payload)
-    store = CatalogStore.open(tmp_path / "catalog.sqlite3")
-    try:
-        with pytest.raises((TypeError, ValueError)):
-            store.backfill(ClipStore(root))
-        assert store.records("clips") == []
-    finally:
-        store.close()
+
+    assert _listed(postgres_product_sandbox, root) == []

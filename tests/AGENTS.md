@@ -18,10 +18,9 @@ Allowed: the package under test, pytest, local helpers. Forbidden as default inp
 
 `conftest.py` pins the host so a fail means code, not the machine.
 
-- Central `edge.sqlite3` is a per-test tmp file. `EDGE_DATABASE_PATH` is monkeypatched on every module that reads it.
 - Dashboard bootstrap is explicit `API_DASHBOARD_*`. Unconfigured-path tests must `delenv`.
 - `API_BACKEND_ALLOW_INSECURE_HTTP=1` is a fixture opt-in. HTTPS-policy tests unset it.
-- `DashboardCredentialsStore.from_env` resolves under `tmp_path`. Never `~/.local/state/ml-api` or `/var/lib/ml-api`.
+- Dashboard credentials persist only through `PostgresDashboardCredentialsStore` in the per-test PostgreSQL sandbox. Never `~/.local/state/ml-api` or `/var/lib/ml-api`.
 - PostgreSQL connection settings require an injected owner and authority; use
   `tests_support.postgres_sandbox.postgres_product_sandbox`. There is no
   connection-settings path/from-env override. The sandbox owns only its unique
@@ -92,9 +91,8 @@ Need `mediamtx` on PATH for `real_stack`. A missing tool skips. After an import 
 
 - Local Hero: outcome decided by umask, GPU, PATH, locale, timezone, or core count. Assert code invariants. Guard or skip on missing env. Never assert "this machine has no GPU".
 - Host-state probes named `*_on_this_dev_machine`. If `available=True`, assert the honest-probe contract (reason present, metadata rules), not the inventory.
-- Required inputs from uncommitted weights, live cameras, or the developer's `catalog.sqlite3`.
+- Required inputs from uncommitted weights, live cameras, or the developer's state directory.
 - Sleep-as-assert, unbounded polls, or "wait a bit and hope".
 - Nested test packages that fake a scope the tree doesn't have.
 - Baking always-fail stubs into runtime so the suite boots. Stubs stay here.
 - Stretching CI deadlines so `heavy` looks green.
-- Aiming `CLOUD_EDGE_ML_CATALOG_PATH` at a production sqlite.
