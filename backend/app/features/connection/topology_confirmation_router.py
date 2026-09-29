@@ -7,7 +7,7 @@ from fastapi.exceptions import HTTPException
 from pydantic import BaseModel, ConfigDict, Field
 
 from backend.app.features.audit.catalog import AuditAction, empty_detail
-from backend.app.features.audit.http import append_transactional
+from backend.app.features.audit.http import mutation_audit
 from backend.app.features.audit.store import AuditEvent, utc_now
 from backend.app.features.cameras.edge_topology_sync_state import TopologyPauseReason
 from backend.app.features.cameras.router import _authorize
@@ -120,10 +120,9 @@ def confirm_topology_preview(
             payload.client_revision,
             payload.server_revision,
         ),
-        after_write=lambda connection: append_transactional(
+        audit=mutation_audit(
             request,
-            connection,
-            AuditEvent(
+            lambda: AuditEvent(
                 occurred_at=utc_now(),
                 actor_id=actor,
                 action=AuditAction.TOPOLOGY_CONFIRM,

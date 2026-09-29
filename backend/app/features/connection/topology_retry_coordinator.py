@@ -1,15 +1,16 @@
 from __future__ import annotations
 
 import secrets
-import sqlite3
 import threading
 import time
 import uuid
 from collections.abc import Callable
 from typing import Protocol, assert_never
 
+import psycopg
 from fastapi import FastAPI
 
+from backend.app.features.audit.postgres_runtime import AuditMutation
 from backend.app.features.cameras.edge_topology_sync_state import (
     EdgeTopologySyncState,
     EdgeTopologySyncStateStore,
@@ -79,7 +80,7 @@ class TopologyRetryCoordinator:
         force: bool = False,
         refresh: bool = False,
         now_epoch: float | None = None,
-        after_write: Callable[[sqlite3.Connection], None] | None = None,
+        audit: AuditMutation | None = None,
     ) -> TopologyRetryResult:
         now = time.time() if now_epoch is None else now_epoch
         if not self._lock.acquire(blocking=False):
@@ -88,16 +89,22 @@ class TopologyRetryCoordinator:
             client = self._client_provider()
             if client is None:
                 return self._unconfigured_result()
-            if after_write is None:
+            if audit is None:
                 return self._trigger(client, force=force, refresh=refresh, now=now)
-            with self._state_store.operation(after_write) as connection:
-                return self._trigger(
-                    client,
-                    force=force,
-                    refresh=refresh,
-                    now=now,
-                    connection=connection,
-                )
+            return audit.apply(
+                self._state_store,
+                lambda append: self._state_store.operation(
+                    lambda connection: self._trigger(
+                        client,
+                        force=force,
+                        refresh=refresh,
+                        now=now,
+                        connection=connection,
+                        audit=audit,
+                    ),
+                    after_write=append,
+                ),
+            )
         finally:
             self._lock.release()
 
@@ -108,35 +115,47 @@ class TopologyRetryCoordinator:
         force: bool,
         refresh: bool,
         now: float,
-        connection: sqlite3.Connection | None = None,
+        connection: psycopg.Connection | None = None,
+        audit: AuditMutation | None = None,
     ) -> TopologyRetryResult:
-        state = self._state_store.ensure_principal(client.principal)
-        state = self._resume_if_refreshed(client, state, refresh)
+        state = self._state_store.ensure_principal(client.principal, connection=connection)
+        state = self._resume_if_refreshed(
+            client, state, refresh, connection=connection, audit=audit
+        )
         if state.pause_reason is not None:
-            return self.current_result(attempted=False)
+            return self.current_result(attempted=False, connection=connection)
         if (
             state.pending is not None
             and not force
             and state.next_retry_at is not None
             and now < state.next_retry_at
         ):
-            return self.current_result(attempted=False)
+            return self.current_result(attempted=False, connection=connection)
         pending = state.pending
         if pending is None:
-            topology = self._registry.topology_snapshot()
+            topology = self._registry.topology_snapshot(connection=connection)
             dirty = topology.dirty
             if dirty is None or dirty.registry_version <= state.last_snapshotted_registry_version:
-                return self.current_result(attempted=False)
+                return self.current_result(attempted=False, connection=connection)
             if topology.readiness_error is not None:
-                return self._result(state, False, "pending", None, _INCOMPLETE)
+                return self._result(
+                    state, False, "pending", None, _INCOMPLETE, connection=connection
+                )
             pending = self._state_store.create_pending(
-                TopologySnapshotBuilder(topology, client.principal, _uuid7())
+                TopologySnapshotBuilder(topology, client.principal, _uuid7()),
+                connection=connection,
             )
+        if audit is not None:
+            audit.require_admission(self._state_store)
         outcome = client.put(pending)
         return self._record_outcome(outcome, pending.snapshot_id, now, connection=connection)
 
-    def current_result(self, *, attempted: bool = False) -> TopologyRetryResult:
-        return current_retry_result(self._registry, self._state_store, attempted=attempted)
+    def current_result(
+        self, *, attempted: bool = False, connection: psycopg.Connection | None = None
+    ) -> TopologyRetryResult:
+        return current_retry_result(
+            self._registry, self._state_store, attempted=attempted, connection=connection
+        )
 
     def preview(self) -> TopologyConfirmationPreview | None:
         return self._confirmation.preview()
@@ -145,25 +164,32 @@ class TopologyRetryCoordinator:
         self,
         command: TopologyConfirmationCommand,
         *,
-        after_write: Callable[[sqlite3.Connection], None] | None = None,
+        audit: AuditMutation | None = None,
     ) -> TopologyConfirmationResult:
-        return self._confirmation.confirm(command, after_write=after_write)
+        return self._confirmation.confirm(command, audit=audit)
 
     def _resume_if_refreshed(
         self,
         client: TopologyClientProtocol,
         state: EdgeTopologySyncState,
         refresh: bool,
+        *,
+        connection: psycopg.Connection | None = None,
+        audit: AuditMutation | None = None,
     ) -> EdgeTopologySyncState:
         pending = state.pending
         if pending is None or state.pause_reason is None or not refresh:
             return state
         if state.pause_reason is TopologyPauseReason.CONFLICT:
+            if audit is not None:
+                audit.require_admission(self._state_store)
             server_revision = client.refresh_server_revision()
             if server_revision is None:
                 return state
-            return self._state_store.refresh_conflict(pending.snapshot_id, server_revision)
-        return self._state_store.resume_pending(pending.snapshot_id)
+            return self._state_store.refresh_conflict(
+                pending.snapshot_id, server_revision, connection=connection
+            )
+        return self._state_store.resume_pending(pending.snapshot_id, connection=connection)
 
     def _record_outcome(
         self,
@@ -171,11 +197,15 @@ class TopologyRetryCoordinator:
         snapshot_id: str,
         now: float,
         *,
-        connection: sqlite3.Connection | None = None,
+        connection: psycopg.Connection | None = None,
     ) -> TopologyRetryResult:
+        if connection is None:
+            return self._state_store.operation(
+                lambda current: self._record_outcome(outcome, snapshot_id, now, connection=current)
+            )
         match outcome:
             case TopologyAccepted(response=response):
-                pending = self._state_store.load().pending
+                pending = self._state_store.load(connection=connection).pending
                 if pending is None:
                     raise TopologySyncStateConflictError(
                         "accepted topology has no pending snapshot"
@@ -186,14 +216,18 @@ class TopologyRetryCoordinator:
                     pending.registry_version,
                     connection=connection,
                 )
-                state = self._state_store.accept(snapshot_id, response, now_epoch=now)
-                return self._result(state, True, "synced", None, None)
+                state = self._state_store.accept(
+                    snapshot_id, response, now_epoch=now, connection=connection
+                )
+                return self._result(state, True, "synced", None, None, connection=connection)
             case TopologyRetryable(error_class=error_class):
-                state = self._state_store.record_retry(snapshot_id, now_epoch=now)
-                return self._result(state, True, "failed", error_class, None)
+                state = self._state_store.record_retry(
+                    snapshot_id, now_epoch=now, connection=connection
+                )
+                return self._result(state, True, "failed", error_class, None, connection=connection)
             case TopologyPaused(reason=reason):
-                self._state_store.pause(snapshot_id, reason)
-                return self.current_result(attempted=True)
+                self._state_store.pause(snapshot_id, reason, connection=connection)
+                return self.current_result(attempted=True, connection=connection)
             case unreachable:
                 assert_never(unreachable)
 
@@ -207,21 +241,24 @@ class TopologyRetryCoordinator:
         status: TopologySyncStatus,
         error_class: TopologySyncErrorClass | None,
         detail: str | None,
+        *,
+        connection: psycopg.Connection | None = None,
     ) -> TopologyRetryResult:
-        return retry_result(self._registry, state, attempted, status, error_class, detail)
+        return retry_result(
+            self._registry, state, attempted, status, error_class, detail, connection=connection
+        )
 
 
 def topology_retry_coordinator(app: FastAPI) -> TopologyRetryCoordinator:
     existing = getattr(app.state, "topology_retry_coordinator", None)
     if isinstance(existing, TopologyRetryCoordinator):
         return existing
-    registry: CameraRegistryStore
     candidate = getattr(app.state, "camera_registry", None)
-    if isinstance(candidate, CameraRegistryStore):
-        registry = candidate
-    else:
-        registry = CameraRegistryStore.from_env()
-        app.state.camera_registry = registry
+    if candidate is None:
+        raise RuntimeError("camera registry is not injected")
+    if not isinstance(candidate, CameraRegistryStore):
+        raise TypeError("camera registry has invalid type")
+    registry = candidate
 
     def client_provider() -> TopologyClient | None:
         bundle = backend_client_bundle(app)
@@ -229,7 +266,7 @@ def topology_retry_coordinator(app: FastAPI) -> TopologyRetryCoordinator:
 
     coordinator = TopologyRetryCoordinator(
         registry,
-        EdgeTopologySyncStateStore(registry.path),
+        EdgeTopologySyncStateStore(registry.database, registry.authority),
         client_provider,
     )
     app.state.topology_retry_coordinator = coordinator

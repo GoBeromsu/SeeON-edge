@@ -1,0 +1,16 @@
+{
+  "audit": {
+    "clock_source": "monotonic",
+    "config_version": 7,
+    "detector_version": "fall-2026.08",
+    "model_version": "lstm-v3",
+    "operating_threshold": 0.62,
+    "runtime_manifest_sha256": "6f6f793e244baf48449e6024aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+  },
+  "camera_id": "cmsnw6rjc01vhlh01oswn99yq",
+  "detected_at": "2026-08-20T17:20:58.197192Z",
+  "edge_event_id": "a5e15ff2-90fd-4764-be74-a7da4f573cc9",
+  "event_type": "bed-exit",
+  "facility_id": "facility-1",
+  "probability": 0.87
+}

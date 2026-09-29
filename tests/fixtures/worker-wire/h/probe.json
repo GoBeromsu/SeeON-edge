@@ -1,0 +1,285 @@
+{
+  "cases": {
+    "bad-request-body": {
+      "request": {
+        "body": {
+          "url": "rtsp://camera.invalid/stream"
+        },
+        "body_raw": "{\"url\":\"rtsp://camera.invalid/stream\"}",
+        "headers": {
+          "content-type": "application/json",
+          "x-edge-relay-token": "<relay-token>"
+        },
+        "method": "POST",
+        "path": "/probe"
+      },
+      "response": {
+        "body_text": "<!DOCTYPE HTML>\n<html lang=\"en\">\n    <head>\n        <meta charset=\"utf-8\">\n        <title>Error response</title>\n    </head>\n    <body>\n        <h1>Error response</h1>\n        <p>Error code: 400</p>\n        <p>Message: Bad Request.</p>\n        <p>Error code explanation: 400 - Bad request syntax or unsupported method.</p>\n    </body>\n</html>\n",
+        "headers": {
+          "content-length": "343",
+          "content-type": "text/html;charset=utf-8"
+        },
+        "status": 400
+      }
+    },
+    "error-class-auth": {
+      "backend": {
+        "parser": "backend.app.features.cameras.router._probe_rtsp_url",
+        "result": {
+          "error_class": "auth",
+          "height": null,
+          "ok": false,
+          "probe_unavailable": false,
+          "width": null
+        }
+      },
+      "request": {
+        "body": {
+          "rtsp_url": "rtsp://camera.invalid/stream"
+        },
+        "body_raw": "{\"rtsp_url\":\"rtsp://camera.invalid/stream\"}",
+        "headers": {
+          "content-type": "application/json",
+          "x-edge-relay-token": "<relay-token>"
+        },
+        "method": "POST",
+        "path": "/probe",
+        "timeout_sec": 5.0
+      },
+      "response": {
+        "body": {
+          "error_class": "auth",
+          "ok": false
+        },
+        "headers": {
+          "content-length": "33",
+          "content-type": "application/json"
+        },
+        "status": 200
+      }
+    },
+    "error-class-decode": {
+      "backend": {
+        "parser": "backend.app.features.cameras.router._probe_rtsp_url",
+        "result": {
+          "error_class": "decode",
+          "height": null,
+          "ok": false,
+          "probe_unavailable": false,
+          "width": null
+        }
+      },
+      "request": {
+        "body": {
+          "rtsp_url": "rtsp://camera.invalid/stream"
+        },
+        "body_raw": "{\"rtsp_url\":\"rtsp://camera.invalid/stream\"}",
+        "headers": {
+          "content-type": "application/json",
+          "x-edge-relay-token": "<relay-token>"
+        },
+        "method": "POST",
+        "path": "/probe",
+        "timeout_sec": 5.0
+      },
+      "response": {
+        "body": {
+          "error_class": "decode",
+          "ok": false
+        },
+        "headers": {
+          "content-length": "35",
+          "content-type": "application/json"
+        },
+        "status": 200
+      }
+    },
+    "error-class-timeout": {
+      "backend": {
+        "parser": "backend.app.features.cameras.router._probe_rtsp_url",
+        "result": {
+          "error_class": "timeout",
+          "height": null,
+          "ok": false,
+          "probe_unavailable": false,
+          "width": null
+        }
+      },
+      "request": {
+        "body": {
+          "rtsp_url": "rtsp://camera.invalid/stream"
+        },
+        "body_raw": "{\"rtsp_url\":\"rtsp://camera.invalid/stream\"}",
+        "headers": {
+          "content-type": "application/json",
+          "x-edge-relay-token": "<relay-token>"
+        },
+        "method": "POST",
+        "path": "/probe",
+        "timeout_sec": 5.0
+      },
+      "response": {
+        "body": {
+          "error_class": "timeout",
+          "ok": false
+        },
+        "headers": {
+          "content-length": "36",
+          "content-type": "application/json"
+        },
+        "status": 200
+      }
+    },
+    "error-class-unavailable": {
+      "backend": {
+        "parser": "backend.app.features.cameras.router._probe_rtsp_url",
+        "result": {
+          "error_class": "unavailable",
+          "height": null,
+          "ok": false,
+          "probe_unavailable": false,
+          "width": null
+        }
+      },
+      "request": {
+        "body": {
+          "rtsp_url": "rtsp://camera.invalid/stream"
+        },
+        "body_raw": "{\"rtsp_url\":\"rtsp://camera.invalid/stream\"}",
+        "headers": {
+          "content-type": "application/json",
+          "x-edge-relay-token": "<relay-token>"
+        },
+        "method": "POST",
+        "path": "/probe",
+        "timeout_sec": 5.0
+      },
+      "response": {
+        "body": {
+          "error_class": "unavailable",
+          "ok": false
+        },
+        "headers": {
+          "content-length": "40",
+          "content-type": "application/json"
+        },
+        "status": 200
+      }
+    },
+    "error-class-unsupported-backend-local": {
+      "backend": {
+        "parser": "backend.app.features.cameras.router._probe_rtsp_url",
+        "result": {
+          "error_class": "unsupported",
+          "height": null,
+          "ok": false,
+          "probe_unavailable": false,
+          "width": null
+        }
+      },
+      "request": null,
+      "response": null
+    },
+    "error-class-unsupported-worker": {
+      "backend": {
+        "parser": "backend.app.features.cameras.router._probe_result_from_worker",
+        "result": {
+          "error_class": "unsupported",
+          "height": null,
+          "ok": false,
+          "probe_unavailable": false,
+          "width": null
+        }
+      },
+      "request": {
+        "body": {
+          "rtsp_url": "rtsp://camera.invalid/stream"
+        },
+        "body_raw": "{\"rtsp_url\":\"rtsp://camera.invalid/stream\"}",
+        "headers": {
+          "content-type": "application/json",
+          "x-edge-relay-token": "<relay-token>"
+        },
+        "method": "POST",
+        "path": "/probe"
+      },
+      "response": {
+        "body": {
+          "error_class": "unsupported",
+          "ok": false
+        },
+        "headers": {
+          "content-length": "40",
+          "content-type": "application/json"
+        },
+        "status": 200
+      }
+    },
+    "forbidden-no-token": {
+      "request": {
+        "body": {
+          "rtsp_url": "rtsp://camera.invalid/stream"
+        },
+        "body_raw": "{\"rtsp_url\":\"rtsp://camera.invalid/stream\"}",
+        "headers": {
+          "content-type": "application/json"
+        },
+        "method": "POST",
+        "path": "/probe"
+      },
+      "response": {
+        "body_text": "<!DOCTYPE HTML>\n<html lang=\"en\">\n    <head>\n        <meta charset=\"utf-8\">\n        <title>Error response</title>\n    </head>\n    <body>\n        <h1>Error response</h1>\n        <p>Error code: 403</p>\n        <p>Message: Forbidden.</p>\n        <p>Error code explanation: 403 - Request forbidden -- authorization will not help.</p>\n    </body>\n</html>\n",
+        "headers": {
+          "content-length": "349",
+          "content-type": "text/html;charset=utf-8"
+        },
+        "status": 403
+      }
+    },
+    "ok": {
+      "backend": {
+        "parser": "backend.app.features.cameras.router._probe_rtsp_url",
+        "result": {
+          "error_class": null,
+          "height": 360,
+          "ok": true,
+          "probe_unavailable": false,
+          "width": 640
+        }
+      },
+      "request": {
+        "body": {
+          "rtsp_url": "rtsp://camera.invalid/stream"
+        },
+        "body_raw": "{\"rtsp_url\":\"rtsp://camera.invalid/stream\"}",
+        "headers": {
+          "content-type": "application/json",
+          "x-edge-relay-token": "<relay-token>"
+        },
+        "method": "POST",
+        "path": "/probe",
+        "timeout_sec": 5.0
+      },
+      "response": {
+        "body": {
+          "backend": "gstreamer",
+          "height": 360,
+          "ok": true,
+          "width": 640
+        },
+        "headers": {
+          "content-length": "58",
+          "content-type": "application/json"
+        },
+        "status": 200
+      }
+    }
+  },
+  "error_classes_seen": [
+    "auth",
+    "decode",
+    "timeout",
+    "unavailable",
+    "unsupported"
+  ]
+}

@@ -3,11 +3,9 @@
 from __future__ import annotations
 
 import json
-import sqlite3
 import urllib.error
 import urllib.parse
 import urllib.request
-from collections.abc import Callable
 from typing import Literal, Protocol
 
 from fastapi import APIRouter, FastAPI, HTTPException, Request, status
@@ -15,7 +13,8 @@ from pydantic import BaseModel, ConfigDict, Field, StrictInt
 
 from backend.app.core.config import get_settings
 from backend.app.features.audit.catalog import AuditAction, empty_detail
-from backend.app.features.audit.http import append_transactional
+from backend.app.features.audit.http import mutation_audit
+from backend.app.features.audit.postgres_runtime import AuditMutation
 from backend.app.features.audit.store import AuditEvent
 from backend.app.features.audit.store import utc_now as audit_now
 from backend.app.features.cameras.bed_zone_store import (
@@ -150,20 +149,27 @@ def save_bed_zone(
     _require_camera(store, camera_id)
     recognized_at = utc_now_iso()
     regions = _region_values(payload.regions)
-    hook = _save_hook(request, actor, camera_id)
+    audit = _save_audit(request, actor, camera_id)
 
     try:
         if not regions:
-            store.delete(camera_id, after_write=hook)
+            audit.apply(
+                store,
+                lambda append: store.delete(camera_id, after_write=append),
+                expects_audit=bool,
+            )
             bed_zone = None
         else:
-            saved = store.put(
-                camera_id,
-                regions=regions,
-                image_width=payload.image_width,
-                image_height=payload.image_height,
-                recognized_at=recognized_at,
-                after_write=hook,
+            saved = audit.apply(
+                store,
+                lambda append: store.put(
+                    camera_id,
+                    regions=regions,
+                    image_width=payload.image_width,
+                    image_height=payload.image_height,
+                    recognized_at=recognized_at,
+                    after_write=append,
+                ),
             )
             bed_zone = BedZonePayload(**saved.as_dict())
     except (TypeError, ValueError) as exc:
@@ -206,23 +212,17 @@ def _require_camera(store: BedZoneStore, camera_id: str) -> None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="camera not found")
 
 
-def _save_hook(
-    request: Request, actor: str, camera_id: str
-) -> Callable[[sqlite3.Connection], None]:
-    def after_write(connection: sqlite3.Connection) -> None:
-        append_transactional(
-            request,
-            connection,
-            AuditEvent(
-                occurred_at=audit_now(),
-                actor_id=actor,
-                action=AuditAction.BED_ZONE_UPDATE,
-                target_id=camera_id,
-                detail=empty_detail(AuditAction.BED_ZONE_UPDATE),
-            ),
-        )
-
-    return after_write
+def _save_audit(request: Request, actor: str, camera_id: str) -> AuditMutation:
+    return mutation_audit(
+        request,
+        lambda: AuditEvent(
+            occurred_at=audit_now(),
+            actor_id=actor,
+            action=AuditAction.BED_ZONE_UPDATE,
+            target_id=camera_id,
+            detail=empty_detail(AuditAction.BED_ZONE_UPDATE),
+        ),
+    )
 
 
 def _is_bed_not_found(raw: bytes) -> bool:
@@ -266,9 +266,10 @@ def _upstream_unavailable() -> HTTPException:
 
 def _store(app: FastAPI) -> BedZoneStore:
     store = getattr(app.state, "bed_zone_store", None)
+    if store is None:
+        raise RuntimeError("bed zone store is not injected")
     if not isinstance(store, BedZoneStore):
-        store = BedZoneStore.from_env()
-        app.state.bed_zone_store = store
+        raise TypeError("bed zone store has invalid type")
     return store
 
 

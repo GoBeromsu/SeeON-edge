@@ -5,7 +5,6 @@ from __future__ import annotations
 import hmac
 import os
 import secrets
-import sqlite3
 import threading
 import time
 from collections.abc import Callable
@@ -15,10 +14,9 @@ from typing import Protocol
 from fastapi import HTTPException, Request, status
 
 from backend.app.shared.dashboard_credentials import (
-    DashboardCredentialsStore,
-    DashboardCredentialsStoreError,
     PersistedDashboardCredentials,
 )
+from backend.app.shared.postgres_dashboard_credentials import PostgresDashboardCredentialsStore
 
 API_DASHBOARD_USERNAME_ENV = "API_DASHBOARD_USERNAME"
 API_DASHBOARD_PASSWORD_ENV = "API_DASHBOARD_PASSWORD"
@@ -72,7 +70,7 @@ class PlaintextDashboardCredentials:
 
 @dataclass(frozen=True, slots=True)
 class HashedDashboardCredentials:
-    """Persisted-file credentials: password compared via scrypt verify."""
+    """Persisted credentials: password compared via scrypt verify."""
 
     persisted: PersistedDashboardCredentials
 
@@ -92,16 +90,17 @@ class DashboardSessionStore:
     ttl_seconds: int = DASHBOARD_SESSION_TTL_SECONDS
     _sessions: dict[str, float] = field(default_factory=dict)
     _lock: threading.Lock = field(default_factory=threading.Lock)
+    _active: bool = field(default=True, init=False, repr=False)
 
     @property
     def username(self) -> str:
         return self.credentials.username
 
     def authenticate(self, username: str, password: str) -> str | None:
-        if not self.credentials.verify(username, password):
-            return None
-        token = secrets.token_urlsafe(32)
         with self._lock:
+            if not self._active or not self.credentials.verify(username, password):
+                return None
+            token = secrets.token_urlsafe(32)
             self._prune_locked()
             self._sessions[token] = time.monotonic() + self.ttl_seconds
         return token
@@ -111,9 +110,9 @@ class DashboardSessionStore:
             return None
         with self._lock:
             self._prune_locked()
-            if token not in self._sessions:
+            if not self._active or token not in self._sessions:
                 return None
-        return self.username
+            return self.credentials.username
 
     def revoke(self, token: str | None) -> None:
         if token is None:
@@ -125,16 +124,25 @@ class DashboardSessionStore:
         with self._lock:
             self._sessions.clear()
 
+    def invalidate(self) -> None:
+        """Retire even held references after an uncertain credential write."""
+        with self._lock:
+            self._active = False
+            self._sessions.clear()
+
     def rotate_credentials(self, persisted: PersistedDashboardCredentials) -> None:
         """Swap in newly-persisted credentials and revoke every existing session.
 
-        Called after a successful ``PUT /auth/credentials``; the caller is
-        expected to hold ``_SESSION_STORE_INIT_LOCK`` while calling this so the
+        Called after credential persistence and audit publication; the caller
+        must hold ``_SESSION_STORE_INIT_LOCK`` while calling this so the
         swap is observed atomically by concurrent requests resolving the
         session store for the first time.
         """
-        self.credentials = HashedDashboardCredentials(persisted)
-        self.revoke_all()
+        with self._lock:
+            if not self._active:
+                raise RuntimeError("dashboard session store is inactive")
+            self.credentials = HashedDashboardCredentials(persisted)
+            self._sessions.clear()
 
     def _prune_locked(self) -> None:
         now = time.monotonic()
@@ -143,26 +151,18 @@ class DashboardSessionStore:
             self._sessions.pop(token, None)
 
 
-def dashboard_credentials_store(request: Request) -> DashboardCredentialsStore:
+def dashboard_credentials_store(request: Request) -> PostgresDashboardCredentialsStore:
     existing = getattr(request.app.state, "dashboard_credentials_store", None)
-    if isinstance(existing, DashboardCredentialsStore):
-        return existing
-    store = DashboardCredentialsStore.from_env()
-    request.app.state.dashboard_credentials_store = store
-    return store
+    if existing is None:
+        raise RuntimeError("dashboard credentials store is not injected")
+    if not isinstance(existing, PostgresDashboardCredentialsStore):
+        raise TypeError("dashboard credentials store has invalid type")
+    return existing
 
 
 def _resolve_credentials(request: Request) -> DashboardCredentials:
     store = dashboard_credentials_store(request)
-    try:
-        persisted = store.load()
-    except DashboardCredentialsStoreError as exc:
-        # Fail closed: a corrupt/unreadable store after rotation must not
-        # resurrect env or known-default credentials.
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="dashboard credentials store is unreadable",
-        ) from exc
+    persisted = store.load()
     if persisted is not None:
         return HashedDashboardCredentials(persisted)
 
@@ -214,7 +214,7 @@ def rotate_dashboard_credentials(
     *,
     new_username: str | None,
     new_password: str,
-    after_write: Callable[[sqlite3.Connection], None] | None = None,
+    persist: Callable[[PostgresDashboardCredentialsStore, str, str], PersistedDashboardCredentials],
 ) -> str:
     """Persist the new credentials, revoke every existing session, and return
     a fresh session token for the caller (so the PUT response can carry a
@@ -227,25 +227,42 @@ def rotate_dashboard_credentials(
     The whole persist -> swap -> mint sequence runs under
     ``_SESSION_STORE_INIT_LOCK`` so two concurrent rotations can't interleave
     (e.g. two admin tabs submitting at once).
+
+    ``persist`` must return only after the complete native save owner and its
+    audit publication return. Failures retire cached authority, not committed
+    database state. Authorization is checked again after acquiring the lock.
     """
 
     sessions = dashboard_sessions(request)
     store = dashboard_credentials_store(request)
 
     with _SESSION_STORE_INIT_LOCK:
+        if (
+            getattr(request.app.state, "dashboard_sessions", None) is not sessions
+            or sessions.actor(request.cookies.get(DASHBOARD_SESSION_COOKIE)) is None
+        ):
+            raise HTTPException(status_code=401, detail="dashboard session required")
         resolved_username = (new_username or "").strip() or sessions.username
-        persisted = store.save(
-            username=resolved_username, password=new_password, after_write=after_write
-        )
+        try:
+            persisted = persist(store, resolved_username, new_password)
+            return _mint_rotated_session(sessions, persisted, new_password)
+        except BaseException:
+            # A failed complete owner return may already have committed. Never
+            # keep authenticating against possibly superseded cached credentials.
+            sessions.invalidate()
+            if getattr(request.app.state, "dashboard_sessions", None) is sessions:
+                del request.app.state.dashboard_sessions
+            raise
 
-        sessions.rotate_credentials(persisted)
 
-        token = sessions.authenticate(resolved_username, new_password)
-        if token is None:
-            # Defensive: rotate_credentials() just persisted this exact pair,
-            # so authenticate() against it must succeed.
-            raise RuntimeError("dashboard credential rotation produced an unauthenticated store")
-        return token
+def _mint_rotated_session(
+    sessions: DashboardSessionStore, persisted: PersistedDashboardCredentials, password: str
+) -> str:
+    sessions.rotate_credentials(persisted)
+    token = sessions.authenticate(persisted.username, password)
+    if token is None:
+        raise RuntimeError("dashboard credential rotation produced an unauthenticated store")
+    return token
 
 
 def authorize_dashboard(request: Request) -> str:

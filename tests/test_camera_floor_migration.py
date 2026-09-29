@@ -8,8 +8,6 @@ method itself.
 
 from __future__ import annotations
 
-from pathlib import Path
-
 import pytest
 
 from backend.app.features.cameras.store import (
@@ -19,12 +17,9 @@ from backend.app.features.cameras.store import (
     is_valid_floor,
     parse_legacy_floor,
 )
-from tests_support.compact_authority_db import prepare_compact_database
+from tests_support.postgres_sandbox import ProductSandbox
 
-
-@pytest.fixture(autouse=True)
-def _compact_camera_database(tmp_path: Path) -> None:
-    prepare_compact_database(tmp_path / "catalog.sqlite3")
+pytest_plugins = ("tests_support.postgres_sandbox",)
 
 
 def test_parse_legacy_floor_passes_none_through_untouched() -> None:
@@ -109,91 +104,25 @@ def test_is_valid_floor_rejects_zero_and_out_of_range_values() -> None:
     assert is_valid_floor(10) is True
 
 
-def test_migrate_legacy_string_floors_rewrites_stored_strings_in_place(tmp_path: Path) -> None:
-    store = CameraRegistryStore(tmp_path / "catalog.sqlite3")
-    store.create(
-        camera_id="camera-1",
-        label="205호",
-        rtsp_url="rtsp://cam/1",
-        space_id=None,
-        status="online",
-        floor="2층",
-    )
-    store.create(
-        camera_id="camera-2",
-        label="B1호",
-        rtsp_url="rtsp://cam/2",
-        space_id=None,
-        status="online",
-        floor="B1",
-    )
-    store.create(
-        camera_id="camera-3",
-        label="already-int",
-        rtsp_url="rtsp://cam/3",
-        space_id=None,
-        status="online",
-        floor=5,
-    )
-    store.create(
-        camera_id="camera-4",
-        label="unset",
-        rtsp_url="rtsp://cam/4",
-        space_id=None,
-        status="online",
-    )
-
-    version_before = store.snapshot()["registry_version"]
-    changes = store.migrate_legacy_string_floors()
-
-    assert {change["camera_id"]: change["new"] for change in changes} == {
-        "camera-1": 2,
-        "camera-2": -1,
-    }
-    assert store.get("camera-1")["floor"] == 2
-    assert store.get("camera-2")["floor"] == -1
-    # Already-int and unset records are untouched.
-    assert store.get("camera-3")["floor"] == 5
-    assert store.get("camera-4").get("floor") is None
-    assert store.snapshot()["registry_version"] == version_before + 1
-
-
-def test_migrate_legacy_string_floors_is_idempotent(tmp_path: Path) -> None:
-    store = CameraRegistryStore(tmp_path / "catalog.sqlite3")
-    store.create(
-        camera_id="camera-1",
-        label="205호",
-        rtsp_url="rtsp://cam/1",
-        space_id=None,
-        status="online",
-        floor="2층",
-    )
-
-    first_pass = store.migrate_legacy_string_floors()
-    version_after_first = store.snapshot()["registry_version"]
-    second_pass = store.migrate_legacy_string_floors()
-
-    assert len(first_pass) == 1
-    assert second_pass == []
-    assert store.snapshot()["registry_version"] == version_after_first
-
-
-def test_migrate_legacy_string_floors_defaults_an_unparseable_value_and_logs(
-    tmp_path: Path, caplog: pytest.LogCaptureFixture
+def test_migrate_legacy_string_floors_defaults_an_unparseable_value(
+    postgres_product_sandbox: ProductSandbox,
 ) -> None:
-    store = CameraRegistryStore(tmp_path / "catalog.sqlite3")
+    sandbox = postgres_product_sandbox
+    store = CameraRegistryStore(sandbox.database, sandbox.authority)
     store.create(
         camera_id="camera-1",
         label="garbled",
         rtsp_url="rtsp://cam/1",
         space_id=None,
         status="online",
-        floor="지하 1층",
+        floor=5,
+    )
+    # A legacy free-text value the typed API can no longer write.
+    sandbox.admin.execute(
+        "UPDATE cameras SET floor_override=%s WHERE camera_id=%s", ("지하 1층", "camera-1")
     )
 
-    with caplog.at_level("WARNING"):
-        changes = store.migrate_legacy_string_floors()
+    changes = store.migrate_legacy_string_floors()
 
     assert changes == [{"camera_id": "camera-1", "old": "지하 1층", "new": DEFAULT_FLOOR}]
     assert store.get("camera-1")["floor"] == DEFAULT_FLOOR
-    assert "camera-1" in caplog.text

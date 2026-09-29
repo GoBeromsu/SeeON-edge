@@ -1,23 +1,29 @@
+"""Durable topology retry state on the API-owned native PostgreSQL authority."""
+
 from __future__ import annotations
 
-import sqlite3
-from collections.abc import Callable, Generator
-from contextlib import contextmanager
+import math
+from collections.abc import Callable
 from dataclasses import dataclass
 from enum import StrEnum, unique
-from pathlib import Path
-from threading import RLock
-from typing import Final, Protocol
+from typing import Final, Protocol, TypeVar
 
-from backend.app.edge_db.configuration import (
-    ensure_edge_site,
-    open_configuration_database,
-    utc_now,
+import psycopg
+from psycopg.pq import TransactionStatus
+
+from backend.app.edge_db.authority import AuthorityToken, require_authority
+from backend.app.edge_db.postgres import (
+    PostgresDatabase,
+    PostgresError,
+    PostgresTransactionStateError,
 )
+from backend.app.features.cameras.camera_repository import utc_now
 from contracts.edge_provisioning_v1 import MachinePrincipal, TopologySuccessEnvelope
 
 BASE_BACKOFF_SECONDS: Final = 5.0
 MAX_BACKOFF_SECONDS: Final = 300.0
+_BACKOFF_EXPONENT_LIMIT = math.ceil(math.log2(MAX_BACKOFF_SECONDS / BASE_BACKOFF_SECONDS))
+_Result = TypeVar("_Result")
 
 
 @unique
@@ -65,47 +71,68 @@ class TopologySyncStateConflictError(RuntimeError):
 
 
 class EdgeTopologySyncStateStore:
-    def __init__(self, path: str | Path) -> None:
-        self.path = Path(path)
-        self._lock = RLock()
-        self._connection = open_configuration_database(self.path)
+    def __init__(self, database: PostgresDatabase, authority: AuthorityToken) -> None:
+        if not isinstance(database, PostgresDatabase):
+            raise TypeError("native topology state requires a PostgreSQL owner")
+        if not isinstance(authority, AuthorityToken):
+            raise TypeError("native topology state requires deployment authority")
+        self.database, self.authority = database, authority
 
-    def load(self) -> EdgeTopologySyncState:
-        with self._lock:
-            return self._load(self._connection)
+    def load(self, *, connection: psycopg.Connection | None = None) -> EdgeTopologySyncState:
+        if connection is None:
+            return self.database.read(self._load)
+        self._require_borrowed(connection)
+        return self._load(connection)
 
-    @contextmanager
     def operation(
         self,
-        after_write: Callable[[sqlite3.Connection], None],
-    ) -> Generator[sqlite3.Connection]:
-        """Own one explicit sync route transaction, including all state stages."""
-        with self._lock, self._transaction() as connection:
-            yield connection
-            after_write(connection)
+        callback: Callable[[psycopg.Connection], _Result],
+        *,
+        after_write: Callable[[psycopg.Connection], None] | None = None,
+    ) -> _Result:
+        """Own one compound operation; audit once on every normal body return.
 
-    def ensure_principal(self, principal: MachinePrincipal) -> EdgeTopologySyncState:
-        with self._lock, self._transaction() as connection:
-            ensure_edge_site(connection)
-            state = self._load(connection)
+        Inner state methods must receive this callback's explicit connection.
+        They never open nested transactions, infer ambient ownership, publish an
+        audit token, or close the borrowed connection. The caller's result is
+        tentative until the complete database owner returns.
+        """
+
+        def write(connection: psycopg.Connection) -> _Result:
+            result = callback(connection)
+            if after_write is not None:
+                after_write(connection)
+            return result
+
+        return self._write(write)
+
+    def ensure_principal(
+        self, principal: MachinePrincipal, *, connection: psycopg.Connection | None = None
+    ) -> EdgeTopologySyncState:
+        def write(current: psycopg.Connection) -> EdgeTopologySyncState:
+            state = self._load(current)
             if state.principal != principal:
                 raise TopologySyncStateConflictError("topology principal does not match enrollment")
             return state
 
-    def create_pending(self, builder: PendingSnapshotBuilder) -> PendingTopologySnapshot:
-        with self._lock, self._transaction() as connection:
-            state = self._load(connection)
+        return self._write(write, connection)
+
+    def create_pending(
+        self, builder: PendingSnapshotBuilder, *, connection: psycopg.Connection | None = None
+    ) -> PendingTopologySnapshot:
+        def write(current: psycopg.Connection) -> PendingTopologySnapshot:
+            state = self._load(current)
             if state.pending is not None:
                 return state.pending
             if state.principal != builder.principal:
                 raise TopologySyncStateConflictError("topology principal changed before enqueue")
             client_revision = state.last_client_revision + 1
             body = builder.build(client_revision, state.server_revision)
-            connection.execute(
-                "UPDATE edge_site SET topology_pending_snapshot_id=?,topology_pending_body=?,"
-                "topology_pending_registry_version=?,topology_pending_client_revision=?,"
-                "topology_pending_expected_server_revision=?,topology_consecutive_failures=0,"
-                "topology_next_retry_at=NULL,topology_pause_reason=NULL,updated_at=? WHERE id=1",
+            current.execute(
+                "UPDATE edge_site SET topology_pending_snapshot_id=%s,topology_pending_body=%s,"
+                "topology_pending_registry_version=%s,topology_pending_client_revision=%s,"
+                "topology_pending_expected_server_revision=%s,topology_consecutive_failures=0,"
+                "topology_next_retry_at=NULL,topology_pause_reason=NULL,updated_at=%s WHERE id=1",
                 (
                     builder.snapshot_id,
                     body,
@@ -115,45 +142,77 @@ class EdgeTopologySyncStateStore:
                     utc_now(),
                 ),
             )
-            pending = self._load(connection).pending
+            pending = self._load(current).pending
             if pending is None:
                 raise TopologySyncStateConflictError("pending topology snapshot was not persisted")
             return pending
 
-    def record_retry(self, snapshot_id: str, *, now_epoch: float) -> EdgeTopologySyncState:
-        with self._lock, self._transaction() as connection:
-            state = self._require_pending(connection, snapshot_id)
+        return self._write(write, connection)
+
+    def record_retry(
+        self,
+        snapshot_id: str,
+        *,
+        now_epoch: float,
+        connection: psycopg.Connection | None = None,
+    ) -> EdgeTopologySyncState:
+        def write(current: psycopg.Connection) -> EdgeTopologySyncState:
+            state = self._require_pending(current, snapshot_id)
             failures = state.consecutive_failures + 1
-            delay = min(BASE_BACKOFF_SECONDS * (2 ** (failures - 1)), MAX_BACKOFF_SECONDS)
-            connection.execute(
-                "UPDATE edge_site SET topology_consecutive_failures=?,topology_next_retry_at=?,"
-                "topology_pause_reason=NULL,updated_at=? WHERE id=1",
+            exponent = min(failures - 1, _BACKOFF_EXPONENT_LIMIT)
+            delay = min(BASE_BACKOFF_SECONDS * (2**exponent), MAX_BACKOFF_SECONDS)
+            current.execute(
+                "UPDATE edge_site SET topology_consecutive_failures=%s,topology_next_retry_at=%s,"
+                "topology_pause_reason=NULL,updated_at=%s WHERE id=1",
                 (failures, now_epoch + delay, utc_now()),
             )
-            return self._load(connection)
+            return self._load(current)
 
-    def pause(self, snapshot_id: str, reason: TopologyPauseReason) -> EdgeTopologySyncState:
+        return self._write(write, connection)
+
+    def pause(
+        self,
+        snapshot_id: str,
+        reason: TopologyPauseReason,
+        *,
+        connection: psycopg.Connection | None = None,
+    ) -> EdgeTopologySyncState:
         return self._update_pending(
             snapshot_id,
-            "topology_pause_reason=?,topology_next_retry_at=NULL",
+            "topology_pause_reason=%s,topology_next_retry_at=NULL",
             (reason.value,),
+            connection,
         )
 
-    def resume_pending(self, snapshot_id: str) -> EdgeTopologySyncState:
-        return self._update_pending(snapshot_id, "topology_pause_reason=NULL", ())
+    def resume_pending(
+        self, snapshot_id: str, *, connection: psycopg.Connection | None = None
+    ) -> EdgeTopologySyncState:
+        return self._update_pending(snapshot_id, "topology_pause_reason=NULL", (), connection)
 
-    def refresh_conflict(self, snapshot_id: str, server_revision: int) -> EdgeTopologySyncState:
+    def refresh_conflict(
+        self,
+        snapshot_id: str,
+        server_revision: int,
+        *,
+        connection: psycopg.Connection | None = None,
+    ) -> EdgeTopologySyncState:
         return self._update_pending(
             snapshot_id,
-            "topology_server_revision=?," + _CLEAR_PENDING,
+            "topology_server_revision=%s," + _CLEAR_PENDING,
             (server_revision,),
+            connection,
         )
 
     def accept(
-        self, snapshot_id: str, response: TopologySuccessEnvelope, *, now_epoch: float = 0.0
+        self,
+        snapshot_id: str,
+        response: TopologySuccessEnvelope,
+        *,
+        now_epoch: float = 0.0,
+        connection: psycopg.Connection | None = None,
     ) -> EdgeTopologySyncState:
-        with self._lock, self._transaction() as connection:
-            state = self._require_pending(connection, snapshot_id)
+        def write(current: psycopg.Connection) -> EdgeTopologySyncState:
+            state = self._require_pending(current, snapshot_id)
             pending = state.pending
             if (
                 pending is None
@@ -161,14 +220,14 @@ class EdgeTopologySyncStateStore:
                 or response.client_revision != pending.client_revision
             ):
                 raise TopologySyncStateConflictError("topology acceptance revision mismatch")
-            connection.execute(
-                "UPDATE edge_site SET topology_snapshot_registry_version=?,"
-                "topology_client_revision=?,topology_server_revision=?," + _CLEAR_PENDING + ","
-                "topology_last_accepted_at=?,topology_dirty_registry_version="
-                "CASE WHEN topology_dirty_registry_version=? THEN NULL "
+            current.execute(
+                "UPDATE edge_site SET topology_snapshot_registry_version=%s,"
+                "topology_client_revision=%s,topology_server_revision=%s," + _CLEAR_PENDING + ","
+                "topology_last_accepted_at=%s,topology_dirty_registry_version="
+                "CASE WHEN topology_dirty_registry_version=%s THEN NULL "
                 "ELSE topology_dirty_registry_version END,"
-                "topology_dirty_created_at=CASE WHEN topology_dirty_registry_version=? THEN NULL "
-                "ELSE topology_dirty_created_at END,updated_at=? WHERE id=1",
+                "topology_dirty_created_at=CASE WHEN topology_dirty_registry_version=%s THEN NULL "
+                "ELSE topology_dirty_created_at END,updated_at=%s WHERE id=1",
                 (
                     pending.registry_version,
                     response.client_revision,
@@ -179,45 +238,59 @@ class EdgeTopologySyncStateStore:
                     utc_now(),
                 ),
             )
-            return self._load(connection)
+            return self._load(current)
+
+        return self._write(write, connection)
 
     def _update_pending(
-        self, snapshot_id: str, assignments: str, values: tuple[str | int, ...]
+        self,
+        snapshot_id: str,
+        assignments: str,
+        values: tuple[str | int, ...],
+        connection: psycopg.Connection | None,
     ) -> EdgeTopologySyncState:
-        with self._lock, self._transaction() as connection:
-            self._require_pending(connection, snapshot_id)
-            connection.execute(
-                f"UPDATE edge_site SET {assignments},updated_at=? WHERE id=1",
+        def write(current: psycopg.Connection) -> EdgeTopologySyncState:
+            self._require_pending(current, snapshot_id)
+            current.execute(
+                f"UPDATE edge_site SET {assignments},updated_at=%s WHERE id=1",
                 (*values, utc_now()),
             )
-            return self._load(connection)
+            return self._load(current)
+
+        return self._write(write, connection)
+
+    def _write(
+        self,
+        callback: Callable[[psycopg.Connection], _Result],
+        connection: psycopg.Connection | None = None,
+    ) -> _Result:
+        def write(current: psycopg.Connection) -> _Result:
+            self._require_borrowed(current)
+            require_authority(current, self.authority)
+            if current.execute("SELECT id FROM edge_site WHERE id=1 FOR UPDATE").fetchone() is None:
+                raise PostgresError("topology state bootstrap row is missing")
+            return callback(current)
+
+        return self.database.transact(write) if connection is None else write(connection)
+
+    @staticmethod
+    def _require_borrowed(connection: psycopg.Connection) -> None:
+        if connection.info.transaction_status is not TransactionStatus.INTRANS:
+            raise PostgresTransactionStateError("topology state requires an active transaction")
 
     def _require_pending(
-        self, connection: sqlite3.Connection, snapshot_id: str
+        self, connection: psycopg.Connection, snapshot_id: str
     ) -> EdgeTopologySyncState:
         state = self._load(connection)
         if state.pending is None or state.pending.snapshot_id != snapshot_id:
             raise TopologySyncStateConflictError("pending topology snapshot changed")
         return state
 
-    @contextmanager
-    def _transaction(self) -> Generator[sqlite3.Connection]:
-        if self._connection.in_transaction:
-            yield self._connection
-            return
-        self._connection.execute("BEGIN IMMEDIATE")
-        completed = False
-        try:
-            yield self._connection
-            completed = True
-        finally:
-            self._connection.execute("COMMIT" if completed else "ROLLBACK")
-
     @staticmethod
-    def _load(connection: sqlite3.Connection) -> EdgeTopologySyncState:
+    def _load(connection: psycopg.Connection) -> EdgeTopologySyncState:
         row = connection.execute(_STATE_SELECT).fetchone()
         if row is None:
-            return EdgeTopologySyncState(None, None, 0, 0, 0, 0, None, None, None)
+            raise PostgresError("topology state bootstrap row is missing")
         principal = None if row[0] is None else MachinePrincipal(str(row[0]), int(row[1]))
         pending = None
         if row[5] is not None:

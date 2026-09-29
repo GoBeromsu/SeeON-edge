@@ -8,9 +8,8 @@ from typing import Annotated, Literal
 from fastapi import APIRouter, HTTPException, Query, Request, status
 from pydantic import BaseModel, ConfigDict, Field
 
-from backend.app.edge_db import EDGE_DATABASE_PATH
 from backend.app.features.audit.catalog import AuditAction, empty_detail
-from backend.app.features.audit.http import append_governed, append_transactional
+from backend.app.features.audit.http import append_governed, mutation_audit
 from backend.app.features.audit.store import AuditEvent
 from backend.app.features.evidence.record_store import (
     CentralEvidenceQuery,
@@ -100,15 +99,21 @@ def review_incident(
         target_id=summary.incident_id,
         detail=empty_detail(AuditAction.INCIDENT_REVIEW),
     )
+    store = _reviews(request)
     try:
-        _reviews(request).update(
-            incident_id=summary.incident_id,
-            expected_version=payload.expected_version,
-            actor_id=actor,
-            reviewed_at=datetime.now(UTC).isoformat(timespec="milliseconds").replace("+00:00", "Z"),
-            disposition=ReviewDisposition(payload.disposition),
-            notes=payload.notes,
-            after_write=lambda connection: append_transactional(request, connection, event),
+        mutation_audit(request, lambda: event).apply(
+            store,
+            lambda append: store.update(
+                incident_id=summary.incident_id,
+                expected_version=payload.expected_version,
+                actor_id=actor,
+                reviewed_at=datetime.now(UTC)
+                .isoformat(timespec="milliseconds")
+                .replace("+00:00", "Z"),
+                disposition=ReviewDisposition(payload.disposition),
+                notes=payload.notes,
+                after_write=append,
+            ),
         )
     except EvidenceReviewConflictError as error:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(error)) from error
@@ -152,16 +157,20 @@ def _summary_response(summary: CentralEvidenceSummary) -> dict[str, object]:
 
 def _query(request: Request) -> CentralEvidenceQuery:
     query = getattr(request.app.state, "central_evidence_query", None)
-    if isinstance(query, CentralEvidenceQuery):
-        return query
-    return CentralEvidenceQuery(EDGE_DATABASE_PATH)
+    if query is None:
+        raise RuntimeError("evidence query is not injected")
+    if not isinstance(query, CentralEvidenceQuery):
+        raise TypeError("evidence query has invalid type")
+    return query
 
 
 def _reviews(request: Request) -> CentralEvidenceReviewStore:
     store = getattr(request.app.state, "central_evidence_review_store", None)
-    if isinstance(store, CentralEvidenceReviewStore):
-        return store
-    return CentralEvidenceReviewStore(EDGE_DATABASE_PATH)
+    if store is None:
+        raise RuntimeError("evidence review store is not injected")
+    if not isinstance(store, CentralEvidenceReviewStore):
+        raise TypeError("evidence review store has invalid type")
+    return store
 
 
 def _authorize(request: Request) -> str:
