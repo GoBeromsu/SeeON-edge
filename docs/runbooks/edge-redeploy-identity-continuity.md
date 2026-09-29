@@ -3,9 +3,9 @@
 이미지를 교체하거나 스택을 다시 세울 때 **카메라 신원(Hub 매핑)을 잃지 않기 위한 절차**다.
 GPU 프로파일 전환, Dockerfile 변경, 호스트 이전 모두 이 절차를 따른다.
 
-스키마는 19 이며 `edge-db-migrator` 는 빈 볼륨에 schema 19 를 만들거나 정확한
-schema 18 을 확장한다 (`docs/runbooks/edge-database-schema-19.md`,
-`docs/architecture.md` 의 "Schema 19; bootstrap creates or extends" 절). 이 문서는 그
+데이터베이스는 PostgreSQL 이며 `edge-db-migrator` 는 `migration provision` 으로 스키마와
+권한 fence 를 준비한다 (`docs/architecture.md` 의 "PostgreSQL schemas and provisioning"
+절, `docs/runbooks/postgresql-cutover.md`). 이 문서는 그
 위에 있는 문제 — **DB 는 멀쩡한데 Hub 가 카메라를 못 알아보는 상태** — 를 다룬다.
 
 ## 왜 필요한가
@@ -31,7 +31,7 @@ relay 502 로만 보인다. 즉 **매핑을 잃으면 알림이 Hub 에 도달�
 
 - **카메라를 지우고 다시 등록하지 않는다.** ID 가 새로 발급되고 Hub 매핑이 끊긴다.
   복구 경로가 없다.
-- **`edge-state` 볼륨을 새로 만들지 않는다.** compose 프로젝트 이름(= 작업 디렉터리
+- **`edge-pgdata` 와 `edge-state` 볼륨을 새로 만들지 않는다.** compose 프로젝트 이름(= 작업 디렉터리
   이름)이 바뀌면 볼륨도 새로 생기고, 결과는 카메라 전멸과 같다.
 - **`docker run` 으로 손수 조립하지 않는다.** compose 가 서비스 별칭(`ml-api`,
   `ml-worker`)을 만들어 준다. 별칭이 없으면 `worker_stream_origin`
@@ -46,8 +46,9 @@ docker run --rm -v <project>_edge-state:/src:ro -v "$PWD":/dst alpine:3.22 \
   tar czf /dst/edge-state.tar.gz -C /src .
 ```
 
-`edge.sqlite3` 에 카메라 레지스트리(`camera_registry.cameras_json`, 매핑 포함)와
-enrollment 가 들어 있다.
+카메라 레지스트리(`cameras` 테이블, `backend_camera_id` 매핑 포함)와 enrollment
+(`edge_site` 테이블)는 PostgreSQL 의 `edge-pgdata` 볼륨에 들어 있다. 위 명령은
+`edge-state` 볼륨만 복사하며, 그 안에는 (있다면) 폐기된 `edge.sqlite3` 만 있다.
 
 ### 2. 같은 볼륨을 유지한 채 이미지만 교체
 
@@ -61,17 +62,8 @@ docker compose -f compose.edge.yaml -f compose.edge.<profile>.yaml up -d --pull 
 ### 3. 순서를 지킨다
 
 `edge-db-migrator` → `ml-api`(healthy) → `ml-worker`. compose 의존성이 이를
-강제한다. migrator 는 create-or-extend 다: 빈 볼륨이면 schema 19 을 만들고, 이미
-정확한 schema 18 이면 여섯 execution 테이블을 확장하고, 이미 schema 19 이면
-검증만 하고, 그 외 버전이면 `EDGE_DB_BOOTSTRAP_FAILED` 로 거부한다.
-
-API 가 떠 있는 상태로 migrator 를 돌리면 다음으로 실패한다.
-
-```
-EDGE_DB_BOOTSTRAP_FAILED: edge deployment lock is held by a running runtime
-```
-
-이는 정상 동작이다. 워커를 먼저 정지한 뒤 다시 올린다.
+강제한다. migrator 는 `migration provision` 이며 이미 준비된 스키마에는 아무것도
+바꾸지 않는다(재실행해도 안전하다).
 
 ### 4. 워커 설정 캐시가 낡았을 때만 다시 가져온다
 
@@ -85,7 +77,7 @@ docker compose ... restart ml-worker
 ```
 
 재시작 뒤에는 아래 검증 절차의 heartbeat와 `worker-config` camera ID를 확인한다.
-캐시 파일을 직접 수정하거나 SQLite를 열어 복구하지 않는다.
+캐시 파일을 직접 수정하거나 데이터베이스를 직접 수정해 복구하지 않는다.
 
 ## 검증
 
