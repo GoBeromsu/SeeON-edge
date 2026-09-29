@@ -1,0 +1,33 @@
+[package]
+name = "seeon-ml-worker"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.90"
+publish = false
+
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "ml-worker"
+path = "src/main.rs"
+
+[dependencies]
+seeon-worker = { path = "../rust" }
+seeon-worker-runtime = { path = "../runtime/rust" }
+seeon-deepstream-native = { path = "../adapters/deepstream/rust" }
+# D3: Python-canonical JSON values and the model-selection digest.
+serde_json = "=1.0.151"
+sha2 = "=0.11.0"
+# D3: HTTPS model fetch and plain-HTTP relay over rustls.
+ureq = { version = "=3.4.2", default-features = false, features = ["rustls"] }
+# D3: request-head parsing only.
+httparse = "=1.10.1"
+# D3: SIGTERM and SIGINT flag registration (design §2.4).
+signal-hook = { version = "=0.4.4", default-features = false }
+# D3: flock, fallocate and kernel random bytes for uuid4 ids.
+rustix = { version = "=1.1.5", features = ["std", "rand"] }
+
+[dev-dependencies]
+# D3: order-preserving parse of the codec-edges key-order input text.
+serde = "=1.0.229"
