@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 from collections.abc import Callable, Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
@@ -54,63 +55,78 @@ def postgres_product_sandbox() -> Iterator[ProductSandbox]:
         # Outside the except block: do not chain a libpq error containing the DSN.
         pytest.fail("isolated PostgreSQL test database is unreachable", pytrace=False)
 
-    schema = "seeon_product_test_" + uuid4().hex
-    database = None
     try:
-        admin.execute("SET statement_timeout TO 5000")
-        admin.execute("SET lock_timeout TO 3000")
-        admin.execute(sql.SQL("CREATE SCHEMA {}").format(sql.Identifier(schema)))
-        try:
-            # Product triggers capture this path with SET search_path FROM CURRENT.
-            admin.execute(
-                sql.SQL("SET search_path TO {}, pg_catalog, pg_temp").format(sql.Identifier(schema))
-            )
-            authority = AuthorityToken(generation=1, writer_token=uuid4())
-            with admin.transaction():
-                admin.execute((_DDL / "postgres_product.sql").read_text(), prepare=False)
-                admin.execute((_DDL / "postgres_delivery.sql").read_text(), prepare=False)
-                admin.execute(
-                    "INSERT INTO deployment_authority "
-                    "(singleton,generation,writer_token,accepting,egress_enabled) "
-                    "VALUES (1,%s,%s,true,true)",
-                    (authority.generation, authority.writer_token),
-                )
-                admin.execute(
-                    "INSERT INTO edge_site (id,updated_at) VALUES (1,%s)",
-                    (datetime.now(UTC).isoformat(timespec="milliseconds").replace("+00:00", "Z"),),
-                )
-            database = PostgresDatabase(
-                dsn,
-                schema,
-                PoolBudget(
-                    max_connections=4,
-                    max_waiting=8,
-                    acquire_timeout_sec=1.0,
-                    statement_timeout_ms=5000,
-                    lock_timeout_ms=3000,
-                    startup_timeout_sec=5.0,
-                ),
-            )
-            database.start()
-            yield ProductSandbox(
-                admin=admin,
-                database=database,
-                authority=authority,
-                schema=schema,
-                dsn=dsn,
-            )
-        finally:
-            if database is not None:
-                database.close(timeout_sec=3.0)
-            admin.rollback()
-            admin.execute(sql.SQL("DROP SCHEMA {} CASCADE").format(sql.Identifier(schema)))
+        with open_product_sandbox(admin, dsn) as sandbox:
+            yield sandbox
     finally:
         admin.close()
 
 
+@contextmanager
+def open_product_sandbox(admin: psycopg.Connection, dsn: str) -> Iterator[ProductSandbox]:
+    """Create, yield and drop one product schema on an open autocommit admin connection.
+
+    The caller owns the admin connection; the fixture below and non-pytest callers
+    (the Rust worker's backend acceptance lane) share this one setup path.
+    """
+    schema = "seeon_product_test_" + uuid4().hex
+    database = None
+    admin.execute("SET statement_timeout TO 5000")
+    admin.execute("SET lock_timeout TO 3000")
+    admin.execute(sql.SQL("CREATE SCHEMA {}").format(sql.Identifier(schema)))
+    try:
+        # Product triggers capture this path with SET search_path FROM CURRENT.
+        admin.execute(
+            sql.SQL("SET search_path TO {}, pg_catalog, pg_temp").format(sql.Identifier(schema))
+        )
+        authority = AuthorityToken(generation=1, writer_token=uuid4())
+        with admin.transaction():
+            admin.execute((_DDL / "postgres_product.sql").read_text(), prepare=False)
+            admin.execute((_DDL / "postgres_delivery.sql").read_text(), prepare=False)
+            admin.execute(
+                "INSERT INTO deployment_authority "
+                "(singleton,generation,writer_token,accepting,egress_enabled) "
+                "VALUES (1,%s,%s,true,true)",
+                (authority.generation, authority.writer_token),
+            )
+            admin.execute(
+                "INSERT INTO edge_site (id,updated_at) VALUES (1,%s)",
+                (datetime.now(UTC).isoformat(timespec="milliseconds").replace("+00:00", "Z"),),
+            )
+        database = PostgresDatabase(
+            dsn,
+            schema,
+            PoolBudget(
+                max_connections=4,
+                max_waiting=8,
+                acquire_timeout_sec=1.0,
+                statement_timeout_ms=5000,
+                lock_timeout_ms=3000,
+                startup_timeout_sec=5.0,
+            ),
+        )
+        database.start()
+        yield ProductSandbox(
+            admin=admin,
+            database=database,
+            authority=authority,
+            schema=schema,
+            dsn=dsn,
+        )
+    finally:
+        if database is not None:
+            database.close(timeout_sec=3.0)
+        admin.rollback()
+        admin.execute(sql.SQL("DROP SCHEMA {} CASCADE").format(sql.Identifier(schema)))
+
+
 @pytest.fixture
 def postgres_audit_runtime(postgres_product_sandbox: ProductSandbox) -> PostgresAuditRuntime:
-    sandbox = postgres_product_sandbox
+    return product_audit_runtime(postgres_product_sandbox)
+
+
+def product_audit_runtime(sandbox: ProductSandbox) -> PostgresAuditRuntime:
+    """Verified audit runtime with an open session on the sandbox authority."""
     runtime = PostgresAuditRuntime(
         PostgresAuditStore(sandbox.database, sandbox.authority),
         maximum_snapshot_age_sec=10,
@@ -140,6 +156,8 @@ class ObservedAuditMutation(AuditMutation):
 __all__ = [
     "ObservedAuditMutation",
     "ProductSandbox",
+    "open_product_sandbox",
     "postgres_audit_runtime",
     "postgres_product_sandbox",
+    "product_audit_runtime",
 ]
