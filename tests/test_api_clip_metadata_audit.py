@@ -1,13 +1,16 @@
 from __future__ import annotations
 
 import json
-import sqlite3
 from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
 
-from backend.app.main import create_app, no_lifespan
+from backend.app.features.audit.postgres_runtime import PostgresAuditRuntime
+from tests_support.postgres_api_app import postgres_api_app
+from tests_support.postgres_sandbox import ProductSandbox
+
+pytest_plugins = ("tests_support.postgres_sandbox",)
 
 
 def _write_manifest(store_root: Path, clip_id: str) -> None:
@@ -36,6 +39,12 @@ def _login(client: TestClient) -> None:
     assert response.status_code == 204
 
 
+def _audit_count(sandbox: ProductSandbox, where: str = "TRUE") -> int:
+    row = sandbox.admin.execute(f"SELECT COUNT(*) FROM audit_events WHERE {where}").fetchone()
+    assert row is not None
+    return row[0]
+
+
 @pytest.fixture(autouse=True)
 def clip_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     monkeypatch.setenv("CLIP_STORE_DIR", str(tmp_path / "clip-store"))
@@ -48,43 +57,52 @@ def clip_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     return tmp_path
 
 
-def test_successful_metadata_read_appends_clip_scoped_audit(clip_env: Path) -> None:
+@pytest.fixture
+def sandbox(postgres_product_sandbox: ProductSandbox) -> ProductSandbox:
+    return postgres_product_sandbox
+
+
+@pytest.fixture
+def client(sandbox: ProductSandbox, postgres_audit_runtime: PostgresAuditRuntime):
+    with TestClient(postgres_api_app(sandbox, postgres_audit_runtime)) as client:
+        yield client
+
+
+def test_successful_metadata_read_appends_clip_scoped_audit(
+    clip_env: Path, sandbox: ProductSandbox, client: TestClient
+) -> None:
     clip_id = "clip-audit"
     _write_manifest(clip_env / "clip-store", clip_id)
 
-    with TestClient(create_app(lifespan=no_lifespan)) as client:
-        _login(client)
-        response = client.get(f"/api/v1/clips/{clip_id}/metadata")
+    _login(client)
+    response = client.get(f"/api/v1/clips/{clip_id}/metadata")
 
     assert response.status_code == 200
-    with sqlite3.connect(clip_env / ".central-fixture" / "edge.sqlite3") as connection:
-        rows = connection.execute(
-            "SELECT actor_id,action,target_id FROM audit_events WHERE action='clip.detail'"
-        ).fetchall()
+    rows = sandbox.admin.execute(
+        "SELECT actor_id,action,target_id FROM audit_events WHERE action=%s ORDER BY audit_id",
+        ("clip.detail",),
+    ).fetchall()
     assert rows == [("admin", "clip.detail", clip_id)]
 
 
-def test_missing_metadata_read_does_not_append_success_audit(clip_env: Path) -> None:
-    with TestClient(create_app(lifespan=no_lifespan)) as client:
-        _login(client)
-        response = client.get("/api/v1/clips/missing/metadata")
+def test_missing_metadata_read_does_not_append_success_audit(
+    sandbox: ProductSandbox, client: TestClient
+) -> None:
+    _login(client)
+    response = client.get("/api/v1/clips/missing/metadata")
 
     assert response.status_code == 404
-    with sqlite3.connect(clip_env / ".central-fixture" / "edge.sqlite3") as connection:
-        count = connection.execute(
-            "SELECT COUNT(*) FROM audit_events WHERE action='clip.detail'"
-        ).fetchone()[0]
-    assert count == 0
+    assert _audit_count(sandbox, "action='clip.detail'") == 0
 
 
-def test_unauthorized_metadata_read_does_not_append_success_audit(clip_env: Path) -> None:
+def test_unauthorized_metadata_read_does_not_append_success_audit(
+    clip_env: Path, sandbox: ProductSandbox, client: TestClient
+) -> None:
     clip_id = "clip-audit"
     _write_manifest(clip_env / "clip-store", clip_id)
+    before = _audit_count(sandbox)
 
-    with TestClient(create_app(lifespan=no_lifespan)) as client:
-        response = client.get(f"/api/v1/clips/{clip_id}/metadata")
+    response = client.get(f"/api/v1/clips/{clip_id}/metadata")
 
     assert response.status_code == 401
-    with sqlite3.connect(clip_env / ".central-fixture" / "edge.sqlite3") as connection:
-        count = connection.execute("SELECT COUNT(*) FROM audit_events").fetchone()[0]
-    assert count == 0
+    assert _audit_count(sandbox) == before

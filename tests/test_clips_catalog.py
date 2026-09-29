@@ -9,7 +9,6 @@ from pathlib import Path
 import pytest
 from fastapi import FastAPI
 
-from backend.app.edge_db.bootstrap import bootstrap_database
 from backend.app.features.cameras.store import CameraRegistryStore
 from backend.app.features.clips import catalog as catalog_module
 from backend.app.features.clips.catalog import (
@@ -20,7 +19,10 @@ from backend.app.features.clips.catalog import (
     get_catalog_store,
 )
 from backend.app.features.clips.store import ClipStore
-from backend.app.shared.dashboard_credentials import DashboardCredentialsStore
+from backend.app.shared.postgres_dashboard_credentials import PostgresDashboardCredentialsStore
+from tests_support.postgres_sandbox import ProductSandbox
+
+pytest_plugins = ("tests_support.postgres_sandbox",)
 
 _EVENT_ID = "11111111-1111-4111-8111-111111111111"
 
@@ -716,34 +718,26 @@ def test_catalog_migration_from_v2_adds_v3_tables_without_touching_legacy_camera
     reopened.close()
 
 
-def test_camera_registry_and_credentials_share_externally_migrated_schema18(tmp_path) -> None:
-    path = tmp_path / "edge.sqlite3"
-    bootstrap_database(path)
-
-    camera_store = CameraRegistryStore(path)
-    camera_store.create(
+def test_camera_registry_and_credentials_share_externally_migrated_schema18(
+    postgres_product_sandbox: ProductSandbox,
+) -> None:
+    sandbox = postgres_product_sandbox
+    CameraRegistryStore(sandbox.database, sandbox.authority).create(
         camera_id="cam-1",
         label="Lobby",
         rtsp_url="rtsp://camera/live",
         space_id=None,
         status="online",
     )
-    DashboardCredentialsStore(path).save(username="admin", password="admin")
+    PostgresDashboardCredentialsStore(sandbox.database, sandbox.authority).save(
+        username="admin", password="admin"
+    )
 
-    reloaded = CameraRegistryStore(path).snapshot()
-    credentials = DashboardCredentialsStore(path).load()
-    with sqlite3.connect(path) as connection:
-        tables = {
-            str(row[0])
-            for row in connection.execute(
-                "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'"
-            )
-        }
+    reloaded = CameraRegistryStore(sandbox.database, sandbox.authority).snapshot()
+    credentials = PostgresDashboardCredentialsStore(sandbox.database, sandbox.authority).load()
     assert reloaded["registry_version"] == 1
     assert [record["id"] for record in reloaded["cameras"]] == ["cam-1"]
     assert credentials is not None and credentials.verify_password("admin")
-    assert "camera_registry" not in tables
-    assert "runtime_latency" not in tables
 
 
 def test_schema18_authorities_do_not_export_feature_local_ddl() -> None:

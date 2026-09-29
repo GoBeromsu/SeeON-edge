@@ -154,6 +154,19 @@ class ClipStore:
         copy is the finalized one; two finalized copies are the same
         ``DuplicateClipIdError`` that ``locate_manifest`` raises.
         """
+        scanned, duplicates = self.scan_manifest_partition()
+        if duplicates:
+            raise duplicates[0]
+        return scanned
+
+    def scan_manifest_partition(
+        self,
+    ) -> tuple[list[ScannedManifest], tuple[DuplicateClipIdError, ...]]:
+        """``scan_manifests`` that reports duplicate ids instead of raising.
+
+        A background reconcile must keep cataloguing every other clip while
+        one id is ambiguous; the ambiguous id's detail routes still answer 409.
+        """
         by_id: dict[str, list[ScannedManifest]] = {}
         for clips_root in bounded_clip_roots(self.root):
             try:
@@ -179,15 +192,19 @@ class ClipStore:
                     )
                 )
         scanned: list[ScannedManifest] = []
+        duplicates: list[DuplicateClipIdError] = []
         for clip_id, candidates in by_id.items():
             if len(candidates) == 1:
                 scanned.append(candidates[0])
                 continue
             finalized = [item for item in candidates if item.located() is not None]
             if len(finalized) > 1:
-                raise DuplicateClipIdError(clip_id, tuple(item.manifest_path for item in finalized))
+                duplicates.append(
+                    DuplicateClipIdError(clip_id, tuple(item.manifest_path for item in finalized))
+                )
+                continue
             scanned.extend(finalized)
-        return scanned
+        return scanned, tuple(duplicates)
 
     def get_manifest(self, clip_id: str) -> ClipManifest | None:
         located = self.locate_manifest(clip_id)

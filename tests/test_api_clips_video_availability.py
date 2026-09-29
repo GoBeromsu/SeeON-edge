@@ -3,20 +3,36 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Callable
 
 import pytest
+from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from receipt_helpers import add_accepted_media_receipts
 
+from backend.app.features.audit.postgres_runtime import PostgresAuditRuntime
 from backend.app.features.clips.media_response import media_type as _media_type
-from backend.app.main import create_app as _create_app
-from backend.app.main import no_lifespan
+from tests_support.postgres_api_app import postgres_api_app
+from tests_support.postgres_clip_app import index_clips
+from tests_support.postgres_sandbox import ProductSandbox
+
+pytest_plugins = ("tests_support.postgres_sandbox",)
 
 
-def create_app(*, lifespan):
-    app = _create_app(lifespan=lifespan)
-    add_accepted_media_receipts(app)
-    return app
+@pytest.fixture
+def make_app(
+    postgres_product_sandbox: ProductSandbox,
+    postgres_audit_runtime: PostgresAuditRuntime,
+) -> Callable[[], FastAPI]:
+    """An indexed app on the sandbox, with receipts for the clips written so far."""
+
+    def make() -> FastAPI:
+        app = postgres_api_app(postgres_product_sandbox, postgres_audit_runtime)
+        add_accepted_media_receipts(app)
+        index_clips(app)
+        return app
+
+    return make
 
 
 # Dashboard auth now always resolves to a session store (persisted file > env
@@ -85,11 +101,13 @@ def clip_env(tmp_path, monkeypatch: pytest.MonkeyPatch):
     return tmp_path
 
 
-def test_path_less_manifest_is_listed_with_video_unavailable(clip_env) -> None:
+def test_path_less_manifest_is_listed_with_video_unavailable(
+    clip_env, make_app: Callable[[], FastAPI]
+) -> None:
     clip_store = clip_env / "clip-store"
     _write_diagnostic_manifest(clip_store, "clip-broken", video_error="no working codec")
 
-    with TestClient(create_app(lifespan=no_lifespan)) as client:
+    with TestClient(make_app()) as client:
         _login(client)
         listed = client.get("/api/v1/clips")
 
@@ -102,7 +120,9 @@ def test_path_less_manifest_is_listed_with_video_unavailable(clip_env) -> None:
     assert row["video_error"] == "no working codec"
 
 
-def test_reason_code_is_surfaced_as_the_clips_failure_reason(clip_env) -> None:
+def test_reason_code_is_surfaced_as_the_clips_failure_reason(
+    clip_env, make_app: Callable[[], FastAPI]
+) -> None:
     """#165: the worker writes the failure reason as `reason_code`
     (worker/pipeline/output/evidence/manifest_models.py:93), never as
     `video_error` -- so `GET /clips` must read `reason_code`, not the key
@@ -126,7 +146,7 @@ def test_reason_code_is_surfaced_as_the_clips_failure_reason(clip_env) -> None:
     }
     (clip_dir / "manifest.json").write_text(json.dumps(payload), encoding="utf-8")
 
-    with TestClient(create_app(lifespan=no_lifespan)) as client:
+    with TestClient(make_app()) as client:
         _login(client)
         listed = client.get("/api/v1/clips")
 
@@ -135,7 +155,9 @@ def test_reason_code_is_surfaced_as_the_clips_failure_reason(clip_env) -> None:
     assert row["video_error"] == "NO_FRAMES"
 
 
-def test_reason_code_takes_priority_over_a_legacy_video_error_field(clip_env) -> None:
+def test_reason_code_takes_priority_over_a_legacy_video_error_field(
+    clip_env, make_app: Callable[[], FastAPI]
+) -> None:
     clip_store = clip_env / "clip-store"
     clip_dir = clip_store / "clips" / "clip-both-fields"
     clip_dir.mkdir(parents=True, exist_ok=True)
@@ -155,7 +177,7 @@ def test_reason_code_takes_priority_over_a_legacy_video_error_field(clip_env) ->
     }
     (clip_dir / "manifest.json").write_text(json.dumps(payload), encoding="utf-8")
 
-    with TestClient(create_app(lifespan=no_lifespan)) as client:
+    with TestClient(make_app()) as client:
         _login(client)
         listed = client.get("/api/v1/clips")
 
@@ -163,7 +185,9 @@ def test_reason_code_takes_priority_over_a_legacy_video_error_field(clip_env) ->
     assert row["video_error"] == "ENCODER_FAILED"
 
 
-def test_legacy_manifest_without_field_defaults_video_available_true(clip_env) -> None:
+def test_legacy_manifest_without_field_defaults_video_available_true(
+    clip_env, make_app: Callable[[], FastAPI]
+) -> None:
     clip_store = clip_env / "clip-store"
     clip_dir = clip_store / "clips" / "clip-legacy"
     clip_dir.mkdir(parents=True, exist_ok=True)
@@ -181,7 +205,7 @@ def test_legacy_manifest_without_field_defaults_video_available_true(clip_env) -
     }
     (clip_dir / "manifest.json").write_text(json.dumps(payload), encoding="utf-8")
 
-    with TestClient(create_app(lifespan=no_lifespan)) as client:
+    with TestClient(make_app()) as client:
         _login(client)
         listed = client.get("/api/v1/clips")
 
@@ -190,12 +214,14 @@ def test_legacy_manifest_without_field_defaults_video_available_true(clip_env) -
     assert row["video_error"] is None
 
 
-def test_video_endpoint_404_but_manifest_stays_listed(clip_env) -> None:
+def test_video_endpoint_404_but_manifest_stays_listed(
+    clip_env, make_app: Callable[[], FastAPI]
+) -> None:
     clip_store = clip_env / "clip-store"
     _write_diagnostic_manifest(clip_store, "clip-broken", video_error="decode failed")
     _write_playable_manifest(clip_store, "clip-ok")
 
-    with TestClient(create_app(lifespan=no_lifespan)) as client:
+    with TestClient(make_app()) as client:
         _login(client)
         broken_video = client.get("/api/v1/clips/clip-broken/video")
         ok_video = client.get("/api/v1/clips/clip-ok/video")

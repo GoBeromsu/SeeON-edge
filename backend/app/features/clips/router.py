@@ -2,21 +2,15 @@
 
 from __future__ import annotations
 
-import sqlite3
 from typing import Annotated
 
 from fastapi import APIRouter, HTTPException, Query, Request, status
 from fastapi.responses import Response
 
-from backend.app.edge_db import EDGE_DATABASE_PATH
 from backend.app.features.audit.catalog import AuditAction
-from backend.app.features.audit.http import AuditUnavailableError, append_governed
+from backend.app.features.audit.http import append_governed
 from backend.app.features.clips.artifacts import CentralClipArtifactQuery
-from backend.app.features.clips.compact_listing import (
-    CompactClipConflictError,
-    CompactClipListing,
-    CompactClipQuery,
-)
+from backend.app.features.clips.catalog_indexer import ClipCatalogQuery, PostgresClipCatalog
 from backend.app.features.clips.media_response import media_response, media_type
 from backend.app.features.clips.responses import clip_response, resolved_video_size
 from backend.app.features.clips.schemas import (
@@ -51,9 +45,9 @@ def list_clips(
     actor = _authorize(request)
     store = _clip_store(request)
     try:
-        page = CompactClipListing(EDGE_DATABASE_PATH).rebuild_and_page(
+        page = _clip_catalog(request).page(
             store,
-            CompactClipQuery(
+            ClipCatalogQuery(
                 camera_id=filters.camera_id,
                 event_type=filters.event_type,
                 limit=filters.limit or 100,
@@ -62,13 +56,6 @@ def list_clips(
         )
     except ValueError as exc:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
-    except DuplicateClipIdError as exc:
-        raise _duplicate_clip_http_error(exc) from exc
-    except (CompactClipConflictError, OSError, sqlite3.Error) as exc:
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="clip listing rebuild unavailable",
-        ) from exc
     clips = [
         clip_response(
             located.manifest,
@@ -217,7 +204,7 @@ def clip_video(
         append_governed(
             request, actor_id=actor, action=AuditAction.CLIP_PLAY, target_id=manifest.clip_id
         )
-    except AuditUnavailableError:
+    except BaseException:
         opened.handle.close()
         raise
     return response
@@ -281,11 +268,21 @@ def _clip_store(request: Request) -> ClipStore:
     return store
 
 
+def _clip_catalog(request: Request) -> PostgresClipCatalog:
+    catalog = _app_state_value(request, "clip_catalog")
+    if catalog is None:
+        raise RuntimeError("clip catalog is not injected")
+    if not isinstance(catalog, PostgresClipCatalog):
+        raise TypeError("clip catalog has invalid type")
+    return catalog
+
+
 def _artifact_query(request: Request) -> CentralClipArtifactQuery:
     query = _app_state_value(request, "central_clip_artifact_query")
+    if query is None:
+        raise RuntimeError("central clip artifact query is not injected")
     if not isinstance(query, CentralClipArtifactQuery):
-        query = CentralClipArtifactQuery()
-        request.app.state.central_clip_artifact_query = query
+        raise TypeError("central clip artifact query has invalid type")
     return query
 
 

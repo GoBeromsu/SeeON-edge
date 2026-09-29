@@ -11,9 +11,14 @@ from __future__ import annotations
 import os
 
 import pytest
+from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from backend.app.main import create_app, no_lifespan
+from backend.app.features.audit.postgres_runtime import PostgresAuditRuntime
+from tests_support.postgres_api_app import postgres_api_app
+from tests_support.postgres_sandbox import ProductSandbox
+
+pytest_plugins = ("tests_support.postgres_sandbox",)
 
 DASHBOARD_LOGIN = {"username": "admin", "password": "admin"}
 
@@ -31,8 +36,17 @@ def clip_store_env(tmp_path, monkeypatch: pytest.MonkeyPatch):
     return root
 
 
-def test_get_storage_reports_usage_and_defaults_selected_path_to_empty(clip_store_env) -> None:
-    with TestClient(create_app(lifespan=no_lifespan)) as client:
+@pytest.fixture
+def app(
+    postgres_product_sandbox: ProductSandbox, postgres_audit_runtime: PostgresAuditRuntime
+) -> FastAPI:
+    return postgres_api_app(postgres_product_sandbox, postgres_audit_runtime)
+
+
+def test_get_storage_reports_usage_and_defaults_selected_path_to_empty(
+    clip_store_env, app: FastAPI
+) -> None:
+    with TestClient(app) as client:
         _login(client)
         response = client.get("/api/v1/clips/storage")
 
@@ -49,10 +63,10 @@ def test_get_storage_reports_usage_and_defaults_selected_path_to_empty(clip_stor
 
 
 def test_get_storage_degrades_to_null_usage_when_the_root_does_not_exist(
-    tmp_path, monkeypatch: pytest.MonkeyPatch
+    app: FastAPI, tmp_path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setenv("CLIP_STORE_DIR", str(tmp_path / "does-not-exist"))
-    with TestClient(create_app(lifespan=no_lifespan)) as client:
+    with TestClient(app) as client:
         _login(client)
         response = client.get("/api/v1/clips/storage")
 
@@ -63,12 +77,12 @@ def test_get_storage_degrades_to_null_usage_when_the_root_does_not_exist(
     assert body["used_pct"] is None
 
 
-def test_browse_lists_root_level_directories_only(clip_store_env) -> None:
+def test_browse_lists_root_level_directories_only(clip_store_env, app: FastAPI) -> None:
     (clip_store_env / "external-drive").mkdir()
     (clip_store_env / "backup").mkdir()
     (clip_store_env / "manifest.json").write_text("{}", encoding="utf-8")
 
-    with TestClient(create_app(lifespan=no_lifespan)) as client:
+    with TestClient(app) as client:
         _login(client)
         response = client.get("/api/v1/clips/storage/browse")
 
@@ -80,11 +94,13 @@ def test_browse_lists_root_level_directories_only(clip_store_env) -> None:
     assert {"name": "backup", "path": "backup"} in body["directories"]
 
 
-def test_browse_lists_a_nested_subdirectory_and_reports_its_parent(clip_store_env) -> None:
+def test_browse_lists_a_nested_subdirectory_and_reports_its_parent(
+    clip_store_env, app: FastAPI
+) -> None:
     (clip_store_env / "backup" / "clips").mkdir(parents=True)
     (clip_store_env / "backup" / "sibling").mkdir()
 
-    with TestClient(create_app(lifespan=no_lifespan)) as client:
+    with TestClient(app) as client:
         _login(client)
         response = client.get("/api/v1/clips/storage/browse", params={"path": "backup"})
 
@@ -100,29 +116,31 @@ def test_browse_lists_a_nested_subdirectory_and_reports_its_parent(clip_store_en
     "path",
     ["/etc", "../escape", "sub/../../escape", "sub\x00null"],
 )
-def test_browse_rejects_traversal_and_absolute_paths_with_400(clip_store_env, path: str) -> None:
-    with TestClient(create_app(lifespan=no_lifespan)) as client:
+def test_browse_rejects_traversal_and_absolute_paths_with_400(
+    clip_store_env, app: FastAPI, path: str
+) -> None:
+    with TestClient(app) as client:
         _login(client)
         response = client.get("/api/v1/clips/storage/browse", params={"path": path})
 
     assert response.status_code == 400
 
 
-def test_browse_returns_404_for_a_nonexistent_path(clip_store_env) -> None:
-    with TestClient(create_app(lifespan=no_lifespan)) as client:
+def test_browse_returns_404_for_a_nonexistent_path(clip_store_env, app: FastAPI) -> None:
+    with TestClient(app) as client:
         _login(client)
         response = client.get("/api/v1/clips/storage/browse", params={"path": "nope"})
 
     assert response.status_code == 404
 
 
-def test_browse_rejects_a_symlink_escape(clip_store_env, tmp_path) -> None:
+def test_browse_rejects_a_symlink_escape(clip_store_env, app: FastAPI, tmp_path) -> None:
     outside = tmp_path / "outside"
     outside.mkdir()
     (outside / "secret").mkdir()
     os.symlink(outside, clip_store_env / "escape-link", target_is_directory=True)
 
-    with TestClient(create_app(lifespan=no_lifespan)) as client:
+    with TestClient(app) as client:
         _login(client)
         root_listing = client.get("/api/v1/clips/storage/browse")
         walk_into_link = client.get("/api/v1/clips/storage/browse", params={"path": "escape-link"})
@@ -137,11 +155,11 @@ def test_browse_rejects_a_symlink_escape(clip_store_env, tmp_path) -> None:
 
 
 def test_put_location_persists_the_selection_and_returns_the_storage_shape(
-    clip_store_env,
+    clip_store_env, app: FastAPI
 ) -> None:
     (clip_store_env / "backup").mkdir()
 
-    with TestClient(create_app(lifespan=no_lifespan)) as client:
+    with TestClient(app) as client:
         _login(client)
         response = client.put("/api/v1/clips/storage/location", json={"path": "backup"})
         get_response = client.get("/api/v1/clips/storage")
@@ -154,10 +172,12 @@ def test_put_location_persists_the_selection_and_returns_the_storage_shape(
     assert get_response.json()["selected_path"] == "backup"
 
 
-def test_put_location_can_reset_the_selection_to_the_empty_root(clip_store_env) -> None:
+def test_put_location_can_reset_the_selection_to_the_empty_root(
+    clip_store_env, app: FastAPI
+) -> None:
     (clip_store_env / "backup").mkdir()
 
-    with TestClient(create_app(lifespan=no_lifespan)) as client:
+    with TestClient(app) as client:
         _login(client)
         client.put("/api/v1/clips/storage/location", json={"path": "backup"})
         reset_response = client.put("/api/v1/clips/storage/location", json={"path": ""})
@@ -168,25 +188,25 @@ def test_put_location_can_reset_the_selection_to_the_empty_root(clip_store_env) 
 
 @pytest.mark.parametrize("path", ["/etc", "../escape"])
 def test_put_location_rejects_traversal_and_absolute_paths_with_400(
-    clip_store_env, path: str
+    clip_store_env, app: FastAPI, path: str
 ) -> None:
-    with TestClient(create_app(lifespan=no_lifespan)) as client:
+    with TestClient(app) as client:
         _login(client)
         response = client.put("/api/v1/clips/storage/location", json={"path": path})
 
     assert response.status_code == 400
 
 
-def test_put_location_returns_404_for_a_nonexistent_path(clip_store_env) -> None:
-    with TestClient(create_app(lifespan=no_lifespan)) as client:
+def test_put_location_returns_404_for_a_nonexistent_path(clip_store_env, app: FastAPI) -> None:
+    with TestClient(app) as client:
         _login(client)
         response = client.put("/api/v1/clips/storage/location", json={"path": "nope"})
 
     assert response.status_code == 404
 
 
-def test_clip_storage_routes_require_a_dashboard_session(clip_store_env) -> None:
-    with TestClient(create_app(lifespan=no_lifespan)) as client:
+def test_clip_storage_routes_require_a_dashboard_session(clip_store_env, app: FastAPI) -> None:
+    with TestClient(app) as client:
         get_storage = client.get("/api/v1/clips/storage")
         browse = client.get("/api/v1/clips/storage/browse")
         put_location = client.put("/api/v1/clips/storage/location", json={"path": ""})
