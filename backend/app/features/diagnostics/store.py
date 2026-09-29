@@ -10,11 +10,7 @@ import psycopg
 
 from backend.app.edge_db.postgres import PostgresDatabase
 from backend.app.features.diagnostics.coverage import UNSCOPED_GAP_CAUSE, insert_coverage
-from backend.app.features.diagnostics.ingest import (
-    insert_record,
-    payload_text_and_bytes,
-    upsert_provenance,
-)
+from backend.app.features.diagnostics.ingest import ingest_records, upsert_provenance
 from backend.app.features.diagnostics.prune import coarsen_coverage
 from backend.app.features.diagnostics.query import (
     QueryResult,
@@ -116,50 +112,15 @@ class ExecutionRecordStore:
             )
         connection.execute("SAVEPOINT ingest")
         provenance_id = upsert_provenance(connection, batch.provenance, now_ns)
-        accepted = 0
-        written_bytes = 0
-        duplicates = 0
-        rejected: list[tuple[str, str]] = []
         epoch_ns = _batch_epoch(batch, now_ns)
-        for record in batch.records:
-            payload_text, payload_bytes = payload_text_and_bytes(record)
-            if payload_bytes > self.budget.max_record_bytes:
-                rejected.append((record.record_id, "oversize"))
-                insert_coverage(
-                    connection,
-                    camera_id=record.camera_id,
-                    worker_boot_id=record.worker_boot_id,
-                    source_generation=record.source_generation,
-                    stream_epoch=record.stream_epoch,
-                    kind=CoverageKind.REJECTED_OVERSIZE,
-                    producer=record.producer,
-                    from_sequence=record.producer_sequence,
-                    to_sequence=record.producer_sequence,
-                    from_ns=record.observed_at_ns,
-                    to_ns=record.observed_at_ns,
-                    record_count=1,
-                    exact=True,
-                    cause="oversize",
-                    recorded_at_ns=now_ns,
-                )
-                continue
-            disposition = insert_record(
-                connection,
-                record,
-                payload_text,
-                payload_bytes,
-                provenance_id,
-                self.budget,
-                batch.batch_id,
-                now_ns,
-            )
-            if disposition is None:
-                accepted += 1
-                written_bytes += payload_bytes
-            elif disposition == "duplicate":
-                duplicates += 1
-            else:
-                rejected.append((record.record_id, disposition))
+        ingested = ingest_records(
+            connection,
+            batch.records,
+            provenance_id,
+            self.budget,
+            batch.batch_id,
+            now_ns,
+        )
         gap_lanes: set[tuple[str, str, int, int]] = set()
         for gap in batch.gaps:
             scoped = gap.source_generation is not None and gap.stream_epoch is not None
@@ -195,9 +156,9 @@ class ExecutionRecordStore:
             )
         receipt = BatchReceipt(
             batch_id=batch.batch_id,
-            accepted=accepted,
-            duplicates=duplicates,
-            rejected=tuple(rejected),
+            accepted=ingested.accepted,
+            duplicates=ingested.duplicates,
+            rejected=ingested.rejected,
             storage_state=StorageState.COMMITTED,
             committed_at_ns=now_ns,
         )
@@ -205,7 +166,7 @@ class ExecutionRecordStore:
         # before the budget is enforced; otherwise every commit lands a few
         # hundred bytes over the line it was just checked against.
         _write_batch_row(connection, batch, receipt, now_ns)
-        self._meter.accrue(written_bytes)
+        self._meter.accrue(ingested.written_bytes)
         if not enforce_budget(connection, self.budget, now_ns, meter=self._meter):
             connection.execute("ROLLBACK TO ingest")
             insert_coverage(
