@@ -2,19 +2,16 @@
 
 from __future__ import annotations
 
-import sqlite3
-from contextlib import closing
 from typing import Annotated
 
 from fastapi import APIRouter, HTTPException, Query, Request, status
 from pydantic import BaseModel, ConfigDict, Field
 
-from backend.app.edge_db import RuntimeActor, open_runtime_database
-from backend.app.edge_db.compatibility import EdgeDatabaseError
 from backend.app.features.audit.catalog import AuditAction
-from backend.app.features.audit.http import append_governed, audit_store, refuse_unavailable
-from backend.app.features.audit.verification import SqlValue
+from backend.app.features.audit.http import append_governed, audit_runtime
 from backend.app.shared.dashboard_auth import authorize_dashboard
+
+SqlValue = str | int | float | bytes | None
 
 router = APIRouter(prefix="/audit", tags=["audit"])
 
@@ -86,21 +83,16 @@ def _response(row: tuple[SqlValue, ...]) -> AuditEventResponse:
 @router.get("", response_model=AuditListResponse)
 def list_audit(request: Request, filters: Annotated[AuditListQuery, Query()]) -> AuditListResponse:
     actor = authorize_dashboard(request)
-    try:
-        with closing(
-            open_runtime_database(audit_store(request).path, actor=RuntimeActor.API)
-        ) as connection:
-            if filters.before_id is None:
-                rows = connection.execute(
-                    _SELECT + " ORDER BY audit_id DESC LIMIT ?", (filters.limit + 1,)
-                ).fetchall()
-            else:
-                rows = connection.execute(
-                    _SELECT + " WHERE audit_id<? ORDER BY audit_id DESC LIMIT ?",
-                    (filters.before_id, filters.limit + 1),
-                ).fetchall()
-    except (OSError, sqlite3.Error, EdgeDatabaseError) as error:
-        refuse_unavailable(request, error)
+    parameters: tuple[int, ...]
+    if filters.before_id is None:
+        query = _SELECT + " ORDER BY audit_id DESC LIMIT %s"
+        parameters = (filters.limit + 1,)
+    else:
+        query = _SELECT + " WHERE audit_id < %s ORDER BY audit_id DESC LIMIT %s"
+        parameters = (filters.before_id, filters.limit + 1)
+    rows = audit_runtime(request).database.read(
+        lambda connection: connection.execute(query, parameters).fetchall()
+    )
     page = rows[: filters.limit]
     append_governed(request, actor_id=actor, action=AuditAction.AUDIT_LIST, target_id="audit")
     return AuditListResponse(
@@ -112,13 +104,11 @@ def list_audit(request: Request, filters: Annotated[AuditListQuery, Query()]) ->
 @router.get("/{audit_id}", response_model=AuditEventResponse)
 def get_audit(audit_id: int, request: Request) -> AuditEventResponse:
     actor = authorize_dashboard(request)
-    try:
-        with closing(
-            open_runtime_database(audit_store(request).path, actor=RuntimeActor.API)
-        ) as connection:
-            row = connection.execute(_SELECT + " WHERE audit_id=?", (audit_id,)).fetchone()
-    except (OSError, sqlite3.Error, EdgeDatabaseError) as error:
-        refuse_unavailable(request, error)
+    row = audit_runtime(request).database.read(
+        lambda connection: connection.execute(
+            _SELECT + " WHERE audit_id = %s", (audit_id,)
+        ).fetchone()
+    )
     if row is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="audit event not found")
     response = _response(row)

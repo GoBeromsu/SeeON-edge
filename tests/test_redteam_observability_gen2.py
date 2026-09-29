@@ -37,6 +37,11 @@ from worker.runtime.worker import _WindowGatedDecider
 from worker.types.business_event import BusinessEvent
 from worker.types.trace import DecisionTraceSnapshot
 
+pytest_plugins = (
+    "tests_support.postgres_sandbox",
+    "tests_support.postgres_diagnostics_sandbox",
+)
+
 _CAMERA = "cam-1"
 _REAL_ZERO_UNIT = fall_causal_unit_id("cam-1", "boot-1", 3, 0, 0)
 _NO_TRACK_UNIT = fall_causal_unit_id("cam-1", "boot-1", 3, None, 0)
@@ -146,7 +151,7 @@ class _StubFallModel:
 
 
 def test_g2_1_missing_track_and_generation_units_never_alias_zero_through_query(
-    tmp_path,
+    tmp_path, postgres_product_sandbox, postgres_audit_runtime, postgres_lifespan_diagnostics_schema
 ) -> None:
     no_track = _policy_record(_snapshot(track_id=None), generation=0)
     no_generation = _policy_record(_snapshot(track_id=0), generation=None)
@@ -163,7 +168,14 @@ def test_g2_1_missing_track_and_generation_units_never_alias_zero_through_query(
     assert lanes.try_emit(real_zero) is True
     pump = _gated_pump(lanes)
     exporter = None
-    with serve_backend(tmp_path, budget_bytes=_BUDGET_BYTES, relay_token=_RELAY_TOKEN) as backend:
+    with serve_backend(
+        tmp_path,
+        budget_bytes=_BUDGET_BYTES,
+        relay_token=_RELAY_TOKEN,
+        sandbox=postgres_product_sandbox,
+        audit_runtime=postgres_audit_runtime,
+        diagnostics_schema=postgres_lifespan_diagnostics_schema,
+    ) as backend:
         try:
             exporter = _exporter(lanes, backend.base_url, backend.relay_token)
             exporter.start()

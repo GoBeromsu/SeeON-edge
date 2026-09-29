@@ -9,7 +9,7 @@ import socket
 import threading
 import time
 from collections.abc import Callable, Iterator
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Final
@@ -18,11 +18,12 @@ import httpx
 import uvicorn
 
 from backend.app.core.config import get_settings
-from backend.app.edge_db.bootstrap import bootstrap_database
-from backend.app.edge_db.connection import RuntimeActor, open_runtime_database
+from backend.app.edge_db.postgres import PoolBudget, PostgresDatabase
+from backend.app.features.audit.postgres_runtime import PostgresAuditRuntime
 from backend.app.features.diagnostics.retention import RetentionBudget
 from backend.app.features.diagnostics.store import ExecutionRecordStore
-from backend.app.main import create_app, no_lifespan
+from tests_support.postgres_api_app import postgres_api_app
+from tests_support.postgres_sandbox import ProductSandbox
 
 _QUERY_PATH: Final = "/api/v1/diagnostics/executions"
 _SESSION_PATH: Final = "/api/v1/auth/session"
@@ -30,6 +31,14 @@ _BUILD_REVISION: Final = "observability-rev-1"
 _DASHBOARD_USERNAME: Final = "admin"
 _DASHBOARD_PASSWORD: Final = "admin"
 _POLL_SEC: Final = 0.01
+_DIAGNOSTICS_POOL: Final = PoolBudget(
+    max_connections=4,
+    max_waiting=8,
+    acquire_timeout_sec=1.0,
+    statement_timeout_ms=5000,
+    lock_timeout_ms=3000,
+    startup_timeout_sec=5.0,
+)
 
 
 def _free_tcp_port() -> int:
@@ -65,7 +74,6 @@ class BackendUnderTest:
 
     base_url: str
     relay_token: str
-    database_path: Path
     dashboard_username: str
     dashboard_password: str
 
@@ -122,11 +130,15 @@ def _restore_environ(previous: dict[str, str | None]) -> None:
 
 @contextmanager
 def serve_backend(
-    tmp_path: Path, *, budget_bytes: int, relay_token: str
+    tmp_path: Path,
+    *,
+    budget_bytes: int,
+    relay_token: str,
+    sandbox: ProductSandbox,
+    audit_runtime: PostgresAuditRuntime,
+    diagnostics_schema: str,
 ) -> Iterator[BackendUnderTest]:
-    """Bootstrap schema-19 sqlite and serve ``create_app()`` on a free loopback port."""
-    database = tmp_path / "observability-edge.sqlite3"
-    bootstrap_database(database)
+    """Serve the no-lifespan app on the PostgreSQL sandbox root on a free loopback port."""
     previous = {
         key: os.environ.get(key)
         for key in (
@@ -148,15 +160,17 @@ def serve_backend(
     os.environ["API_BACKEND_HEARTBEAT_RELAY_SEC"] = "0"
     get_settings.cache_clear()
     port = _free_tcp_port()
+    diagnostics = ExitStack()
     try:
-        app = create_app(lifespan=no_lifespan)
+        app = postgres_api_app(sandbox, audit_runtime)
         app.state.edge_relay_token = relay_token
         app.state.backend_build_revision = _BUILD_REVISION
+        # The caller owns the schema, so a second serve reopens the same rows.
+        database = PostgresDatabase(sandbox.dsn, diagnostics_schema, _DIAGNOSTICS_POOL)
+        database.start()
+        diagnostics.callback(database.close, timeout_sec=3.0)
         app.state.execution_record_store = ExecutionRecordStore(
-            lambda: open_runtime_database(
-                database, actor=RuntimeActor.API, check_same_thread=False
-            ),
-            RetentionBudget(total_bytes=budget_bytes),
+            database, RetentionBudget(total_bytes=budget_bytes)
         )
         config = uvicorn.Config(
             app,
@@ -173,7 +187,6 @@ def serve_backend(
             yield BackendUnderTest(
                 base_url=f"http://127.0.0.1:{port}",
                 relay_token=relay_token,
-                database_path=database,
                 dashboard_username=_DASHBOARD_USERNAME,
                 dashboard_password=_DASHBOARD_PASSWORD,
             )
@@ -181,6 +194,7 @@ def serve_backend(
             server.should_exit = True
             thread.join(timeout=10.0)
     finally:
+        diagnostics.close()
         _restore_environ(previous)
         get_settings.cache_clear()
 

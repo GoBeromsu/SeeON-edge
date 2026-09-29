@@ -1,6 +1,7 @@
 # 0006 — Vendored `contracts/` Typed Vocabulary
 
-- Status: Accepted
+- Status: Accepted; the byte-mirror clauses are superseded by
+  [0009](0009-rust-worker-postgresql.md). The typed vocabulary rules stand.
 - Date: 2026-08-21
 - Relates to: `contracts/`, `contracts/AGENTS.md`, `tests/test_vendor_drift.py`,
   `tests/test_worker_event_payload_boundary.py`, `pyproject.toml` (import-linter

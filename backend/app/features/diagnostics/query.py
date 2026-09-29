@@ -4,9 +4,10 @@ from __future__ import annotations
 
 import base64
 import json
-import sqlite3
 from collections.abc import Mapping
 from dataclasses import dataclass
+
+import psycopg
 
 from backend.app.features.diagnostics.coverage import (
     AvailabilityRange,
@@ -165,7 +166,7 @@ def load_stored_record(row: tuple[object, ...]) -> StoredRecord:
 
 
 def execute_query(
-    connection: sqlite3.Connection,
+    connection: psycopg.Connection,
     *,
     camera_id: str,
     from_ns: int,
@@ -176,14 +177,14 @@ def execute_query(
     if limit < 1:
         raise ValueError("limit must be >= 1")
     params: list[object] = [camera_id, from_ns, to_ns]
-    where = "camera_id = ? AND observed_at_ns >= ? AND observed_at_ns <= ?"
+    where = "camera_id = %s AND observed_at_ns >= %s AND observed_at_ns <= %s"
     if cursor is not None:
         observed, sequence, record_id = decode_cursor(cursor)
         where += (
-            " AND (observed_at_ns > ? OR "
-            "(observed_at_ns = ? AND producer_sequence > ?) OR "
-            "(observed_at_ns = ? AND producer_sequence = ? "
-            "AND record_id > ?))"
+            " AND (observed_at_ns > %s OR "
+            "(observed_at_ns = %s AND producer_sequence > %s) OR "
+            "(observed_at_ns = %s AND producer_sequence = %s "
+            'AND record_id COLLATE pg_catalog."C" > %s))'
         )
         params.extend((observed, observed, sequence, observed, sequence, record_id))
     params.append(limit + 1)
@@ -195,8 +196,8 @@ def execute_query(
                reason, payload, payload_bytes, committed_at_ns, segment_id, provenance_id
         FROM execution_records
         WHERE {where}
-        ORDER BY observed_at_ns, producer_sequence, record_id
-        LIMIT ?
+        ORDER BY observed_at_ns, producer_sequence, record_id COLLATE pg_catalog."C"
+        LIMIT %s
         """,
         tuple(params),
     ).fetchall()
@@ -211,8 +212,8 @@ def execute_query(
                causal_state, terminal, first_observed_ns, last_observed_ns,
                record_count, payload_bytes
         FROM execution_units
-        WHERE camera_id = ? AND first_observed_ns <= ? AND last_observed_ns >= ?
-        ORDER BY first_observed_ns, causal_unit_id
+        WHERE camera_id = %s AND first_observed_ns <= %s AND last_observed_ns >= %s
+        ORDER BY first_observed_ns, causal_unit_id COLLATE pg_catalog."C"
         """,
         (camera_id, to_ns, from_ns),
     ).fetchall()
@@ -222,7 +223,7 @@ def execute_query(
                coverage_kind, producer, from_sequence, to_sequence, from_ns, to_ns,
                record_count, exact, cause, recorded_at_ns
         FROM execution_coverage
-        WHERE camera_id = ? AND from_ns <= ? AND to_ns >= ?
+        WHERE camera_id = %s AND from_ns <= %s AND to_ns >= %s
         ORDER BY from_ns, coverage_id
         """,
         (camera_id, to_ns, from_ns),

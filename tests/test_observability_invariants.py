@@ -22,15 +22,13 @@ member of each class fails here instead of on a camera.
 from __future__ import annotations
 
 import inspect
-import sqlite3
 import time
-from pathlib import Path
 
+import psycopg
 import pytest
 from test_execution_record_store import (  # noqa: E402 - sibling test module fixture reuse
     CAMERA,
     _batch,
-    _factory,
     _record,
     _store,
 )
@@ -44,7 +42,10 @@ from backend.app.features.diagnostics.retention import (
     enforce_budget,
     used_bytes,
 )
+from tests_support.postgres_diagnostics_sandbox import DiagnosticsSandbox
 from worker.pipeline.diagnostics import emit_delivery, emit_policy
+
+pytest_plugins = ("tests_support.postgres_diagnostics_sandbox",)
 
 # Wall-clock nanoseconds are >= 2020-01-01. A monotonic stamp on this host is
 # uptime, which is many orders of magnitude smaller, so this separates the two
@@ -138,7 +139,9 @@ def test_every_record_builder_stamps_wall_clock() -> None:
         assert record.observed_at_ns > _YEAR_2020_NS, record.record_kind
 
 
-def test_availability_range_count_scales_with_gaps_not_records(tmp_path: Path) -> None:
+def test_availability_range_count_scales_with_gaps_not_records(
+    postgres_diagnostics_sandbox: DiagnosticsSandbox,
+) -> None:
     """Availability is a description of continuity, not a row-per-record.
 
     Live, a 120 s window over ~3,000 records painted 10,241 ranges because
@@ -148,9 +151,10 @@ def test_availability_range_count_scales_with_gaps_not_records(tmp_path: Path) -
     painted ranges must be bounded by the number of real discontinuities,
     whatever the record count.
     """
+    diag = postgres_diagnostics_sandbox
     budget = RetentionBudget(total_bytes=8 * 2**20)
     del budget
-    store, path = _store(tmp_path, total_bytes=8 * 2**20)
+    store = _store(diag, total_bytes=8 * 2**20)
     # One contiguous producer run, one sequence break, then another run.
     first = tuple(
         _record(label=f"a{index}", seq=index, observed=1_000 + index * 33) for index in range(600)
@@ -162,11 +166,9 @@ def test_availability_range_count_scales_with_gaps_not_records(tmp_path: Path) -
     store.ingest_batch(_batch("run-a", first))
     store.ingest_batch(_batch("run-b", second))
 
-    connection = _factory(path)()
-    try:
-        painted = availability(connection, CAMERA, 0, 2_000 * 33)
-    finally:
-        connection.close()
+    painted = diag.database.read_snapshot(
+        lambda connection: availability(connection, CAMERA, 0, 2_000 * 33)
+    )
 
     kinds = [item.kind for item in painted]
     available = [item for item in painted if item.kind is AvailabilityKind.AVAILABLE]
@@ -178,7 +180,7 @@ def test_availability_range_count_scales_with_gaps_not_records(tmp_path: Path) -
 
 
 def test_enforce_budget_does_bounded_work_however_deep_the_backlog(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    postgres_diagnostics_sandbox: DiagnosticsSandbox, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """One request may never do unbounded work.
 
@@ -186,11 +188,14 @@ def test_enforce_budget_does_bounded_work_however_deep_the_backlog(
     tried to prune a ~700 MB backlog inside one request on the event loop:
     /health stopped answering and the container went unhealthy. Nothing in
     the suite asserted that ingest terminates, so the state was undetectable.
-    Cost is counted structurally (prunes and dbstat walks), never by wall
+    Cost is counted structurally (prunes and used_bytes walks), never by wall
     clock, so this stays deterministic.
     """
-    budget = RetentionBudget(total_bytes=512 * 1024, unit_horizon_ns=1_000)
-    store, path = _store(tmp_path, total_bytes=1 << 40)
+    diag = postgres_diagnostics_sandbox
+    # 60 units of ~15 KB live rows against a 128 KiB budget: reaching
+    # low_water needs ~53 prunes, so the per-call bound actually binds.
+    budget = RetentionBudget(total_bytes=128 * 1024, unit_horizon_ns=1_000)
+    store = _store(diag, total_bytes=1 << 40)
     blob = {"blob": "x" * 200}
     for unit in range(60):
         store.ingest_batch(
@@ -212,26 +217,23 @@ def test_enforce_budget_does_bounded_work_however_deep_the_backlog(
     walks = 0
     real_used_bytes = retention_module.used_bytes
 
-    def _counting_used_bytes(connection: sqlite3.Connection) -> int:
+    def _counting_used_bytes(connection: psycopg.Connection) -> int:
         nonlocal walks
         walks += 1
         return real_used_bytes(connection)
 
     monkeypatch.setattr(retention_module, "used_bytes", _counting_used_bytes)
 
-    connection = _factory(path)()
-    try:
-        assert used_bytes(connection) > budget.high_water
-        before = connection.execute("SELECT COUNT(*) FROM execution_units").fetchone()[0]
-        connection.execute("BEGIN IMMEDIATE")
-        committed = enforce_budget(connection, budget, 10_000_000)
-        connection.execute("COMMIT")
-        after = connection.execute("SELECT COUNT(*) FROM execution_units").fetchone()[0]
-    finally:
-        connection.close()
+    admin = diag.admin
+    assert used_bytes(admin) > budget.high_water
+    before = admin.execute("SELECT COUNT(*) FROM execution_units").fetchone()[0]
+    committed = diag.database.transact(
+        lambda connection: enforce_budget(connection, budget, 10_000_000)
+    )
+    after = admin.execute("SELECT COUNT(*) FROM execution_units").fetchone()[0]
 
     assert committed is True, "progress was made, so the ingest may commit"
     assert before - after <= MAX_UNITS_PER_ENFORCE, "one call pruned an unbounded backlog"
     assert before - after >= 1, "a call that commits must make progress"
-    # The page walk is the expensive part; it must not run per pruned unit.
-    assert walks <= 2, f"{walks} dbstat walks in one call"
+    # The row-size walk is the expensive part; it must not run per pruned unit.
+    assert walks <= 2, f"{walks} used_bytes walks in one call"

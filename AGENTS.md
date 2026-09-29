@@ -6,10 +6,11 @@
 
 Python/uv + React monorepo for fall and bed-exit detection. Three deployable
 instances (`front`, `backend`, `worker`) plus `shared` and the canonical
-cross-repo `contracts` leaf mirrored into `eldercare-dataset-ops`. Import-linter
-(`[tool.importlinter]` in `pyproject.toml`) owns the boundaries. Training lives
-in `eldercare-dataset-ops`. Local weights stay under `models/` and are never
-committed.
+`contracts` leaf. This repository's `contracts/` is the authority; the copy in
+the archived `eldercare-dataset-ops` is historical only. Import-linter
+(`[tool.importlinter]` in `pyproject.toml`) owns the boundaries. Historical
+training lived in the archived `eldercare-dataset-ops`. Local weights stay
+under `models/` and are never committed.
 
 ## Package Boundaries
 
@@ -19,7 +20,7 @@ committed.
 | `backend` | FastAPI gateway. Vertical slices under `app/features/*` (router + store). |
 | `worker` | DeepStream Flow worker. SDK media plane, CPU domain decisions, evidence, and relay egress. |
 | `shared` | `shared.events` (backend↔worker wire). |
-| `contracts` | ADR-0006 canonical typed-vocabulary leaf; mirrored byte-for-byte into `eldercare-dataset-ops`. |
+| `contracts` | ADR-0006 canonical typed-vocabulary leaf and the contract authority; the archived `eldercare-dataset-ops` copy is historical only. |
 | `tests` | pytest contracts and boundary coverage. |
 
 `backend` and `worker` do not import each other. HTTP relay is the command/event
@@ -77,8 +78,9 @@ exports: `tests/test_contract_symbol_exports.py`. Docs live in
 
 ## Conventions
 
-- Keep `contracts` in sync with `eldercare-dataset-ops` (ADR-0006). Domain
-  decision math stays worker-internal.
+- `contracts/` is the contract authority (ADR-0006); nothing mirrors it to or
+  drift-checks it against the archived `eldercare-dataset-ops`. Domain decision
+  math stays worker-internal.
 - Worker→backend command/event traffic is one-way over relay HTTP. The backend's
   local `edge.sqlite3` is never worker persistence or polling IPC.
 - Cameras are registered at runtime through the dashboard registry. Do not seed

@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
-import sqlite3
 from dataclasses import replace
+
+import psycopg
 
 from backend.app.features.diagnostics.coverage import (
     insert_coverage,
@@ -27,7 +28,7 @@ def payload_text_and_bytes(record: ExecutionRecordInput) -> tuple[str, int]:
     return text, len(text.encode())
 
 
-def upsert_provenance(connection: sqlite3.Connection, provenance: Provenance, now_ns: int) -> str:
+def upsert_provenance(connection: psycopg.Connection, provenance: Provenance, now_ns: int) -> str:
     provenance_id = provenance.provenance_id
     connection.execute(
         """
@@ -35,7 +36,7 @@ def upsert_provenance(connection: sqlite3.Connection, provenance: Provenance, no
             provenance_id, worker_build_revision, worker_image_digest, model_digest,
             calibration_digest, preprocessing_identity, config_digest, policy_identity,
             backend_build_revision, first_seen_ns
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
         ON CONFLICT(provenance_id) DO NOTHING
         """,
         (
@@ -55,7 +56,7 @@ def upsert_provenance(connection: sqlite3.Connection, provenance: Provenance, no
 
 
 def _late_ack_unit(
-    connection: sqlite3.Connection,
+    connection: psycopg.Connection,
     record: ExecutionRecordInput,
     batch_id: str,
     now_ns: int,
@@ -90,7 +91,7 @@ def _late_ack_unit(
 
 
 def upsert_unit(
-    connection: sqlite3.Connection,
+    connection: psycopg.Connection,
     record: ExecutionRecordInput,
     payload_bytes: int,
     batch_id: str,
@@ -98,12 +99,12 @@ def upsert_unit(
 ) -> str:
     unit_id = record.causal_unit_id
     existing = connection.execute(
-        "SELECT 1 FROM execution_units WHERE causal_unit_id = ?", (unit_id,)
+        "SELECT 1 FROM execution_units WHERE causal_unit_id = %s", (unit_id,)
     ).fetchone()
     if existing is None and record.record_kind is RecordKind.BACKEND_ACCEPTANCE:
         unit_id = _late_ack_unit(connection, record, batch_id, now_ns)
         existing = connection.execute(
-            "SELECT 1 FROM execution_units WHERE causal_unit_id = ?", (unit_id,)
+            "SELECT 1 FROM execution_units WHERE causal_unit_id = %s", (unit_id,)
         ).fetchone()
     if existing is None:
         connection.execute(
@@ -112,7 +113,7 @@ def upsert_unit(
                 causal_unit_id, camera_id, worker_boot_id, source_generation,
                 stream_epoch, causal_state, terminal, first_observed_ns,
                 last_observed_ns, record_count, payload_bytes
-            ) VALUES (?, ?, ?, ?, ?, ?, 0, ?, ?, 1, ?)
+            ) VALUES (%s, %s, %s, %s, %s, %s, 0, %s, %s, 1, %s)
             """,
             (
                 unit_id,
@@ -130,11 +131,11 @@ def upsert_unit(
     connection.execute(
         """
         UPDATE execution_units
-        SET first_observed_ns = MIN(first_observed_ns, ?),
-            last_observed_ns = MAX(last_observed_ns, ?),
+        SET first_observed_ns = LEAST(first_observed_ns, %s),
+            last_observed_ns = GREATEST(last_observed_ns, %s),
             record_count = record_count + 1,
-            payload_bytes = payload_bytes + ?
-        WHERE causal_unit_id = ?
+            payload_bytes = payload_bytes + %s
+        WHERE causal_unit_id = %s
         """,
         (record.observed_at_ns, record.observed_at_ns, payload_bytes, unit_id),
     )
@@ -163,7 +164,7 @@ def _content_key(record: ExecutionRecordInput, payload_text: str) -> tuple[objec
 
 
 def insert_record(
-    connection: sqlite3.Connection,
+    connection: psycopg.Connection,
     record: ExecutionRecordInput,
     payload_text: str,
     payload_bytes: int,
@@ -177,7 +178,7 @@ def insert_record(
         SELECT record_kind, camera_id, worker_boot_id, source_generation, stream_epoch,
                producer, producer_sequence, frame_seq, source_pts_ns, observed_at_ns,
                time_quality, causal_unit_id, parent_record_id, outcome, reason, payload
-        FROM execution_records WHERE record_id = ?
+        FROM execution_records WHERE record_id = %s
         """,
         (record.record_id,),
     ).fetchone()
@@ -215,7 +216,10 @@ def insert_record(
             stream_epoch, producer, producer_sequence, frame_seq, source_pts_ns,
             observed_at_ns, time_quality, causal_unit_id, parent_record_id, segment_id,
             provenance_id, outcome, reason, payload, payload_bytes, committed_at_ns
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ) VALUES (
+            %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
+            %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
+        )
         """,
         (
             stored_record.record_id,
