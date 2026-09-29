@@ -1,0 +1,968 @@
+{
+  "compose_cases": [
+    {
+      "env": {},
+      "exporter": null,
+      "identities": {
+        "build_revision": "abc123",
+        "calibration_digest": "cal-1",
+        "image_digest": "sha256:deadbeef",
+        "model_digest": "model-1",
+        "policy_identity": "fall.policy:2",
+        "preprocessing_identity": "pose-bbox56/v1"
+      },
+      "lanes": null,
+      "name": "compose:disabled",
+      "relay": {
+        "token": "<relay-token>",
+        "url": "http://relay.invalid:8000"
+      },
+      "settings": null,
+      "verdict": "accepted"
+    },
+    {
+      "env": {
+        "ML_WORKER_EXECUTION_RECORDS_BATCH_MAX": "64",
+        "ML_WORKER_EXECUTION_RECORDS_ENABLED": "1",
+        "ML_WORKER_EXECUTION_RECORDS_FLUSH_MS": "500",
+        "ML_WORKER_EXECUTION_RECORDS_LANE_CAPACITY": "256"
+      },
+      "exporter": "ExecutionRecordExporter",
+      "identities": {
+        "build_revision": "abc123",
+        "calibration_digest": "cal-1",
+        "image_digest": "sha256:deadbeef",
+        "model_digest": "model-1",
+        "policy_identity": "fall.policy:2",
+        "preprocessing_identity": "pose-bbox56/v1"
+      },
+      "lanes": "ExecutionRecordLanes",
+      "name": "compose:enabled",
+      "relay": {
+        "token": "<relay-token>",
+        "url": "http://relay.invalid:8000"
+      },
+      "settings": {
+        "batch_max": 64,
+        "flush_ms": 500,
+        "lane_capacity": 256
+      },
+      "verdict": "accepted"
+    },
+    {
+      "class": "ExecutionRecordProvenanceError",
+      "env": {
+        "ML_WORKER_EXECUTION_RECORDS_BATCH_MAX": "64",
+        "ML_WORKER_EXECUTION_RECORDS_ENABLED": "1",
+        "ML_WORKER_EXECUTION_RECORDS_FLUSH_MS": "500",
+        "ML_WORKER_EXECUTION_RECORDS_LANE_CAPACITY": "256"
+      },
+      "identities": {
+        "build_revision": "abc123",
+        "calibration_digest": "cal-1",
+        "image_digest": "sha256:deadbeef",
+        "model_digest": "model-1",
+        "policy_identity": "fall.policy:2",
+        "preprocessing_identity": "pose-bbox56/v1"
+      },
+      "message": "execution records enabled but relay URL/token missing",
+      "name": "compose:relay-url-empty",
+      "relay": {
+        "token": "<relay-token>",
+        "url": ""
+      },
+      "verdict": "refused"
+    },
+    {
+      "class": "ExecutionRecordProvenanceError",
+      "env": {
+        "ML_WORKER_EXECUTION_RECORDS_BATCH_MAX": "64",
+        "ML_WORKER_EXECUTION_RECORDS_ENABLED": "1",
+        "ML_WORKER_EXECUTION_RECORDS_FLUSH_MS": "500",
+        "ML_WORKER_EXECUTION_RECORDS_LANE_CAPACITY": "256"
+      },
+      "identities": {
+        "build_revision": "abc123",
+        "calibration_digest": "cal-1",
+        "image_digest": "sha256:deadbeef",
+        "model_digest": "model-1",
+        "policy_identity": "fall.policy:2",
+        "preprocessing_identity": "pose-bbox56/v1"
+      },
+      "message": "execution records enabled but relay URL/token missing",
+      "name": "compose:relay-url-whitespace",
+      "relay": {
+        "token": "<relay-token>",
+        "url": "   "
+      },
+      "verdict": "refused"
+    },
+    {
+      "class": "ExecutionRecordProvenanceError",
+      "env": {
+        "ML_WORKER_EXECUTION_RECORDS_BATCH_MAX": "64",
+        "ML_WORKER_EXECUTION_RECORDS_ENABLED": "1",
+        "ML_WORKER_EXECUTION_RECORDS_FLUSH_MS": "500",
+        "ML_WORKER_EXECUTION_RECORDS_LANE_CAPACITY": "256"
+      },
+      "identities": {
+        "build_revision": "abc123",
+        "calibration_digest": "cal-1",
+        "image_digest": "sha256:deadbeef",
+        "model_digest": "model-1",
+        "policy_identity": "fall.policy:2",
+        "preprocessing_identity": "pose-bbox56/v1"
+      },
+      "message": "execution records enabled but relay URL/token missing",
+      "name": "compose:relay-token-empty",
+      "relay": {
+        "token": "",
+        "url": "http://relay.invalid:8000"
+      },
+      "verdict": "refused"
+    },
+    {
+      "class": "ExecutionRecordProvenanceError",
+      "env": {
+        "ML_WORKER_EXECUTION_RECORDS_BATCH_MAX": "64",
+        "ML_WORKER_EXECUTION_RECORDS_ENABLED": "1",
+        "ML_WORKER_EXECUTION_RECORDS_FLUSH_MS": "500",
+        "ML_WORKER_EXECUTION_RECORDS_LANE_CAPACITY": "256"
+      },
+      "identities": {
+        "build_revision": "abc123",
+        "calibration_digest": "cal-1",
+        "image_digest": "sha256:deadbeef",
+        "model_digest": "model-1",
+        "policy_identity": "fall.policy:2",
+        "preprocessing_identity": "pose-bbox56/v1"
+      },
+      "message": "execution records enabled but relay URL/token missing",
+      "name": "compose:relay-token-whitespace",
+      "relay": {
+        "token": "  ",
+        "url": "http://relay.invalid:8000"
+      },
+      "verdict": "refused"
+    },
+    {
+      "class": "WorkerConfigError",
+      "env": {
+        "ML_WORKER_EXECUTION_RECORDS_ENABLED": "1"
+      },
+      "identities": {
+        "build_revision": "abc123",
+        "calibration_digest": "cal-1",
+        "image_digest": "sha256:deadbeef",
+        "model_digest": "model-1",
+        "policy_identity": "fall.policy:2",
+        "preprocessing_identity": "pose-bbox56/v1"
+      },
+      "message": "ML_WORKER_EXECUTION_RECORDS_LANE_CAPACITY is required when ML_WORKER_EXECUTION_RECORDS_ENABLED=1",
+      "name": "compose:settings-refused-before-relay",
+      "relay": {
+        "token": "",
+        "url": ""
+      },
+      "verdict": "refused"
+    },
+    {
+      "class": "ExecutionRecordProvenanceError",
+      "env": {
+        "ML_WORKER_EXECUTION_RECORDS_BATCH_MAX": "64",
+        "ML_WORKER_EXECUTION_RECORDS_ENABLED": "1",
+        "ML_WORKER_EXECUTION_RECORDS_FLUSH_MS": "500",
+        "ML_WORKER_EXECUTION_RECORDS_LANE_CAPACITY": "256"
+      },
+      "identities": {
+        "build_revision": null,
+        "calibration_digest": "cal-1",
+        "image_digest": "sha256:deadbeef",
+        "model_digest": "model-1",
+        "policy_identity": "fall.policy:2",
+        "preprocessing_identity": "pose-bbox56/v1"
+      },
+      "message": "execution-record provenance missing: worker_build_revision",
+      "name": "compose:provenance-missing-build-revision",
+      "relay": {
+        "token": "<relay-token>",
+        "url": "http://relay.invalid:8000"
+      },
+      "verdict": "refused"
+    },
+    {
+      "class": "ExecutionRecordProvenanceError",
+      "env": {
+        "ML_WORKER_EXECUTION_RECORDS_BATCH_MAX": "64",
+        "ML_WORKER_EXECUTION_RECORDS_ENABLED": "1",
+        "ML_WORKER_EXECUTION_RECORDS_FLUSH_MS": "500",
+        "ML_WORKER_EXECUTION_RECORDS_LANE_CAPACITY": "256"
+      },
+      "identities": {
+        "build_revision": "abc123",
+        "calibration_digest": "cal-1",
+        "image_digest": "",
+        "model_digest": null,
+        "policy_identity": null,
+        "preprocessing_identity": "pose-bbox56/v1"
+      },
+      "message": "execution-record provenance missing: worker_image_digest, model_digest, policy_identity",
+      "name": "compose:provenance-missing-several",
+      "relay": {
+        "token": "<relay-token>",
+        "url": "http://relay.invalid:8000"
+      },
+      "verdict": "refused"
+    }
+  ],
+  "execution_records_cases": [
+    {
+      "env": {},
+      "name": "disabled:unset",
+      "settings": null,
+      "verdict": "accepted"
+    },
+    {
+      "env": {
+        "ML_WORKER_EXECUTION_RECORDS_ENABLED": ""
+      },
+      "name": "disabled:empty",
+      "settings": null,
+      "verdict": "accepted"
+    },
+    {
+      "env": {
+        "ML_WORKER_EXECUTION_RECORDS_ENABLED": "   "
+      },
+      "name": "disabled:whitespace",
+      "settings": null,
+      "verdict": "accepted"
+    },
+    {
+      "env": {
+        "ML_WORKER_EXECUTION_RECORDS_ENABLED": "0"
+      },
+      "name": "disabled:0",
+      "settings": null,
+      "verdict": "accepted"
+    },
+    {
+      "env": {
+        "ML_WORKER_EXECUTION_RECORDS_ENABLED": "false"
+      },
+      "name": "disabled:false",
+      "settings": null,
+      "verdict": "accepted"
+    },
+    {
+      "env": {
+        "ML_WORKER_EXECUTION_RECORDS_ENABLED": "no"
+      },
+      "name": "disabled:no",
+      "settings": null,
+      "verdict": "accepted"
+    },
+    {
+      "env": {
+        "ML_WORKER_EXECUTION_RECORDS_ENABLED": "off"
+      },
+      "name": "disabled:off",
+      "settings": null,
+      "verdict": "accepted"
+    },
+    {
+      "env": {
+        "ML_WORKER_EXECUTION_RECORDS_ENABLED": "OFF"
+      },
+      "name": "disabled:OFF",
+      "settings": null,
+      "verdict": "accepted"
+    },
+    {
+      "env": {
+        "ML_WORKER_EXECUTION_RECORDS_BATCH_MAX": "0",
+        "ML_WORKER_EXECUTION_RECORDS_ENABLED": "0",
+        "ML_WORKER_EXECUTION_RECORDS_LANE_CAPACITY": "abc"
+      },
+      "name": "disabled:sizing-keys-ignored",
+      "settings": null,
+      "verdict": "accepted"
+    },
+    {
+      "env": {
+        "ML_WORKER_EXECUTION_RECORDS_BATCH_MAX": "64",
+        "ML_WORKER_EXECUTION_RECORDS_ENABLED": "1",
+        "ML_WORKER_EXECUTION_RECORDS_FLUSH_MS": "500",
+        "ML_WORKER_EXECUTION_RECORDS_LANE_CAPACITY": "256"
+      },
+      "name": "enabled:1",
+      "settings": {
+        "batch_max": 64,
+        "flush_ms": 500,
+        "lane_capacity": 256
+      },
+      "verdict": "accepted"
+    },
+    {
+      "env": {
+        "ML_WORKER_EXECUTION_RECORDS_BATCH_MAX": "64",
+        "ML_WORKER_EXECUTION_RECORDS_ENABLED": "true",
+        "ML_WORKER_EXECUTION_RECORDS_FLUSH_MS": "500",
+        "ML_WORKER_EXECUTION_RECORDS_LANE_CAPACITY": "256"
+      },
+      "name": "enabled:true",
+      "settings": {
+        "batch_max": 64,
+        "flush_ms": 500,
+        "lane_capacity": 256
+      },
+      "verdict": "accepted"
+    },
+    {
+      "env": {
+        "ML_WORKER_EXECUTION_RECORDS_BATCH_MAX": "64",
+        "ML_WORKER_EXECUTION_RECORDS_ENABLED": "YES",
+        "ML_WORKER_EXECUTION_RECORDS_FLUSH_MS": "500",
+        "ML_WORKER_EXECUTION_RECORDS_LANE_CAPACITY": "256"
+      },
+      "name": "enabled:YES",
+      "settings": {
+        "batch_max": 64,
+        "flush_ms": 500,
+        "lane_capacity": 256
+      },
+      "verdict": "accepted"
+    },
+    {
+      "env": {
+        "ML_WORKER_EXECUTION_RECORDS_BATCH_MAX": "64",
+        "ML_WORKER_EXECUTION_RECORDS_ENABLED": " on ",
+        "ML_WORKER_EXECUTION_RECORDS_FLUSH_MS": "500",
+        "ML_WORKER_EXECUTION_RECORDS_LANE_CAPACITY": "256"
+      },
+      "name": "enabled:on",
+      "settings": {
+        "batch_max": 64,
+        "flush_ms": 500,
+        "lane_capacity": 256
+      },
+      "verdict": "accepted"
+    },
+    {
+      "env": {
+        "ML_WORKER_EXECUTION_RECORDS_BATCH_MAX": "\t2",
+        "ML_WORKER_EXECUTION_RECORDS_ENABLED": "1",
+        "ML_WORKER_EXECUTION_RECORDS_FLUSH_MS": "1\n",
+        "ML_WORKER_EXECUTION_RECORDS_LANE_CAPACITY": " 8 "
+      },
+      "name": "enabled:padded-ints",
+      "settings": {
+        "batch_max": 2,
+        "flush_ms": 1,
+        "lane_capacity": 8
+      },
+      "verdict": "accepted"
+    },
+    {
+      "env": {
+        "ML_WORKER_EXECUTION_RECORDS_BATCH_MAX": "1",
+        "ML_WORKER_EXECUTION_RECORDS_ENABLED": "1",
+        "ML_WORKER_EXECUTION_RECORDS_FLUSH_MS": "1",
+        "ML_WORKER_EXECUTION_RECORDS_LANE_CAPACITY": "1"
+      },
+      "name": "enabled:minimum-ones",
+      "settings": {
+        "batch_max": 1,
+        "flush_ms": 1,
+        "lane_capacity": 1
+      },
+      "verdict": "accepted"
+    },
+    {
+      "class": "WorkerConfigError",
+      "env": {
+        "ML_WORKER_EXECUTION_RECORDS_BATCH_MAX": "64",
+        "ML_WORKER_EXECUTION_RECORDS_ENABLED": "maybe",
+        "ML_WORKER_EXECUTION_RECORDS_FLUSH_MS": "500",
+        "ML_WORKER_EXECUTION_RECORDS_LANE_CAPACITY": "256"
+      },
+      "message": "ML_WORKER_EXECUTION_RECORDS_ENABLED must be a boolean (['0', '1', 'false', 'no', 'off', 'on', 'true', 'yes']), got 'maybe'",
+      "name": "bad-boolean:maybe",
+      "verdict": "refused"
+    },
+    {
+      "class": "WorkerConfigError",
+      "env": {
+        "ML_WORKER_EXECUTION_RECORDS_BATCH_MAX": "64",
+        "ML_WORKER_EXECUTION_RECORDS_ENABLED": "2",
+        "ML_WORKER_EXECUTION_RECORDS_FLUSH_MS": "500",
+        "ML_WORKER_EXECUTION_RECORDS_LANE_CAPACITY": "256"
+      },
+      "message": "ML_WORKER_EXECUTION_RECORDS_ENABLED must be a boolean (['0', '1', 'false', 'no', 'off', 'on', 'true', 'yes']), got '2'",
+      "name": "bad-boolean:2",
+      "verdict": "refused"
+    },
+    {
+      "class": "WorkerConfigError",
+      "env": {
+        "ML_WORKER_EXECUTION_RECORDS_ENABLED": "1"
+      },
+      "message": "ML_WORKER_EXECUTION_RECORDS_LANE_CAPACITY is required when ML_WORKER_EXECUTION_RECORDS_ENABLED=1",
+      "name": "enabled:all-sizing-missing",
+      "verdict": "refused"
+    },
+    {
+      "class": "WorkerConfigError",
+      "env": {
+        "ML_WORKER_EXECUTION_RECORDS_BATCH_MAX": "64",
+        "ML_WORKER_EXECUTION_RECORDS_ENABLED": "1",
+        "ML_WORKER_EXECUTION_RECORDS_FLUSH_MS": "500"
+      },
+      "message": "ML_WORKER_EXECUTION_RECORDS_LANE_CAPACITY is required when ML_WORKER_EXECUTION_RECORDS_ENABLED=1",
+      "name": "enabled:LANE_CAPACITY:missing",
+      "verdict": "refused"
+    },
+    {
+      "class": "WorkerConfigError",
+      "env": {
+        "ML_WORKER_EXECUTION_RECORDS_BATCH_MAX": "64",
+        "ML_WORKER_EXECUTION_RECORDS_ENABLED": "1",
+        "ML_WORKER_EXECUTION_RECORDS_FLUSH_MS": "500",
+        "ML_WORKER_EXECUTION_RECORDS_LANE_CAPACITY": ""
+      },
+      "message": "ML_WORKER_EXECUTION_RECORDS_LANE_CAPACITY is required when ML_WORKER_EXECUTION_RECORDS_ENABLED=1",
+      "name": "enabled:LANE_CAPACITY:empty",
+      "verdict": "refused"
+    },
+    {
+      "class": "WorkerConfigError",
+      "env": {
+        "ML_WORKER_EXECUTION_RECORDS_BATCH_MAX": "64",
+        "ML_WORKER_EXECUTION_RECORDS_ENABLED": "1",
+        "ML_WORKER_EXECUTION_RECORDS_FLUSH_MS": "500",
+        "ML_WORKER_EXECUTION_RECORDS_LANE_CAPACITY": "  "
+      },
+      "message": "ML_WORKER_EXECUTION_RECORDS_LANE_CAPACITY is required when ML_WORKER_EXECUTION_RECORDS_ENABLED=1",
+      "name": "enabled:LANE_CAPACITY:whitespace",
+      "verdict": "refused"
+    },
+    {
+      "class": "WorkerConfigError",
+      "env": {
+        "ML_WORKER_EXECUTION_RECORDS_BATCH_MAX": "64",
+        "ML_WORKER_EXECUTION_RECORDS_ENABLED": "1",
+        "ML_WORKER_EXECUTION_RECORDS_FLUSH_MS": "500",
+        "ML_WORKER_EXECUTION_RECORDS_LANE_CAPACITY": "0"
+      },
+      "message": "ML_WORKER_EXECUTION_RECORDS_LANE_CAPACITY must be a positive integer, got '0'",
+      "name": "enabled:LANE_CAPACITY:zero",
+      "verdict": "refused"
+    },
+    {
+      "class": "WorkerConfigError",
+      "env": {
+        "ML_WORKER_EXECUTION_RECORDS_BATCH_MAX": "64",
+        "ML_WORKER_EXECUTION_RECORDS_ENABLED": "1",
+        "ML_WORKER_EXECUTION_RECORDS_FLUSH_MS": "500",
+        "ML_WORKER_EXECUTION_RECORDS_LANE_CAPACITY": "-1"
+      },
+      "message": "ML_WORKER_EXECUTION_RECORDS_LANE_CAPACITY must be a positive integer, got '-1'",
+      "name": "enabled:LANE_CAPACITY:negative",
+      "verdict": "refused"
+    },
+    {
+      "class": "WorkerConfigError",
+      "env": {
+        "ML_WORKER_EXECUTION_RECORDS_BATCH_MAX": "64",
+        "ML_WORKER_EXECUTION_RECORDS_ENABLED": "1",
+        "ML_WORKER_EXECUTION_RECORDS_FLUSH_MS": "500",
+        "ML_WORKER_EXECUTION_RECORDS_LANE_CAPACITY": "abc"
+      },
+      "message": "ML_WORKER_EXECUTION_RECORDS_LANE_CAPACITY must be an integer, got 'abc'",
+      "name": "enabled:LANE_CAPACITY:non-integer",
+      "verdict": "refused"
+    },
+    {
+      "class": "WorkerConfigError",
+      "env": {
+        "ML_WORKER_EXECUTION_RECORDS_BATCH_MAX": "64",
+        "ML_WORKER_EXECUTION_RECORDS_ENABLED": "1",
+        "ML_WORKER_EXECUTION_RECORDS_FLUSH_MS": "500",
+        "ML_WORKER_EXECUTION_RECORDS_LANE_CAPACITY": "1.5"
+      },
+      "message": "ML_WORKER_EXECUTION_RECORDS_LANE_CAPACITY must be an integer, got '1.5'",
+      "name": "enabled:LANE_CAPACITY:decimal",
+      "verdict": "refused"
+    },
+    {
+      "class": "WorkerConfigError",
+      "env": {
+        "ML_WORKER_EXECUTION_RECORDS_BATCH_MAX": "64",
+        "ML_WORKER_EXECUTION_RECORDS_ENABLED": "1",
+        "ML_WORKER_EXECUTION_RECORDS_FLUSH_MS": "500",
+        "ML_WORKER_EXECUTION_RECORDS_LANE_CAPACITY": "1e3"
+      },
+      "message": "ML_WORKER_EXECUTION_RECORDS_LANE_CAPACITY must be an integer, got '1e3'",
+      "name": "enabled:LANE_CAPACITY:exponent",
+      "verdict": "refused"
+    },
+    {
+      "class": "WorkerConfigError",
+      "env": {
+        "ML_WORKER_EXECUTION_RECORDS_ENABLED": "1",
+        "ML_WORKER_EXECUTION_RECORDS_FLUSH_MS": "500",
+        "ML_WORKER_EXECUTION_RECORDS_LANE_CAPACITY": "256"
+      },
+      "message": "ML_WORKER_EXECUTION_RECORDS_BATCH_MAX is required when ML_WORKER_EXECUTION_RECORDS_ENABLED=1",
+      "name": "enabled:BATCH_MAX:missing",
+      "verdict": "refused"
+    },
+    {
+      "class": "WorkerConfigError",
+      "env": {
+        "ML_WORKER_EXECUTION_RECORDS_BATCH_MAX": "",
+        "ML_WORKER_EXECUTION_RECORDS_ENABLED": "1",
+        "ML_WORKER_EXECUTION_RECORDS_FLUSH_MS": "500",
+        "ML_WORKER_EXECUTION_RECORDS_LANE_CAPACITY": "256"
+      },
+      "message": "ML_WORKER_EXECUTION_RECORDS_BATCH_MAX is required when ML_WORKER_EXECUTION_RECORDS_ENABLED=1",
+      "name": "enabled:BATCH_MAX:empty",
+      "verdict": "refused"
+    },
+    {
+      "class": "WorkerConfigError",
+      "env": {
+        "ML_WORKER_EXECUTION_RECORDS_BATCH_MAX": "  ",
+        "ML_WORKER_EXECUTION_RECORDS_ENABLED": "1",
+        "ML_WORKER_EXECUTION_RECORDS_FLUSH_MS": "500",
+        "ML_WORKER_EXECUTION_RECORDS_LANE_CAPACITY": "256"
+      },
+      "message": "ML_WORKER_EXECUTION_RECORDS_BATCH_MAX is required when ML_WORKER_EXECUTION_RECORDS_ENABLED=1",
+      "name": "enabled:BATCH_MAX:whitespace",
+      "verdict": "refused"
+    },
+    {
+      "class": "WorkerConfigError",
+      "env": {
+        "ML_WORKER_EXECUTION_RECORDS_BATCH_MAX": "0",
+        "ML_WORKER_EXECUTION_RECORDS_ENABLED": "1",
+        "ML_WORKER_EXECUTION_RECORDS_FLUSH_MS": "500",
+        "ML_WORKER_EXECUTION_RECORDS_LANE_CAPACITY": "256"
+      },
+      "message": "ML_WORKER_EXECUTION_RECORDS_BATCH_MAX must be a positive integer, got '0'",
+      "name": "enabled:BATCH_MAX:zero",
+      "verdict": "refused"
+    },
+    {
+      "class": "WorkerConfigError",
+      "env": {
+        "ML_WORKER_EXECUTION_RECORDS_BATCH_MAX": "-1",
+        "ML_WORKER_EXECUTION_RECORDS_ENABLED": "1",
+        "ML_WORKER_EXECUTION_RECORDS_FLUSH_MS": "500",
+        "ML_WORKER_EXECUTION_RECORDS_LANE_CAPACITY": "256"
+      },
+      "message": "ML_WORKER_EXECUTION_RECORDS_BATCH_MAX must be a positive integer, got '-1'",
+      "name": "enabled:BATCH_MAX:negative",
+      "verdict": "refused"
+    },
+    {
+      "class": "WorkerConfigError",
+      "env": {
+        "ML_WORKER_EXECUTION_RECORDS_BATCH_MAX": "abc",
+        "ML_WORKER_EXECUTION_RECORDS_ENABLED": "1",
+        "ML_WORKER_EXECUTION_RECORDS_FLUSH_MS": "500",
+        "ML_WORKER_EXECUTION_RECORDS_LANE_CAPACITY": "256"
+      },
+      "message": "ML_WORKER_EXECUTION_RECORDS_BATCH_MAX must be an integer, got 'abc'",
+      "name": "enabled:BATCH_MAX:non-integer",
+      "verdict": "refused"
+    },
+    {
+      "class": "WorkerConfigError",
+      "env": {
+        "ML_WORKER_EXECUTION_RECORDS_BATCH_MAX": "1.5",
+        "ML_WORKER_EXECUTION_RECORDS_ENABLED": "1",
+        "ML_WORKER_EXECUTION_RECORDS_FLUSH_MS": "500",
+        "ML_WORKER_EXECUTION_RECORDS_LANE_CAPACITY": "256"
+      },
+      "message": "ML_WORKER_EXECUTION_RECORDS_BATCH_MAX must be an integer, got '1.5'",
+      "name": "enabled:BATCH_MAX:decimal",
+      "verdict": "refused"
+    },
+    {
+      "class": "WorkerConfigError",
+      "env": {
+        "ML_WORKER_EXECUTION_RECORDS_BATCH_MAX": "1e3",
+        "ML_WORKER_EXECUTION_RECORDS_ENABLED": "1",
+        "ML_WORKER_EXECUTION_RECORDS_FLUSH_MS": "500",
+        "ML_WORKER_EXECUTION_RECORDS_LANE_CAPACITY": "256"
+      },
+      "message": "ML_WORKER_EXECUTION_RECORDS_BATCH_MAX must be an integer, got '1e3'",
+      "name": "enabled:BATCH_MAX:exponent",
+      "verdict": "refused"
+    },
+    {
+      "class": "WorkerConfigError",
+      "env": {
+        "ML_WORKER_EXECUTION_RECORDS_BATCH_MAX": "64",
+        "ML_WORKER_EXECUTION_RECORDS_ENABLED": "1",
+        "ML_WORKER_EXECUTION_RECORDS_LANE_CAPACITY": "256"
+      },
+      "message": "ML_WORKER_EXECUTION_RECORDS_FLUSH_MS is required when ML_WORKER_EXECUTION_RECORDS_ENABLED=1",
+      "name": "enabled:FLUSH_MS:missing",
+      "verdict": "refused"
+    },
+    {
+      "class": "WorkerConfigError",
+      "env": {
+        "ML_WORKER_EXECUTION_RECORDS_BATCH_MAX": "64",
+        "ML_WORKER_EXECUTION_RECORDS_ENABLED": "1",
+        "ML_WORKER_EXECUTION_RECORDS_FLUSH_MS": "",
+        "ML_WORKER_EXECUTION_RECORDS_LANE_CAPACITY": "256"
+      },
+      "message": "ML_WORKER_EXECUTION_RECORDS_FLUSH_MS is required when ML_WORKER_EXECUTION_RECORDS_ENABLED=1",
+      "name": "enabled:FLUSH_MS:empty",
+      "verdict": "refused"
+    },
+    {
+      "class": "WorkerConfigError",
+      "env": {
+        "ML_WORKER_EXECUTION_RECORDS_BATCH_MAX": "64",
+        "ML_WORKER_EXECUTION_RECORDS_ENABLED": "1",
+        "ML_WORKER_EXECUTION_RECORDS_FLUSH_MS": "  ",
+        "ML_WORKER_EXECUTION_RECORDS_LANE_CAPACITY": "256"
+      },
+      "message": "ML_WORKER_EXECUTION_RECORDS_FLUSH_MS is required when ML_WORKER_EXECUTION_RECORDS_ENABLED=1",
+      "name": "enabled:FLUSH_MS:whitespace",
+      "verdict": "refused"
+    },
+    {
+      "class": "WorkerConfigError",
+      "env": {
+        "ML_WORKER_EXECUTION_RECORDS_BATCH_MAX": "64",
+        "ML_WORKER_EXECUTION_RECORDS_ENABLED": "1",
+        "ML_WORKER_EXECUTION_RECORDS_FLUSH_MS": "0",
+        "ML_WORKER_EXECUTION_RECORDS_LANE_CAPACITY": "256"
+      },
+      "message": "ML_WORKER_EXECUTION_RECORDS_FLUSH_MS must be a positive integer, got '0'",
+      "name": "enabled:FLUSH_MS:zero",
+      "verdict": "refused"
+    },
+    {
+      "class": "WorkerConfigError",
+      "env": {
+        "ML_WORKER_EXECUTION_RECORDS_BATCH_MAX": "64",
+        "ML_WORKER_EXECUTION_RECORDS_ENABLED": "1",
+        "ML_WORKER_EXECUTION_RECORDS_FLUSH_MS": "-1",
+        "ML_WORKER_EXECUTION_RECORDS_LANE_CAPACITY": "256"
+      },
+      "message": "ML_WORKER_EXECUTION_RECORDS_FLUSH_MS must be a positive integer, got '-1'",
+      "name": "enabled:FLUSH_MS:negative",
+      "verdict": "refused"
+    },
+    {
+      "class": "WorkerConfigError",
+      "env": {
+        "ML_WORKER_EXECUTION_RECORDS_BATCH_MAX": "64",
+        "ML_WORKER_EXECUTION_RECORDS_ENABLED": "1",
+        "ML_WORKER_EXECUTION_RECORDS_FLUSH_MS": "abc",
+        "ML_WORKER_EXECUTION_RECORDS_LANE_CAPACITY": "256"
+      },
+      "message": "ML_WORKER_EXECUTION_RECORDS_FLUSH_MS must be an integer, got 'abc'",
+      "name": "enabled:FLUSH_MS:non-integer",
+      "verdict": "refused"
+    },
+    {
+      "class": "WorkerConfigError",
+      "env": {
+        "ML_WORKER_EXECUTION_RECORDS_BATCH_MAX": "64",
+        "ML_WORKER_EXECUTION_RECORDS_ENABLED": "1",
+        "ML_WORKER_EXECUTION_RECORDS_FLUSH_MS": "1.5",
+        "ML_WORKER_EXECUTION_RECORDS_LANE_CAPACITY": "256"
+      },
+      "message": "ML_WORKER_EXECUTION_RECORDS_FLUSH_MS must be an integer, got '1.5'",
+      "name": "enabled:FLUSH_MS:decimal",
+      "verdict": "refused"
+    },
+    {
+      "class": "WorkerConfigError",
+      "env": {
+        "ML_WORKER_EXECUTION_RECORDS_BATCH_MAX": "64",
+        "ML_WORKER_EXECUTION_RECORDS_ENABLED": "1",
+        "ML_WORKER_EXECUTION_RECORDS_FLUSH_MS": "1e3",
+        "ML_WORKER_EXECUTION_RECORDS_LANE_CAPACITY": "256"
+      },
+      "message": "ML_WORKER_EXECUTION_RECORDS_FLUSH_MS must be an integer, got '1e3'",
+      "name": "enabled:FLUSH_MS:exponent",
+      "verdict": "refused"
+    }
+  ],
+  "provenance": "synthetic-only",
+  "recipe": {
+    "compose_cases": "compose_execution_records with a SimpleNamespace config: relay url http://relay.invalid:8000 or blank, a synthetic token shown as <relay-token>, synthetic identities",
+    "execution_records_cases": "env maps over the four ML_WORKER_EXECUTION_RECORDS_* keys; sizing values missing, empty, whitespace, 0, -1, abc, 1.5, 1e3; booleans from both sets and outside them",
+    "retired_key_cases": "each literal retired key alone with value 'synthetic', all 18 together, none, an empty value, two keys, a lowercase spelling and a non-retired key"
+  },
+  "recorder_sha256": "685b4b585916d96ada08ef94edec4266005c60aa992eccf4540209ed43a73e35",
+  "repo_head": "030aaf1dc2c4a114b5d1f83ae391757ddbc3da2c",
+  "retired_key_cases": [
+    {
+      "class": "WorkerConfigError",
+      "env": {
+        "CLIP_STORE_DIR": "synthetic"
+      },
+      "message": "retired edge environment key(s): CLIP_STORE_DIR; use the versioned worker config authority",
+      "name": "retired:CLIP_STORE_DIR",
+      "verdict": "refused"
+    },
+    {
+      "class": "WorkerConfigError",
+      "env": {
+        "EDGE_CAMERA_CONFIG": "synthetic"
+      },
+      "message": "retired edge environment key(s): EDGE_CAMERA_CONFIG; use the versioned worker config authority",
+      "name": "retired:EDGE_CAMERA_CONFIG",
+      "verdict": "refused"
+    },
+    {
+      "class": "WorkerConfigError",
+      "env": {
+        "EDGE_CAMERA_CONFIG_FILE": "synthetic"
+      },
+      "message": "retired edge environment key(s): EDGE_CAMERA_CONFIG_FILE; use the versioned worker config authority",
+      "name": "retired:EDGE_CAMERA_CONFIG_FILE",
+      "verdict": "refused"
+    },
+    {
+      "class": "WorkerConfigError",
+      "env": {
+        "ML_WORKER_CLIP_RECORDING_ENABLED": "synthetic"
+      },
+      "message": "retired edge environment key(s): ML_WORKER_CLIP_RECORDING_ENABLED; use the versioned worker config authority",
+      "name": "retired:ML_WORKER_CLIP_RECORDING_ENABLED",
+      "verdict": "refused"
+    },
+    {
+      "class": "WorkerConfigError",
+      "env": {
+        "ML_WORKER_DEV_MJPEG": "synthetic"
+      },
+      "message": "retired edge environment key(s): ML_WORKER_DEV_MJPEG; use the versioned worker config authority",
+      "name": "retired:ML_WORKER_DEV_MJPEG",
+      "verdict": "refused"
+    },
+    {
+      "class": "WorkerConfigError",
+      "env": {
+        "ML_WORKER_DEV_MJPEG_HOST": "synthetic"
+      },
+      "message": "retired edge environment key(s): ML_WORKER_DEV_MJPEG_HOST; use the versioned worker config authority",
+      "name": "retired:ML_WORKER_DEV_MJPEG_HOST",
+      "verdict": "refused"
+    },
+    {
+      "class": "WorkerConfigError",
+      "env": {
+        "ML_WORKER_DEV_MJPEG_PORT": "synthetic"
+      },
+      "message": "retired edge environment key(s): ML_WORKER_DEV_MJPEG_PORT; use the versioned worker config authority",
+      "name": "retired:ML_WORKER_DEV_MJPEG_PORT",
+      "verdict": "refused"
+    },
+    {
+      "class": "WorkerConfigError",
+      "env": {
+        "ML_WORKER_EVENT_CLIP_EXPORT_ENABLED": "synthetic"
+      },
+      "message": "retired edge environment key(s): ML_WORKER_EVENT_CLIP_EXPORT_ENABLED; use the versioned worker config authority",
+      "name": "retired:ML_WORKER_EVENT_CLIP_EXPORT_ENABLED",
+      "verdict": "refused"
+    },
+    {
+      "class": "WorkerConfigError",
+      "env": {
+        "ML_WORKER_FALL_MODEL_ARCHITECTURE": "synthetic"
+      },
+      "message": "retired edge environment key(s): ML_WORKER_FALL_MODEL_ARCHITECTURE; use the versioned worker config authority",
+      "name": "retired:ML_WORKER_FALL_MODEL_ARCHITECTURE",
+      "verdict": "refused"
+    },
+    {
+      "class": "WorkerConfigError",
+      "env": {
+        "ML_WORKER_FALL_MODEL_ARTIFACT_DIR": "synthetic"
+      },
+      "message": "retired edge environment key(s): ML_WORKER_FALL_MODEL_ARTIFACT_DIR; use the versioned worker config authority",
+      "name": "retired:ML_WORKER_FALL_MODEL_ARTIFACT_DIR",
+      "verdict": "refused"
+    },
+    {
+      "class": "WorkerConfigError",
+      "env": {
+        "ML_WORKER_FALL_MODEL_OPERATING_THRESHOLD": "synthetic"
+      },
+      "message": "retired edge environment key(s): ML_WORKER_FALL_MODEL_OPERATING_THRESHOLD; use the versioned worker config authority",
+      "name": "retired:ML_WORKER_FALL_MODEL_OPERATING_THRESHOLD",
+      "verdict": "refused"
+    },
+    {
+      "class": "WorkerConfigError",
+      "env": {
+        "ML_WORKER_FALL_MODEL_PREPROCESSING_IDENTITY": "synthetic"
+      },
+      "message": "retired edge environment key(s): ML_WORKER_FALL_MODEL_PREPROCESSING_IDENTITY; use the versioned worker config authority",
+      "name": "retired:ML_WORKER_FALL_MODEL_PREPROCESSING_IDENTITY",
+      "verdict": "refused"
+    },
+    {
+      "class": "WorkerConfigError",
+      "env": {
+        "ML_WORKER_FALL_MODEL_SCHEMA_VERSION": "synthetic"
+      },
+      "message": "retired edge environment key(s): ML_WORKER_FALL_MODEL_SCHEMA_VERSION; use the versioned worker config authority",
+      "name": "retired:ML_WORKER_FALL_MODEL_SCHEMA_VERSION",
+      "verdict": "refused"
+    },
+    {
+      "class": "WorkerConfigError",
+      "env": {
+        "ML_WORKER_FALL_MODEL_STRIDE": "synthetic"
+      },
+      "message": "retired edge environment key(s): ML_WORKER_FALL_MODEL_STRIDE; use the versioned worker config authority",
+      "name": "retired:ML_WORKER_FALL_MODEL_STRIDE",
+      "verdict": "refused"
+    },
+    {
+      "class": "WorkerConfigError",
+      "env": {
+        "ML_WORKER_FALL_MODEL_TYPE": "synthetic"
+      },
+      "message": "retired edge environment key(s): ML_WORKER_FALL_MODEL_TYPE; use the versioned worker config authority",
+      "name": "retired:ML_WORKER_FALL_MODEL_TYPE",
+      "verdict": "refused"
+    },
+    {
+      "class": "WorkerConfigError",
+      "env": {
+        "ML_WORKER_FALL_MODEL_WEIGHTS": "synthetic"
+      },
+      "message": "retired edge environment key(s): ML_WORKER_FALL_MODEL_WEIGHTS; use the versioned worker config authority",
+      "name": "retired:ML_WORKER_FALL_MODEL_WEIGHTS",
+      "verdict": "refused"
+    },
+    {
+      "class": "WorkerConfigError",
+      "env": {
+        "ML_WORKER_FALL_MODEL_WINDOW": "synthetic"
+      },
+      "message": "retired edge environment key(s): ML_WORKER_FALL_MODEL_WINDOW; use the versioned worker config authority",
+      "name": "retired:ML_WORKER_FALL_MODEL_WINDOW",
+      "verdict": "refused"
+    },
+    {
+      "class": "WorkerConfigError",
+      "env": {
+        "RELAY_URL": "synthetic"
+      },
+      "message": "retired edge environment key(s): RELAY_URL; use the versioned worker config authority",
+      "name": "retired:RELAY_URL",
+      "verdict": "refused"
+    },
+    {
+      "class": "WorkerConfigError",
+      "env": {
+        "CLIP_STORE_DIR": "synthetic",
+        "EDGE_CAMERA_CONFIG": "synthetic",
+        "EDGE_CAMERA_CONFIG_FILE": "synthetic",
+        "ML_WORKER_CLIP_RECORDING_ENABLED": "synthetic",
+        "ML_WORKER_DEV_MJPEG": "synthetic",
+        "ML_WORKER_DEV_MJPEG_HOST": "synthetic",
+        "ML_WORKER_DEV_MJPEG_PORT": "synthetic",
+        "ML_WORKER_EVENT_CLIP_EXPORT_ENABLED": "synthetic",
+        "ML_WORKER_FALL_MODEL_ARCHITECTURE": "synthetic",
+        "ML_WORKER_FALL_MODEL_ARTIFACT_DIR": "synthetic",
+        "ML_WORKER_FALL_MODEL_OPERATING_THRESHOLD": "synthetic",
+        "ML_WORKER_FALL_MODEL_PREPROCESSING_IDENTITY": "synthetic",
+        "ML_WORKER_FALL_MODEL_SCHEMA_VERSION": "synthetic",
+        "ML_WORKER_FALL_MODEL_STRIDE": "synthetic",
+        "ML_WORKER_FALL_MODEL_TYPE": "synthetic",
+        "ML_WORKER_FALL_MODEL_WEIGHTS": "synthetic",
+        "ML_WORKER_FALL_MODEL_WINDOW": "synthetic",
+        "RELAY_URL": "synthetic"
+      },
+      "message": "retired edge environment key(s): CLIP_STORE_DIR, EDGE_CAMERA_CONFIG, EDGE_CAMERA_CONFIG_FILE, ML_WORKER_CLIP_RECORDING_ENABLED, ML_WORKER_DEV_MJPEG, ML_WORKER_DEV_MJPEG_HOST, ML_WORKER_DEV_MJPEG_PORT, ML_WORKER_EVENT_CLIP_EXPORT_ENABLED, ML_WORKER_FALL_MODEL_ARCHITECTURE, ML_WORKER_FALL_MODEL_ARTIFACT_DIR, ML_WORKER_FALL_MODEL_OPERATING_THRESHOLD, ML_WORKER_FALL_MODEL_PREPROCESSING_IDENTITY, ML_WORKER_FALL_MODEL_SCHEMA_VERSION, ML_WORKER_FALL_MODEL_STRIDE, ML_WORKER_FALL_MODEL_TYPE, ML_WORKER_FALL_MODEL_WEIGHTS, ML_WORKER_FALL_MODEL_WINDOW, RELAY_URL; use the versioned worker config authority",
+      "name": "retired:all-18",
+      "verdict": "refused"
+    },
+    {
+      "env": {},
+      "name": "retired:none",
+      "verdict": "accepted"
+    },
+    {
+      "class": "WorkerConfigError",
+      "env": {
+        "RELAY_URL": ""
+      },
+      "message": "retired edge environment key(s): RELAY_URL; use the versioned worker config authority",
+      "name": "retired:empty-value-still-refused",
+      "verdict": "refused"
+    },
+    {
+      "class": "WorkerConfigError",
+      "env": {
+        "CLIP_STORE_DIR": "synthetic",
+        "RELAY_URL": "synthetic"
+      },
+      "message": "retired edge environment key(s): CLIP_STORE_DIR, RELAY_URL; use the versioned worker config authority",
+      "name": "retired:two-keys-sorted",
+      "verdict": "refused"
+    },
+    {
+      "env": {
+        "relay_url": "synthetic"
+      },
+      "name": "retired:case-exact-lowercase-accepted",
+      "verdict": "accepted"
+    },
+    {
+      "env": {
+        "ML_WORKER_EXECUTION_RECORDS_ENABLED": "0",
+        "WORKER_REPLAY_TRACE_DIR": "synthetic"
+      },
+      "name": "retired:non-retired-key-accepted",
+      "verdict": "accepted"
+    }
+  ],
+  "retired_keys": [
+    "CLIP_STORE_DIR",
+    "EDGE_CAMERA_CONFIG",
+    "EDGE_CAMERA_CONFIG_FILE",
+    "ML_WORKER_CLIP_RECORDING_ENABLED",
+    "ML_WORKER_DEV_MJPEG",
+    "ML_WORKER_DEV_MJPEG_HOST",
+    "ML_WORKER_DEV_MJPEG_PORT",
+    "ML_WORKER_EVENT_CLIP_EXPORT_ENABLED",
+    "ML_WORKER_FALL_MODEL_ARCHITECTURE",
+    "ML_WORKER_FALL_MODEL_ARTIFACT_DIR",
+    "ML_WORKER_FALL_MODEL_OPERATING_THRESHOLD",
+    "ML_WORKER_FALL_MODEL_PREPROCESSING_IDENTITY",
+    "ML_WORKER_FALL_MODEL_SCHEMA_VERSION",
+    "ML_WORKER_FALL_MODEL_STRIDE",
+    "ML_WORKER_FALL_MODEL_TYPE",
+    "ML_WORKER_FALL_MODEL_WEIGHTS",
+    "ML_WORKER_FALL_MODEL_WINDOW",
+    "RELAY_URL"
+  ],
+  "review": {
+    "independent_oracle": [
+      "worker/runtime/config/local_env.py:_RETIRED_WORKER_ENV (L69) @030aaf1",
+      "worker/runtime/config/local_env.py:reject_retired_worker_environment (L93) @030aaf1",
+      "worker/runtime/config/execution_records.py:execution_records_settings_from_environment (L32), _bool_env (L54), _required_positive_int (L65), keys L16-19 @030aaf1",
+      "worker/runtime/execution_records.py:compose_execution_records (L29) @030aaf1",
+      "worker/pipeline/diagnostics/provenance.py:build_wire_provenance (L12, refusal L33) @030aaf1"
+    ],
+    "note": "retired_keys is the oracle's own frozenset, sorted; each case is the value the oracle returned or the exception it raised (class name and str). The retired-key cases iterate a recorder-side literal list, so removing a key from the oracle set flips its case to accepted."
+  },
+  "schema": "seeon-worker-wire-goldens/env-refusals/v1"
+}

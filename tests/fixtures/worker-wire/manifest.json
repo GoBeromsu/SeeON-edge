@@ -8,6 +8,7 @@
     "mjpeg-part-framing": "framing is the contract, payload bytes are encoder-specific: the producer's first multipart part must equal part_head_template with <content-length> replaced by the decimal payload length, then the payload, then part_tail byte for byte; the payload must be the JPEG the producer was given, unchanged; recorded_payload_* and recorded_part_sha256 describe the Python recording and are not compared"
   },
   "files_sha256": {
+    "d/bed-containment.json": "e834749ff4d023877101b96b2b858a24b676b48cbcb6b636c2b6e7228033ac0c",
     "d/clip-analysis/clip.analysis.json": "7b42a6107011dd1cbd7854b144834adabd409ce7f6bf3c4cf156d6427b60fc2b",
     "d/clip-analysis/clip.analysis.json.sha256": "22c1023568feca0e3331aa547391144b33417ba1bf226e102782e3d7b6989192",
     "d/clip-manifests/corrupt-existing.json": "6ab429331964b917ea73f90b9b4ac32df3732b7deb64ba6d221acee997bad9b0",
@@ -40,7 +41,9 @@
     "d/delivery-queue/clip-fb4271979957cd5b20b1078f7c3a2e13eaba5661c34a0a8d37e4387023d111e8.json": "d10387aec43f493abafbac178b19695fb013703e1696bc0d7973147c61c7d8b2",
     "d/delivery-queue/disposition-d6681ffe537c67cb3880ffbf5edaa522cd5bfe992a5f99a034c3471ba257c405.json": "9370f1b2f2d86c7006e71ec89bc5754b7bd8079ab1ff3939a4e4551095f04d3c",
     "d/delivery-queue/event-a5e15ff2-90fd-4764-be74-a7da4f573cc9.json": "fc7a8aa478a9078bb720b66b6bfd817d92492d530a31f7801e678c1081a8b905",
+    "d/engine-identity-refusals.json": "fb3cca78edd5c85760fac4f1435c44fbd3d2f3cee71698f44c1c576894596dda",
     "d/engine-identity.json": "d97dffe367deb592f215d04195e143392c785e7d5049b61147f16dc161d71c0c",
+    "d/env-refusals.json": "797685e143908c6dfe665d99ead23f06096e5abee6f7a104b2ccf6e22f8227ba",
     "d/event-identities/cases.json": "25325a46d02ae6eb40f36b26d02897b5010ef15ab97533c89a017601b1cd16af",
     "d/event-identities/fresh/0-after-resolve-new.lines.json": "69a0944f7cebde3ec67db9586c436a6c00002d9d4b931e294ec1888094594409",
     "d/event-identities/refusal-conflicting-source-key/0-input.lines.json": "6b755a7fc482312b1da7fc2f299a760f8027942f96b2207a8ad2a37b63327d8b",
@@ -96,6 +99,7 @@
     "r/clip-put-ready.response.json": "380ddd848747dd4489c5306cf2230257d1a5a0e5f3340f0a07290f08ad024858",
     "r/clip-put-unavailable-capture-failed.json": "6dbb55cba1b320341ef9123cea23e1c9b609b999074f750be5ec25af3ba1307d",
     "r/clip-put-unavailable-corrupt.json": "ebc2ded5f0e01cc29aea91ee053381cc83864008014961e6e4efdf917ba5c1f6",
+    "r/execution-records-overflow.json": "91d352a5d79798d61d670e3623e077a1b2ce81034e499826303b96bb7baddd1c",
     "r/execution-records.json": "d5d706512c5446afae53f75094fde15fda4926bd8e122843d390f8bfee1a5d98",
     "r/execution-records.model-evidence.json": "2a0248b2331c2a2acb09943eba691ba263f52bb5c24d3bf583a75c7ad705d1e6",
     "r/execution-records.model-evidence.response.json": "d917a674f303916906e5af92c6677b83dfd5510baff066d9f57bc10d02108c88",
@@ -203,6 +207,21 @@
     }
   ],
   "goldens": [
+    {
+      "backend_parser": "n/a (domain geometry; consumer is the Rust bed-exit geometry unit test)",
+      "compare": "json-value",
+      "input": "synthetic integer polygons and person boxes (see golden recipe)",
+      "lane": "p04d",
+      "normalised": [],
+      "path": "d/bed-containment.json",
+      "producer": "worker/domains/bed_exit/geometry.py:containment_ratio + best_bed_id",
+      "rows": [
+        8
+      ],
+      "sha256": "e834749ff4d023877101b96b2b858a24b676b48cbcb6b636c2b6e7228033ac0c",
+      "size_bytes": 37891,
+      "wire_class": "D"
+    },
     {
       "backend_parser": "shared/events/clip_analysis_wire.py:decode_clip_analysis (round-trip equal); h/clip-analysis.json get-with-sidecar reads the same bytes",
       "compare": "bytes",
@@ -835,6 +854,26 @@
       "wire_class": "D"
     },
     {
+      "backend_parser": "n/a (worker-internal boot and build gate)",
+      "compare": "json-value",
+      "input": "synthetic ONNX graphs built in memory with onnx.helper (dims only), literal model/config bytes, a fake nvinfer (see golden recipe)",
+      "lane": "p04d",
+      "normalised": [
+        "cases[].message where onnxruntime raised -> '<ort-error: CODE NAME>' (the ORT text names host build paths)",
+        "paths under the recorder work dir -> '<work>'",
+        "sha256 values -> '<sha256:ROLE>' (see recipe.digests)"
+      ],
+      "path": "d/engine-identity-refusals.json",
+      "producer": "worker/runtime/flow/cold_start.py:verify_engine_identity + verify_flow_boot_inputs; worker/runtime/flow/onnx_shape.py:input_dims; worker/tools/edge_engine_build.py:build_engine; worker/runtime/model_composition.py:_verified_identity_field",
+      "rows": [
+        4,
+        21
+      ],
+      "sha256": "fb3cca78edd5c85760fac4f1435c44fbd3d2f3cee71698f44c1c576894596dda",
+      "size_bytes": 213810,
+      "wire_class": "D"
+    },
+    {
       "backend_parser": "worker/runtime/flow/cold_start.py:verify_engine_identity -> {'batch_size': '1', 'engine_sha256': '4cdc83eb03cc830add0aae46bc5e0819f6705ac92400088d9e7ba52a5206c522', 'image_digest': 'sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee', 'inf",
       "compare": "bytes",
       "input": "six synthetic files b'synthetic-<role>'; image_digest sha256:eee...; batch_size 1",
@@ -846,6 +885,22 @@
       ],
       "sha256": "d97dffe367deb592f215d04195e143392c785e7d5049b61147f16dc161d71c0c",
       "size_bytes": 646,
+      "wire_class": "D"
+    },
+    {
+      "backend_parser": "n/a (process environment; consumer is the Rust worker env loader)",
+      "compare": "json-value",
+      "input": "synthetic env maps (retired keys valued 'synthetic', execution-record sizing values); relay url http://relay.invalid:8000, token redacted",
+      "lane": "p04d",
+      "normalised": [],
+      "path": "d/env-refusals.json",
+      "producer": "worker/runtime/config/local_env.py:reject_retired_worker_environment + worker/runtime/config/execution_records.py:execution_records_settings_from_environment + worker/runtime/execution_records.py:compose_execution_records",
+      "rows": [
+        2,
+        14
+      ],
+      "sha256": "797685e143908c6dfe665d99ead23f06096e5abee6f7a104b2ccf6e22f8227ba",
+      "size_bytes": 34638,
       "wire_class": "D"
     },
     {
@@ -1763,6 +1818,23 @@
       "wire_class": "R"
     },
     {
+      "backend_parser": "ok: shared/events/execution_records.py:WireBatch.from_json + backend/app/features/diagnostics/wire.py:ingest_batch_from_wire on every posted body",
+      "compare": "json-value",
+      "input": "synthetic model.score and policy.consume records for one camera (see golden recipe)",
+      "lane": "p04d",
+      "normalised": [],
+      "path": "r/execution-records-overflow.json",
+      "producer": "worker/pipeline/diagnostics/lanes.py:ExecutionRecordLanes.try_emit + drain_for; worker/pipeline/diagnostics/exporter.py:ExecutionRecordExporter._run + flush_once via shared/events/execution_records_client.py:ExecutionRecordsClient.post_batch",
+      "rows": [
+        9,
+        14,
+        23
+      ],
+      "sha256": "91d352a5d79798d61d670e3623e077a1b2ce81034e499826303b96bb7baddd1c",
+      "size_bytes": 37652,
+      "wire_class": "R"
+    },
+    {
       "backend_parser": "ok: shared.events.execution_records.WireBatch.from_json + backend.app.features.diagnostics.wire.ingest_batch_from_wire (as backend/app/features/diagnostics/router.py:ingest_execution_records)",
       "compare": "json-value",
       "input": "two model.score records (frame_seq 100,101) for one camera/boot",
@@ -2213,6 +2285,43 @@
       "recorder_sha256": "cde032a17f0d9f3de2496a3930104e22dde17c3027394033ef1068b2d138f7f9",
       "repo_head": "030aaf1dc2c4a114b5d1f83ae391757ddbc3da2c",
       "schema": "seeon-worker-wire-goldens/v1 fragment (P0.4 lane p04c8, item 8)"
+    },
+    "p04d": {
+      "fixed_inputs": {
+        "camera_id": "cmsnw6rjc01vhlh01oswn99yq",
+        "facility_id": "facility-1",
+        "monotonic_sec": 5000.0,
+        "relay_token": "<relay-token> (synthetic, never written)",
+        "relay_url": "http://relay.invalid:8000",
+        "uuid4": "uuid.uuid4 patched to UUID(int=n, version=4), n=1,2,...",
+        "wall_clock_sec": 1787000000.0
+      },
+      "oracle_sources_sha256": {
+        "backend/app/features/diagnostics/wire.py": "80ab7ade1f0100569153aa50aa2731de7f3a4dc311640f7ee70a79470513c102",
+        "shared/events/execution_records.py": "2db925961396d2939b58571c1cf69e3b891f0d4dead9e15b7f752b3e28895338",
+        "shared/events/execution_records_client.py": "22404e7db39aad2e9617635302b50428978d4be45faba531fc1ceaa47d97b168",
+        "worker/domains/bed_exit/geometry.py": "b6f160a131d95476e48b5b3288b9ac50d7c266d060d0f447933971c9b075a46d",
+        "worker/pipeline/diagnostics/exporter.py": "b5fe553747dd07ef15781c68323f8a93ef70f90de4a29541b75261b68f20bb02",
+        "worker/pipeline/diagnostics/lanes.py": "61c73b49aaa6ad3bd8de1146e0f99b969c80f88cbcb541f5de301578e0f482e7",
+        "worker/runtime/config/execution_records.py": "4ec72ce1a7cd509aed94feff0db0475de1ca9931c717e0a93b43bbb100b85035",
+        "worker/runtime/config/local_env.py": "a59688531690d7253f54ce8d08b70c17c3a6dd038f101c28832e604b6593ebfd",
+        "worker/runtime/execution_records.py": "2355f156a1ab575c9c180cbe21ee4fa6eecac519efde3ed0f3ee15e279762a8b",
+        "worker/runtime/flow/cold_start.py": "3a35e253b9f0bdeed3c676321ca9eaabca1147bbd83017b29ac86bb1bbb40d74",
+        "worker/runtime/flow/onnx_shape.py": "467044f6557e49c3b9340dfacbab39bc78b418aa80b022217fafa22ad8b296f7",
+        "worker/runtime/model_composition.py": "2e27be33fa97f9098981e11d0456eab1c29913f5bbe305815f1ed9be3b62c07a",
+        "worker/tools/edge_engine_build.py": "636e6991397f2c2f219198461eb38066697407961b9fc6a8fc2b7697f598ce83"
+      },
+      "packages": {
+        "numpy": "2.4.6",
+        "onnx": "1.22.0",
+        "onnxruntime": "1.29.0",
+        "pydantic": "2.13.4"
+      },
+      "python": "3.12.13",
+      "recorder": "record_wire_p04d.py (kept outside the repo; see recorder_sha256)",
+      "recorder_sha256": "685b4b585916d96ada08ef94edec4266005c60aa992eccf4540209ed43a73e35",
+      "repo_head": "030aaf1dc2c4a114b5d1f83ae391757ddbc3da2c",
+      "schema": "seeon-worker-wire-goldens/v1 fragment (P0.4 lane D, items 9-12)"
     }
   },
   "lock_files_excluded": [],
@@ -2358,6 +2467,8 @@
       "gaps": [],
       "goldens": [
         "d/codec-edges.json",
+        "d/env-refusals.json",
+        "r/execution-records-overflow.json",
         "r/execution-records.json",
         "r/execution-records.model-evidence.json",
         "r/execution-records.model-evidence.response.json",
@@ -2428,6 +2539,7 @@
         "selection document as written in production"
       ],
       "goldens": [
+        "d/env-refusals.json",
         "d/model-selection-refusals.json",
         "d/model-selection.json"
       ]
@@ -2437,6 +2549,7 @@
         "real TensorRT engine and DeepStream build identity"
       ],
       "goldens": [
+        "d/engine-identity-refusals.json",
         "d/engine-identity.json"
       ]
     },
@@ -2470,6 +2583,7 @@
         "r/clip-put-ready.response.json",
         "r/clip-put-unavailable-capture-failed.json",
         "r/clip-put-unavailable-corrupt.json",
+        "r/execution-records-overflow.json",
         "r/execution-records.json",
         "r/execution-records.model-evidence.json",
         "r/execution-records.model-evidence.response.json",
@@ -2497,6 +2611,7 @@
     "4": {
       "gaps": [],
       "goldens": [
+        "d/engine-identity-refusals.json",
         "d/model-bundle-admission/digest-flip.json",
         "d/model-bundle-admission/escaping-symlink.json",
         "d/model-bundle-admission/extra-empty-dir.json",
@@ -2526,12 +2641,19 @@
         "d/observation-coverage.json"
       ]
     },
+    "8": {
+      "gaps": [],
+      "goldens": [
+        "d/bed-containment.json"
+      ]
+    },
     "9": {
       "gaps": [
         "execution-record accelerator value"
       ],
       "goldens": [
         "d/codec-edges.json",
+        "r/execution-records-overflow.json",
         "r/execution-records.json",
         "r/execution-records.model-evidence.json",
         "r/execution-records.model-evidence.response.json",

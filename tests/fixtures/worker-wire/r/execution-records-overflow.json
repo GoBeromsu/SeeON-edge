@@ -1,0 +1,1084 @@
+{
+  "byte_cap": {
+    "batch_max": 8,
+    "emit": [
+      {
+        "input": "policy #0 pad 400000",
+        "queued_after": 1,
+        "try_emit": true
+      },
+      {
+        "input": "policy #1 pad 400000",
+        "queued_after": 2,
+        "try_emit": true
+      },
+      {
+        "input": "policy #2 pad 400000",
+        "queued_after": 3,
+        "try_emit": true
+      },
+      {
+        "input": "policy #3 pad 1100000",
+        "queued_after": 4,
+        "try_emit": true
+      }
+    ],
+    "failures": [
+      [
+        "PERMANENT",
+        "OVERSIZE"
+      ]
+    ],
+    "input": "four policy.consume records whose payload carries a 'pad' of 'x' * pad chars",
+    "lane_capacity": 8,
+    "max_execution_record_body_bytes": 1048576,
+    "posts": [
+      {
+        "backend_parser": "ok",
+        "batch_id": "d973da6cf5af638925e9df3a7ebcfc728ef3652ff3ebe8f1017b39e07459dcf9",
+        "body_bytes": 801582,
+        "body_sha256": "de3a9b4b51bbbf6096e0312438cdc0534f72ddfdea97225760e897ba1734d723",
+        "gaps": [],
+        "records": [
+          {
+            "pad_chars": 400000,
+            "producer": "policy",
+            "producer_sequence": 0,
+            "record_id": "c6c1098b56b035796cde04953f7f1f4ec0ff090d40c3404307e1da839b5d9bb9"
+          },
+          {
+            "pad_chars": 400000,
+            "producer": "policy",
+            "producer_sequence": 1,
+            "record_id": "210d13ff6fec15bc61a172391c369ef8378dc001164bbd7092344cad8501ff54"
+          }
+        ],
+        "within_cap": true
+      },
+      {
+        "backend_parser": "ok",
+        "batch_id": "59bf2d774527291a8dad933aef3c0b06a03cd7a2ec0c2a4e180aa70aee428e1d",
+        "body_bytes": 401191,
+        "body_sha256": "9c9c2ecbfaa4a01e94f0e2f9b8b2888eeb981ef5b9ba88c2bf34ac1feac8cb20",
+        "gaps": [
+          {
+            "cause": "record-invalid",
+            "from_ns": 1787000000100000999,
+            "from_sequence": 3,
+            "producer": "policy",
+            "record_count": 1,
+            "source_generation": 1,
+            "stream_epoch": 1,
+            "to_ns": 1787000000100000999,
+            "to_sequence": 3
+          }
+        ],
+        "records": [
+          {
+            "pad_chars": 400000,
+            "producer": "policy",
+            "producer_sequence": 2,
+            "record_id": "f258e15866fd6831f2e577a93563b31114acd0b9c0594a48f2ea8d8e9b8e3e9a"
+          }
+        ],
+        "within_cap": true
+      }
+    ],
+    "queued_after": 0,
+    "warnings": [
+      "execution-record export for camera cmsnw6rjc01vhlh01oswn99yq: OVERSIZE (one record cannot be encoded within the byte cap; recorded as record-invalid)"
+    ]
+  },
+  "exporter_run": {
+    "batch_max": 4,
+    "failures": [],
+    "flush_ms": 500,
+    "flushes": [
+      {
+        "after_wait": 0,
+        "posts": []
+      },
+      {
+        "after_wait": 1,
+        "posts": [
+          {
+            "backend_parser": "ok",
+            "body": {
+              "batch_id": "c6ab70fc4e1a931f52049a3362545c44665524d593ac319c403a06bc2b907808",
+              "camera_id": "cmsnw6rjc01vhlh01oswn99yq",
+              "gaps": [],
+              "provenance": {
+                "calibration_digest": "cal-1",
+                "config_digest": "cfg-1",
+                "model_digest": "model-1",
+                "policy_identity": "fall.policy:2",
+                "preprocessing_identity": "pose-bbox56/v1",
+                "worker_build_revision": "abc123",
+                "worker_image_digest": "sha256:deadbeef"
+              },
+              "records": [
+                {
+                  "camera_id": "cmsnw6rjc01vhlh01oswn99yq",
+                  "causal_unit_id": "cmsnw6rjc01vhlh01oswn99yq:boot-0001:1:1:3",
+                  "frame_seq": 100,
+                  "observed_at_ns": 1787000000000000000,
+                  "outcome": "scored",
+                  "parent_record_id": null,
+                  "payload": {
+                    "background": 0.5,
+                    "fall_transition": 0.25,
+                    "fallen": 0.25,
+                    "generation": 3,
+                    "track_id": 1,
+                    "window_frames": 30
+                  },
+                  "producer": "model",
+                  "producer_sequence": 0,
+                  "reason": null,
+                  "record_id": "c8e19d5cdd5f977fdcd094967a93b5df07b257ac7dbd773490e7cb83941b496d",
+                  "record_kind": "model.score",
+                  "source_generation": 1,
+                  "source_pts_ns": 4000000000,
+                  "stream_epoch": 1,
+                  "time_quality": "wall",
+                  "worker_boot_id": "boot-0001"
+                },
+                {
+                  "camera_id": "cmsnw6rjc01vhlh01oswn99yq",
+                  "causal_unit_id": "cmsnw6rjc01vhlh01oswn99yq:boot-0001:1:1:3",
+                  "frame_seq": 101,
+                  "observed_at_ns": 1787000000033333333,
+                  "outcome": "scored",
+                  "parent_record_id": null,
+                  "payload": {
+                    "background": 0.5,
+                    "fall_transition": 0.25,
+                    "fallen": 0.25,
+                    "generation": 3,
+                    "track_id": 1,
+                    "window_frames": 30
+                  },
+                  "producer": "model",
+                  "producer_sequence": 1,
+                  "reason": null,
+                  "record_id": "30c338c0b0fafdf34ba8b6103270b1b92005fd196f8cac35813e03853377fabb",
+                  "record_kind": "model.score",
+                  "source_generation": 1,
+                  "source_pts_ns": 4033333333,
+                  "stream_epoch": 1,
+                  "time_quality": "wall",
+                  "worker_boot_id": "boot-0001"
+                }
+              ],
+              "worker_boot_id": "boot-0001"
+            },
+            "body_bytes": 1594,
+            "transport": {
+              "body_sha256": "f84be261cb776a614e253f4ab23c4398ba21b1357622cd0d6c2106c515a31d43",
+              "headers": {
+                "Content-Type": "application/json",
+                "X-Edge-Relay-Token": "<relay-token>"
+              },
+              "method": "POST",
+              "path": "/api/v1/relay/execution-records",
+              "query": "",
+              "timeout_sec": 2.0
+            }
+          }
+        ]
+      },
+      {
+        "after_wait": 2,
+        "posts": [
+          {
+            "backend_parser": "ok",
+            "body": {
+              "batch_id": "cf09854c18c2a9a1b22e1926c7f54837fd68e9c210b88a78e84857744b0b94b9",
+              "camera_id": "cmsnw6rjc01vhlh01oswn99yq",
+              "gaps": [
+                {
+                  "cause": "lane-overflow",
+                  "from_ns": 1787000000266666664,
+                  "from_sequence": 8,
+                  "producer": "model",
+                  "record_count": 4,
+                  "source_generation": 1,
+                  "stream_epoch": 1,
+                  "to_ns": 1787000000366666663,
+                  "to_sequence": 11
+                }
+              ],
+              "provenance": {
+                "calibration_digest": "cal-1",
+                "config_digest": "cfg-1",
+                "model_digest": "model-1",
+                "policy_identity": "fall.policy:2",
+                "preprocessing_identity": "pose-bbox56/v1",
+                "worker_build_revision": "abc123",
+                "worker_image_digest": "sha256:deadbeef"
+              },
+              "records": [
+                {
+                  "camera_id": "cmsnw6rjc01vhlh01oswn99yq",
+                  "causal_unit_id": "cmsnw6rjc01vhlh01oswn99yq:boot-0001:1:1:3",
+                  "frame_seq": 102,
+                  "observed_at_ns": 1787000000066666666,
+                  "outcome": "scored",
+                  "parent_record_id": null,
+                  "payload": {
+                    "background": 0.5,
+                    "fall_transition": 0.25,
+                    "fallen": 0.25,
+                    "generation": 3,
+                    "track_id": 1,
+                    "window_frames": 30
+                  },
+                  "producer": "model",
+                  "producer_sequence": 2,
+                  "reason": null,
+                  "record_id": "e9e944d76ba8c11519c9df6fcded69213d30738365d09a40c3b68b3f497519d5",
+                  "record_kind": "model.score",
+                  "source_generation": 1,
+                  "source_pts_ns": 4066666666,
+                  "stream_epoch": 1,
+                  "time_quality": "wall",
+                  "worker_boot_id": "boot-0001"
+                },
+                {
+                  "camera_id": "cmsnw6rjc01vhlh01oswn99yq",
+                  "causal_unit_id": "cmsnw6rjc01vhlh01oswn99yq:boot-0001:1:1:3",
+                  "frame_seq": 103,
+                  "observed_at_ns": 1787000000099999999,
+                  "outcome": "scored",
+                  "parent_record_id": null,
+                  "payload": {
+                    "background": 0.5,
+                    "fall_transition": 0.25,
+                    "fallen": 0.25,
+                    "generation": 3,
+                    "track_id": 1,
+                    "window_frames": 30
+                  },
+                  "producer": "model",
+                  "producer_sequence": 3,
+                  "reason": null,
+                  "record_id": "dd5dfa8e1ba260cc3b4d4624c77acc8248be7c2749defb3058d0555e328020b7",
+                  "record_kind": "model.score",
+                  "source_generation": 1,
+                  "source_pts_ns": 4099999999,
+                  "stream_epoch": 1,
+                  "time_quality": "wall",
+                  "worker_boot_id": "boot-0001"
+                },
+                {
+                  "camera_id": "cmsnw6rjc01vhlh01oswn99yq",
+                  "causal_unit_id": "cmsnw6rjc01vhlh01oswn99yq:boot-0001:1:1:3",
+                  "frame_seq": 104,
+                  "observed_at_ns": 1787000000133333332,
+                  "outcome": "scored",
+                  "parent_record_id": null,
+                  "payload": {
+                    "background": 0.5,
+                    "fall_transition": 0.25,
+                    "fallen": 0.25,
+                    "generation": 3,
+                    "track_id": 1,
+                    "window_frames": 30
+                  },
+                  "producer": "model",
+                  "producer_sequence": 4,
+                  "reason": null,
+                  "record_id": "21cbf7fe04c05b54bd7994b100339fd933d44a66015ca86d970009659e3f4c01",
+                  "record_kind": "model.score",
+                  "source_generation": 1,
+                  "source_pts_ns": 4133333332,
+                  "stream_epoch": 1,
+                  "time_quality": "wall",
+                  "worker_boot_id": "boot-0001"
+                },
+                {
+                  "camera_id": "cmsnw6rjc01vhlh01oswn99yq",
+                  "causal_unit_id": "cmsnw6rjc01vhlh01oswn99yq:boot-0001:1:1:3",
+                  "frame_seq": 105,
+                  "observed_at_ns": 1787000000166666665,
+                  "outcome": "scored",
+                  "parent_record_id": null,
+                  "payload": {
+                    "background": 0.5,
+                    "fall_transition": 0.25,
+                    "fallen": 0.25,
+                    "generation": 3,
+                    "track_id": 1,
+                    "window_frames": 30
+                  },
+                  "producer": "model",
+                  "producer_sequence": 5,
+                  "reason": null,
+                  "record_id": "0e994d49e8e8b0ca24112e1495d2ad229bbe97bbe8078ea841c511c86d8bce1d",
+                  "record_kind": "model.score",
+                  "source_generation": 1,
+                  "source_pts_ns": 4166666665,
+                  "stream_epoch": 1,
+                  "time_quality": "wall",
+                  "worker_boot_id": "boot-0001"
+                }
+              ],
+              "worker_boot_id": "boot-0001"
+            },
+            "body_bytes": 2969,
+            "transport": {
+              "body_sha256": "8a94b6a0bb3e51e27fb9d322661d96185d0c621174d00bc89d43f6fac9227b8e",
+              "headers": {
+                "Content-Type": "application/json",
+                "X-Edge-Relay-Token": "<relay-token>"
+              },
+              "method": "POST",
+              "path": "/api/v1/relay/execution-records",
+              "query": "",
+              "timeout_sec": 2.0
+            }
+          }
+        ]
+      },
+      {
+        "after_wait": 3,
+        "posts": [
+          {
+            "backend_parser": "ok",
+            "body": {
+              "batch_id": "ade00bf82513bd498bbc59ab7675f811a562a7c4857f0ad3216b5d39777da4c0",
+              "camera_id": "cmsnw6rjc01vhlh01oswn99yq",
+              "gaps": [],
+              "provenance": {
+                "calibration_digest": "cal-1",
+                "config_digest": "cfg-1",
+                "model_digest": "model-1",
+                "policy_identity": "fall.policy:2",
+                "preprocessing_identity": "pose-bbox56/v1",
+                "worker_build_revision": "abc123",
+                "worker_image_digest": "sha256:deadbeef"
+              },
+              "records": [
+                {
+                  "camera_id": "cmsnw6rjc01vhlh01oswn99yq",
+                  "causal_unit_id": "cmsnw6rjc01vhlh01oswn99yq:boot-0001:1:1:3",
+                  "frame_seq": 106,
+                  "observed_at_ns": 1787000000199999998,
+                  "outcome": "scored",
+                  "parent_record_id": null,
+                  "payload": {
+                    "background": 0.5,
+                    "fall_transition": 0.25,
+                    "fallen": 0.25,
+                    "generation": 3,
+                    "track_id": 1,
+                    "window_frames": 30
+                  },
+                  "producer": "model",
+                  "producer_sequence": 6,
+                  "reason": null,
+                  "record_id": "a3f3ac219fdd8f0debc593d361e8fd6d6fb7efcef992502b3f26ac816047ef4a",
+                  "record_kind": "model.score",
+                  "source_generation": 1,
+                  "source_pts_ns": 4199999998,
+                  "stream_epoch": 1,
+                  "time_quality": "wall",
+                  "worker_boot_id": "boot-0001"
+                },
+                {
+                  "camera_id": "cmsnw6rjc01vhlh01oswn99yq",
+                  "causal_unit_id": "cmsnw6rjc01vhlh01oswn99yq:boot-0001:1:1:3",
+                  "frame_seq": 107,
+                  "observed_at_ns": 1787000000233333331,
+                  "outcome": "scored",
+                  "parent_record_id": null,
+                  "payload": {
+                    "background": 0.5,
+                    "fall_transition": 0.25,
+                    "fallen": 0.25,
+                    "generation": 3,
+                    "track_id": 1,
+                    "window_frames": 30
+                  },
+                  "producer": "model",
+                  "producer_sequence": 7,
+                  "reason": null,
+                  "record_id": "c1124f14dedd5f8f3047b4cf8d63a8dead6a0ec5ff6753b1dff070fbc2dfdbdb",
+                  "record_kind": "model.score",
+                  "source_generation": 1,
+                  "source_pts_ns": 4233333331,
+                  "stream_epoch": 1,
+                  "time_quality": "wall",
+                  "worker_boot_id": "boot-0001"
+                },
+                {
+                  "camera_id": "cmsnw6rjc01vhlh01oswn99yq",
+                  "causal_unit_id": "cmsnw6rjc01vhlh01oswn99yq:boot-0001:1:1:3",
+                  "frame_seq": 112,
+                  "observed_at_ns": 1787000000399999996,
+                  "outcome": "scored",
+                  "parent_record_id": null,
+                  "payload": {
+                    "background": 0.5,
+                    "fall_transition": 0.25,
+                    "fallen": 0.25,
+                    "generation": 3,
+                    "track_id": 1,
+                    "window_frames": 30
+                  },
+                  "producer": "model",
+                  "producer_sequence": 12,
+                  "reason": null,
+                  "record_id": "f68d70ee8f21cf1d34b967063540e88d228c46c9cea8e376595a635e8a522ce6",
+                  "record_kind": "model.score",
+                  "source_generation": 1,
+                  "source_pts_ns": 4399999996,
+                  "stream_epoch": 1,
+                  "time_quality": "wall",
+                  "worker_boot_id": "boot-0001"
+                }
+              ],
+              "worker_boot_id": "boot-0001"
+            },
+            "body_bytes": 2186,
+            "transport": {
+              "body_sha256": "7b12cd226fde8baee03e3c31937f089f6b37184439d99a693f89c186db2ed140",
+              "headers": {
+                "Content-Type": "application/json",
+                "X-Edge-Relay-Token": "<relay-token>"
+              },
+              "method": "POST",
+              "path": "/api/v1/relay/execution-records",
+              "query": "",
+              "timeout_sec": 2.0
+            }
+          }
+        ]
+      },
+      {
+        "after_wait": 4,
+        "posts": []
+      },
+      {
+        "after_wait": 5,
+        "posts": []
+      }
+    ],
+    "lane_capacity": 6,
+    "loop": "ExecutionRecordExporter._run (L94): wait_for_work(timeout_sec=flush_ms/1000, batch_max) then flush_once, until stop; the last scripted wait sets stop",
+    "receipts": [
+      {
+        "accepted": 2,
+        "batch_id": "c6ab70fc4e1a931f52049a3362545c44665524d593ac319c403a06bc2b907808",
+        "committed_at_ns": 1787000000001000000,
+        "duplicates": 0,
+        "rejected": [],
+        "storage_state": "committed"
+      },
+      {
+        "accepted": 4,
+        "batch_id": "cf09854c18c2a9a1b22e1926c7f54837fd68e9c210b88a78e84857744b0b94b9",
+        "committed_at_ns": 1787000000002000000,
+        "duplicates": 0,
+        "rejected": [],
+        "storage_state": "committed"
+      },
+      {
+        "accepted": 3,
+        "batch_id": "ade00bf82513bd498bbc59ab7675f811a562a7c4857f0ad3216b5d39777da4c0",
+        "committed_at_ns": 1787000000003000000,
+        "duplicates": 0,
+        "rejected": [],
+        "storage_state": "committed"
+      }
+    ],
+    "waits": [
+      {
+        "batch_ready": false,
+        "emitted_before_wait": [],
+        "has_work": false,
+        "outcome": "times-out-after-timeout_sec",
+        "predicate": false,
+        "records_queued": 0,
+        "timeout_sec": 0.5,
+        "wait": 0
+      },
+      {
+        "batch_ready": false,
+        "emitted_before_wait": [
+          {
+            "input": "model #0",
+            "queued_after": 1,
+            "try_emit": true
+          },
+          {
+            "input": "model #1",
+            "queued_after": 2,
+            "try_emit": true
+          }
+        ],
+        "has_work": true,
+        "outcome": "returns-immediately",
+        "predicate": true,
+        "records_queued": 2,
+        "timeout_sec": 0.5,
+        "wait": 1
+      },
+      {
+        "batch_ready": true,
+        "emitted_before_wait": [
+          {
+            "input": "model #2",
+            "queued_after": 1,
+            "try_emit": true
+          },
+          {
+            "input": "model #3",
+            "queued_after": 2,
+            "try_emit": true
+          },
+          {
+            "input": "model #4",
+            "queued_after": 3,
+            "try_emit": true
+          },
+          {
+            "input": "model #5",
+            "queued_after": 4,
+            "try_emit": true
+          },
+          {
+            "input": "model #6",
+            "queued_after": 5,
+            "try_emit": true
+          },
+          {
+            "input": "model #7",
+            "queued_after": 6,
+            "try_emit": true
+          },
+          {
+            "input": "model #8",
+            "queued_after": 6,
+            "try_emit": false
+          },
+          {
+            "input": "model #9",
+            "queued_after": 6,
+            "try_emit": false
+          },
+          {
+            "input": "model #10",
+            "queued_after": 6,
+            "try_emit": false
+          },
+          {
+            "input": "model #11",
+            "queued_after": 6,
+            "try_emit": false
+          }
+        ],
+        "has_work": true,
+        "outcome": "returns-immediately",
+        "predicate": true,
+        "records_queued": 6,
+        "timeout_sec": 0.5,
+        "wait": 2
+      },
+      {
+        "batch_ready": false,
+        "emitted_before_wait": [
+          {
+            "input": "model #12",
+            "queued_after": 3,
+            "try_emit": true
+          }
+        ],
+        "has_work": true,
+        "outcome": "returns-immediately",
+        "predicate": true,
+        "records_queued": 3,
+        "timeout_sec": 0.5,
+        "wait": 3
+      },
+      {
+        "batch_ready": false,
+        "emitted_before_wait": [],
+        "has_work": false,
+        "outcome": "times-out-after-timeout_sec",
+        "predicate": false,
+        "records_queued": 0,
+        "timeout_sec": 0.5,
+        "wait": 4
+      },
+      {
+        "batch_ready": false,
+        "emitted_before_wait": [],
+        "has_work": false,
+        "outcome": "times-out-after-timeout_sec",
+        "predicate": false,
+        "records_queued": 0,
+        "timeout_sec": 0.5,
+        "wait": 5
+      }
+    ]
+  },
+  "lanes": {
+    "lane_capacity": 3,
+    "steps": [
+      {
+        "results": [
+          {
+            "input": "model #0 epoch 1",
+            "queued_after": 1,
+            "try_emit": true
+          },
+          {
+            "input": "model #1 epoch 1",
+            "queued_after": 2,
+            "try_emit": true
+          },
+          {
+            "input": "model #2 epoch 1",
+            "queued_after": 3,
+            "try_emit": true
+          },
+          {
+            "input": "model #3 epoch 1",
+            "queued_after": 3,
+            "try_emit": false
+          },
+          {
+            "input": "model #4 epoch 1",
+            "queued_after": 3,
+            "try_emit": false
+          },
+          {
+            "input": "model #5 epoch 1",
+            "queued_after": 3,
+            "try_emit": false
+          },
+          {
+            "input": "model #6 epoch 2",
+            "queued_after": 3,
+            "try_emit": false
+          },
+          {
+            "input": "policy #0",
+            "queued_after": 4,
+            "try_emit": true
+          },
+          {
+            "input": "policy #1",
+            "queued_after": 5,
+            "try_emit": true
+          },
+          {
+            "input": "policy #2",
+            "queued_after": 6,
+            "try_emit": true
+          },
+          {
+            "input": "policy #3",
+            "queued_after": 6,
+            "try_emit": false
+          },
+          {
+            "input": "policy #4",
+            "queued_after": 6,
+            "try_emit": false
+          },
+          {
+            "input": "model #0 boot-0002",
+            "queued_after": 7,
+            "try_emit": true
+          },
+          {
+            "input": "not a WireRecord (None)",
+            "queued_after": 7,
+            "try_emit": false
+          }
+        ],
+        "step": "emit"
+      },
+      {
+        "result": [
+          [
+            "cmsnw6rjc01vhlh01oswn99yq",
+            "boot-0001"
+          ],
+          [
+            "cmsnw6rjc01vhlh01oswn99yq",
+            "boot-0002"
+          ]
+        ],
+        "step": "cameras_with_work"
+      },
+      {
+        "result": {
+          "camera_id": "cmsnw6rjc01vhlh01oswn99yq",
+          "gaps": [
+            {
+              "cause": "lane-overflow",
+              "from_ns": 1787000000099999999,
+              "from_sequence": 3,
+              "producer": "model",
+              "record_count": 3,
+              "source_generation": 1,
+              "stream_epoch": 1,
+              "to_ns": 1787000000166666665,
+              "to_sequence": 5
+            },
+            {
+              "cause": "lane-overflow",
+              "from_ns": 1787000000199999998,
+              "from_sequence": 6,
+              "producer": "model",
+              "record_count": 1,
+              "source_generation": 1,
+              "stream_epoch": 2,
+              "to_ns": 1787000000199999998,
+              "to_sequence": 6
+            },
+            {
+              "cause": "lane-overflow",
+              "from_ns": 1787000000100000999,
+              "from_sequence": 3,
+              "producer": "policy",
+              "record_count": 2,
+              "source_generation": 1,
+              "stream_epoch": 1,
+              "to_ns": 1787000000133334332,
+              "to_sequence": 4
+            }
+          ],
+          "records": [
+            {
+              "camera_id": "cmsnw6rjc01vhlh01oswn99yq",
+              "causal_unit_id": "cmsnw6rjc01vhlh01oswn99yq:boot-0001:1:1:3",
+              "frame_seq": 100,
+              "observed_at_ns": 1787000000000000000,
+              "outcome": "scored",
+              "parent_record_id": null,
+              "payload": {
+                "background": 0.5,
+                "fall_transition": 0.25,
+                "fallen": 0.25,
+                "generation": 3,
+                "track_id": 1,
+                "window_frames": 30
+              },
+              "producer": "model",
+              "producer_sequence": 0,
+              "reason": null,
+              "record_id": "c8e19d5cdd5f977fdcd094967a93b5df07b257ac7dbd773490e7cb83941b496d",
+              "record_kind": "model.score",
+              "source_generation": 1,
+              "source_pts_ns": 4000000000,
+              "stream_epoch": 1,
+              "time_quality": "wall",
+              "worker_boot_id": "boot-0001"
+            },
+            {
+              "camera_id": "cmsnw6rjc01vhlh01oswn99yq",
+              "causal_unit_id": "cmsnw6rjc01vhlh01oswn99yq:boot-0001:1:1:3",
+              "frame_seq": 101,
+              "observed_at_ns": 1787000000033333333,
+              "outcome": "scored",
+              "parent_record_id": null,
+              "payload": {
+                "background": 0.5,
+                "fall_transition": 0.25,
+                "fallen": 0.25,
+                "generation": 3,
+                "track_id": 1,
+                "window_frames": 30
+              },
+              "producer": "model",
+              "producer_sequence": 1,
+              "reason": null,
+              "record_id": "30c338c0b0fafdf34ba8b6103270b1b92005fd196f8cac35813e03853377fabb",
+              "record_kind": "model.score",
+              "source_generation": 1,
+              "source_pts_ns": 4033333333,
+              "stream_epoch": 1,
+              "time_quality": "wall",
+              "worker_boot_id": "boot-0001"
+            },
+            {
+              "camera_id": "cmsnw6rjc01vhlh01oswn99yq",
+              "causal_unit_id": "cmsnw6rjc01vhlh01oswn99yq:boot-0001:1:1:3",
+              "frame_seq": 102,
+              "observed_at_ns": 1787000000066666666,
+              "outcome": "scored",
+              "parent_record_id": null,
+              "payload": {
+                "background": 0.5,
+                "fall_transition": 0.25,
+                "fallen": 0.25,
+                "generation": 3,
+                "track_id": 1,
+                "window_frames": 30
+              },
+              "producer": "model",
+              "producer_sequence": 2,
+              "reason": null,
+              "record_id": "e9e944d76ba8c11519c9df6fcded69213d30738365d09a40c3b68b3f497519d5",
+              "record_kind": "model.score",
+              "source_generation": 1,
+              "source_pts_ns": 4066666666,
+              "stream_epoch": 1,
+              "time_quality": "wall",
+              "worker_boot_id": "boot-0001"
+            },
+            {
+              "camera_id": "cmsnw6rjc01vhlh01oswn99yq",
+              "causal_unit_id": "cmsnw6rjc01vhlh01oswn99yq:boot-0001:1:frame:3",
+              "frame_seq": 100,
+              "observed_at_ns": 1787000000000001000,
+              "outcome": "consumed",
+              "parent_record_id": null,
+              "payload": {
+                "accepted_delta": 1,
+                "late_delta": 0,
+                "overwritten_delta": 0,
+                "processed_count": 0
+              },
+              "producer": "policy",
+              "producer_sequence": 0,
+              "reason": null,
+              "record_id": "e82f05ef2050533e5d311a93857758d9f1733f09b59070e9348162e8764975cb",
+              "record_kind": "policy.consume",
+              "source_generation": 1,
+              "source_pts_ns": 4000000000,
+              "stream_epoch": 1,
+              "time_quality": "wall",
+              "worker_boot_id": "boot-0001"
+            },
+            {
+              "camera_id": "cmsnw6rjc01vhlh01oswn99yq",
+              "causal_unit_id": "cmsnw6rjc01vhlh01oswn99yq:boot-0001:1:frame:3",
+              "frame_seq": 101,
+              "observed_at_ns": 1787000000033334333,
+              "outcome": "consumed",
+              "parent_record_id": null,
+              "payload": {
+                "accepted_delta": 1,
+                "late_delta": 0,
+                "overwritten_delta": 0,
+                "processed_count": 1
+              },
+              "producer": "policy",
+              "producer_sequence": 1,
+              "reason": null,
+              "record_id": "8af0f01e3006155342d8a279f2e691aa0f5e57abc3c7eb65cb519965febac37f",
+              "record_kind": "policy.consume",
+              "source_generation": 1,
+              "source_pts_ns": 4033333333,
+              "stream_epoch": 1,
+              "time_quality": "wall",
+              "worker_boot_id": "boot-0001"
+            },
+            {
+              "camera_id": "cmsnw6rjc01vhlh01oswn99yq",
+              "causal_unit_id": "cmsnw6rjc01vhlh01oswn99yq:boot-0001:1:frame:3",
+              "frame_seq": 102,
+              "observed_at_ns": 1787000000066667666,
+              "outcome": "consumed",
+              "parent_record_id": null,
+              "payload": {
+                "accepted_delta": 1,
+                "late_delta": 0,
+                "overwritten_delta": 0,
+                "processed_count": 2
+              },
+              "producer": "policy",
+              "producer_sequence": 2,
+              "reason": null,
+              "record_id": "68af3ba8ef84c39f2c51d331ecb81a03ddd2e1925f9b22e088d4ed7a0dce900b",
+              "record_kind": "policy.consume",
+              "source_generation": 1,
+              "source_pts_ns": 4066666666,
+              "stream_epoch": 1,
+              "time_quality": "wall",
+              "worker_boot_id": "boot-0001"
+            }
+          ],
+          "worker_boot_id": "boot-0001"
+        },
+        "step": "drain_for(boot-0001, limit=10)"
+      },
+      {
+        "results": [
+          {
+            "input": "model #7 epoch 2",
+            "queued_after": 2,
+            "try_emit": true
+          }
+        ],
+        "step": "emit"
+      },
+      {
+        "result": {
+          "camera_id": "cmsnw6rjc01vhlh01oswn99yq",
+          "gaps": [],
+          "records": [
+            {
+              "camera_id": "cmsnw6rjc01vhlh01oswn99yq",
+              "causal_unit_id": "cmsnw6rjc01vhlh01oswn99yq:boot-0001:2:1:3",
+              "frame_seq": 107,
+              "observed_at_ns": 1787000000233333331,
+              "outcome": "scored",
+              "parent_record_id": null,
+              "payload": {
+                "background": 0.5,
+                "fall_transition": 0.25,
+                "fallen": 0.25,
+                "generation": 3,
+                "track_id": 1,
+                "window_frames": 30
+              },
+              "producer": "model",
+              "producer_sequence": 7,
+              "reason": null,
+              "record_id": "67ccffb424ba6f3a84027121c07fe350c5ea57c6ad4995ce519e60a210761574",
+              "record_kind": "model.score",
+              "source_generation": 1,
+              "source_pts_ns": 4233333331,
+              "stream_epoch": 2,
+              "time_quality": "wall",
+              "worker_boot_id": "boot-0001"
+            }
+          ],
+          "worker_boot_id": "boot-0001"
+        },
+        "step": "drain_for(boot-0001, limit=1)"
+      },
+      {
+        "result": null,
+        "step": "drain_for(boot-0001, limit=1) again"
+      },
+      {
+        "result": {
+          "camera_id": "cmsnw6rjc01vhlh01oswn99yq",
+          "gaps": [],
+          "records": [
+            {
+              "camera_id": "cmsnw6rjc01vhlh01oswn99yq",
+              "causal_unit_id": "cmsnw6rjc01vhlh01oswn99yq:boot-0002:1:1:3",
+              "frame_seq": 100,
+              "observed_at_ns": 1787000000000000000,
+              "outcome": "scored",
+              "parent_record_id": null,
+              "payload": {
+                "background": 0.5,
+                "fall_transition": 0.25,
+                "fallen": 0.25,
+                "generation": 3,
+                "track_id": 1,
+                "window_frames": 30
+              },
+              "producer": "model",
+              "producer_sequence": 0,
+              "reason": null,
+              "record_id": "be0d392b49a13a66dc46a398db686c2344b06440076fa334e0a5999cea8c7511",
+              "record_kind": "model.score",
+              "source_generation": 1,
+              "source_pts_ns": 4000000000,
+              "stream_epoch": 1,
+              "time_quality": "wall",
+              "worker_boot_id": "boot-0002"
+            }
+          ],
+          "worker_boot_id": "boot-0002"
+        },
+        "step": "drain_for(boot-0002, limit=10)"
+      }
+    ]
+  },
+  "provenance": "synthetic-only",
+  "recipe": {
+    "camera_id": "cmsnw6rjc01vhlh01oswn99yq",
+    "observed_at_ns": "1787000000000000000 + index * 33333333 (policy + 1000); injected, no clock read",
+    "provenance": [
+      "abc123",
+      "sha256:deadbeef",
+      "model-1",
+      "cal-1",
+      "pose-bbox56/v1",
+      "cfg-1",
+      "fall.policy:2"
+    ],
+    "records": "model.score via emit_policy.model_score_record (producer 'model'); policy.consume via record_builder.make_record with the policy_consume_record payload shape (producer 'policy')",
+    "time": "no sleeps; lanes._condition replaced by a scripted non-blocking condition for the _run part",
+    "transport": "shared.events.execution_records_client.bounded_request replaced by an in-process fake returning a committed receipt; no network send",
+    "worker_boot_id": [
+      "boot-0001",
+      "boot-0002"
+    ]
+  },
+  "recorder_sha256": "685b4b585916d96ada08ef94edec4266005c60aa992eccf4540209ed43a73e35",
+  "refusals": [
+    {
+      "case": "ExecutionRecordLanes(lane_capacity=0)",
+      "class": "ValueError",
+      "message": "lane_capacity must be a positive integer",
+      "verdict": "refused"
+    },
+    {
+      "case": "ExecutionRecordLanes(lane_capacity=-1)",
+      "class": "ValueError",
+      "message": "lane_capacity must be a positive integer",
+      "verdict": "refused"
+    },
+    {
+      "case": "ExecutionRecordLanes(lane_capacity=1)",
+      "verdict": "accepted"
+    },
+    {
+      "case": "drain_for(limit=0)",
+      "class": "ValueError",
+      "message": "drain limit must be a positive integer",
+      "verdict": "refused"
+    },
+    {
+      "case": "drain_for(limit=-1)",
+      "class": "ValueError",
+      "message": "drain limit must be a positive integer",
+      "verdict": "refused"
+    },
+    {
+      "case": "ExecutionRecordExporter(batch_max=0, flush_ms=500)",
+      "class": "ValueError",
+      "message": "batch_max and flush_ms must be positive",
+      "verdict": "refused"
+    },
+    {
+      "case": "ExecutionRecordExporter(batch_max=4, flush_ms=0)",
+      "class": "ValueError",
+      "message": "batch_max and flush_ms must be positive",
+      "verdict": "refused"
+    },
+    {
+      "case": "ExecutionRecordExporter(batch_max=-1, flush_ms=500)",
+      "class": "ValueError",
+      "message": "batch_max and flush_ms must be positive",
+      "verdict": "refused"
+    },
+    {
+      "case": "ExecutionRecordExporter(batch_max=1, flush_ms=1)",
+      "verdict": "accepted"
+    }
+  ],
+  "repo_head": "030aaf1dc2c4a114b5d1f83ae391757ddbc3da2c",
+  "review": {
+    "independent_oracle": [
+      "worker/pipeline/diagnostics/lanes.py:ExecutionRecordLanes.try_emit (L60; sequence L69, L77; overflow L78-83) @030aaf1",
+      "worker/pipeline/diagnostics/lanes.py:ExecutionRecordLanes.drain_for (L116), _take_overflow (L227), _gaps_for_records (L264), wait_for_work (L88), _batch_ready (L191), __init__ refusal (L51-53) @030aaf1",
+      "worker/pipeline/diagnostics/exporter.py:ExecutionRecordExporter.__init__ refusal (L45), flush_once (L84), _run (L94), _post byte chunking (L102-185), _send (L201) @030aaf1",
+      "shared/events/execution_records.py:MAX_EXECUTION_RECORD_BODY_BYTES, WireBatch.from_json; backend/app/features/diagnostics/wire.py:ingest_batch_from_wire @030aaf1"
+    ],
+    "note": "An overflowed record still consumes its producer_sequence (L77 before the capacity check at L78); lane-overflow gaps are grouped per (producer, source_generation, stream_epoch) into consecutive runs, so they never merge across producers or epochs. Python's wait predicate is batch_ready OR has_work, so any queued record or gap makes the exporter flush immediately; BATCH_MAX caps records per drain_for (one drain per camera/boot per flush) and FLUSH_MS is only the idle wait timeout. Bodies are split before exceeding MAX_EXECUTION_RECORD_BODY_BYTES; a single record larger than the cap becomes a record-invalid gap."
+  },
+  "schema": "seeon-worker-wire-goldens/execution-records-overflow/v1"
+}
