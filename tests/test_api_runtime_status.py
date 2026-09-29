@@ -1,19 +1,20 @@
 from __future__ import annotations
 
 import json
-import sqlite3
 import threading
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
 import pytest
+from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from httpx import Response
 from pydantic import ValidationError
 from starlette.applications import Starlette
 
-from backend.app.features.cameras.store import CameraRegistryStore
+from backend.app.edge_db.migration.mapping import DIAGNOSTICS_TARGET_TABLES, EXPECTED_TARGET_TABLES
+from backend.app.features.audit.postgres_runtime import PostgresAuditRuntime
 from backend.app.features.relay.router import (
     MAX_RELAY_RUNTIME_STATUS_BODY_BYTES,
     RelayRuntimeStatusRequest,
@@ -30,7 +31,8 @@ from shared.events.delivery_queue import (
     SnapshotAttachmentEntry,
     SnapshotDispositionEntry,
 )
-from tests_support.compact_authority_db import prepare_compact_database
+from tests_support.postgres_api_app import postgres_api_app
+from tests_support.postgres_sandbox import ProductSandbox
 from worker.pipeline.inference_telemetry import (
     CameraInferenceTelemetry,
     InferenceTelemetrySnapshot,
@@ -38,6 +40,15 @@ from worker.pipeline.inference_telemetry import (
 from worker.runtime.telemetry.runtime_diagnostics import WorkerDiagnostics
 from worker.runtime.telemetry.runtime_status_sender import RuntimeStatusSender
 from worker.runtime.telemetry.wire import RelayRuntimeStatusPayload
+
+pytest_plugins = ("tests_support.postgres_sandbox",)
+
+
+@pytest.fixture
+def app(
+    postgres_product_sandbox: ProductSandbox, postgres_audit_runtime: PostgresAuditRuntime
+) -> FastAPI:
+    return postgres_api_app(postgres_product_sandbox, postgres_audit_runtime)
 
 
 def _payload(**overrides: object) -> dict[str, object]:
@@ -73,8 +84,7 @@ def _payload(**overrides: object) -> dict[str, object]:
     return payload
 
 
-def _client() -> TestClient:
-    app = create_app(lifespan=no_lifespan)
+def _client(app: FastAPI) -> TestClient:
     app.state.edge_relay_token = "relay-token"
     app.state.camera_inventory = {
         "camera-1": {"camera_id": "camera-1", "facility_id": "facility-1"}
@@ -184,11 +194,13 @@ def _post_queue_capacity(client: TestClient, queue: DeliveryQueue) -> dict[str, 
     return delivery_queue
 
 
-def test_status_round_trips_delivery_queue_capacity_and_kind_mix(tmp_path: Path) -> None:
+def test_status_round_trips_delivery_queue_capacity_and_kind_mix(
+    tmp_path: Path, app: FastAPI
+) -> None:
     queue = _delivery_queue(tmp_path)
     expected = queue.capacity_snapshot
 
-    projected = _post_queue_capacity(_client(), queue)
+    projected = _post_queue_capacity(_client(app), queue)
 
     assert projected == {
         "accepted_count": expected.accepted_count,
@@ -212,8 +224,8 @@ def test_status_round_trips_delivery_queue_capacity_and_kind_mix(tmp_path: Path)
     assert projected["oldest_event_accepted_at"] is not None
 
 
-def test_status_promotes_delivery_queue_to_top_level(tmp_path: Path) -> None:
-    client = _client()
+def test_status_promotes_delivery_queue_to_top_level(tmp_path: Path, app: FastAPI) -> None:
+    client = _client(app)
     _post_queue_capacity(client, _delivery_queue(tmp_path))
 
     runtime = _json(client.get("/api/v1/status"))["runtime"]
@@ -221,8 +233,10 @@ def test_status_promotes_delivery_queue_to_top_level(tmp_path: Path) -> None:
     assert runtime["delivery_queue"] == runtime["facilities"]["facility-1"]["delivery_queue"]
 
 
-def test_status_reports_delivery_queue_bounds_for_headroom_calculation(tmp_path: Path) -> None:
-    projected = _post_queue_capacity(_client(), _delivery_queue(tmp_path))
+def test_status_reports_delivery_queue_bounds_for_headroom_calculation(
+    tmp_path: Path, app: FastAPI
+) -> None:
+    projected = _post_queue_capacity(_client(app), _delivery_queue(tmp_path))
 
     assert projected["max_accepted_entries"] == MAX_ACCEPTED_ENTRIES
     assert projected["max_accepted_bytes"] == MAX_ACCEPTED_BYTES
@@ -251,7 +265,7 @@ def test_runtime_status_schema_round_trip_and_rejects_extra_fields() -> None:
         RelayRuntimeStatusRequest.model_validate(_payload(unexpected=True))
 
 
-def test_runtime_status_accepts_old_payload_omitting_detection() -> None:
+def test_runtime_status_accepts_old_payload_omitting_detection(app: FastAPI) -> None:
     """Old workers remain accepted and are explicitly reported as missing."""
     payload = _payload()
     camera = _payload_cameras(payload)[0]
@@ -259,7 +273,7 @@ def test_runtime_status_accepts_old_payload_omitting_detection() -> None:
     assert "detection" not in camera
 
     parsed = RelayRuntimeStatusRequest.model_validate(payload)
-    client = _client()
+    client = _client(app)
     posted = _post(client, payload)
     accepted_camera = _runtime_cameras(client)["camera-1"]
 
@@ -286,7 +300,7 @@ def _camera(**overrides: object) -> dict[str, object]:
     return camera
 
 
-def test_runtime_status_accepts_valid_zero_event_progress_detection() -> None:
+def test_runtime_status_accepts_valid_zero_event_progress_detection(app: FastAPI) -> None:
     detection = _detection(
         inference_admitted=4,
         inference_succeeded=4,
@@ -295,7 +309,7 @@ def test_runtime_status_accepts_valid_zero_event_progress_detection() -> None:
     )
     payload = _payload(cameras=[_camera(detection=detection)])
     parsed = RelayRuntimeStatusRequest.model_validate(payload)
-    client = _client()
+    client = _client(app)
     posted = _post(client, payload)
     stored = _runtime_cameras(client)["camera-1"]
 
@@ -531,10 +545,11 @@ def test_detection_health_prunes_removed_camera_and_facility_state() -> None:
 
 def test_detection_health_real_api_sequence_uses_accepted_times(
     monkeypatch: pytest.MonkeyPatch,
+    app: FastAPI,
 ) -> None:
     clock = [0.0]
     monkeypatch.setattr("backend.app.features.status.runtime_status_store.time", lambda: clock[0])
-    client = _client()
+    client = _client(app)
 
     def post_at(at: float, seq: int, detection: dict[str, object]) -> dict[str, object]:
         clock[0] = at
@@ -574,7 +589,7 @@ def test_detection_health_real_api_sequence_uses_accepted_times(
         )
     )
 
-    timeout_client = _client()
+    timeout_client = _client(app)
     timeout_app = timeout_client.app
     assert isinstance(timeout_app, Starlette)
     timeout_app.state.runtime_status_store = RuntimeStatusStore(stale_after_sec=1000.0)
@@ -599,7 +614,7 @@ def test_detection_health_real_api_sequence_uses_accepted_times(
     ]
 
 
-def test_runtime_status_rejects_impossible_counter_ordering() -> None:
+def test_runtime_status_rejects_impossible_counter_ordering(app: FastAPI) -> None:
     succeeded_gt_admitted = _payload(
         cameras=[_camera(detection=_detection(inference_admitted=1, inference_succeeded=2))]
     )
@@ -619,10 +634,10 @@ def test_runtime_status_rejects_impossible_counter_ordering() -> None:
         RelayRuntimeStatusRequest.model_validate(succeeded_gt_admitted)
     with pytest.raises(ValidationError):
         RelayRuntimeStatusRequest.model_validate(completed_gt_succeeded)
-    assert _post(_client(), completed_gt_succeeded).status_code == 422
+    assert _post(_client(app), completed_gt_succeeded).status_code == 422
 
 
-def test_runtime_status_rejects_negative_detection_counters() -> None:
+def test_runtime_status_rejects_negative_detection_counters(app: FastAPI) -> None:
     for field in (
         "inference_admitted",
         "inference_succeeded",
@@ -632,19 +647,21 @@ def test_runtime_status_rejects_negative_detection_counters() -> None:
         payload = _payload(cameras=[_camera(detection=_detection(**{field: -1}))])
         with pytest.raises(ValidationError):
             RelayRuntimeStatusRequest.model_validate(payload)
-        assert _post(_client(), payload).status_code == 422
+        assert _post(_client(app), payload).status_code == 422
 
 
-def test_runtime_status_rejects_unknown_detection_extras() -> None:
+def test_runtime_status_rejects_unknown_detection_extras(app: FastAPI) -> None:
     payload = _payload(cameras=[_camera(detection=_detection(reason="pose_not_completing"))])
 
     with pytest.raises(ValidationError):
         RelayRuntimeStatusRequest.model_validate(payload)
-    assert _post(_client(), payload).status_code == 422
+    assert _post(_client(app), payload).status_code == 422
 
 
-def test_runtime_status_rejects_one_malformed_camera_without_mutating_snapshot() -> None:
-    client = _client()
+def test_runtime_status_rejects_one_malformed_camera_without_mutating_snapshot(
+    app: FastAPI,
+) -> None:
+    client = _client(app)
     first = _post(client, _payload())
     generation = _json(first)["generation"]
     rejected = _post(
@@ -669,7 +686,7 @@ def test_runtime_status_rejects_one_malformed_camera_without_mutating_snapshot()
     assert stored["camera-1"]["detection"] == _derived(state="unknown", reason="telemetry_missing")
 
 
-def test_fifty_camera_detection_payload_stays_under_runtime_status_body_limit() -> None:
+def test_fifty_camera_detection_payload_stays_under_runtime_status_body_limit(app: FastAPI) -> None:
     cameras = [
         _camera(
             camera_id=f"camera-{index:02d}",
@@ -681,7 +698,7 @@ def test_fifty_camera_detection_payload_stays_under_runtime_status_body_limit() 
     payload = _payload(cameras=cameras, generation=1)
     body = json.dumps(payload, separators=(",", ":")).encode("utf-8")
     parsed = RelayRuntimeStatusRequest.model_validate(payload)
-    posted = _post(_client(), payload)
+    posted = _post(_client(app), payload)
 
     assert len(body) < MAX_RELAY_RUNTIME_STATUS_BODY_BYTES
     assert len(parsed.cameras) == 50
@@ -816,8 +833,8 @@ def test_worker_fifty_camera_detection_payload_stays_under_body_limit() -> None:
     assert len(body) < MAX_RELAY_RUNTIME_STATUS_BODY_BYTES
 
 
-def test_runtime_status_exposes_additive_diagnostics() -> None:
-    client = _client()
+def test_runtime_status_exposes_additive_diagnostics(app: FastAPI) -> None:
+    client = _client(app)
     payload = _payload(
         cameras=[
             {
@@ -888,7 +905,7 @@ def test_flatten_runtime_cameras_marks_fresh_camera_as_not_stale() -> None:
 
 
 def test_status_returns_unmapped_local_camera_id_unchanged(
-    tmp_path: Path,
+    app: FastAPI,
 ) -> None:
     """Baseline: an unmapped registry-local id is already the dashboard key.
 
@@ -897,12 +914,8 @@ def test_status_returns_unmapped_local_camera_id_unchanged(
     keep that same key. This is the identity we later normalize mapped
     aliases onto; the unmapped path must not change.
     """
-    app = create_app(lifespan=no_lifespan)
     app.state.edge_relay_token = "relay-token"
-    registry_path = tmp_path / "catalog.sqlite3"
-    prepare_compact_database(registry_path)
-    registry = CameraRegistryStore(registry_path)
-    registry.create(
+    app.state.camera_registry.create(
         camera_id="local-unmapped-1",
         label="Lobby",
         rtsp_url="rtsp://example/unmapped",
@@ -910,7 +923,6 @@ def test_status_returns_unmapped_local_camera_id_unchanged(
         status="online",
         backend_camera_id=None,
     )
-    app.state.camera_registry = registry
     client = TestClient(app)
 
     posted = _post(
@@ -934,17 +946,13 @@ def test_status_returns_unmapped_local_camera_id_unchanged(
 
 
 def _registry_status_client(
-    tmp_path: Path,
+    app: FastAPI,
     *,
     camera_id: str,
     backend_camera_id: str | None,
 ) -> TestClient:
-    app = create_app(lifespan=no_lifespan)
     app.state.edge_relay_token = "relay-token"
-    registry_path = tmp_path / "catalog.sqlite3"
-    prepare_compact_database(registry_path)
-    registry = CameraRegistryStore(registry_path)
-    registry.create(
+    app.state.camera_registry.create(
         camera_id=camera_id,
         label="Lobby",
         rtsp_url="rtsp://example/lobby",
@@ -952,15 +960,14 @@ def _registry_status_client(
         status="online",
         backend_camera_id=backend_camera_id,
     )
-    app.state.camera_registry = registry
     return TestClient(app)
 
 
 def test_status_normalizes_mapped_canonical_id_to_local_registry_id(
-    tmp_path: Path,
+    app: FastAPI,
 ) -> None:
     client = _registry_status_client(
-        tmp_path,
+        app,
         camera_id="local-uuid-1",
         backend_camera_id="backend-camera-1",
     )
@@ -986,9 +993,9 @@ def test_status_normalizes_mapped_canonical_id_to_local_registry_id(
     assert runtime_cameras["local-uuid-1"]["measured_fps"] == 11.0
 
 
-def test_status_keeps_unmapped_local_id_as_dashboard_key(tmp_path: Path) -> None:
+def test_status_keeps_unmapped_local_id_as_dashboard_key(app: FastAPI) -> None:
     client = _registry_status_client(
-        tmp_path,
+        app,
         camera_id="local-unmapped-2",
         backend_camera_id=None,
     )
@@ -1013,9 +1020,9 @@ def test_status_keeps_unmapped_local_id_as_dashboard_key(tmp_path: Path) -> None
     assert runtime_cameras["local-unmapped-2"]["measured_fps"] == 6.5
 
 
-def test_status_retains_unknown_runtime_camera_id(tmp_path: Path) -> None:
+def test_status_retains_unknown_runtime_camera_id(app: FastAPI) -> None:
     client = _registry_status_client(
-        tmp_path,
+        app,
         camera_id="local-uuid-1",
         backend_camera_id="backend-camera-1",
     )
@@ -1042,10 +1049,10 @@ def test_status_retains_unknown_runtime_camera_id(tmp_path: Path) -> None:
 
 
 def test_status_mapping_transition_emits_one_local_row_without_phantom(
-    tmp_path: Path,
+    app: FastAPI,
 ) -> None:
     client = _registry_status_client(
-        tmp_path,
+        app,
         camera_id="local-uuid-1",
         backend_camera_id="backend-camera-1",
     )
@@ -1111,10 +1118,10 @@ def test_status_mapping_transition_emits_one_local_row_without_phantom(
 
 
 def test_status_keeps_unknown_camera_beside_known_mapped_camera(
-    tmp_path: Path,
+    app: FastAPI,
 ) -> None:
     client = _registry_status_client(
-        tmp_path,
+        app,
         camera_id="local-uuid-1",
         backend_camera_id="backend-camera-1",
     )
@@ -1147,11 +1154,7 @@ def test_status_keeps_unknown_camera_beside_known_mapped_camera(
     assert runtime_cameras["local-uuid-1"].get("unresolved") is not True
 
 
-def test_latency_is_latest_memory_only_and_missing_after_restart(tmp_path: Path) -> None:
-    database = tmp_path / "edge.sqlite3"
-    from backend.app.edge_db.bootstrap import bootstrap_database
-
-    bootstrap_database(database)
+def test_latency_is_latest_memory_only_and_missing_after_restart() -> None:
     store = RuntimeStatusStore()
     store.record_latency("facility-1", "1970-01-01T00:00:00Z", received_at=10.0)
     store.record_latency("facility-1", "1970-01-01T00:00:00Z", received_at=20.0)
@@ -1162,13 +1165,8 @@ def test_latency_is_latest_memory_only_and_missing_after_restart(tmp_path: Path)
 
     assert live == {"first_attempt_samples": 2, "max_sec": 20.0, "since_sec": 10.0}
     assert restarted.snapshot(now=21.0)["facilities"]["facility-1"]["latency"] is None
-    with sqlite3.connect(database) as connection:
-        tables = {
-            str(row[0])
-            for row in connection.execute(
-                "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'"
-            )
-        }
+    # Provisioning checks the PostgreSQL product and diagnostics schemas against these sets.
+    tables = EXPECTED_TARGET_TABLES | DIAGNOSTICS_TARGET_TABLES
     assert "runtime_latency" not in tables
     assert "control_heartbeats" not in tables
 
@@ -1204,8 +1202,8 @@ def test_runtime_status_future_received_at_is_not_accepted_as_fresh() -> None:
     assert snapshot["facilities"] == {}
 
 
-def test_runtime_status_none_generation_is_issued_and_retransmission_keeps_it() -> None:
-    client = _client()
+def test_runtime_status_none_generation_is_issued_and_retransmission_keeps_it(app: FastAPI) -> None:
+    client = _client(app)
 
     first = _post(client, _payload())
     generation = first.json()["generation"]
@@ -1220,8 +1218,8 @@ def test_runtime_status_none_generation_is_issued_and_retransmission_keeps_it() 
     assert runtime["facilities"]["facility-1"]["seq"] == 1
 
 
-def test_runtime_status_none_generation_replaces_prior_worker_generation() -> None:
-    client = _client()
+def test_runtime_status_none_generation_replaces_prior_worker_generation(app: FastAPI) -> None:
+    client = _client(app)
 
     first_generation = _post(client, _payload()).json()["generation"]
     restarted = _post(client, _payload(generation=None, seq=0))
@@ -1230,8 +1228,8 @@ def test_runtime_status_none_generation_replaces_prior_worker_generation() -> No
     assert restarted.json() == {"accepted": True, "generation": first_generation + 1}
 
 
-def test_runtime_status_rejects_delayed_old_generation() -> None:
-    client = _client()
+def test_runtime_status_rejects_delayed_old_generation(app: FastAPI) -> None:
+    client = _client(app)
 
     old_generation = _post(client, _payload()).json()["generation"]
     new_generation = _post(client, _payload(generation=None, seq=0)).json()["generation"]
@@ -1242,8 +1240,8 @@ def test_runtime_status_rejects_delayed_old_generation() -> None:
     assert delayed.json()["detail"] == "old_generation"
 
 
-def test_runtime_status_rejects_reversed_sequence_within_generation() -> None:
-    client = _client()
+def test_runtime_status_rejects_reversed_sequence_within_generation(app: FastAPI) -> None:
+    client = _client(app)
 
     generation = _post(client, _payload()).json()["generation"]
     assert _post(client, _payload(generation=generation, seq=2)).status_code == 200
@@ -1253,8 +1251,7 @@ def test_runtime_status_rejects_reversed_sequence_within_generation() -> None:
     assert reversed_sequence.json()["detail"] == "old_seq"
 
 
-def test_status_marks_applied_clip_export_stale_and_offline_separately() -> None:
-    app = create_app(lifespan=no_lifespan)
+def test_status_marks_applied_clip_export_stale_and_offline_separately(app: FastAPI) -> None:
     app.state.edge_relay_token = "relay-token"
     app.state.camera_inventory = {
         "camera-1": {"camera_id": "camera-1", "facility_id": "facility-1"}
@@ -1284,8 +1281,8 @@ def test_runtime_status_snapshot_is_stale_after_ttl() -> None:
     assert snapshot["facilities"]["facility-1"]["stale"] is True
 
 
-def test_runtime_status_rejects_missing_and_invalid_tokens() -> None:
-    client = _client()
+def test_runtime_status_rejects_missing_and_invalid_tokens(app: FastAPI) -> None:
+    client = _client(app)
 
     missing = client.post("/api/v1/relay/runtime-status", json=_payload())
     wrong = client.post(
@@ -1363,8 +1360,8 @@ def test_runtime_status_accepts_any_facility_without_env_gate(
     assert response.json()["accepted"] is True
 
 
-def test_status_merges_runtime_snapshot() -> None:
-    client = _client()
+def test_status_merges_runtime_snapshot(app: FastAPI) -> None:
+    client = _client(app)
     assert _post(client, _payload()).status_code == 200
 
     response = client.get("/api/v1/status")
@@ -1398,7 +1395,7 @@ def test_runtime_status_rejects_non_backend_decode_values() -> None:
         RelayRuntimeStatusRequest.model_validate(invalid)
 
 
-def test_worker_runtime_payload_round_trips_through_runtime_status_route() -> None:
+def test_worker_runtime_payload_round_trips_through_runtime_status_route(app: FastAPI) -> None:
     diagnostics = WorkerDiagnostics()
     diagnostics.update_decode(
         "camera-1",
@@ -1410,7 +1407,7 @@ def test_worker_runtime_payload_round_trips_through_runtime_status_route() -> No
             updated_at_sec=1000.0,
         ),
     )
-    client = _client()
+    client = _client(app)
 
     response = _post(client, diagnostics.to_payload("facility-1", None, 4))
 
@@ -1430,7 +1427,7 @@ def test_worker_runtime_payload_round_trips_through_runtime_status_route() -> No
     }
 
 
-def test_profile_boot_failure_status_with_no_cameras_is_accepted() -> None:
+def test_profile_boot_failure_status_with_no_cameras_is_accepted(app: FastAPI) -> None:
     diagnostics = WorkerDiagnostics()
     diagnostics.set_gpu_status(
         {
@@ -1443,7 +1440,7 @@ def test_profile_boot_failure_status_with_no_cameras_is_accepted() -> None:
         }
     )
     diagnostics.set_worker_status({"alive": False, "profile_boot_error": "no usable CUDA device"})
-    client = _client()
+    client = _client(app)
 
     response = _post(client, diagnostics.to_payload("facility-1", None, 0))
 

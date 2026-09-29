@@ -6,7 +6,7 @@ from collections.abc import Mapping
 from functools import lru_cache
 from typing import ClassVar, Final, Self
 
-from pydantic import model_validator
+from pydantic import field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 _RETIRED_BACKEND_ENV: Final = frozenset(
@@ -64,6 +64,12 @@ class Settings(BaseSettings):
     worker_bed_zone_timeout_s: float = 25.0
     execution_records_enabled: bool = False
     execution_records_budget_bytes: int | None = None
+
+    @field_validator("execution_records_budget_bytes", mode="before")
+    @classmethod
+    def empty_budget_is_unset(cls, value: object) -> object:
+        # Compose renders an unset budget as ML_API_EXECUTION_RECORDS_BUDGET_BYTES=''.
+        return None if value == "" else value
 
     @model_validator(mode="after")
     def require_execution_records_budget_when_enabled(self) -> Self:
