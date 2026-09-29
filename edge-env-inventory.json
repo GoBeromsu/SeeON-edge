@@ -108,6 +108,24 @@
       "behavior": "retired; backend startup rejects injection"
     },
     {
+      "name": "API_POSTGRES_AUTHORITY_FILE",
+      "category": "secret/bootstrap",
+      "authority": "migration-owner issued secret file",
+      "behavior": "path to JSON {generation, writer_token} matching the live deployment_authority row; missing, unreadable, invalid, or fenced refuses startup"
+    },
+    {
+      "name": "API_POSTGRES_DSN_FILE",
+      "category": "secret/bootstrap",
+      "authority": "deployment secret file",
+      "behavior": "path to the PostgreSQL connection string; required; missing, unreadable, empty, or unreachable refuses startup; the value is never logged or echoed"
+    },
+    {
+      "name": "API_POSTGRES_SCHEMA",
+      "category": "deployment artifact",
+      "authority": "deployment env",
+      "behavior": "provisioned product schema; typed default seeon_edge; startup never creates or migrates it"
+    },
+    {
       "name": "CLIP_STORE_DIR",
       "category": "fixed internal topology",
       "authority": "baked /var/lib/clip-store",

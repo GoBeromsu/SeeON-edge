@@ -1,10 +1,10 @@
 from __future__ import annotations
 
 from http.server import ThreadingHTTPServer
-from pathlib import Path
 
 import pytest
 
+from backend.app.features.audit.postgres_runtime import PostgresAuditRuntime
 from backend.app.features.connection.store import API_BACKEND_BASE_URL_ENV
 from tests_support.connection_api import (
     EnrollmentVerifyHandler,
@@ -13,6 +13,9 @@ from tests_support.connection_api import (
     response_json,
     run_server,
 )
+from tests_support.postgres_sandbox import ProductSandbox
+
+pytest_plugins = ("tests_support.postgres_sandbox",)
 
 _PAYLOAD = {
     "facility_code": "NH-7H2K9M4QXP",
@@ -22,14 +25,16 @@ _PAYLOAD = {
 
 
 def test_connection_test_verifies_without_persisting(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    postgres_product_sandbox: ProductSandbox,
+    postgres_audit_runtime: PostgresAuditRuntime,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     EnrollmentVerifyHandler.reset()
     server = ThreadingHTTPServer(("127.0.0.1", 0), EnrollmentVerifyHandler)
     thread = run_server(server)
     try:
         monkeypatch.setenv(API_BACKEND_BASE_URL_ENV, f"http://127.0.0.1:{server.server_port}")
-        client = connection_client(tmp_path, monkeypatch)
+        client = connection_client(postgres_product_sandbox, postgres_audit_runtime, monkeypatch)
         login(client)
 
         response = client.post("/api/v1/connection/test", json=_PAYLOAD)
@@ -44,17 +49,23 @@ def test_connection_test_verifies_without_persisting(
         thread.join(timeout=1.0)
 
 
-def test_connection_test_requires_auth(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    response = connection_client(tmp_path, monkeypatch).post(
-        "/api/v1/connection/test", json=_PAYLOAD
-    )
+def test_connection_test_requires_auth(
+    postgres_product_sandbox: ProductSandbox,
+    postgres_audit_runtime: PostgresAuditRuntime,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    response = connection_client(
+        postgres_product_sandbox, postgres_audit_runtime, monkeypatch
+    ).post("/api/v1/connection/test", json=_PAYLOAD)
     assert response.status_code == 401
 
 
 def test_connection_test_rejects_legacy_url_fields(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    postgres_product_sandbox: ProductSandbox,
+    postgres_audit_runtime: PostgresAuditRuntime,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    client = connection_client(tmp_path, monkeypatch)
+    client = connection_client(postgres_product_sandbox, postgres_audit_runtime, monkeypatch)
     login(client)
     response = client.post(
         "/api/v1/connection/test",

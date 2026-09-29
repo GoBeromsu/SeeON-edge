@@ -5,7 +5,6 @@ import socket
 import time
 from collections.abc import Iterator, Mapping
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from pathlib import Path
 from threading import Thread
 from typing import Protocol, TypeAlias, cast
 
@@ -16,15 +15,12 @@ from httpx import Response
 from typing_extensions import override
 
 from backend.app.core.config import get_settings
-from backend.app.features.connection.store import (
-    API_BACKEND_BASE_URL_ENV,
-    API_BACKEND_CONFIG_URL_ENV,
-    API_BACKEND_EVENTS_URL_ENV,
-    API_CONNECTION_SETTINGS_PATH_ENV,
-    ConnectionSettingsStore,
-)
+from backend.app.features.audit.postgres_runtime import PostgresAuditRuntime
+from backend.app.features.connection.store import API_BACKEND_BASE_URL_ENV, ConnectionSettingsStore
 from backend.app.lifespan import API_EDGE_RELAY_TOKEN_ENV
 from backend.app.main import create_app, no_lifespan
+from backend.app.postgres_root import PostgresRoot, install_postgres_stores
+from tests_support.postgres_sandbox import ProductSandbox
 
 DASHBOARD_LOGIN: Mapping[str, JsonValue] = {
     "username": "admin",
@@ -48,10 +44,7 @@ class ConnectionTestClient(Protocol):
 @pytest.fixture(autouse=True)
 def clear_env(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     for name in (
-        API_CONNECTION_SETTINGS_PATH_ENV,
         API_BACKEND_BASE_URL_ENV,
-        API_BACKEND_EVENTS_URL_ENV,
-        API_BACKEND_CONFIG_URL_ENV,
         "API_FACILITY_ID",
         "EDGE_FACILITY_TOKEN",
         API_EDGE_RELAY_TOKEN_ENV,
@@ -69,19 +62,23 @@ def login(client: ConnectionTestClient) -> None:
 
 
 def connection_client(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, *, test_timeout_s: float = 0.3
+    sandbox: ProductSandbox,
+    audit_runtime: PostgresAuditRuntime,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    test_timeout_s: float = 0.3,
 ) -> ConnectionTestClient:
-    monkeypatch.setenv(API_CONNECTION_SETTINGS_PATH_ENV, str(tmp_path / "connection_settings.json"))
     monkeypatch.setenv(TEST_TIMEOUT_ENV, str(test_timeout_s))
     get_settings.cache_clear()
     app = create_app(lifespan=no_lifespan)
+    install_postgres_stores(app, PostgresRoot(sandbox.database, sandbox.authority))
+    app.state.audit_runtime = audit_runtime
     app.state.edge_relay_token = "relay-token"
     return cast(ConnectionTestClient, TestClient(app))
 
 
-def connection_store(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> ConnectionSettingsStore:
-    monkeypatch.setenv(API_CONNECTION_SETTINGS_PATH_ENV, str(tmp_path / "connection_settings.json"))
-    return ConnectionSettingsStore.from_env()
+def connection_store(sandbox: ProductSandbox) -> ConnectionSettingsStore:
+    return ConnectionSettingsStore(sandbox.database, sandbox.authority)
 
 
 def response_json(response: Response) -> dict[str, JsonValue]:

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import urllib.request
-from pathlib import Path
+from typing import TYPE_CHECKING
 
 import pytest
 
@@ -17,12 +17,17 @@ from backend.app.features.connection.hub_url import (
     API_BACKEND_ALLOW_INSECURE_HTTP_ENV,
     hub_url_transport_allowed,
 )
+from backend.app.features.connection.repository import ConnectionData
 from backend.app.features.connection.store import (
     API_BACKEND_BASE_URL_ENV,
     ConnectionSettingsStore,
     InvalidConnectionSettingError,
 )
-from tests_support.compact_authority_db import prepare_compact_database
+
+if TYPE_CHECKING:
+    from tests_support.postgres_sandbox import ProductSandbox
+
+pytest_plugins = ("tests_support.postgres_sandbox",)
 
 _CREDS = EnrollmentCredentials(
     facility_code="NH-7H2K9M4QXP",
@@ -32,11 +37,10 @@ _CREDS = EnrollmentCredentials(
 
 
 @pytest.fixture(autouse=True)
-def production_hub_transport_contract(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+def production_hub_transport_contract(monkeypatch: pytest.MonkeyPatch) -> None:
     """HTTPS policy tests must not inherit the suite's insecure-HTTP opt-in."""
 
     monkeypatch.delenv(API_BACKEND_ALLOW_INSECURE_HTTP_ENV, raising=False)
-    prepare_compact_database(tmp_path / "c.sqlite3")
 
 
 class TestHubUrlPolicy:
@@ -59,39 +63,6 @@ class TestHubUrlPolicy:
     ) -> None:
         monkeypatch.setenv(API_BACKEND_ALLOW_INSECURE_HTTP_ENV, "1")
         assert hub_url_transport_allowed("http://backend.example/api/v1/events")
-
-
-class TestStoreRejectsInsecureHubUrls:
-    def test_base_url_http_public_does_not_seed_events(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        monkeypatch.setenv(API_BACKEND_BASE_URL_ENV, "http://hub.example.com")
-        settings = ConnectionSettingsStore(tmp_path / "c.sqlite3").load()
-        assert settings.events_url is None
-        assert settings.config_url is None
-
-    def test_base_url_http_public_ip_does_not_seed_events(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        monkeypatch.setenv(API_BACKEND_BASE_URL_ENV, "http://49.247.204.81")
-        settings = ConnectionSettingsStore(tmp_path / "c.sqlite3").load()
-        assert settings.events_url is None
-        assert settings.config_url is None
-
-    def test_base_url_https_seeds_events(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        monkeypatch.setenv(API_BACKEND_BASE_URL_ENV, "https://hub.example.com")
-        settings = ConnectionSettingsStore(tmp_path / "c.sqlite3").load()
-        assert settings.events_url == "https://hub.example.com/api/v1/events"
-        assert settings.config_url == "https://hub.example.com/api/v1/ml-config"
-
-    def test_save_rejects_retired_editable_events_url(self, tmp_path: Path) -> None:
-        store = ConnectionSettingsStore(tmp_path / "c.sqlite3")
-        with pytest.raises(InvalidConnectionSettingError) as exc:
-            store.save({"events_url": "http://49.247.204.81/api/v1/events"})
-        assert exc.value.field_name == "events_url"
-        assert "unknown connection setting" in exc.value.reason
 
 
 class TestEnrollmentNeverSendsBearerToRejectedOrigin:
@@ -125,3 +96,61 @@ class TestEnrollmentNeverSendsBearerToRejectedOrigin:
         assert enrollment_endpoint("http://127.0.0.1:9/api/v1/events") == (
             "http://127.0.0.1:9/api/v1/edge/enrollments/verify"
         )
+
+
+def _enrollment() -> ConnectionData:
+    return {
+        "facility_code": "NH-1234",
+        "client_installation_ref": "install-1",
+        "facility_id": "facility-1",
+        "facility_token": "synthetic-client-token-1234",
+        "edge_installation_id": "edge-1",
+        "enrollment_generation": 1,
+    }
+
+
+class TestConnectionStoreTransportPolicy:
+    @pytest.mark.parametrize(
+        ("base", "expected"),
+        [
+            ("https://hub.example", "https://hub.example/api"),
+            (" https://hub.example/ ", "https://hub.example/api"),
+            ("https://hub.example/api/", "https://hub.example/api"),
+            ("http://hub.example", None),
+            ("http://127.0.0.1:8000", "http://127.0.0.1:8000/api"),
+            ("http://[::1]:8000/api", "http://[::1]:8000/api"),
+            ("https://[invalid", None),
+            ("ftp://hub.example", None),
+            ("   ", None),
+        ],
+    )
+    def test_base_url_is_canonical_deployment_authority_with_https_policy(
+        self,
+        postgres_product_sandbox: ProductSandbox,
+        monkeypatch: pytest.MonkeyPatch,
+        base: str,
+        expected: str | None,
+    ) -> None:
+        sandbox = postgres_product_sandbox
+        monkeypatch.setenv(API_BACKEND_BASE_URL_ENV, base)
+        monkeypatch.setenv("API_BACKEND_EVENTS_URL", "https://retired.example/events")
+        monkeypatch.setenv("API_BACKEND_CONFIG_URL", "https://retired.example/config")
+        store = ConnectionSettingsStore(sandbox.database, sandbox.authority)
+        saved = store.save(_enrollment())
+        assert saved.events_url == (f"{expected}/v1/events" if expected else None)
+        assert saved.config_url == (f"{expected}/v1/ml-config" if expected else None)
+        assert store.load() == saved
+        with pytest.raises(InvalidConnectionSettingError, match="unknown connection setting"):
+            store.save({"events_url": "https://site-override.example/events"})
+        assert store.load() == saved
+
+    def test_http_requires_explicit_development_opt_in_for_public_host(
+        self, postgres_product_sandbox: ProductSandbox, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        sandbox = postgres_product_sandbox
+        monkeypatch.setenv(API_BACKEND_BASE_URL_ENV, "http://hub.example")
+        monkeypatch.setenv(API_BACKEND_ALLOW_INSECURE_HTTP_ENV, "1")
+        store = ConnectionSettingsStore(sandbox.database, sandbox.authority)
+        assert store.load().events_url == "http://hub.example/api/v1/events"
+        monkeypatch.setenv(API_BACKEND_ALLOW_INSECURE_HTTP_ENV, "0")
+        assert store.load().events_url is None

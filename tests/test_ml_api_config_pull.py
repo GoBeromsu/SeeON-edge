@@ -16,7 +16,9 @@ from backend.app.features.connection.store import ConnectionSettingsStore
 from backend.app.lifespan import BACKEND_CONFIG_SHUTDOWN_WAIT_SEC, refresh_backend_config
 from backend.app.main import create_app
 from contracts.worker_config import CONFIG_VERSION_KEY, RESTART_EPOCH_KEY, PulledNightWindow
-from tests_support.compact_authority_db import prepare_compact_database
+from tests_support.postgres_sandbox import ProductSandbox
+
+pytest_plugins = ("tests_support.postgres_sandbox", "tests_support.postgres_app_env")
 
 
 class FakeBackendIngestClient:
@@ -82,14 +84,13 @@ def _backend_config() -> dict[str, object]:
     }
 
 
-def _set_pull_env(monkeypatch: pytest.MonkeyPatch) -> None:
+def _set_pull_env(monkeypatch: pytest.MonkeyPatch, sandbox: ProductSandbox) -> None:
     monkeypatch.setenv("API_EDGE_RELAY_TOKEN", "relay-token")
     monkeypatch.setenv("API_BACKEND_BASE_URL", "http://backend:3000")
-    # Facility identity is DB-only. The suite fixture redirects from_env() to
-    # an isolated database, so seed a complete enrollment through that
-    # supported persistence seam while endpoints derive from the one public
-    # deployment base URL.
-    ConnectionSettingsStore.from_env().save(
+    # Facility identity is DB-only. Seed a complete enrollment into the same
+    # PostgreSQL schema the real lifespan opens, while endpoints derive from
+    # the one public deployment base URL.
+    ConnectionSettingsStore(sandbox.database, sandbox.authority).save(
         {
             "facility_code": "NH-7H2K9M4QXP",
             "client_installation_ref": "aa83ea3f-6e5f-4f45-a401-fb36c38835b6",
@@ -101,14 +102,13 @@ def _set_pull_env(monkeypatch: pytest.MonkeyPatch) -> None:
     )
 
 
-def _dashboard_camera_registry() -> CameraRegistryStore:
-    """Register one camera on the suite's single EDGE_DATABASE_PATH principal.
+def _dashboard_camera_registry(sandbox: ProductSandbox) -> CameraRegistryStore:
+    """Register one camera in the PostgreSQL schema that also holds enrollment.
 
-    Production keeps enrollment and the camera registry on one compact DB.
-    A split registry path made boot roster sync read an un-enrolled store
-    while ConnectionSettingsStore seeded the fixture DB.
+    Production keeps enrollment and the camera registry behind one database
+    authority; a split registry made boot roster sync read an un-enrolled store.
     """
-    store = CameraRegistryStore.from_env()
+    store = CameraRegistryStore(sandbox.database, sandbox.authority)
     store.create(
         camera_id="dashboard-camera",
         label="Dashboard Camera",
@@ -121,6 +121,7 @@ def _dashboard_camera_registry() -> CameraRegistryStore:
 
 def test_backend_config_pull_applies_metadata_not_camera_roster(
     monkeypatch: pytest.MonkeyPatch,
+    postgres_app_env: ProductSandbox,
 ) -> None:
     """ml-config pull keeps detection windows/config_version only.
 
@@ -133,7 +134,7 @@ def test_backend_config_pull_applies_metadata_not_camera_roster(
         captured.append((request.full_url, request.get_header("Authorization"), timeout))
         return FakeHTTPResponse(_backend_config())
 
-    _set_pull_env(monkeypatch)
+    _set_pull_env(monkeypatch, postgres_app_env)
     monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
 
     with TestClient(create_app()) as client:
@@ -173,6 +174,7 @@ def test_backend_config_pull_applies_metadata_not_camera_roster(
 
 def test_backend_detection_windows_present_ignores_legacy_night_window_entirely(
     monkeypatch: pytest.MonkeyPatch,
+    postgres_app_env: ProductSandbox,
 ) -> None:
     """Plan-file payload-level rule: once ``detectionWindows`` is present at
     all, it is the sole authority for every domain and legacy ``nightWindow``
@@ -205,10 +207,10 @@ def test_backend_detection_windows_present_ignores_legacy_night_window_entirely(
             }
         )
 
-    _set_pull_env(monkeypatch)
+    _set_pull_env(monkeypatch, postgres_app_env)
     monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
     app = create_app()
-    app.state.camera_registry = _dashboard_camera_registry()
+    app.state.camera_registry = _dashboard_camera_registry(postgres_app_env)
 
     with TestClient(app) as client:
         response = client.get(
@@ -237,6 +239,7 @@ def test_backend_detection_windows_present_ignores_legacy_night_window_entirely(
 
 def test_backend_detection_windows_absent_still_uses_legacy_night_window(
     monkeypatch: pytest.MonkeyPatch,
+    postgres_app_env: ProductSandbox,
 ) -> None:
     """When ``detectionWindows`` is absent entirely, the legacy single
     ``nightWindow`` field still applies to bed_exit (compat fallback).
@@ -248,10 +251,10 @@ def test_backend_detection_windows_absent_still_uses_legacy_night_window(
     def fake_urlopen(request: urllib.request.Request, timeout: float) -> FakeHTTPResponse:
         return FakeHTTPResponse(_backend_config())
 
-    _set_pull_env(monkeypatch)
+    _set_pull_env(monkeypatch, postgres_app_env)
     monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
     app = create_app()
-    app.state.camera_registry = _dashboard_camera_registry()
+    app.state.camera_registry = _dashboard_camera_registry(postgres_app_env)
 
     with TestClient(app) as client:
         response = client.get(
@@ -267,6 +270,7 @@ def test_backend_detection_windows_absent_still_uses_legacy_night_window(
 
 def test_backend_config_pull_survives_invalid_window_and_never_populates_cameras(
     monkeypatch: pytest.MonkeyPatch,
+    postgres_app_env: ProductSandbox,
 ) -> None:
     """A malformed window value for one domain (start == end here) must not
     crash the whole pull: it fails open to ALWAYS for that domain (logged to
@@ -294,10 +298,10 @@ def test_backend_config_pull_survives_invalid_window_and_never_populates_cameras
             }
         )
 
-    _set_pull_env(monkeypatch)
+    _set_pull_env(monkeypatch, postgres_app_env)
     monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
     app = create_app()
-    app.state.camera_registry = _dashboard_camera_registry()
+    app.state.camera_registry = _dashboard_camera_registry(postgres_app_env)
 
     with TestClient(app) as client:
         assert client.app.state.pulled_config is not None
@@ -321,11 +325,12 @@ def test_backend_config_pull_survives_invalid_window_and_never_populates_cameras
 
 def test_backend_config_pull_failure_does_not_create_inventory(
     monkeypatch: pytest.MonkeyPatch,
+    postgres_app_env: ProductSandbox,
 ) -> None:
     def fake_urlopen(url: str, timeout: float) -> FakeHTTPResponse:
         raise TimeoutError("boom")
 
-    _set_pull_env(monkeypatch)
+    _set_pull_env(monkeypatch, postgres_app_env)
     monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
 
     with TestClient(create_app()) as client:
@@ -335,15 +340,16 @@ def test_backend_config_pull_failure_does_not_create_inventory(
 
 def test_config_and_restart_require_token_and_restart_reflects_live_epoch(
     monkeypatch: pytest.MonkeyPatch,
+    postgres_app_env: ProductSandbox,
 ) -> None:
-    _set_pull_env(monkeypatch)
+    _set_pull_env(monkeypatch, postgres_app_env)
     monkeypatch.setattr(
         urllib.request,
         "urlopen",
         lambda url, timeout: FakeHTTPResponse(_backend_config()),
     )
     app = create_app()
-    app.state.camera_registry = _dashboard_camera_registry()
+    app.state.camera_registry = _dashboard_camera_registry(postgres_app_env)
 
     with TestClient(app) as client:
         assert client.get("/api/v1/relay/config").status_code == 401
@@ -380,12 +386,10 @@ def test_config_and_restart_require_token_and_restart_reflects_live_epoch(
 
 def test_heartbeat_config_version_surfaces_in_status_and_remains_optional(
     monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
+    postgres_app_env: ProductSandbox,
 ) -> None:
     monkeypatch.setenv("API_EDGE_RELAY_TOKEN", "relay-token")
-    registry_path = tmp_path / "catalog.sqlite3"
-    prepare_compact_database(registry_path)
-    store = CameraRegistryStore(registry_path)
+    store = CameraRegistryStore(postgres_app_env.database, postgres_app_env.authority)
     for camera_id in ("cam-1", "cam-2"):
         store.create(
             camera_id=camera_id,
@@ -418,6 +422,7 @@ def test_heartbeat_config_version_surfaces_in_status_and_remains_optional(
 
 def test_config_returns_503_when_backend_config_unavailable(
     monkeypatch: pytest.MonkeyPatch,
+    postgres_app_env: ProductSandbox,
 ) -> None:
     # Relay auth is configured, but no backend enrollment/config pull is
     # available, so app.state.pulled_config stays None. /config MUST signal
@@ -438,6 +443,7 @@ def test_config_returns_503_when_backend_config_unavailable(
 
 def test_config_refresh_reflects_backend_change_without_restart(
     monkeypatch: pytest.MonkeyPatch,
+    postgres_app_env: ProductSandbox,
 ) -> None:
     configs = [
         _backend_config(),  # boot -> config_version 7
@@ -462,10 +468,10 @@ def test_config_refresh_reflects_backend_change_without_restart(
         calls["n"] += 1
         return FakeHTTPResponse(payload)
 
-    _set_pull_env(monkeypatch)
+    _set_pull_env(monkeypatch, postgres_app_env)
     monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
     app = create_app()
-    app.state.camera_registry = _dashboard_camera_registry()
+    app.state.camera_registry = _dashboard_camera_registry(postgres_app_env)
 
     with TestClient(app) as client:
         assert client.app.state.config_version == 7
@@ -493,6 +499,7 @@ def test_config_refresh_reflects_backend_change_without_restart(
 
 def test_config_refresh_preserves_last_good_on_failure(
     monkeypatch: pytest.MonkeyPatch,
+    postgres_app_env: ProductSandbox,
 ) -> None:
     calls = {"n": 0}
 
@@ -502,10 +509,10 @@ def test_config_refresh_preserves_last_good_on_failure(
             return FakeHTTPResponse(_backend_config())  # boot success -> version 7
         raise urllib.error.URLError("backend down")  # refresh fails
 
-    _set_pull_env(monkeypatch)
+    _set_pull_env(monkeypatch, postgres_app_env)
     monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
     app = create_app()
-    app.state.camera_registry = _dashboard_camera_registry()
+    app.state.camera_registry = _dashboard_camera_registry(postgres_app_env)
 
     with TestClient(app) as client:
         assert client.app.state.config_version == 7
@@ -521,6 +528,7 @@ def test_config_refresh_preserves_last_good_on_failure(
 
 def test_config_refresh_rejects_partial_roster_and_preserves_last_good(
     monkeypatch: pytest.MonkeyPatch,
+    postgres_app_env: ProductSandbox,
 ) -> None:
     configs = [
         _backend_config(),
@@ -545,7 +553,7 @@ def test_config_refresh_rejects_partial_roster_and_preserves_last_good(
         calls["count"] += 1
         return FakeHTTPResponse(payload)
 
-    _set_pull_env(monkeypatch)
+    _set_pull_env(monkeypatch, postgres_app_env)
     monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
 
     with TestClient(create_app()) as client:
@@ -566,6 +574,7 @@ def test_config_refresh_rejects_partial_roster_and_preserves_last_good(
 
 def test_shutdown_waits_for_inflight_backend_refresh(
     monkeypatch: pytest.MonkeyPatch,
+    postgres_app_env: ProductSandbox,
 ) -> None:
     refresh_started = threading.Event()
     release_refresh = threading.Event()
@@ -579,7 +588,7 @@ def test_shutdown_waits_for_inflight_backend_refresh(
         assert release_refresh.wait(timeout=3)
         return FakeHTTPResponse(_backend_config())
 
-    _set_pull_env(monkeypatch)
+    _set_pull_env(monkeypatch, postgres_app_env)
     monkeypatch.setenv("API_BACKEND_CONFIG_REFRESH_SEC", "1")
     monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
     app = create_app()
@@ -603,6 +612,7 @@ def test_shutdown_waits_for_inflight_backend_refresh(
 
 def test_shutdown_bounds_late_refresh_and_discards_its_result(
     monkeypatch: pytest.MonkeyPatch,
+    postgres_app_env: ProductSandbox,
 ) -> None:
     refresh_started = threading.Event()
     release_refresh = threading.Event()
@@ -618,7 +628,7 @@ def test_shutdown_bounds_late_refresh_and_discards_its_result(
         refresh_finished.set()
         return FakeHTTPResponse(_backend_config() | {"configVersion": 8})
 
-    _set_pull_env(monkeypatch)
+    _set_pull_env(monkeypatch, postgres_app_env)
     monkeypatch.setenv("API_BACKEND_CONFIG_REFRESH_SEC", "1")
     monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
     app = create_app()
@@ -645,7 +655,7 @@ def test_shutdown_bounds_late_refresh_and_discards_its_result(
 
 
 def test_successful_refresh_resumes_roster_sync_without_per_camera_mapping(
-    monkeypatch: pytest.MonkeyPatch, tmp_path
+    monkeypatch: pytest.MonkeyPatch, postgres_app_env: ProductSandbox
 ) -> None:
     """A backend connectivity recovery (refresh_backend_config transitioning
     unreachable -> reachable) resumes pending roster-sync work via
@@ -664,7 +674,7 @@ def test_successful_refresh_resumes_roster_sync_without_per_camera_mapping(
     canonical id resolution -- the worker-config projection falls back to the
     record's own local id while it is unmapped.
     """
-    _set_pull_env(monkeypatch)
+    _set_pull_env(monkeypatch, postgres_app_env)
 
     mapping_calls: list[dict[str, object]] = []
 
@@ -677,9 +687,7 @@ def test_successful_refresh_resumes_roster_sync_without_per_camera_mapping(
     monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
 
     with TestClient(create_app()) as client:
-        registry_path = tmp_path / "catalog.sqlite3"
-        prepare_compact_database(registry_path)
-        store = CameraRegistryStore(registry_path)
+        store = CameraRegistryStore(postgres_app_env.database, postgres_app_env.authority)
         store.create(
             camera_id="local-uuid-9",
             label="Room 9",
@@ -733,6 +741,7 @@ def test_backend_camera_mapper_surface_is_absent(
 
 def test_backend_detection_windows_populate_per_domain_map_and_bed_exit_alias(
     monkeypatch: pytest.MonkeyPatch,
+    postgres_app_env: ProductSandbox,
 ) -> None:
     """The backend's ``detectionWindows`` (domain -> window|null) becomes
     ``PulledWorkerConfig.detection_windows``; a null entry for a domain is
@@ -764,10 +773,10 @@ def test_backend_detection_windows_populate_per_domain_map_and_bed_exit_alias(
             }
         )
 
-    _set_pull_env(monkeypatch)
+    _set_pull_env(monkeypatch, postgres_app_env)
     monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
     app = create_app()
-    app.state.camera_registry = _dashboard_camera_registry()
+    app.state.camera_registry = _dashboard_camera_registry(postgres_app_env)
 
     with TestClient(app) as client:
         pulled = client.app.state.pulled_config
@@ -800,6 +809,7 @@ def test_backend_detection_windows_populate_per_domain_map_and_bed_exit_alias(
 
 def test_backend_detection_windows_absent_falls_back_to_legacy_night_window(
     monkeypatch: pytest.MonkeyPatch,
+    postgres_app_env: ProductSandbox,
 ) -> None:
     """When the backend has not rolled out ``detectionWindows`` yet, the
     legacy single ``nightWindow`` field still maps to "bed_exit"."""
@@ -807,7 +817,7 @@ def test_backend_detection_windows_absent_falls_back_to_legacy_night_window(
     def fake_urlopen(url: str, timeout: float) -> FakeHTTPResponse:
         return FakeHTTPResponse(_backend_config())
 
-    _set_pull_env(monkeypatch)
+    _set_pull_env(monkeypatch, postgres_app_env)
     monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
 
     with TestClient(create_app()) as client:
