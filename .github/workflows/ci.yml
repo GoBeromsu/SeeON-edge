@@ -70,7 +70,7 @@ jobs:
       - run: uv run --group lint ruff check .
 
       # Stage 0 guardrail: declarative architecture contracts (import-linter).
-      # Tightened per strangler stage; replaces test_import_dependency_ladder.py at Stage 5.
+      # Tightened per strangler stage.
       - run: uv run --group lint lint-imports
 
       # Facility identity (facility id / facility token) and the camera roster
@@ -148,18 +148,21 @@ jobs:
 
       - run: uv sync --frozen --group lint
 
-      # CI downloads no model weights. Tests that need a real model file on
-      # disk skip with an explicit reason (tests/conftest.py); they run
-      # locally and on the deployment host where models/ is provisioned by
-      # scripts/fetch-models.sh. Pulling weights from GitHub releases or
-      # Hugging Face inside CI was a network/credential dependency (and a
-      # supply-chain surface for fork PRs) that the suite does not need to pass.
+      # CI downloads no model weights. Tests that read the private fall bundle
+      # carry the `private_bundle` marker (tests_support/private_bundle.py) and
+      # are deselected here; any run that selects one without models/ fails
+      # rather than skipping, so they run locally and on hosts where
+      # scripts/fetch-models.sh provisioned models/. Pulling weights from GitHub
+      # releases or Hugging Face inside CI was a network/credential dependency
+      # (and a supply-chain surface for fork PRs) that the suite does not need.
 
-      # The marker filter is unchanged. `integration` is deselected because that
-      # is what the marker has always claimed in pyproject.toml; its one test
-      # drives a live enrolled ml-api over CLOUD_EDGE_ML_URL and can only fail on
-      # a runner. `heavy` is wall-clock supervision that is flaky on a loaded
-      # runner; `real_stack` needs external RTSP tooling on PATH.
+      # `integration` is deselected because that is what the marker has always
+      # claimed in pyproject.toml; its one test drives a live enrolled ml-api
+      # over CLOUD_EDGE_ML_URL and can only fail on a runner. `heavy` is
+      # wall-clock supervision that is flaky on a loaded runner; `real_stack`
+      # needs external RTSP tooling on PATH. `private_bundle` needs models/ (see
+      # above). The filter lives here and never in pytest addopts, so an
+      # unfiltered local run selects every test.
       #
       # Sharding is a deterministic round-robin over the sorted tracked test
       # files. It adds no dependency to uv.lock (pytest-split/pytest-xdist would),
@@ -196,7 +199,7 @@ jobs:
             exit 1
           fi
           echo "shard $SHARD/$SHARD_TOTAL: ${#shard_files[@]} files"
-          uv run pytest -q -m "not real_stack and not heavy and not integration" \
+          uv run pytest -q -m "not real_stack and not heavy and not integration and not private_bundle" \
             "${shard_files[@]}"
 
 

@@ -28,6 +28,9 @@ from observability_stack_fixtures import (
     wait_until,
 )
 
+from backend.app.features.audit.postgres_runtime import PostgresAuditRuntime
+from tests_support.postgres_sandbox import ProductSandbox
+
 _RELAY_TOKEN: Final = "obs-load-relay-token"
 _BUDGET_BYTES: Final = 32 * 1024 * 1024
 _SAMPLE_HZ: Final = 1.0
@@ -351,11 +354,15 @@ def run_measurement(
     duration_sec: float,
     camera_fps: float,
     output_dir: Path,
+    sandbox: ProductSandbox,
+    audit_runtime: PostgresAuditRuntime,
+    diagnostics_schema: str,
 ) -> Path:
     """Run one N-stream measurement and write ``obs-<N>.json`` under ``output_dir``.
 
     Missing operator tools skip via ``ObservabilityLoadSkip``. The document
     records measurements only; callers must not assert numeric thresholds.
+    The backend serves on the caller's PostgreSQL sandbox root.
     """
     if streams < 1:
         raise ValueError("streams must be a positive integer")
@@ -394,7 +401,12 @@ def run_measurement(
             )
             publishers = _start_looping_publishers(stream_path, rtsp_port, streams, camera_fps)
             with serve_backend(
-                tmp_path / "backend", budget_bytes=_BUDGET_BYTES, relay_token=_RELAY_TOKEN
+                tmp_path / "backend",
+                budget_bytes=_BUDGET_BYTES,
+                relay_token=_RELAY_TOKEN,
+                sandbox=sandbox,
+                audit_runtime=audit_runtime,
+                diagnostics_schema=diagnostics_schema,
             ) as backend:
                 config = _worker_config(backend.base_url, streams, rtsp_port)
                 env = _worker_env(backend.base_url)

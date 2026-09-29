@@ -169,10 +169,10 @@ only package permitted to import everything.
 ## Types and the contracts boundary
 
 Worker-internal ports and envelopes live under `worker/`; cross-instance L0 data
-stays in `contracts`. `contracts/` is ADR-0006 vendored byte-for-byte from
-`eldercare-dataset-ops` and is snapshotted by `tests/test_vendor_drift.py`,
-including `contracts/AGENTS.md` — never edit anything under it as part of worker
-work, and never duplicate or shadow a vendored type inside `worker/`.
+stays in `contracts`. `contracts/` is the ADR-0006 typed-vocabulary leaf and the
+authority for it; the copy in the archived `eldercare-dataset-ops` is historical
+only, and no test compares the two. Never edit anything under it as part of
+worker work, and never duplicate or shadow a contract type inside `worker/`.
 
 | Envelope | Module | Carries pixels |
 | --- | --- | --- |
@@ -193,8 +193,9 @@ reads back.
 The rule for both: **each side owns its own definition of the interface, and
 a test -- not a shared module -- catches drift.** The provider owns the schema
 it serves or writes; the consumer owns the schema it expects. `contracts/` is
-the ADR-0006 byte-mirrored ML vocabulary shared with eldercare-dataset-ops,
-not an edge-internal interface package, so neither seam is defined there.
+the ADR-0006 ML vocabulary (this repository holds the authoritative copy; the
+archived eldercare-dataset-ops copy is historical only), not an edge-internal
+interface package, so neither seam is defined there.
 
 | Seam | Provider (worker) | Consumer (backend) |
 | --- | --- | --- |
@@ -537,27 +538,26 @@ cited test failing on your machine may be pinning a real runtime floor, or may
 just be instrumentation that was never written to be portable, and the two look
 identical from the test report.
 
-**Resolved: the shipped example config pinned a fall contract nothing produces yet.**
+**Resolved: the shipped example config pinned a fall contract nothing produced.**
 `worker/ml-worker.example.yaml` used to pin `models.fall.schema_version: 2`
 and the current coco17 `preprocessing_identity`, while
 `models/fall/lstm/metadata.yaml` declares neither — so it loads as
 `LEGACY_SCHEMA_VERSION` (1) with the legacy identity, and the pinned pair was
 refused. Neither side was malformed: the loader supports both generations as
 first-class cases (`worker/adapters/model/lstm_manifest.py`,
-`SUPPORTED_PREPROCESSING_IDENTITIES`), but `eldercare-dataset-ops` currently
-emits `schema_version: 1` for fall and no preprocessing identity
+`SUPPORTED_PREPROCESSING_IDENTITIES`), but the archived `eldercare-dataset-ops`
+emitted `schema_version: 1` for fall and no preprocessing identity
 (`ml/training/model_artifacts.py::build_fall_lstm_metadata`, which never
-writes either field), so schema_version 2 is not a contract any export path
-produces today — the example was documenting an aspirational target, not the
+wrote either field), so schema_version 2 was not a contract any export path
+produced — the example was documenting an aspirational target, not the
 artifact it ships with.
 
 The example was corrected to pin the legacy contract
 (`schema_version: 1`, `legacy-coco17-xyc-frame-normalized-zero-fill-v1`) that
-the shipped artifact and current training pipeline actually satisfy, so
-copying the example boots the fall model it ships with. When
-`eldercare-dataset-ops` starts exporting fall artifacts with
-`schema_version: 2` and the current coco17 identity, re-export
-`models/fall/lstm` from that pipeline and bump the example's pins back to the
+the shipped artifact satisfies and the archived training pipeline emitted, so
+copying the example boots the fall model it ships with. If a fall artifact is
+ever exported with `schema_version: 2` and the current coco17 identity,
+replace `models/fall/lstm` with it and bump the example's pins back to the
 v2 values at the same time — the fail-closed validation in
 `_validate_expected_identity` (`worker/adapters/model/torch_lstm_fall.py`)
 stays unchanged either way; only the pinned values move. The regression is

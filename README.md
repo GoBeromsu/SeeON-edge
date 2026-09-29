@@ -9,7 +9,7 @@ instances plus a shared library:
 - **`shared/`** — `shared.events` (the backend↔worker wire code); `contracts` is a
   top-level vendored leaf (ADR-0006).
 
-Training is maintained separately in `SeniorAILab/eldercare-dataset-ops`.
+Historical training lived in the archived `SeniorAILab/eldercare-dataset-ops`.
 
 ## License notice
 

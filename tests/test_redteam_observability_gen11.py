@@ -65,6 +65,11 @@ from worker.types.perception_frame import (
 )
 from worker.types.trace import DecisionIdentity
 
+pytest_plugins = (
+    "tests_support.postgres_sandbox",
+    "tests_support.postgres_diagnostics_sandbox",
+)
+
 _CAMERA = "cam-1"
 _BED_MODULE = "bed_exit.v1"
 _FALL_POLICY = "a" * 64
@@ -263,12 +268,21 @@ def _is_coast_row(row: dict[str, Any]) -> bool:
     )
 
 
-def test_g11_1_duplicate_pts_coasts_through_backend_query(tmp_path) -> None:
+def test_g11_1_duplicate_pts_coasts_through_backend_query(
+    tmp_path, postgres_product_sandbox, postgres_audit_runtime, postgres_lifespan_diagnostics_schema
+) -> None:
     """Three frames; frame_seq 1 repeats PTS. Exactly one coasted fall decision."""
     lanes = ExecutionRecordLanes(lane_capacity=256)
     pump = _pump(lanes, identity=_fall_identity(), fall_transition=0.1)
     exporter = None
-    with serve_backend(tmp_path, budget_bytes=_BUDGET_BYTES, relay_token=_RELAY_TOKEN) as backend:
+    with serve_backend(
+        tmp_path,
+        budget_bytes=_BUDGET_BYTES,
+        relay_token=_RELAY_TOKEN,
+        sandbox=postgres_product_sandbox,
+        audit_runtime=postgres_audit_runtime,
+        diagnostics_schema=postgres_lifespan_diagnostics_schema,
+    ) as backend:
         try:
             exporter = _exporter(lanes, backend.base_url, backend.relay_token)
             exporter.start()
@@ -302,7 +316,9 @@ def test_g11_1_duplicate_pts_coasts_through_backend_query(tmp_path) -> None:
                 exporter.stop()
 
 
-def test_g11_2_nonmonotonic_pts_coasts_then_resumes_through_backend_query(tmp_path) -> None:
+def test_g11_2_nonmonotonic_pts_coasts_then_resumes_through_backend_query(
+    tmp_path, postgres_product_sandbox, postgres_audit_runtime, postgres_lifespan_diagnostics_schema
+) -> None:
     """PTS rollback: ImmediateClassifier refuses; FallWindowClassifier resets.
 
     Duplicate PTS still coasts (G11-1). A strictly smaller PTS rebuilds the
@@ -326,7 +342,14 @@ def test_g11_2_nonmonotonic_pts_coasts_then_resumes_through_backend_query(tmp_pa
     inner = pump._decision.deciders[0]
     inner.classifier = FallWindowClassifier(_ConstFallModel())  # type: ignore[attr-defined]
     exporter = None
-    with serve_backend(tmp_path, budget_bytes=_BUDGET_BYTES, relay_token=_RELAY_TOKEN) as backend:
+    with serve_backend(
+        tmp_path,
+        budget_bytes=_BUDGET_BYTES,
+        relay_token=_RELAY_TOKEN,
+        sandbox=postgres_product_sandbox,
+        audit_runtime=postgres_audit_runtime,
+        diagnostics_schema=postgres_lifespan_diagnostics_schema,
+    ) as backend:
         try:
             exporter = _exporter(lanes, backend.base_url, backend.relay_token)
             exporter.start()
@@ -355,7 +378,9 @@ def test_g11_2_nonmonotonic_pts_coasts_then_resumes_through_backend_query(tmp_pa
                 exporter.stop()
 
 
-def test_g11_3_bed_exit_episode_already_open_through_backend_query(tmp_path) -> None:
+def test_g11_3_bed_exit_episode_already_open_through_backend_query(
+    tmp_path, postgres_product_sandbox, postgres_audit_runtime, postgres_lifespan_diagnostics_schema
+) -> None:
     """Onset is triggered+delivered; the next frame explains the non-repeat.
 
     The one-way hysteresis latch (#the-track-must-re-arm-to-exit-again)
@@ -374,7 +399,14 @@ def test_g11_3_bed_exit_episode_already_open_through_backend_query(tmp_path) -> 
     monitor = _night_monitor()
     _compose_bed_and_fall(pump, monitor, identities=(_fall_identity(), _bed_identity()))
     exporter = None
-    with serve_backend(tmp_path, budget_bytes=_BUDGET_BYTES, relay_token=_RELAY_TOKEN) as backend:
+    with serve_backend(
+        tmp_path,
+        budget_bytes=_BUDGET_BYTES,
+        relay_token=_RELAY_TOKEN,
+        sandbox=postgres_product_sandbox,
+        audit_runtime=postgres_audit_runtime,
+        diagnostics_schema=postgres_lifespan_diagnostics_schema,
+    ) as backend:
         try:
             exporter = _exporter(lanes, backend.base_url, backend.relay_token)
             exporter.start()
@@ -432,7 +464,9 @@ def test_g11_3_bed_exit_episode_already_open_through_backend_query(tmp_path) -> 
                 exporter.stop()
 
 
-def test_g11_4_bed_exit_outside_window_through_backend_query(tmp_path) -> None:
+def test_g11_4_bed_exit_outside_window_through_backend_query(
+    tmp_path, postgres_product_sandbox, postgres_audit_runtime, postgres_lifespan_diagnostics_schema
+) -> None:
     """Clock outside the night window: explicit non-event, zero deliveries."""
     lanes = ExecutionRecordLanes(lane_capacity=256)
     pump = _pump(
@@ -445,7 +479,14 @@ def test_g11_4_bed_exit_outside_window_through_backend_query(tmp_path) -> None:
     monitor._clock = _bed_clock_at(hour=12)  # noqa: SLF001
     _compose_bed_and_fall(pump, monitor, identities=(_fall_identity(), _bed_identity()))
     exporter = None
-    with serve_backend(tmp_path, budget_bytes=_BUDGET_BYTES, relay_token=_RELAY_TOKEN) as backend:
+    with serve_backend(
+        tmp_path,
+        budget_bytes=_BUDGET_BYTES,
+        relay_token=_RELAY_TOKEN,
+        sandbox=postgres_product_sandbox,
+        audit_runtime=postgres_audit_runtime,
+        diagnostics_schema=postgres_lifespan_diagnostics_schema,
+    ) as backend:
         try:
             exporter = _exporter(lanes, backend.base_url, backend.relay_token)
             exporter.start()

@@ -3,12 +3,12 @@
 from __future__ import annotations
 
 import json
-import sqlite3
 import time
 from collections.abc import Callable
-from contextlib import closing
 
-from backend.app.edge_db.connection import write_transaction
+import psycopg
+
+from backend.app.edge_db.postgres import PostgresDatabase
 from backend.app.features.diagnostics.coverage import UNSCOPED_GAP_CAUSE, insert_coverage
 from backend.app.features.diagnostics.ingest import (
     insert_record,
@@ -28,8 +28,6 @@ from backend.app.features.diagnostics.records import (
     canonical_json,
 )
 from backend.app.features.diagnostics.retention import RetentionBudget, UsageMeter, enforce_budget
-
-ConnectionFactory = Callable[[], sqlite3.Connection]
 
 
 def _receipt_json(receipt: BatchReceipt) -> str:
@@ -62,20 +60,18 @@ class ExecutionRecordStore:
 
     def __init__(
         self,
-        connection_factory: ConnectionFactory,
+        database: PostgresDatabase,
         budget: RetentionBudget,
         clock: Callable[[], int] = time.time_ns,
     ) -> None:
-        self._connect = connection_factory
+        self._database = database
         self.budget = budget
         self._clock = clock
         self._meter = UsageMeter()
 
     def ingest_batch(self, batch: IngestBatch) -> BatchReceipt:
         now_ns = self._clock()
-        with closing(self._connect()) as connection:
-            with write_transaction(connection):
-                return self._ingest(connection, batch, now_ns)
+        return self._database.transact(lambda connection: self._ingest(connection, batch, now_ns))
 
     def query(
         self,
@@ -85,8 +81,8 @@ class ExecutionRecordStore:
         limit: int,
         cursor: str | None = None,
     ) -> QueryResult:
-        with closing(self._connect()) as connection:
-            return execute_query(
+        return self._database.read_snapshot(
+            lambda connection: execute_query(
                 connection,
                 camera_id=camera_id,
                 from_ns=from_ns,
@@ -94,12 +90,18 @@ class ExecutionRecordStore:
                 limit=limit,
                 cursor=cursor,
             )
+        )
 
     def _ingest(
-        self, connection: sqlite3.Connection, batch: IngestBatch, now_ns: int
+        self, connection: psycopg.Connection, batch: IngestBatch, now_ns: int
     ) -> BatchReceipt:
+        # One writer at a time: the batch-id
+        # lookup, retention measurement and prune below all assume no
+        # concurrent ingest. The lock conflicts only with itself and
+        # stronger modes, so snapshot readers never wait on it.
+        connection.execute("LOCK TABLE execution_batches IN SHARE ROW EXCLUSIVE MODE")
         existing = connection.execute(
-            "SELECT receipt FROM execution_batches WHERE batch_id = ?",
+            "SELECT receipt FROM execution_batches WHERE batch_id = %s",
             (batch.batch_id,),
         ).fetchone()
         if existing is not None:
@@ -110,7 +112,7 @@ class ExecutionRecordStore:
             # either outcome can replace it under the same id. The enclosing
             # write transaction restores it if ingestion raises.
             connection.execute(
-                "DELETE FROM execution_batches WHERE batch_id = ?", (batch.batch_id,)
+                "DELETE FROM execution_batches WHERE batch_id = %s", (batch.batch_id,)
             )
         connection.execute("SAVEPOINT ingest")
         provenance_id = upsert_provenance(connection, batch.provenance, now_ns)
@@ -241,7 +243,7 @@ class ExecutionRecordStore:
             _write_batch_row(connection, batch, receipt, now_ns)
             return receipt
         still_recorded = connection.execute(
-            "SELECT 1 FROM execution_batches WHERE batch_id = ?", (batch.batch_id,)
+            "SELECT 1 FROM execution_batches WHERE batch_id = %s", (batch.batch_id,)
         ).fetchone()
         if still_recorded is None:
             # Capacity pruned every record this batch contributed, which also
@@ -261,7 +263,7 @@ def _batch_epoch(batch: IngestBatch, now_ns: int) -> tuple[int, int]:
 
 
 def _write_batch_row(
-    connection: sqlite3.Connection,
+    connection: psycopg.Connection,
     batch: IngestBatch,
     receipt: BatchReceipt,
     now_ns: int,
@@ -271,7 +273,7 @@ def _write_batch_row(
         INSERT INTO execution_batches (
             batch_id, camera_id, worker_boot_id, received_at_ns,
             accepted_records, duplicate_records, rejected_records, receipt
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
         """,
         (
             batch.batch_id,

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-import sqlite3
+import psycopg
 
 from backend.app.features.diagnostics.records import (
     ExecutionRecordInput,
@@ -12,7 +12,7 @@ from backend.app.features.diagnostics.retention import RetentionBudget
 
 
 def assign_segment(
-    connection: sqlite3.Connection,
+    connection: psycopg.Connection,
     record: ExecutionRecordInput,
     payload_bytes: int,
     budget: RetentionBudget,
@@ -22,8 +22,8 @@ def assign_segment(
     open_row = connection.execute(
         """
         SELECT segment_id, payload_bytes, segment_ordinal FROM execution_segments
-        WHERE camera_id = ? AND worker_boot_id = ? AND source_generation = ?
-          AND stream_epoch = ? AND storage_state = ?
+        WHERE camera_id = %s AND worker_boot_id = %s AND source_generation = %s
+          AND stream_epoch = %s AND storage_state = %s
         ORDER BY segment_ordinal DESC LIMIT 1
         """,
         (*key, str(SegmentStorageState.OPEN)),
@@ -33,16 +33,16 @@ def assign_segment(
         connection.execute(
             """
             UPDATE execution_segments
-            SET record_count = record_count + 1, payload_bytes = payload_bytes + ?
-            WHERE segment_id = ?
+            SET record_count = record_count + 1, payload_bytes = payload_bytes + %s
+            WHERE segment_id = %s
             """,
             (payload_bytes, segment_id),
         )
         return segment_id
     if open_row is not None:
         connection.execute(
-            "UPDATE execution_segments SET storage_state = ?, sealed_at_ns = ? "
-            "WHERE segment_id = ?",
+            "UPDATE execution_segments SET storage_state = %s, sealed_at_ns = %s "
+            "WHERE segment_id = %s",
             (str(SegmentStorageState.SEALED_PENDING), now_ns, int(open_row[0])),
         )
         ordinal = int(open_row[2]) + 1
@@ -50,22 +50,23 @@ def assign_segment(
         last = connection.execute(
             """
             SELECT COALESCE(MAX(segment_ordinal), -1) FROM execution_segments
-            WHERE camera_id = ? AND worker_boot_id = ? AND source_generation = ?
-              AND stream_epoch = ?
+            WHERE camera_id = %s AND worker_boot_id = %s AND source_generation = %s
+              AND stream_epoch = %s
             """,
             key,
         ).fetchone()
         ordinal = int(last[0]) + 1
-    cursor = connection.execute(
+    row = connection.execute(
         """
         INSERT INTO execution_segments (
             camera_id, worker_boot_id, source_generation, stream_epoch, segment_ordinal,
             storage_state, opened_at_ns, sealed_at_ns, record_count, payload_bytes
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, NULL, 1, ?)
+        ) VALUES (%s, %s, %s, %s, %s, %s, %s, NULL, 1, %s)
+        RETURNING segment_id
         """,
         (*key, ordinal, str(SegmentStorageState.OPEN), now_ns, payload_bytes),
-    )
-    return int(cursor.lastrowid)
+    ).fetchone()
+    return int(row[0])
 
 
 __all__ = ["assign_segment"]
