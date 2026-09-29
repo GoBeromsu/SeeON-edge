@@ -267,10 +267,13 @@ def _cooldown_rows() -> tuple[ReplayRow, ...]:
 def test_metric_cli_exact_returns_zero_for_both_domains(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    # One person: in the bed for 20 rows, then out of it while the fall window
-    # keeps filling -- both domains alert exactly once inside their windows.
-    inside = _run(0, 20, first_seq=1)
-    outside = _run(20 * _FRAME_NS, _ONSET_ROWS - 20, first_seq=21, bbox=(0.7, 0.7, 0.8, 0.8, 0.9))
+    # One person: in the bed past BedExitConfig.in_bed_dwell_sec (3.0 s), then
+    # out of it past outside_dwell_sec (2.0 s) while the fall window keeps
+    # filling -- both domains alert exactly once inside their windows.
+    inside = _run(0, 48, first_seq=1)  # > 3.0 s / _FRAME_NS
+    outside = _run(
+        48 * _FRAME_NS, 32, first_seq=49, bbox=(0.7, 0.7, 0.8, 0.8, 0.9)
+    )  # > 2.0 s / _FRAME_NS
     rows = (_row(0, "open"), *inside, *outside)
     status, result = _run_cli(
         monkeypatch,
@@ -278,7 +281,7 @@ def test_metric_cli_exact_returns_zero_for_both_domains(
         rows,
         (
             _cli_golden("fall", 0, 3_000_000_000),
-            _cli_golden("bed_exit", 0, 3_000_000_000),
+            _cli_golden("bed_exit", 0, 6_000_000_000),
         ),
     )
     assert status == 0
