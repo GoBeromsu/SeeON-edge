@@ -1,33 +1,17 @@
 from __future__ import annotations
 
 import json
-import os
-import sqlite3
 from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
 
-from backend.app.edge_db.bootstrap import bootstrap_database
-from backend.app.features.audit.catalog import AuditAction, AuditDetailError, empty_detail
-from backend.app.features.audit.store import AuditEvent, AuditStore, AuditVerificationError
+from backend.app.features.audit.catalog import AuditAction, AuditDetailError
+from backend.app.features.runtime_settings.store import RuntimeSettingsStore
 from backend.app.main import create_app, no_lifespan
+from backend.app.shared.postgres_dashboard_credentials import PostgresDashboardCredentialsStore
 
-
-def _database_path() -> Path:
-    from backend.app.features.audit import store
-
-    return store.EDGE_DATABASE_PATH
-
-
-def _event(action: AuditAction, target_id: str) -> AuditEvent:
-    return AuditEvent(
-        occurred_at="2026-08-24T00:00:00.000Z",
-        actor_id="admin",
-        action=action,
-        target_id=target_id,
-        detail=empty_detail(action),
-    )
+pytest_plugins = ("tests_support.postgres_sandbox",)
 
 
 def _login(client: TestClient) -> None:
@@ -51,111 +35,20 @@ def test_action_detail_catalog_is_exhaustive_and_versioned() -> None:
         assert_catalog_complete(ACTION_DETAIL_CATALOG[:-1])
 
 
-def test_incremental_verification_rechecks_history_after_trigger_epoch_change() -> None:
-    # Given: a fully verified two-row chain and the canonical immutable trigger SQL.
-    audit = AuditStore(_database_path())
-    first = audit.append(_event(AuditAction.CLIP_LIST, "clips"))
-    audit.append(_event(AuditAction.AUDIT_LIST, "audit"))
-    checkpoint = audit.verify()
-    with sqlite3.connect(_database_path()) as connection:
-        trigger_sql = connection.execute(
-            "SELECT sql FROM sqlite_master WHERE type='trigger' "
-            "AND name='audit_events_immutable_update'"
-        ).fetchone()[0]
-        connection.execute("DROP TRIGGER audit_events_immutable_update")
-        connection.execute(
-            "UPDATE audit_events SET actor_id='mutated-admin' WHERE audit_id=?",
-            (first.audit_id,),
-        )
-        connection.execute(trigger_sql)
-
-    # When/Then: incremental verification agrees with full verification and rejects history.
-    with pytest.raises(AuditVerificationError, match="hash|contract"):
-        audit.verify(checkpoint)
-
-
-def test_full_verification_rejects_same_name_wrong_trigger_definition() -> None:
-    # Given: all required trigger names but one non-canonical body.
-    audit = AuditStore(_database_path())
-    with sqlite3.connect(_database_path()) as connection:
-        connection.execute("DROP TRIGGER audit_events_immutable_update")
-        connection.execute(
-            "CREATE TRIGGER audit_events_immutable_update "
-            "BEFORE UPDATE ON audit_events BEGIN SELECT 1; END"
-        )
-
-    # When/Then: fresh full verification rejects names-only impersonation.
-    with pytest.raises(AuditVerificationError, match="canonical|schema 19 contract"):
-        audit.verify()
-
-
-def test_incremental_verification_rejects_missing_trigger() -> None:
-    # Given: a valid checkpoint whose immutable-delete trigger is then removed.
-    audit = AuditStore(_database_path())
-    checkpoint = audit.verify()
-    with sqlite3.connect(_database_path()) as connection:
-        connection.execute("DROP TRIGGER audit_events_immutable_delete")
-
-    # When/Then: incremental verification refuses the incomplete contract.
-    with pytest.raises(AuditVerificationError, match="canonical|schema 19 contract"):
-        audit.verify(checkpoint)
-
-
-def test_incremental_checkpoint_is_bound_to_database_file_identity(tmp_path: Path) -> None:
-    # Given: one checkpoint and a separately valid schema-18 database.
-    audit = AuditStore(_database_path())
-    checkpoint = audit.verify()
-    replacement = tmp_path / "replacement.sqlite3"
-    bootstrap_database(replacement)
-
-    # When: a valid-looking different file replaces the checkpointed path.
-    os.replace(replacement, _database_path())
-
-    # Then: stale history cannot be trusted solely because row ids/hashes look valid.
-    with pytest.raises(AuditVerificationError, match="identity"):
-        audit.verify(checkpoint)
-
-
-def test_full_and_incremental_verification_agree_for_healthy_history() -> None:
-    # Given: a verified prefix followed by one canonical event.
-    audit = AuditStore(_database_path())
-    audit.append(_event(AuditAction.AUDIT_LIST, "first"))
-    checkpoint = audit.verify()
-    audit.append(_event(AuditAction.AUDIT_DETAIL, "second"))
-
-    # When/Then: both modes return the same healthy terminal checkpoint.
-    assert audit.verify(checkpoint) == audit.verify()
-
-
-def test_full_and_incremental_verification_agree_for_corrupted_history() -> None:
-    # Given: a checkpoint whose anchor is changed behind a recreated canonical trigger.
-    audit = AuditStore(_database_path())
-    first = audit.append(_event(AuditAction.AUDIT_LIST, "first"))
-    checkpoint = audit.verify()
-    with sqlite3.connect(_database_path()) as connection:
-        trigger_sql = connection.execute(
-            "SELECT sql FROM sqlite_master WHERE name='audit_events_immutable_update'"
-        ).fetchone()[0]
-        connection.execute("DROP TRIGGER audit_events_immutable_update")
-        connection.execute(
-            "UPDATE audit_events SET actor_id='changed' WHERE audit_id=?", (first.audit_id,)
-        )
-        connection.execute(trigger_sql)
-
-    # When/Then: both bounded modes reject the same corrupted history.
-    with pytest.raises(AuditVerificationError):
-        audit.verify(checkpoint)
-    with pytest.raises(AuditVerificationError):
-        audit.verify()
-
-
-def test_runtime_settings_success_appends_exactly_one_audit_row() -> None:
-    # Given: an authenticated real schema-18 app.
+def test_runtime_settings_success_appends_exactly_one_audit_row(
+    postgres_product_sandbox, postgres_audit_runtime
+) -> None:
+    # Given: the native owner and verified audit runtime explicitly injected.
+    sandbox = postgres_product_sandbox
     app = create_app(lifespan=no_lifespan)
+    app.state.runtime_settings_store = RuntimeSettingsStore(sandbox.database, sandbox.authority)
+    app.state.audit_runtime = postgres_audit_runtime
+    app.state.dashboard_credentials_store = PostgresDashboardCredentialsStore(
+        sandbox.database, sandbox.authority
+    )
     with TestClient(app) as client:
         _login(client)
-        with sqlite3.connect(_database_path()) as connection:
-            before = connection.execute("SELECT COUNT(*) FROM audit_events").fetchone()[0]
+        before = sandbox.admin.execute("SELECT COUNT(*) FROM audit_events").fetchone()[0]
 
         # When: the governed runtime setting mutates.
         response = client.put(
@@ -163,18 +56,22 @@ def test_runtime_settings_success_appends_exactly_one_audit_row() -> None:
             json={"clip_export_enabled": True, "expected_version": 0},
         )
 
-        with sqlite3.connect(_database_path()) as connection:
-            after = connection.execute("SELECT COUNT(*) FROM audit_events").fetchone()[0]
+        after = sandbox.admin.execute("SELECT COUNT(*) FROM audit_events").fetchone()[0]
 
     # Then: state and exactly one audit event commit together.
     assert response.status_code == 200
     assert response.json() == {"clip_export_enabled": True, "version": 1}
     assert after - before == 1
+    assert sandbox.admin.execute(
+        "SELECT clip_export_enabled,runtime_settings_version FROM edge_site WHERE id=1"
+    ).fetchone() == (1, 1)
 
 
 def test_invalid_video_range_appends_no_success_audit(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    postgres_product_sandbox,
+    postgres_audit_runtime,
 ) -> None:
     # Given: one ten-byte descriptor-backed clip.
     root = tmp_path / "clips"
@@ -200,20 +97,31 @@ def test_invalid_video_range_appends_no_success_audit(
     )
     monkeypatch.setenv("CLIP_STORE_DIR", str(root))
     app = create_app(lifespan=no_lifespan)
+    sandbox = postgres_product_sandbox
+    app.state.audit_runtime = postgres_audit_runtime
+    app.state.dashboard_credentials_store = PostgresDashboardCredentialsStore(
+        sandbox.database, sandbox.authority
+    )
     with TestClient(app) as client:
         _login(client)
-        with sqlite3.connect(_database_path()) as connection:
-            before = connection.execute(
-                "SELECT COUNT(*) FROM audit_events WHERE action='clip.play'"
-            ).fetchone()[0]
+        before = sandbox.admin.execute(
+            "SELECT COUNT(*) FROM audit_events WHERE action='clip.play'"
+        ).fetchone()[0]
 
         # When: range preparation rejects a non-overlapping request.
         response = client.get("/api/v1/clips/range-clip/video", headers={"Range": "bytes=999-1000"})
 
-        with sqlite3.connect(_database_path()) as connection:
-            after = connection.execute(
+        after = sandbox.admin.execute(
+            "SELECT COUNT(*) FROM audit_events WHERE action='clip.play'"
+        ).fetchone()[0]
+        valid = client.get("/api/v1/clips/range-clip/video", headers={"Range": "bytes=0-2"})
+        assert (valid.status_code, valid.content) == (206, b"012")
+        assert (
+            sandbox.admin.execute(
                 "SELECT COUNT(*) FROM audit_events WHERE action='clip.play'"
             ).fetchone()[0]
+            == after + 1
+        )
 
     # Then: 416 is not recorded as successful access.
     assert (response.status_code, response.content) == (416, b"")

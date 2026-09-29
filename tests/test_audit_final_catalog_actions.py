@@ -1,28 +1,30 @@
 from __future__ import annotations
 
-import hashlib
-import json
-import sqlite3
-from pathlib import Path
-
 import pytest
 from fastapi.testclient import TestClient
 
-from backend.app.edge_db.bootstrap import bootstrap_database
 from backend.app.features.audit.catalog import AuditAction, empty_detail
-from backend.app.features.audit.store import AuditEvent, AuditStore, utc_now
+from backend.app.features.audit.postgres_runtime import (
+    AuditMutation,
+    AuditRuntimeUnavailable,
+    PostgresAuditRuntime,
+)
+from backend.app.features.audit.store import AuditEvent
 from backend.app.features.cameras.edge_topology_sync_state import (
     EdgeTopologySyncStateStore,
     PendingTopologySnapshot,
 )
 from backend.app.features.cameras.store import CameraRegistryStore
 from backend.app.features.cameras.topology_client import TopologyAccepted, TopologyPutResult
-from backend.app.features.cameras.topology_confirmation_state import TopologyConfirmationStore
+from backend.app.features.cameras.topology_confirmation_state import (
+    TopologyConfirmationPreview,
+    TopologyConfirmationStore,
+)
+from backend.app.features.connection.store import ConnectionSettingsStore
 from backend.app.features.connection.topology_retry_coordinator import TopologyRetryCoordinator
-from backend.app.features.evidence.compact_receipts import CompactArtifactReceiptStore
-from backend.app.features.evidence.receipt_store import ArtifactReceipt, verified_artifact
-from backend.app.features.evidence.relay_projection import RelayEvent, RelayEvidenceProjection
-from backend.app.main import create_app, no_lifespan
+from backend.app.features.evidence.event_outbox import EventOutbox, OutboxBudget
+from backend.app.features.evidence.postgres_relay_projection import PostgresRelayEvidenceProjection
+from backend.app.features.evidence.relay_projection import RelayEvent
 from contracts.edge_provisioning_v1 import (
     MachinePrincipal,
     MutationCounts,
@@ -31,44 +33,75 @@ from contracts.edge_provisioning_v1 import (
     TopologyMutationResult,
     TopologySuccessEnvelope,
 )
-from tests_support.compact_authority_db import seed_enrollment
+from tests_support.postgres_api_app import postgres_api_app
+from tests_support.postgres_sandbox import ProductSandbox
+
+pytest_plugins = ("tests_support.postgres_sandbox",)
 
 _PRINCIPAL = MachinePrincipal("c72bd9a7-3e04-47ba-a8cd-a56e54f98152", 1)
+_SNAPSHOT_ID = "0197f671-3a31-7a6c-a6e4-83ed412de81a"
+_CONFIRMATION_ID = "0197f671-3a31-7a6c-a6e4-83ed412de81b"
+_STAMP = "2026-08-24T00:00:00.000Z"
 
 
-def _hook(path: Path, action: AuditAction, *, deny: bool = False):
-    store = AuditStore(path)
-    event = AuditEvent(utc_now(), "test", action, action.value, empty_detail(action))
-
-    def append(connection: sqlite3.Connection) -> None:
-        if deny:
-            connection.set_authorizer(
-                lambda code, table, *_: (
-                    sqlite3.SQLITE_DENY
-                    if code == sqlite3.SQLITE_INSERT and table == "audit_events"
-                    else sqlite3.SQLITE_OK
-                )
-            )
-        store.append(event, connection=connection)
-
-    return append
-
-
-def _count(path: Path, action: AuditAction) -> int:
-    with sqlite3.connect(path) as connection:
-        return connection.execute(
-            "SELECT COUNT(*) FROM audit_events WHERE action=?", (action.value,)
-        ).fetchone()[0]
-
-
-def _sync_fixture(path: Path) -> tuple[TopologyRetryCoordinator, EdgeTopologySyncStateStore]:
-    bootstrap_database(path)
-    seed_enrollment(
-        path,
-        edge_installation_id=_PRINCIPAL.edge_installation_id,
-        enrollment_generation=_PRINCIPAL.enrollment_generation,
+def _audit(runtime: PostgresAuditRuntime, action: AuditAction, target_id: str) -> AuditMutation:
+    return AuditMutation(
+        runtime,
+        lambda: AuditEvent(
+            occurred_at=_STAMP,
+            actor_id="admin",
+            action=action,
+            target_id=target_id,
+            detail=empty_detail(action),
+        ),
     )
-    registry = CameraRegistryStore(path)
+
+
+def _reject_audit_inserts(sandbox: ProductSandbox) -> None:
+    sandbox.admin.execute(
+        "CREATE OR REPLACE FUNCTION reject_audit_test() RETURNS trigger LANGUAGE plpgsql AS $$ "
+        "BEGIN RAISE EXCEPTION 'injected audit failure'; END $$"
+    )
+    sandbox.admin.execute(
+        "CREATE TRIGGER reject_audit_test BEFORE INSERT ON audit_events "
+        "FOR EACH ROW EXECUTE FUNCTION reject_audit_test()"
+    )
+
+
+def _restore_audit_inserts(sandbox: ProductSandbox, runtime: PostgresAuditRuntime) -> None:
+    # The extra trigger fails the exact trigger contract, so re-verify only after dropping it.
+    sandbox.admin.execute("DROP TRIGGER reject_audit_test ON audit_events")
+    assert runtime.verify_once()
+
+
+def _action_count(sandbox: ProductSandbox, action: AuditAction) -> int:
+    return sandbox.admin.execute(
+        "SELECT COUNT(*) FROM audit_events WHERE action=%s", (action.value,)
+    ).fetchone()[0]
+
+
+def _edge_site(sandbox: ProductSandbox) -> tuple[object, ...]:
+    return sandbox.admin.execute("SELECT * FROM edge_site WHERE id=1").fetchone()
+
+
+def _enroll(sandbox: ProductSandbox) -> None:
+    ConnectionSettingsStore(sandbox.database, sandbox.authority).save(
+        {
+            "facility_code": "NH-1234",
+            "client_installation_ref": "install-1",
+            "facility_id": "facility-1",
+            "facility_token": "token-1",
+            "edge_installation_id": _PRINCIPAL.edge_installation_id,
+            "enrollment_generation": _PRINCIPAL.enrollment_generation,
+        }
+    )
+
+
+def _sync_fixture(
+    sandbox: ProductSandbox,
+) -> tuple[TopologyRetryCoordinator, EdgeTopologySyncStateStore]:
+    _enroll(sandbox)
+    registry = CameraRegistryStore(sandbox.database, sandbox.authority)
     registry.create_floor(edge_ref="floor-1", name="First", order_index=1)
     registry.create_room(edge_ref="room-1", floor_edge_ref="floor-1", name="101")
     registry.create(
@@ -104,109 +137,129 @@ def _sync_fixture(path: Path) -> tuple[TopologyRetryCoordinator, EdgeTopologySyn
         ) -> TopologyPutResult:
             raise AssertionError("not used")
 
-    state = EdgeTopologySyncStateStore(path)
+    state = EdgeTopologySyncStateStore(sandbox.database, sandbox.authority)
     client = Client()
     return TopologyRetryCoordinator(registry, state, lambda: client), state
 
 
-def test_connection_sync_route_commits_canonical_action_and_detail(tmp_path: Path) -> None:
-    path = tmp_path / "sync-route" / "edge.sqlite3"
-    coordinator, _state = _sync_fixture(path)
-    app = create_app(lifespan=no_lifespan)
+def test_connection_sync_route_commits_canonical_action_and_detail(
+    postgres_product_sandbox: ProductSandbox, postgres_audit_runtime: PostgresAuditRuntime
+) -> None:
+    # Given: an enrolled roster whose sync coordinator shares the product database.
+    sandbox = postgres_product_sandbox
+    coordinator, _state = _sync_fixture(sandbox)
+    app = postgres_api_app(sandbox, postgres_audit_runtime)
     app.state.topology_retry_coordinator = coordinator
-    client = TestClient(app)
-    assert (
-        client.post(
-            "/api/v1/auth/session", json={"username": "admin", "password": "admin"}
-        ).status_code
-        == 204
-    )
+    with TestClient(app) as client:
+        login = client.post("/api/v1/auth/session", json={"username": "admin", "password": "admin"})
+        assert login.status_code == 204
 
-    response = client.post("/api/v1/connection/sync-cameras")
+        # When: the dashboard requests an explicit roster sync.
+        response = client.post("/api/v1/connection/sync-cameras")
 
+    # Then: the route commits exactly the canonical sync action and detail.
     assert response.status_code == 200
-    with sqlite3.connect(path) as connection:
-        rows = connection.execute(
-            "SELECT action,target_id,actor_type,auth_mechanism,detail_json "
-            "FROM audit_events WHERE action NOT LIKE 'audit.%'"
-        ).fetchall()
+    rows = sandbox.admin.execute(
+        "SELECT action,target_id,actor_type,auth_mechanism,detail_json FROM audit_events "
+        "WHERE action NOT LIKE 'audit.%' AND action NOT LIKE 'auth.%' ORDER BY audit_id"
+    ).fetchall()
     assert rows == [
         ("connection.sync", "camera-roster", "user", "dashboard_session", '{"version":1}')
     ]
 
 
-def test_connection_sync_audit_is_one_atomic_operation(tmp_path: Path) -> None:
-    healthy_path = tmp_path / "sync-healthy" / "edge.sqlite3"
-    healthy, healthy_state = _sync_fixture(healthy_path)
-    result = healthy.trigger(
-        force=True,
-        now_epoch=1.0,
-        after_write=_hook(healthy_path, AuditAction.CONNECTION_SYNC),
-    )
-    assert result.status == "synced"
-    assert _count(healthy_path, AuditAction.CONNECTION_SYNC) == 1
-    assert healthy_state.load().last_client_revision == 1
+def test_connection_sync_audit_is_one_atomic_operation(
+    postgres_product_sandbox: ProductSandbox, postgres_audit_runtime: PostgresAuditRuntime
+) -> None:
+    # Given: an enrolled roster and a real PostgreSQL rejection at audit INSERT.
+    sandbox = postgres_product_sandbox
+    runtime = postgres_audit_runtime
+    coordinator, state = _sync_fixture(sandbox)
+    before = _edge_site(sandbox)
+    _reject_audit_inserts(sandbox)
 
-    fault_path = tmp_path / "sync-fault" / "edge.sqlite3"
-    fault, fault_state = _sync_fixture(fault_path)
-    before = fault_state.load()
-    with pytest.raises(sqlite3.DatabaseError):
-        fault.trigger(
+    # When: the sync commits its acceptance and audit in one transaction.
+    with pytest.raises(AuditRuntimeUnavailable):
+        coordinator.trigger(
             force=True,
             now_epoch=1.0,
-            after_write=_hook(fault_path, AuditAction.CONNECTION_SYNC, deny=True),
+            audit=_audit(runtime, AuditAction.CONNECTION_SYNC, "camera-roster"),
         )
-    assert fault_state.load() == before
-    assert _count(fault_path, AuditAction.CONNECTION_SYNC) == 0
+
+    # Then: the failed audit leaves the sync state untouched.
+    assert _edge_site(sandbox) == before
+    assert _action_count(sandbox, AuditAction.CONNECTION_SYNC) == 0
+
+    # When: audit inserts are accepted again and the sync repeats.
+    _restore_audit_inserts(sandbox, runtime)
+    result = coordinator.trigger(
+        force=True,
+        now_epoch=1.0,
+        audit=_audit(runtime, AuditAction.CONNECTION_SYNC, "camera-roster"),
+    )
+
+    # Then: acceptance and its one audit row commit together.
+    assert result.status == "synced"
+    assert _action_count(sandbox, AuditAction.CONNECTION_SYNC) == 1
+    assert state.load().last_client_revision == 1
 
 
-def _confirmation_fixture(path: Path):
-    bootstrap_database(path)
-    seed_enrollment(
-        path,
-        edge_installation_id=_PRINCIPAL.edge_installation_id,
-        enrollment_generation=_PRINCIPAL.enrollment_generation,
+def _confirmation_fixture(
+    sandbox: ProductSandbox,
+) -> tuple[TopologyConfirmationStore, TopologyConfirmationPreview, TopologySuccessEnvelope]:
+    _enroll(sandbox)
+    # The terminal CAS revalidates these accepted-snapshot versions against the preview.
+    sandbox.admin.execute(
+        "UPDATE edge_site SET registry_version=12,topology_client_revision=1,"
+        "topology_server_revision=7 WHERE id=1"
     )
     counts = MutationCounts(0, 0, 1)
     result = TopologyMutationResult(counts, counts, counts)
     preview_response = TopologySuccessEnvelope(
-        "snapshot-1",
+        _SNAPSHOT_ID,
         1,
         7,
         result,
-        OmissionPreview("confirmation-1", "a" * 64, "2099-01-01T00:00:00Z", (), (), ()),
+        OmissionPreview(_CONFIRMATION_ID, "a" * 64, "2099-01-01T00:00:00.000Z", (), (), ()),
     )
-    terminal = TopologySuccessEnvelope("snapshot-1", 1, 8, result, None)
-    store = TopologyConfirmationStore(path)
-    store.save(preview_response, _PRINCIPAL, 0)
+    terminal = TopologySuccessEnvelope(_SNAPSHOT_ID, 1, 8, result, None)
+    store = TopologyConfirmationStore(sandbox.database, sandbox.authority)
+    store.save(preview_response, _PRINCIPAL, registry_version=12)
     preview = store.load()
     assert preview is not None
     return store, preview, terminal
 
 
-def test_topology_confirmation_audit_rolls_back_terminal_state(tmp_path: Path) -> None:
-    healthy_path = tmp_path / "confirm-healthy" / "edge.sqlite3"
-    store, preview, terminal = _confirmation_fixture(healthy_path)
-    store.complete(
-        preview,
-        terminal,
-        after_write=_hook(healthy_path, AuditAction.TOPOLOGY_CONFIRM),
+def test_topology_confirmation_audit_rolls_back_terminal_state(
+    postgres_product_sandbox: ProductSandbox, postgres_audit_runtime: PostgresAuditRuntime
+) -> None:
+    # Given: a saved omission preview and a real PostgreSQL rejection at audit INSERT.
+    sandbox = postgres_product_sandbox
+    runtime = postgres_audit_runtime
+    store, preview, terminal = _confirmation_fixture(sandbox)
+    _reject_audit_inserts(sandbox)
+
+    # When: the terminal confirmation and its audit share one transaction.
+    with pytest.raises(AuditRuntimeUnavailable):
+        _audit(runtime, AuditAction.TOPOLOGY_CONFIRM, _SNAPSHOT_ID).apply(
+            store, lambda append: store.complete(preview, terminal, after_write=append)
+        )
+
+    # Then: the preview stays unconfirmed and no audit row escaped.
+    loaded = store.load()
+    assert loaded is not None and loaded.confirmed is False
+    assert _action_count(sandbox, AuditAction.TOPOLOGY_CONFIRM) == 0
+
+    # When: audit inserts are accepted again and the confirmation repeats.
+    _restore_audit_inserts(sandbox, runtime)
+    _audit(runtime, AuditAction.TOPOLOGY_CONFIRM, _SNAPSHOT_ID).apply(
+        store, lambda append: store.complete(preview, terminal, after_write=append)
     )
+
+    # Then: the terminal state and its one audit row commit together.
     loaded = store.load()
     assert loaded is not None and loaded.confirmed is True
-    assert _count(healthy_path, AuditAction.TOPOLOGY_CONFIRM) == 1
-
-    fault_path = tmp_path / "confirm-fault" / "edge.sqlite3"
-    fault_store, fault_preview, fault_terminal = _confirmation_fixture(fault_path)
-    with pytest.raises(sqlite3.DatabaseError):
-        fault_store.complete(
-            fault_preview,
-            fault_terminal,
-            after_write=_hook(fault_path, AuditAction.TOPOLOGY_CONFIRM, deny=True),
-        )
-    loaded = fault_store.load()
-    assert loaded is not None and loaded.confirmed is False
-    assert _count(fault_path, AuditAction.TOPOLOGY_CONFIRM) == 0
+    assert _action_count(sandbox, AuditAction.TOPOLOGY_CONFIRM) == 1
 
 
 def _event(edge_event_id: str) -> RelayEvent:
@@ -223,118 +276,76 @@ def _event(edge_event_id: str) -> RelayEvent:
     )
 
 
-def test_snapshot_actions_share_projection_transactions(tmp_path: Path) -> None:
-    path = tmp_path / "relay.sqlite3"
-    bootstrap_database(path)
-    projection = RelayEvidenceProjection(path)
-    projection.project_event(_event("event-attach"))
-    projection.attach_snapshot(
-        edge_event_id="event-attach",
-        snapshot_id="snapshot-1",
-        sha256="a" * 64,
-        media_reference="clips/snapshot.jpg",
-        size_bytes=10,
-        mime_type="image/jpeg",
-        after_write=_hook(path, AuditAction.RELAY_SNAPSHOT_ATTACHMENT),
-    )
-    projection.project_event(_event("event-disposition"))
-    projection.record_snapshot_disposition(
-        edge_event_id="event-disposition",
-        snapshot_id="snapshot-2",
-        disposition="unavailable",
-        reason="capture_failed",
-        after_write=_hook(path, AuditAction.RELAY_SNAPSHOT_DISPOSITION),
-    )
-    assert _count(path, AuditAction.RELAY_SNAPSHOT_ATTACHMENT) == 1
-    assert _count(path, AuditAction.RELAY_SNAPSHOT_DISPOSITION) == 1
+def _snapshot_artifacts(sandbox: ProductSandbox) -> list[tuple[object, ...]]:
+    return sandbox.admin.execute(
+        "SELECT incidents.edge_event_id,artifacts.artifact_id,artifacts.state FROM artifacts "
+        "JOIN incidents USING (incident_id) WHERE artifacts.kind='SNAPSHOT' "
+        "ORDER BY incidents.edge_event_id"
+    ).fetchall()
 
-    projection.project_event(_event("event-fault"))
-    with pytest.raises(sqlite3.DatabaseError):
-        projection.attach_snapshot(
-            edge_event_id="event-fault",
-            snapshot_id="snapshot-3",
-            sha256="b" * 64,
-            media_reference="clips/fault.jpg",
+
+def test_snapshot_actions_share_projection_transactions(
+    postgres_product_sandbox: ProductSandbox, postgres_audit_runtime: PostgresAuditRuntime
+) -> None:
+    # Given: three accepted events and the native late-snapshot owner.
+    sandbox = postgres_product_sandbox
+    runtime = postgres_audit_runtime
+    outbox = EventOutbox(
+        sandbox.database, sandbox.authority, OutboxBudget(10, 1_048_576), audit_runtime=runtime
+    )
+    for edge_event_id in ("event-attach", "event-disposition", "event-fault"):
+        outbox.accept(_event(edge_event_id), backend_camera_id=None, forward=False)
+    projection = PostgresRelayEvidenceProjection(sandbox.database, sandbox.authority)
+
+    # When: an attachment and a disposition each carry their audit into the projection.
+    _audit(runtime, AuditAction.RELAY_SNAPSHOT_ATTACHMENT, "snapshot-1").apply(
+        projection,
+        lambda append: projection.attach_snapshot(
+            edge_event_id="event-attach",
+            snapshot_id="snapshot-1",
+            sha256="a" * 64,
+            media_reference="clips/snapshot.jpg",
             size_bytes=10,
             mime_type="image/jpeg",
-            after_write=_hook(path, AuditAction.RELAY_SNAPSHOT_ATTACHMENT, deny=True),
-        )
-    with sqlite3.connect(path) as connection:
-        stored = connection.execute(
-            "SELECT COUNT(*) FROM artifacts WHERE artifact_id='snapshot-3'"
-        ).fetchone()[0]
-    assert stored == 0
-
-
-def _media(tmp_path: Path, data: bytes) -> Path:
-    path = tmp_path / "clip-store" / "clips" / "clip-1" / "clip.mp4"
-    path.parent.mkdir(parents=True)
-    path.write_bytes(data)
-    (path.parent / "manifest.json").write_text(
-        json.dumps(
-            {
-                "clip_id": "clip-1",
-                "camera_id": "camera-1",
-                "event_ref": "event-1",
-                "event_type": "fall",
-                "started_at": "2026-08-24T00:00:00Z",
-                "duration_s": 1.0,
-                "codec": "h264",
-                "path": "clips/clip-1",
-                "video_available": True,
-                "finalized": True,
-            }
+            after_write=append,
         ),
-        encoding="utf-8",
     )
-    return path
-
-
-def _seed_incident(database: Path) -> None:
-    """A verified receipt now completes its incident, so the incident must exist."""
-    from backend.app.features.evidence.relay_projection import RelayEvent, RelayEvidenceProjection
-
-    RelayEvidenceProjection(database).project_event(
-        RelayEvent(
-            edge_event_id="event-1",
-            event_type="fall",
-            probability=0.8,
-            detected_at="2026-08-24T00:00:00Z",
-            camera_id="camera-1",
-            facility_id="facility-1",
-            resident_id=None,
-            evidence=None,
-            audit=None,
-        )
+    _audit(runtime, AuditAction.RELAY_SNAPSHOT_DISPOSITION, "snapshot-2").apply(
+        projection,
+        lambda append: projection.record_snapshot_disposition(
+            edge_event_id="event-disposition",
+            snapshot_id="snapshot-2",
+            disposition="unavailable",
+            reason="capture_failed",
+            after_write=append,
+        ),
     )
 
+    # Then: each fact commits with exactly one audit row.
+    committed = [
+        ("event-attach", "snapshot-1", "AVAILABLE"),
+        ("event-disposition", None, "UNAVAILABLE"),
+    ]
+    assert _snapshot_artifacts(sandbox) == committed
+    assert _action_count(sandbox, AuditAction.RELAY_SNAPSHOT_ATTACHMENT) == 1
+    assert _action_count(sandbox, AuditAction.RELAY_SNAPSHOT_DISPOSITION) == 1
 
-def test_evidence_receipt_audit_rolls_back_compact_facts(tmp_path: Path) -> None:
-    path = tmp_path / "receipt.sqlite3"
-    bootstrap_database(path)
-    _seed_incident(path)
-    data = b"verified video"
-    media_path = _media(tmp_path, data)
-    receipt = ArtifactReceipt("clip-1", hashlib.sha256(data).hexdigest(), len(data))
-    store = CompactArtifactReceiptStore(path, tmp_path / "clip-store")
-    with media_path.open("rb") as handle:
-        store.commit_verified(
-            receipt,
-            verified_artifact(handle),
-            after_write=_hook(path, AuditAction.EVIDENCE_RECEIPT),
+    # When: PostgreSQL rejects the audit INSERT of a further attachment.
+    _reject_audit_inserts(sandbox)
+    with pytest.raises(AuditRuntimeUnavailable):
+        _audit(runtime, AuditAction.RELAY_SNAPSHOT_ATTACHMENT, "snapshot-3").apply(
+            projection,
+            lambda append: projection.attach_snapshot(
+                edge_event_id="event-fault",
+                snapshot_id="snapshot-3",
+                sha256="b" * 64,
+                media_reference="clips/fault.jpg",
+                size_bytes=10,
+                mime_type="image/jpeg",
+                after_write=append,
+            ),
         )
-    assert store.get("clip-1") == receipt
-    assert _count(path, AuditAction.EVIDENCE_RECEIPT) == 1
 
-    fault_path = tmp_path / "receipt-fault.sqlite3"
-    bootstrap_database(fault_path)
-    _seed_incident(fault_path)
-    fault_store = CompactArtifactReceiptStore(fault_path, tmp_path / "clip-store")
-    with media_path.open("rb") as handle, pytest.raises(sqlite3.DatabaseError):
-        fault_store.commit_verified(
-            receipt,
-            verified_artifact(handle),
-            after_write=_hook(fault_path, AuditAction.EVIDENCE_RECEIPT, deny=True),
-        )
-    assert fault_store.get("clip-1") is None
-    assert _count(fault_path, AuditAction.EVIDENCE_RECEIPT) == 0
+    # Then: the attachment rolled back with its audit row.
+    assert _snapshot_artifacts(sandbox) == committed
+    assert _action_count(sandbox, AuditAction.RELAY_SNAPSHOT_ATTACHMENT) == 1

@@ -9,12 +9,12 @@ Unavailable receipts retain the existing zero-callback contract.
 from __future__ import annotations
 
 from collections.abc import Callable
+from datetime import UTC, datetime
 from pathlib import Path
 
 import psycopg
 
 from backend.app.edge_db.authority import AuthorityToken, require_authority
-from backend.app.edge_db.configuration import utc_now
 from backend.app.edge_db.postgres import PostgresDatabase
 from backend.app.features.clips.store import ClipStore
 from backend.app.features.evidence.postgres_receipt_sql import (
@@ -36,6 +36,10 @@ from backend.app.features.evidence.receipt_store import (
     VerifiedArtifact,
     verified_artifact,
 )
+
+
+def utc_now() -> str:
+    return datetime.now(UTC).isoformat(timespec="milliseconds").replace("+00:00", "Z")
 
 
 class PostgresArtifactReceiptStore:
