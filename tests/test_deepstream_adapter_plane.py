@@ -11,6 +11,7 @@ absorbed into the same session; a Flow fixes its sources when built.
 from __future__ import annotations
 
 import logging
+import tempfile
 import threading
 import time
 from collections.abc import Callable
@@ -135,7 +136,7 @@ def _plane(
         "infer",
         "tracker",
         "lib",
-        Path("/tmp/seeon-adapter-tests"),
+        Path(tempfile.gettempdir()) / "seeon-adapter-tests",
         5,
         640,
         360,

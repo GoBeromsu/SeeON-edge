@@ -1,0 +1,11 @@
+[package]
+name = "seeon-deepstream-native"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.90"
+publish = false
+build = "build.rs"
+links = "seeon_gpu"
+
+[lib]
+path = "src/lib.rs"

@@ -993,7 +993,7 @@ _TEST_STEPS = [
             'echo "shard $SHARD/$SHARD_TOTAL: ${#shard_files[@]} files"\n'
             "uv run pytest -q -m "
             '"not real_stack and not heavy and not integration '
-            'and not private_bundle" \\\n'
+            'and not private_bundle and not gpu" \\\n'
             '  "${shard_files[@]}"\n'
         ),
     },

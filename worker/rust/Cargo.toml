@@ -1,0 +1,18 @@
+[package]
+name = "seeon-worker"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.90"
+publish = false
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+# Rust 1.70 MSRV; explicit TZif input only, no system-zone or bundled-db fallback.
+jiff = { version = "=0.2.15", default-features = false, features = ["std"] }
+
+[dev-dependencies]
+# D3: oracle fixture decoding in integration tests only.
+serde_json = "=1.0.151"
+sha2 = "=0.11.0"

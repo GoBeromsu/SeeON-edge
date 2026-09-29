@@ -1,0 +1,189 @@
+{
+  "schema": "synthetic-scene-v1",
+  "role": "external-3d-asset-metadata",
+  "bytes_vendored": false,
+  "network_fetch": false,
+  "fetch_note": "Parent provisions both pinned assets onsite. Pass --asset and --sha256 for CesiumMan, and REQUIRED --bed-asset-root for the exact five-file GothicBed_01 closure below, including textures/. No URI rewriting, download or procedural bed fallback. A Git LFS pointer is not a glTF binary.",
+  "asset": {
+    "repository": "KhronosGroup/glTF-Sample-Assets",
+    "revision": "03251428e295f20d8c4a65ddbbd7dafe4f251c6d",
+    "upstream_path": "Models/CesiumMan/glTF-Binary/CesiumMan.glb",
+    "filename": "CesiumMan.glb",
+    "media_type": "model/gltf-binary",
+    "license": "CC-BY-4.0",
+    "copyright": "©2017 Cesium",
+    "attribution": "CesiumMan by Cesium, ©2017 Cesium, licensed under CC-BY-4.0. Source: KhronosGroup/glTF-Sample-Assets revision 03251428e295f20d8c4a65ddbbd7dafe4f251c6d, Models/CesiumMan/glTF-Binary/CesiumMan.glb.",
+    "upstream_url": "https://raw.githubusercontent.com/KhronosGroup/glTF-Sample-Assets/03251428e295f20d8c4a65ddbbd7dafe4f251c6d/Models/CesiumMan/glTF-Binary/CesiumMan.glb",
+    "byte_length": 438044,
+    "digest": {
+      "algorithm": "SHA-256",
+      "required": true,
+      "pinned_hex": "b7001eaeea8254bd44773bcd247e78696d94169388fbb2a1800fc69434e777d9"
+    },
+    "resident_textures": "discard-and-replace-with-procedural-nonidentifying-materials"
+  },
+  "bed_asset": {
+    "name": "Poly Haven Gothic Bed01",
+    "artist": "Kirill Sannikov",
+    "license": "CC0-1.0",
+    "source": "https://polyhaven.com/a/GothicBed_01",
+    "license_url": "https://polyhaven.com/license",
+    "entrypoint": "GothicBed_01_1k.gltf",
+    "members": [
+      {"file": "GothicBed_01_1k.gltf", "bytes": 2683, "sha256": "67df189dd3a645936827f3cc123fb9e97ca9d2201d1e4090762bf477cab82fc0"},
+      {"file": "GothicBed_01.bin", "bytes": 658648, "sha256": "2276e86480c49dfb63a4671a9637621f88727708cf83342156c157a1d89f747b"},
+      {"file": "textures/GothicBed_01_diff_1k.jpg", "bytes": 116672, "sha256": "f7e8611a731a87a42a35d92e59f78b848ac20475827b79cb8aa34df0dd5bcbd5"},
+      {"file": "textures/GothicBed_01_nor_gl_1k.jpg", "bytes": 196568, "sha256": "27533a33617689035cf9880803ed19af45550864442734ee9898697933b7319f"},
+      {"file": "textures/GothicBed_01_arm_1k.jpg", "bytes": 180642, "sha256": "049014a0bb54fd3da3b555d90966b63cad7e35feb5470b578524a7b1cec8506a"}
+    ],
+    "uri_mapping": "exact local relative paths, including textures/; no rewriting",
+    "materials": "retain imported PBR materials and all three pinned textures",
+    "website_preview_used": false
+  },
+  "scene": {
+    "width": 640,
+    "height": 360,
+    "ingest_fps": 30,
+    "pose_fps_reference": 15,
+    "frame_start": 0,
+    "frame_end": 359,
+    "frame_count": 360,
+    "seed": 1,
+    "variants": ["normal", "fall"],
+    "actor_counts": [1, 4],
+    "overlays": false,
+    "camera_input": false
+  },
+  "motion_contracts": {
+    "normal": {
+      "heading_rad": -0.07363107781851078,
+      "rotation_order": "XYZ",
+      "pitch_axis": "local-X",
+      "pitch_end_rad": 0.0,
+      "interpolation": "constant",
+      "upright_inclusive": [0, 359],
+      "falling_inclusive": [],
+      "lying_hold_inclusive": [],
+      "floor_posture": null,
+      "posture_note": "No prone/supine or model-admission claim",
+      "pose": "first imported animation at time 0/frame 0, frozen POSE; rigid root motion",
+      "grounding": "clearance minus minimum rotated evaluated posed-mesh vertex Z at each angle",
+      "ground_clearance_m": 0.025
+    },
+    "fall": {
+      "heading_rad": -0.07363107781851078,
+      "rotation_order": "XYZ",
+      "pitch_axis": "local-X",
+      "pitch_end_rad": -1.5707963267948966,
+      "interpolation": "smoothstep((frame-149)/30)",
+      "upright_inclusive": [0, 149],
+      "falling_inclusive": [150, 179],
+      "lying_hold_inclusive": [180, 359],
+      "floor_posture": "lying",
+      "posture_note": "No prone/supine or model-admission claim",
+      "pose": "first imported animation at time 0/frame 0, frozen POSE; rigid root motion",
+      "grounding": "clearance minus minimum rotated evaluated posed-mesh vertex Z at each angle",
+      "ground_clearance_m": 0.025
+    }
+  },
+  "render_contract": {
+    "actor_height_m": 1.75,
+    "actor_positions_xy_m": {
+      "1": [[0.0, 0.0]],
+      "4": [[-1.2, 0.0], [-0.4, 0.0], [0.4, 0.0], [1.2, 0.0]]
+    },
+    "independent_armatures": true,
+    "actor_pose": {
+      "animation_index": 0,
+      "required_animation_count": 1,
+      "sample_time_s": 0.0,
+      "sample_frame": 0,
+      "sample_subframe": 0.0,
+      "pose_position": "POSE",
+      "out_of_range_sampling": "Blender CONSTANT endpoint extrapolation per FCurve; frame stays 0, keys unchanged",
+      "freeze": "snapshot bone matrix_basis; clear animation data/NLA; restore sampled matrices",
+      "geometry": "evaluated deformed skin, not undeformed rest vertices",
+      "motion": "frozen imported sample with grounded rigid root rotation",
+      "claims": "no walking, physics, prone/supine or model admission"
+    },
+    "head_material": "synthetic skin and scalp on existing mesh; no face overlay",
+    "human_surfaces": [
+      {"name": "shoes", "upper_height_m": 0.12, "color": [0.045, 0.035, 0.03]},
+      {"name": "trousers", "upper_height_m": 0.86, "color": [0.065, 0.09, 0.12]},
+      {"name": "shirt", "upper_height_m": 1.46, "color": [0.16, 0.27, 0.42]},
+      {"name": "skin", "upper_height_m": 1.7, "color": [0.68, 0.39, 0.23]},
+      {"name": "scalp", "upper_height_m": 1.75, "color": [0.08, 0.045, 0.025]}
+    ],
+    "bed": {
+      "asset": "Poly Haven Gothic Bed01",
+      "placement": {
+        "1": {"center_xy_m": [2.1, 0.7], "heading_rad": 0.0},
+        "4": {"center_xy_m": [2.7, 0.7], "heading_rad": 0.0}
+      },
+      "normalization": "all evaluated mesh vertices; uniform scale; longer horizontal extent to local Y; center XY and ground minimum Z",
+      "length_m": 2.2,
+      "width_range_m": [0.8, 2.2],
+      "height_range_m": [0.35, 2.5],
+      "imported_axis_extent_range_exclusive": [0.1, 5.0],
+      "vertex_limit_exclusive": 200000,
+      "materials": "unchanged imported PBR materials/textures",
+      "geometry": "own render of pinned glTF meshes; no procedural bed or 2D stamp"
+    },
+    "path_clearance_m": 0.08,
+    "camera": {
+      "projection": "PERSP",
+      "elevation_rad": 0.6108652381980153,
+      "lens_mm": 70.0,
+      "sensor_width_mm": 36.0,
+      "sensor_fit": "HORIZONTAL",
+      "minimum_edge_margin": 0.06,
+      "envelope_steps": 30,
+      "continuous_guard": "2 * maximum YZ radius * half angular sample spacing",
+      "bounds": "evaluated posed actor meshes swept through full fall and all bed meshes",
+      "fixed_for": "all frames and both motion variants of a count/seed layout",
+      "excluded_from_bounds": ["floor", "wall", "lights"]
+    }
+  },
+  "admission": {
+    "inference_qualification": false,
+    "model_admission": false,
+    "qualifying_full_corpus_member": false,
+    "status": "unverified; neither declared actors nor a complete 360-frame render admit the corpus",
+    "revision_note": "The compact four-actor row and frontal bed beside it reduce unnecessary behind-row depth as a declared physical input-scene change. One-actor layout, pinned meshes and frozen imported time-zero POSE are unchanged. Exact evaluated continuous geometry must pass clearance and fixed-camera framing for every render/seed. Admission uses only the unchanged pinned BASELINE, not candidate optimization. Component detections do not admit this scene; no walking, physics, prone/supine or expected detected-person-count claim.",
+    "gate_order": [
+      "parent renders only four new endpoints: 1/4 actors upright and lying",
+      "unchanged pinned BASELINE CPU decoder checks all 1/4 actors, floor-posture coverage and positive bed",
+      "full rerender and frozen comparison only after parent admission"
+    ],
+    "prior_evidence": "Retain all earlier renders and failures; prior pose parity on admitted subsets does not admit the corpus",
+    "parent_reported_prior_attempt": {
+      "source_sha256_prefix": "6faf4df1",
+      "source_identity_note": "Only this prefix was supplied to the source-only executor; retain the parent's full source digest and receipts",
+      "artifact": "1022",
+      "evidence_origin": "Parent report, not rerun by the source-only executor",
+      "baseline_weights": "unchanged",
+      "stored_pose_threshold": 0.25,
+      "bed_threshold": 0.25,
+      "live_strict_pose_threshold": 0.05,
+      "live_strict_pose_evaluated": false,
+      "endpoints": [
+        {"case": "a1-standing", "pose_detections": 0, "reported_pose_scores": [0.00538], "top_class59_score": 0.000738, "positive_bed_detections": 0},
+        {"case": "a1-lying", "pose_detections": 1, "reported_pose_scores": [0.55378], "top_class59_score": 0.000063, "positive_bed_detections": 0},
+        {"case": "a4-standing", "pose_detections": 0, "reported_pose_scores": [0.09685, 0.08577], "top_class59_score": 0.13221, "positive_bed_detections": 0},
+        {"case": "a4-lying", "pose_detections": 3, "reported_pose_scores": [0.3065, 0.3005, 0.2981, 0.10955], "top_class59_score": 0.00290, "positive_bed_detections": 0}
+      ],
+      "corpus_admitted": false,
+      "reference_image_tag": "6dd7",
+      "reference_image_note": "Immediately preceding one-person geometry; visual inspection only, not model evidence"
+    },
+    "drop_fourth_actor": false
+  },
+  "blender": {
+    "minimum": [4, 0, 2],
+    "maximum_exclusive": [4, 0, 3],
+    "provisioned": [4, 0, 2],
+    "engine": "BLENDER_EEVEE",
+    "gltf_importer": "bpy.ops.import_scene.gltf",
+    "background": true
+  }
+}

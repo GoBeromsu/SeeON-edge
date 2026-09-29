@@ -9,6 +9,65 @@ RUN g++ -std=c++17 -shared -fPIC -O2 \
       -I/opt/nvidia/deepstream/deepstream/sources/includes -I/usr/local/cuda/include \
     && sha256sum /src/libnvdsinfer_custom_yolo26_pose.so
 
+# The C ABI libraries the Rust adapter links: TensorRT/CUDA, DeepStream media
+# and libav clip decoding. A missing SDK header or library fails the build.
+FROM nvcr.io/nvidia/deepstream@sha256:f6fa0247da9290979cbb05749e7da9435d089c93db7c4dcfe85ba2488b5f4994 AS native-build
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+        libavcodec-dev \
+        libavformat-dev \
+        libavutil-dev \
+        libswscale-dev \
+        pkg-config \
+    && rm -rf /var/lib/apt/lists/*
+COPY worker/adapters/deepstream/native /src/native
+RUN make -C /src/native OUT=/opt/seeon/lib all \
+    && sha256sum /opt/seeon/lib/libseeon_gpu.so /opt/seeon/lib/libseeon_media.so \
+        /opt/seeon/lib/libseeon_clipdec.so
+
+# Pin the official Rust 1.90.0 linux/amd64 manifest, as Dockerfile.rust-builder does.
+FROM docker.io/library/rust:1.90.0-bookworm@sha256:3f6e6f8d8725a65a2db964bb828850f888d430c68784d661f753144e5d787207 AS rust-toolchain
+RUN rustup component add --toolchain 1.90.0 clippy rustfmt
+
+# Links the Rust workspace against the native-build libraries and runs the CPU
+# test lane. GPU tests are ignored here; they run on a GPU host.
+FROM nvcr.io/nvidia/deepstream@sha256:f6fa0247da9290979cbb05749e7da9435d089c93db7c4dcfe85ba2488b5f4994 AS cargo-build
+# The clip decoder's test binaries load libav at run time. DeepStream ships no
+# libav and strips its codec runtimes; reinstall those as the runtime stage does.
+RUN apt-get update \
+    && apt-get install -y --reinstall --no-install-recommends \
+        libavcodec60 \
+        libavformat60 \
+        libavutil58 \
+        libswscale7 \
+        libmp3lame0 \
+        libmpg123-0t64 \
+        libvpx9 \
+        libx264-164 \
+        libx265-199 \
+    && rm -rf /var/lib/apt/lists/*
+COPY --from=rust-toolchain /usr/local/cargo /usr/local/cargo
+COPY --from=rust-toolchain /usr/local/rustup /usr/local/rustup
+COPY --from=native-build /opt/seeon/lib/ /opt/seeon/lib/
+ENV CARGO_HOME=/usr/local/cargo \
+    RUSTUP_HOME=/usr/local/rustup \
+    PATH=/usr/local/cargo/bin:$PATH \
+    SEEON_GPU_LIB_DIR=/opt/seeon/lib \
+    SEEON_MEDIA_LIB_DIR=/opt/seeon/lib \
+    SEEON_CLIPDEC_LIB_DIR=/opt/seeon/lib \
+    LD_LIBRARY_PATH=/opt/seeon/lib:/opt/nvidia/deepstream/deepstream/lib:${LD_LIBRARY_PATH}
+WORKDIR /usr/src/myapp
+COPY Cargo.toml Cargo.lock rust-toolchain.toml ./
+COPY worker/rust ./worker/rust
+COPY worker/runtime/rust ./worker/runtime/rust
+COPY worker/adapters/deepstream/rust ./worker/adapters/deepstream/rust
+COPY worker/adapters/deepstream/native ./worker/adapters/deepstream/native
+RUN --mount=type=cache,target=/usr/local/cargo/registry \
+    test "$(rustc --version)" = "rustc 1.90.0 (1159e78c4 2025-09-14)" \
+    && test "$(cargo --version)" = "cargo 1.90.0 (840b83a10 2025-07-30)" \
+    && cargo build --locked --release --workspace \
+    && cargo test --locked --workspace
+
 FROM ghcr.io/astral-sh/uv:python3.12-bookworm-slim@sha256:e5b65587bce7de595f299855d7385fe7fca39b8a74baa261ba1b7147afa78e58 AS uv-bin
 
 FROM nvcr.io/nvidia/deepstream@sha256:f6fa0247da9290979cbb05749e7da9435d089c93db7c4dcfe85ba2488b5f4994 AS runtime

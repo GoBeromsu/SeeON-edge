@@ -39,13 +39,14 @@ Async tests must not pass by sleep. Subscribe to the event or state, act, then a
 
 ## Markers
 
-CI runs `uv run pytest -q -m "not real_stack and not heavy and not integration and not private_bundle"`. `test_public_repository_privacy.py` pins that filter. Deselect only in that `-m`, never in pytest `addopts`, so an unfiltered run selects everything. Don't widen timeouts to hide load flakiness.
+CI runs `uv run pytest -q -m "not real_stack and not heavy and not integration and not private_bundle and not gpu"`. `test_public_repository_privacy.py` pins that filter. Deselect only in that `-m`, never in pytest `addopts`, so an unfiltered run selects everything. Don't widen timeouts to hide load flakiness.
 
 - default: hermetic, hardware-free. `uv run pytest -q tests/test_<file>.py`
 - `real_stack`: real composition plus `mediamtx`/`ffmpeg` on PATH. Skip if missing, don't error. `uv run pytest -m real_stack`
 - `integration`: live enrolled ml-api. Needs explicit `CLOUD_EDGE_*`. Writes the catalog it is pointed at. Never a production volume. `uv run pytest -m integration`
 - `heavy`: real interpreter subprocess whose exit is a wall-clock watchdog or hard-exit path. Idle-host correct, CI-load flaky. `uv run pytest -q -m heavy`
 - `private_bundle`: reads the private fall bundle under `models/fall/pose-bbox56-gru` (`scripts/fetch-models.sh`). `tests_support/private_bundle.py` marks it at collection and fails a selected test when the bundle is missing, naming the path. `uv run pytest -q -m private_bundle`
+- `gpu`: runs the native GPU runtime on an NVIDIA device against the recorded ORT-CUDA fixtures, with the assets named by `SEEON_TEST_GPU_LIBRARY`, `SEEON_TEST_GPU_FIXTURES`, `SEEON_TEST_BED_ENGINE`, `SEEON_TEST_STORED_POSE_ENGINE` and `SEEON_TEST_FALL_ENGINE`. A selected test fails when an asset is missing, naming the variable; it never skips. `uv run pytest -q -m gpu`
 
 `private_bundle` fails rather than skips: an unprovisioned bundle is deselected with `-m`, never skipped by the test. `real_stack` is RTSP tooling, not "any live service". `integration` is a live enrolled API, not RTSP. `heavy` is subprocess deadline supervision, not "slow".
 
@@ -76,11 +77,12 @@ OBS_STREAMS=1 OBS_DURATION_SEC=30 OBS_CAMERA_FPS=15 \
 
 ```bash
 uv run pytest -q tests/test_<file>.py
-uv run pytest -q -m "not real_stack and not heavy and not integration and not private_bundle"
+uv run pytest -q -m "not real_stack and not heavy and not integration and not private_bundle and not gpu"
 uv run pytest -m real_stack
 uv run pytest -m integration
 uv run pytest -q -m heavy
 uv run pytest -q -m private_bundle
+uv run pytest -q -m gpu
 uv run --group lint lint-imports
 ```
 

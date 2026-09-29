@@ -1,0 +1,27 @@
+# Standalone compiler prerequisite, not the production ml-worker image.
+# Pin the official Rust 1.90.0 linux/amd64 manifest, including compiler binaries.
+FROM docker.io/library/rust:1.90.0-bookworm@sha256:3f6e6f8d8725a65a2db964bb828850f888d430c68784d661f753144e5d787207 AS rust-toolchain
+
+# Install only inside this builder; rustup verifies upstream component checksums.
+RUN rustup component add --toolchain 1.90.0 clippy rustfmt
+
+FROM nvcr.io/nvidia/deepstream@sha256:f6fa0247da9290979cbb05749e7da9435d089c93db7c4dcfe85ba2488b5f4994
+COPY --from=rust-toolchain /usr/local/cargo /usr/local/cargo
+COPY --from=rust-toolchain /usr/local/rustup /usr/local/rustup
+ENV CARGO_HOME=/usr/local/cargo \
+    RUSTUP_HOME=/usr/local/rustup \
+    PATH=/usr/local/cargo/bin:$PATH
+
+WORKDIR /usr/src/myapp
+# Build with the explicit two-file context documented in README.md.
+COPY rust-toolchain.toml ./rust-toolchain.toml
+RUN test "$(rustc --version)" = "rustc 1.90.0 (1159e78c4 2025-09-14)" \
+    && test "$(cargo --version)" = "cargo 1.90.0 (840b83a10 2025-07-30)" \
+    && rustfmt --version \
+    && cargo clippy --version
+
+LABEL org.opencontainers.image.title="seeon-rust-builder" \
+      com.seniorailab.seeon.image.role="rust-builder" \
+      com.seniorailab.seeon.rust.channel="1.90.0" \
+      com.seniorailab.seeon.sdk.base-digest="sha256:f6fa0247da9290979cbb05749e7da9435d089c93db7c4dcfe85ba2488b5f4994" \
+      com.seniorailab.seeon.rust.base-digest="sha256:3f6e6f8d8725a65a2db964bb828850f888d430c68784d661f753144e5d787207"

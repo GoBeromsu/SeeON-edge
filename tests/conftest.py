@@ -171,7 +171,8 @@ def _deterministic_file_modes() -> Iterator[None]:
         os.umask(previous)
 
 
-# --- private fall bundle gate -------------------------------------------------
+# --- private fall bundle and native GPU gates ---------------------------------
 # Bundle-reading tests are marked `private_bundle` at collection and fail at
 # setup when models/fall/pose-bbox56-gru is absent; CI deselects them with -m.
+# `gpu` tests fail when their assets are absent; CI deselects them with -m.
 pytest_plugins = ("tests_support.private_bundle",)

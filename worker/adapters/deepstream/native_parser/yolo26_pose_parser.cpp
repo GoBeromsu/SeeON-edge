@@ -3,6 +3,7 @@
 #include <cstddef>
 #include <cstring>
 #include <iostream>
+#include <type_traits>
 #include <vector>
 
 namespace {
@@ -77,4 +78,5 @@ extern "C" bool NvDsInferParseCustomYolo26Pose(
   }
   return true;
 }
-CHECK_CUSTOM_PARSE_FUNC_PROTOTYPE(NvDsInferParseCustomYolo26Pose);
+static_assert(std::is_same_v<decltype(&NvDsInferParseCustomYolo26Pose),
+                             NvDsInferParseCustomFunc>);

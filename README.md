@@ -48,6 +48,48 @@ copy `worker/ml-worker.example.yaml` to `worker/ml-worker.local.yaml` before
 configuring a real worker-reachable RTSP URL. Never commit RTSP credentials or
 relay tokens.
 
+### Rust 1.90.0 builder
+
+`Dockerfile.rust-builder` pins the official Rust 1.90.0 linux/amd64 toolchain
+and the DeepStream SDK base by digest. Checksum-verified `clippy` and `rustfmt`
+components and the compiler are copied into the SDK builder so native CUDA/
+TensorRT linking uses the actual libraries. `rust-toolchain.toml` declares
+the matching toolchain.
+This prerequisite does not replace `Dockerfile.edge` or install a host compiler.
+
+On the authorized onsite build host, use an explicit two-file context:
+
+```bash
+tar -cf - Dockerfile.rust-builder rust-toolchain.toml \
+  | docker build \
+      --platform linux/amd64 \
+      --file Dockerfile.rust-builder \
+      --tag seeon-rust-builder:1.90.0-deepstream9.1 \
+      -
+```
+
+Only these reviewed files belong in the build context: never send `.env`,
+credentials, agent runtime state, or the whole working tree. When controlled
+remotely, transfer the content-addressed context and verify its digest onsite
+before building. Check the resulting image without mounting any host files:
+
+```bash
+docker run --rm --network none --read-only \
+  seeon-rust-builder:1.90.0-deepstream9.1 rustc --version
+docker run --rm --network none --read-only \
+  seeon-rust-builder:1.90.0-deepstream9.1 rustfmt --version
+docker run --rm --network none --read-only \
+  seeon-rust-builder:1.90.0-deepstream9.1 cargo clippy --version
+```
+
+The builder workdir is `/usr/src/myapp`. The workspace contains the bounded
+numeric core and a thread-confined native GPU adapter, not a complete Rust
+Worker. The adapter requires `SEEON_GPU_LIB_DIR` to name the exact canonical
+directory containing the compiled `libseeon_gpu.so`; its runtime loader path
+must also be supplied. It refuses missing native libraries and has no CPU
+fallback. Ignored GPU integration tests require explicit engine/model inputs
+and actual GPU access. Compiler and component checks are not product acceptance.
+
 ## Run
 
 ### Local state directories
