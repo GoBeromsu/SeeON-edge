@@ -24,6 +24,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 import pytest
+import yaml
 
 ROOT = Path(__file__).resolve().parents[1]
 SLOT_ROOT = ROOT / "worker"
@@ -171,10 +172,14 @@ def test_backend_only_sqlite_cutover_is_atomic() -> None:
     assert scan_slot() == frozenset()
 
     compatibility = (database_package / "compatibility.py").read_text()
-    compose = (ROOT / "compose.edge.yaml").read_text()
     assert "EDGE_DATABASE_SCHEMA_VERSION" in compatibility
-    assert "worker-local-state:/var/lib/seeon-state" in compose
-    assert "edge-state:/var/lib/seeon-state" in compose
+    # BaseLoader keeps Compose's `!reset` tags as plain scalars.
+    services = yaml.load((ROOT / "compose.edge.yaml").read_text(), Loader=yaml.BaseLoader)[
+        "services"
+    ]
+    assert "edge-state:/var/lib/seeon-state" in services["ml-api"]["volumes"]
+    assert "worker-local-state:/var/lib/seeon-state" in services["ml-worker"]["volumes"]
+    assert not any(volume.startswith("edge-state:") for volume in services["ml-worker"]["volumes"])
 
     from backend.app.edge_db.compatibility import (  # noqa: PLC0415
         CURRENT_SCHEMA_RANGE,

@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+import os
 import re
 from pathlib import Path
 from typing import Final, TypeAlias
 
+import pytest
 import yaml
+from pydantic import ValidationError
 
 from backend.app.core.config import Settings
 from worker.runtime.config.pull_models import BackendWorkerConfigPayload
@@ -31,8 +34,24 @@ EDGE_MODEL_FETCH_SERVICE: Final = "edge-model-fetch"
 EDGE_ENGINE_BUILD_SERVICE: Final = "edge-engine-build"
 MODELS_VOLUME: Final = "worker-models"
 
+#: Edge product state. edge-db-migrator provisions it before ml-api starts; the
+#: SQLite cutover runs from the ops-profile edge-db-cutover one-shot.
+EDGE_POSTGRES_SERVICE: Final = "postgres"
+EDGE_DB_CUTOVER_SERVICE: Final = "edge-db-cutover"
+CI_WORKFLOW: Final = ".github/workflows/ci.yml"
+EDGE_DEV_COMPOSE_FILE: Final = "compose.edge.dev.yaml"
+EDGE_ENV_EXAMPLE: Final = ".env.edge.prod.example"
+#: Compose secret name -> the required env var naming its host file.
+POSTGRES_SECRETS: Final = {
+    "pg_superuser_password": "PG_SUPERUSER_PASSWORD_HOST_FILE",
+    "pg_owner_dsn": "PG_OWNER_DSN_HOST_FILE",
+    "pg_runtime_dsn": "PG_RUNTIME_DSN_HOST_FILE",
+}
+
 EDGE_SERVICES: Final = {
     "edge-db-migrator",
+    EDGE_POSTGRES_SERVICE,
+    EDGE_DB_CUTOVER_SERVICE,
     EDGE_MODEL_FETCH_SERVICE,
     EDGE_ENGINE_BUILD_SERVICE,
     *EDGE_OPS_SERVICES,
@@ -82,6 +101,17 @@ def _compose_services(compose_file: str) -> dict[str, dict[str, ComposeValue]]:
     }
 
 
+def _compose_top_level(compose_file: str, field_name: str) -> dict[str, ComposeValue]:
+    compose = yaml.load(
+        (REPO_ROOT / compose_file).read_text(encoding="utf-8"),
+        Loader=ComposeLoader,
+    )
+    assert isinstance(compose, dict)
+    value = compose.get(field_name, {})
+    assert isinstance(value, dict)
+    return {str(key): item for key, item in value.items()}
+
+
 def _workflow(path: str) -> dict[str, object]:
     workflow = yaml.load(
         (REPO_ROOT / path).read_text(encoding="utf-8"),
@@ -103,6 +133,14 @@ def _list_field(service: dict[str, ComposeValue], field_name: str) -> list[Compo
     if not isinstance(value, list):
         return []
     return list(value)
+
+
+def _scalars(value: ComposeValue) -> list[str]:
+    if isinstance(value, dict):
+        return [text for key, item in value.items() for text in [str(key), *_scalars(item)]]
+    if isinstance(value, list):
+        return [text for item in value for text in _scalars(item)]
+    return [] if value is None else [str(value)]
 
 
 def test_edge_worker_runtime_status_environment_contract() -> None:
@@ -168,31 +206,235 @@ def test_edge_compose_contains_migrator_api_and_worker() -> None:
     assert set(services) == EDGE_SERVICES, sorted(services)
 
 
-def test_edge_db_migrator_owns_schema_lifecycle_before_runtime_start() -> None:
+def test_edge_db_migrator_provisions_postgres_before_ml_api() -> None:
     services = _compose_services(EDGE_COMPOSE_FILE)
     migrator = services["edge-db-migrator"]
+    command = _list_field(migrator, "command")
+    healthcheck = _mapping_field(services[EDGE_POSTGRES_SERVICE], "healthcheck")
+    api_environment = _mapping_field(services["ml-api"], "environment")
     api_depends_on = _mapping_field(services["ml-api"], "depends_on")
     worker_depends_on = _mapping_field(services["ml-worker"], "depends_on")
 
-    assert "depends_on" not in migrator
+    # The job waits for a server that accepts connections, then gates ml-api.
+    assert _mapping_field(migrator, "depends_on") == {
+        EDGE_POSTGRES_SERVICE: {"condition": "service_healthy"}
+    }
+    assert _list_field(healthcheck, "test")[:2] == ["CMD", "pg_isready"]
     assert migrator["restart"] == "no"
-    # Create-or-extend: the bootstrap mounts nothing but the one state volume it
-    # creates schema 19 in. There is no legacy state to import or gate on.
-    assert _list_field(migrator, "volumes") == ["edge-state:/var/lib/seeon-state"]
-    assert migrator["command"] == [
+    assert "profiles" not in migrator, "must run on every `up`, not behind an opt-in profile"
+    # Idempotent: a rerun verifies the schema, runtime role, runtime password and
+    # authority file and changes none of them.
+    assert command == [
         "python",
         "-m",
-        "backend.app.edge_db",
-        "--database",
-        "/var/lib/seeon-state/edge.sqlite3",
+        "backend.app.edge_db.migration",
+        "provision",
+        "--owner-dsn-file",
+        "/run/secrets/pg_owner_dsn",
+        "--schema",
+        "seeon_edge",
+        "--runtime-dsn-file",
+        "/run/secrets/pg_runtime_dsn",
+        "--authority-file",
+        "/run/seeon-authority/authority.json",
     ]
+    # Provisioning is PostgreSQL-only; it never opens the SQLite state.
+    assert _list_field(migrator, "volumes") == ["edge-pg-authority:/run/seeon-authority"]
     assert api_depends_on == {"edge-db-migrator": {"condition": "service_completed_successfully"}}
+    assert api_environment["API_POSTGRES_SCHEMA"] == command[command.index("--schema") + 1]
     # The worker waits on both the healthy API and a verified models volume.
     assert worker_depends_on == {
         "ml-api": {"condition": "service_healthy"},
         EDGE_MODEL_FETCH_SERVICE: {"condition": "service_completed_successfully"},
         EDGE_ENGINE_BUILD_SERVICE: {"condition": "service_completed_successfully"},
     }
+
+
+def test_edge_postgres_publishes_no_port() -> None:
+    """The superuser password is the database's only barrier, so the server is
+    reachable only from the private Compose network."""
+    services = _compose_services(EDGE_COMPOSE_FILE)
+
+    assert not {"ports", "expose", "network_mode"}.intersection(services[EDGE_POSTGRES_SERVICE])
+    for service_name, service in services.items():
+        targets = {
+            str(port["target"])
+            if isinstance(port, dict)
+            else str(port).split("/")[0].rsplit(":", 1)[-1]
+            for port in _list_field(service, "ports")
+        }
+        assert "5432" not in targets, f"{service_name} publishes the PostgreSQL port"
+
+
+def test_edge_postgres_image_is_the_ci_digest() -> None:
+    """The edge server is the exact image the PostgreSQL tests ran against."""
+    image = _compose_services(EDGE_COMPOSE_FILE)[EDGE_POSTGRES_SERVICE]["image"]
+    jobs = _workflow(CI_WORKFLOW)["jobs"]
+    assert isinstance(jobs, dict)
+
+    ci_images: set[str] = set()
+    for job in jobs.values():
+        assert isinstance(job, dict)
+        job_services = job.get("services", {})
+        if "postgres" in job_services:
+            ci_images.add(job_services["postgres"]["image"])
+
+    assert re.fullmatch(r"postgres@sha256:[0-9a-f]{64}", str(image))
+    assert ci_images == {image}
+
+
+def test_edge_ml_api_holds_only_the_runtime_dsn() -> None:
+    """A compromised API process must not get DDL or superuser rights: only the
+    one-shots hold the owner DSN and only postgres reads the superuser password."""
+    services = _compose_services(EDGE_COMPOSE_FILE)
+    api = services["ml-api"]
+    holders = {
+        secret_name: {
+            service_name
+            for service_name, service in services.items()
+            if secret_name in _list_field(service, "secrets")
+        }
+        for secret_name in POSTGRES_SECRETS
+    }
+
+    assert _list_field(api, "secrets") == ["pg_runtime_dsn"]
+    assert _mapping_field(api, "environment")["API_POSTGRES_DSN_FILE"] == (
+        "/run/secrets/pg_runtime_dsn"
+    )
+    assert holders == {
+        "pg_superuser_password": {EDGE_POSTGRES_SERVICE},
+        "pg_owner_dsn": {"edge-db-migrator", EDGE_DB_CUTOVER_SERVICE},
+        "pg_runtime_dsn": {"edge-db-migrator", "ml-api"},
+    }
+
+
+def test_edge_owner_dsn_reaches_only_the_postgres_one_shots() -> None:
+    """The owner DSN can reach a service as a secret, a bind mount of its host
+    file or an environment value. Only the two one-shots may name it, and the
+    only one a plain `docker compose up` starts is the migrator, which exits."""
+    references = ("pg_owner_dsn", POSTGRES_SECRETS["pg_owner_dsn"])
+    holders: set[str] = set()
+    for compose_file in (EDGE_COMPOSE_FILE, EDGE_DEV_COMPOSE_FILE):
+        for service_name, service in _compose_services(compose_file).items():
+            if any(ref in text for text in _scalars(service) for ref in references):
+                holders.add(service_name)
+    services = _compose_services(EDGE_COMPOSE_FILE)
+    default_holders = {name for name in holders if not services[name].get("profiles")}
+
+    assert holders == {"edge-db-migrator", EDGE_DB_CUTOVER_SERVICE}
+    assert default_holders == {"edge-db-migrator"}
+    assert services["edge-db-migrator"]["restart"] == "no"
+
+
+def test_edge_postgres_credentials_are_required_secret_files() -> None:
+    """No credential has a default path or an inline value: a missing host file
+    stops the render instead of mounting a stale one, and nothing secret shows in
+    `docker inspect` or `docker compose config`."""
+    services = _compose_services(EDGE_COMPOSE_FILE)
+    secrets = _compose_top_level(EDGE_COMPOSE_FILE, "secrets")
+
+    assert set(secrets) == set(POSTGRES_SECRETS)
+    for secret_name, path_variable in POSTGRES_SECRETS.items():
+        assert secrets[secret_name] == {"file": secrets[secret_name]["file"]}, secret_name
+        assert re.fullmatch(rf"\$\{{{path_variable}:\?[^}}]+\}}", str(secrets[secret_name]["file"]))
+    assert _mapping_field(services[EDGE_POSTGRES_SERVICE], "environment") == {
+        "POSTGRES_PASSWORD_FILE": "/run/secrets/pg_superuser_password"
+    }
+    for service_name, service in services.items():
+        environment = _mapping_field(service, "environment")
+        assert not {"POSTGRES_PASSWORD", "PGPASSWORD"}.intersection(environment), service_name
+        for key, value in environment.items():
+            assert not re.search(r"postgres(ql)?://|password=", str(value), re.IGNORECASE), (
+                f"{service_name} {key} carries an inline credential"
+            )
+
+
+def test_edge_postgres_state_lives_in_named_volumes() -> None:
+    """The database and its authority file survive `down` and container
+    replacement, and ml-api cannot rewrite its own fence token."""
+    services = _compose_services(EDGE_COMPOSE_FILE)
+    volumes = _compose_top_level(EDGE_COMPOSE_FILE, "volumes")
+    command = _list_field(services["edge-db-migrator"], "command")
+    authority_file = str(command[command.index("--authority-file") + 1])
+
+    def mounted_by(volume: str) -> set[str]:
+        return {
+            service_name
+            for service_name, service in services.items()
+            if volume in _list_field(service, "volumes")
+        }
+
+    assert _list_field(services[EDGE_POSTGRES_SERVICE], "volumes") == [
+        "edge-pgdata:/var/lib/postgresql"
+    ]
+    assert mounted_by("edge-pg-authority:/run/seeon-authority") == {
+        "edge-db-migrator",
+        EDGE_DB_CUTOVER_SERVICE,
+    }
+    assert mounted_by("edge-pg-authority:/run/seeon-authority:ro") == {"ml-api"}
+    assert authority_file.startswith("/run/seeon-authority/")
+    assert (
+        _mapping_field(services["ml-api"], "environment")["API_POSTGRES_AUTHORITY_FILE"]
+        == authority_file
+    )
+    # Project-scoped named volumes: not external, no fixed name, default driver.
+    for volume_name in ("edge-pgdata", "edge-pg-authority", "edge-migration"):
+        assert volumes[volume_name] == {}, volume_name
+
+
+def test_edge_db_cutover_is_an_ops_one_shot() -> None:
+    """Each cutover step is `docker compose run --rm edge-db-cutover <step>`. It
+    never starts with the stack, so it never holds the SQLite deployment lock or
+    repeats a transfer on restart."""
+    cutover = _compose_services(EDGE_COMPOSE_FILE)[EDGE_DB_CUTOVER_SERVICE]
+
+    assert cutover["profiles"] == ["ops"]
+    assert cutover["restart"] == "no"
+    assert not {"ports", "expose", "healthcheck", "command"}.intersection(cutover)
+    assert cutover["entrypoint"] == ["python", "-m", "backend.app.edge_db.migration"]
+    assert _list_field(cutover, "secrets") == ["pg_owner_dsn"]
+    # edge-state is read-write: export takes deployment.lock beside the database.
+    assert _list_field(cutover, "volumes") == [
+        "edge-state:/var/lib/seeon-state",
+        "worker-local-state:/var/lib/seeon-worker-state:ro",
+        "edge-migration:/var/lib/seeon-migration",
+        "edge-pg-authority:/run/seeon-authority",
+    ]
+    assert _mapping_field(cutover, "depends_on") == {
+        EDGE_POSTGRES_SERVICE: {"condition": "service_healthy"}
+    }
+
+
+def test_edge_dev_overlay_never_pulls_the_api_image() -> None:
+    """The dev overlay's ML_API_IMAGE is a local build tag; pulling it fails."""
+    base = _compose_services(EDGE_COMPOSE_FILE)
+    overlay = _compose_services(EDGE_DEV_COMPOSE_FILE)
+    api_image_services = {
+        name for name, service in base.items() if "${ML_API_IMAGE" in str(service.get("image"))
+    }
+
+    assert api_image_services >= {
+        "ml-api",
+        "edge-db-migrator",
+        EDGE_DB_CUTOVER_SERVICE,
+        *EDGE_OPS_SERVICES,
+    }
+    for service_name in sorted(api_image_services):
+        assert overlay.get(service_name, {}).get("pull_policy") == "never", service_name
+
+
+def test_edge_env_example_declares_every_postgres_secret_path() -> None:
+    """CI renders compose.edge.yaml with this example; a missing path fails it."""
+    lines = (REPO_ROOT / EDGE_ENV_EXAMPLE).read_text(encoding="utf-8").splitlines()
+    entries = {
+        key: value
+        for key, _, value in (line.partition("=") for line in lines)
+        if key and not key.startswith("#")
+    }
+
+    for path_variable in POSTGRES_SECRETS.values():
+        # An absolute path and nothing else: no DSN, host or password fits.
+        assert re.fullmatch(r"/[\w./-]+", entries.get(path_variable, "")), path_variable
 
 
 def test_edge_model_fetch_owns_the_models_volume_before_worker_start() -> None:
@@ -272,9 +514,10 @@ def test_edge_services_pin_release_images_with_dockerfiles_for_build() -> None:
             failures.append(f"{expected_dockerfile} must exist for the release image build")
 
     assert not failures, "\n".join(failures)
-    migrator = services["edge-db-migrator"]
-    assert "ML_API_IMAGE" in str(migrator["image"])
-    assert migrator["pull_policy"] == "always"
+    for service_name in ("edge-db-migrator", EDGE_DB_CUTOVER_SERVICE):
+        one_shot = services[service_name]
+        assert "ML_API_IMAGE" in str(one_shot["image"]), service_name
+        assert one_shot["pull_policy"] == "always", service_name
 
 
 def test_edge_image_release_workflow_publishes_digest_env_artifact() -> None:
@@ -470,18 +713,22 @@ def test_edge_api_host_port_is_loopback_only() -> None:
 
 def test_edge_runtime_state_volumes_follow_backend_ownership() -> None:
     services = _compose_services(EDGE_COMPOSE_FILE)
-    compose = yaml.load(
-        (REPO_ROOT / EDGE_COMPOSE_FILE).read_text(encoding="utf-8"),
-        Loader=ComposeLoader,
-    )
+    volumes = _compose_top_level(EDGE_COMPOSE_FILE, "volumes")
 
-    for service_name in ("edge-db-migrator", "ml-api"):
+    for service_name in (EDGE_DB_CUTOVER_SERVICE, "ml-api"):
         assert "edge-state:/var/lib/seeon-state" in _list_field(services[service_name], "volumes")
-    assert "edge-state:/var/lib/seeon-state" not in _list_field(services["ml-worker"], "volumes")
+    for service_name in ("edge-db-migrator", "ml-worker"):
+        assert not any(
+            str(volume).startswith("edge-state:")
+            for volume in _list_field(services[service_name], "volumes")
+        ), service_name
     assert "worker-local-state:/var/lib/seeon-state" in _list_field(
         services["ml-worker"], "volumes"
     )
-    assert set(compose.get("volumes", {})) == {
+    assert set(volumes) == {
+        "edge-migration",
+        "edge-pg-authority",
+        "edge-pgdata",
         "edge-state",
         "worker-engine-cache",
         "worker-local-state",
@@ -684,3 +931,70 @@ def test_edge_api_execution_records_seam_environment_contract() -> None:
     assert api_environment["ML_API_EXECUTION_RECORDS_BUDGET_BYTES"] == (
         "${ML_API_EXECUTION_RECORDS_BUDGET_BYTES:-}"
     )
+
+
+#: The only interpolation form compose.edge.yaml uses for ml-api's ML_API_* keys.
+_COMPOSE_DEFAULT: Final = re.compile(r"\$\{(?P<name>\w+):-(?P<default>[^}]*)\}")
+
+
+def _rendered_api_settings_environment() -> dict[str, str]:
+    """ml-api's ML_API_* environment as `docker compose config` renders it from the example.
+
+    `${NAME:-default}` takes the default when NAME is unset or empty.
+    """
+    lines = (REPO_ROOT / EDGE_ENV_EXAMPLE).read_text(encoding="utf-8").splitlines()
+    example = {
+        key: value
+        for key, _, value in (line.partition("=") for line in lines)
+        if key and not key.startswith("#")
+    }
+    api_environment = _mapping_field(_compose_services(EDGE_COMPOSE_FILE)["ml-api"], "environment")
+    rendered = {}
+    for key, value in api_environment.items():
+        if not key.startswith("ML_API_"):
+            continue
+        match = _COMPOSE_DEFAULT.fullmatch(str(value))
+        assert match is not None, key
+        rendered[key] = example.get(match["name"]) or match["default"]
+    return rendered
+
+
+def _api_settings_from(monkeypatch: pytest.MonkeyPatch, environment: dict[str, str]) -> Settings:
+    for key in list(os.environ):
+        if key.upper().startswith("ML_API_"):
+            monkeypatch.delenv(key)
+    for key, value in environment.items():
+        monkeypatch.setenv(key, value)
+    return Settings()
+
+
+def test_ml_api_settings_accept_the_rendered_edge_example(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Compose renders the unset budget as ''; records stay off and the API boots."""
+    environment = _rendered_api_settings_environment()
+
+    settings = _api_settings_from(monkeypatch, environment)
+
+    assert environment["ML_API_EXECUTION_RECORDS_BUDGET_BYTES"] == ""
+    assert settings.execution_records_enabled is False
+    assert settings.execution_records_budget_bytes is None
+
+
+@pytest.mark.parametrize("budget", ["", None], ids=["empty", "missing"])
+def test_ml_api_settings_still_require_a_budget_when_records_are_enabled(
+    monkeypatch: pytest.MonkeyPatch, budget: str | None
+) -> None:
+    environment = _rendered_api_settings_environment() | {"ML_API_EXECUTION_RECORDS_ENABLED": "1"}
+    if budget is None:
+        del environment["ML_API_EXECUTION_RECORDS_BUDGET_BYTES"]
+    else:
+        environment["ML_API_EXECUTION_RECORDS_BUDGET_BYTES"] = budget
+
+    with pytest.raises(ValidationError) as refused:
+        _api_settings_from(monkeypatch, environment)
+
+    # The budget rule refused it, not an integer parse of the empty string.
+    assert [(error["type"], error["loc"]) for error in refused.value.errors()] == [
+        ("value_error", ())
+    ]
