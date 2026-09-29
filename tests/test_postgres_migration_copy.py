@@ -186,6 +186,41 @@ def test_reconcile_detects_target_drift(
     assert (entry["source"]["status"], entry["target"]["status"]) == statuses
 
 
+def _delete_audit_row(target: MigrationTarget, audit_id: int) -> None:
+    """Delete one audit row as the schema owner, past the trigger the runtime meets."""
+    table = sql.Identifier(target.schema, "audit_events")
+    trigger = sql.Identifier("audit_events_immutable_delete")
+    with target.admin.transaction():
+        target.admin.execute(sql.SQL("ALTER TABLE {} DISABLE TRIGGER {}").format(table, trigger))
+        target.admin.execute(
+            sql.SQL("DELETE FROM {} WHERE audit_id = %s").format(table), (audit_id,)
+        )
+        target.admin.execute(sql.SQL("ALTER TABLE {} ENABLE TRIGGER {}").format(table, trigger))
+
+
+def test_reconcile_fails_a_target_that_lost_the_snapshot_audit_tail(
+    migration_target: MigrationTarget, tmp_path: Path
+) -> None:
+    target = migration_target
+    source, destination = source_and_destination(tmp_path)
+    snapshot = export_snapshot(source, destination).path
+    with closing(sqlite3.connect(f"file:{snapshot}?mode=ro", uri=True)) as old:
+        audit_ids = [audit_id for (audit_id,) in old.execute("SELECT audit_id FROM audit_events")]
+    _import(target, snapshot)
+    imported = _reconcile(target, snapshot)
+
+    _delete_audit_row(target, max(audit_ids))
+    report = _reconcile(target, snapshot)
+
+    assert (imported["result"], imported["failures"]) == ("PASS", [])
+    assert report["result"] == "FAIL"
+    assert "boundary:audit_tail" in report["failures"]
+    assert (report["boundary"]["snapshot_audit_tail"], report["boundary"]["target_audit_tail"]) == (
+        max(audit_ids),
+        sorted(audit_ids)[-2],
+    )
+
+
 def test_copy_failure_leaves_the_target_empty_and_retryable(
     migration_target: MigrationTarget, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

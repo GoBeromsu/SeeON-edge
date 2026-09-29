@@ -15,6 +15,7 @@ import psycopg
 from psycopg.conninfo import conninfo_to_dict
 
 from backend.app.edge_db.authority import AuthorityFenced
+from backend.app.edge_db.migration.authority_file import read_authority_file
 from backend.app.edge_db.migration.compatibility import EdgeDatabaseError
 from backend.app.edge_db.migration.errors import MigrationError
 from backend.app.edge_db.migration.load import import_snapshot
@@ -23,6 +24,7 @@ from backend.app.edge_db.migration.provision import provision, set_runtime_passw
 from backend.app.edge_db.migration.reconcile import PASS, reconcile, write_report
 from backend.app.edge_db.migration.rollback import ALLOW, rollback_check
 from backend.app.edge_db.migration.snapshot import export_snapshot
+from backend.app.edge_db.migration.sqlite_fence import fence_sqlite
 from backend.app.edge_db.migration.transfer import freeze, transfer
 from backend.app.edge_db.migration.unfence import unfence_sqlite
 from backend.app.edge_db.migration.worker_state import queue_digest
@@ -83,6 +85,16 @@ def _parser() -> argparse.ArgumentParser:
     command = commands.add_parser("export", help="copy the fenced SQLite database to a snapshot")
     command.add_argument("--source", type=Path, required=True)
     command.add_argument("--snapshot", type=Path, required=True)
+
+    command = commands.add_parser(
+        "fence-sqlite", help="stamp the stopped SQLite database so the old stack refuses it"
+    )
+    command.add_argument("--source", type=Path, required=True)
+    command.add_argument(
+        "--snapshot", type=Path, help="the exported snapshot; omitted only on a fresh install"
+    )
+    command.add_argument("--authority-file", type=Path, required=True)
+    command.add_argument("--fence-receipt", type=Path, required=True)
 
     command = target("import", "load a snapshot into the empty schema in one transaction")
     command.add_argument("--snapshot", type=Path, required=True)
@@ -153,6 +165,19 @@ def _run(args: argparse.Namespace, label: str) -> int:
         print(
             f"{label}_OK snapshot={snapshot.path} sha256={snapshot.sha256} "
             f"source_schema={snapshot.schema_version}"
+        )
+        return 0
+    if args.command == "fence-sqlite":
+        token = read_authority_file(args.authority_file)
+        fence = fence_sqlite(
+            args.source,
+            snapshot=args.snapshot,
+            generation=token.generation,
+            receipt=args.fence_receipt,
+        )
+        print(
+            f"{label}_OK generation={fence.generation} user_version={fence.user_version} "
+            f"source_present={_flag(fence.source_present)} sha256={fence.fenced_sha256}"
         )
         return 0
     if args.command == "queue-digest":

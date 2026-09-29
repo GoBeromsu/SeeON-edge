@@ -2,14 +2,16 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
+import sqlite3
+from contextlib import closing
 from pathlib import Path
 
 import pytest
 from psycopg.conninfo import make_conninfo
 
 from backend.app.edge_db.migration.cli import main
-from backend.app.edge_db.migration.sqlite_fence import fence_sqlite
 from backend.app.edge_db.migration.transfer import pending_authority_path
 from tests_support.postgres_migration import (
     MigrationNames,
@@ -101,9 +103,17 @@ def test_cli_runs_the_cutover_and_reports_failure_by_exit_code(
         authority,
     )
     exported = run("export", "--source", str(source), "--snapshot", str(snapshot))
-    # The operator stamps the stopped old database at the provisioned generation.
-    generation, _ = authority_file_token(Path(authority))
-    fence_sqlite(source, snapshot=snapshot, generation=generation, receipt=Path(receipt))
+    fenced_source = run(
+        "fence-sqlite",
+        "--source",
+        str(source),
+        "--snapshot",
+        str(snapshot),
+        "--authority-file",
+        authority,
+        "--fence-receipt",
+        receipt,
+    )
     digested = run("queue-digest", "--worker-state-dir", state)
     queue_sha256 = digested[1].rsplit("sha256=", 1)[1].strip()
     imported = run("import", *owner, "--snapshot", str(snapshot))
@@ -131,12 +141,16 @@ def test_cli_runs_the_cutover_and_reports_failure_by_exit_code(
     live = run("rollback-check", *owner, *rollback)
     frozen = run("freeze", *owner, "--authority-file", authority)
     fenced = run("rollback-check", *owner, *rollback)
+    with closing(sqlite3.connect(f"file:{source}?mode=ro", uri=True)) as stopped:
+        (user_version,) = stopped.execute("PRAGMA user_version").fetchone()
+    fenced_sha256 = hashlib.sha256(source.read_bytes()).hexdigest()
 
     report_text = bound.read_text(encoding="utf-8") + unfenced.read_text(encoding="utf-8")
     text = "".join(output) + report_text
     leaked = [index for index, value in enumerate((*_SEEDED_VALUES, names.dsn)) if value in text]
     assert leaked == []
-    assert [step[0] for step in (provisioned, exported, digested, imported)] == [0, 0, 0, 0]
+    steps = (provisioned, exported, fenced_source, digested, imported)
+    assert [step[0] for step in steps] == [0, 0, 0, 0, 0]
     assert provisioned[1:] == (
         (
             f"EDGE_PG_MIGRATION_PROVISION_OK schema={names.schema} schema_created=true "
@@ -146,6 +160,14 @@ def test_cli_runs_the_cutover_and_reports_failure_by_exit_code(
         "",
     )
     assert exported[1].startswith(f"EDGE_PG_MIGRATION_EXPORT_OK snapshot={snapshot} sha256=")
+    assert fenced_source[1:] == (
+        (
+            "EDGE_PG_MIGRATION_FENCE_SQLITE_OK generation=1 user_version=1000001 "
+            f"source_present=true sha256={fenced_sha256}\n"
+        ),
+        "",
+    )
+    assert user_version == 1_000_001
     assert digested[1].startswith(
         "EDGE_PG_MIGRATION_QUEUE_DIGEST_OK queued=2 temporary=1 dead_lettered=1 sha256="
     )
@@ -481,3 +503,162 @@ def test_cli_fresh_install_refuses_legacy_data_at_either_path(
         True,
         True,
     )
+
+
+def _user_version(source: Path) -> int:
+    with closing(sqlite3.connect(f"file:{source}?mode=ro", uri=True)) as database:
+        (user_version,) = database.execute("PRAGMA user_version").fetchone()
+    return user_version
+
+
+def test_cli_fences_a_fresh_install_at_its_activated_generation(
+    migration_names: MigrationNames,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    names = migration_names
+    canonical, _ = _fresh_install_paths(tmp_path, monkeypatch)
+    owner = _owner_args(tmp_path, names)
+    authority = _provision_for_transfer(names, tmp_path, owner)
+    receipts = tmp_path / "receipts"
+    receipts.mkdir(mode=0o700)
+    receipt = str(receipts / "fence-receipt.json")
+    assert main(["transfer", *owner, "--authority-file", str(authority), "--fresh-install"]) == 0
+    capsys.readouterr()
+
+    fenced = main(
+        [
+            "fence-sqlite",
+            "--source",
+            str(canonical),
+            "--authority-file",
+            str(authority),
+            "--fence-receipt",
+            receipt,
+        ]
+    )
+    fence_output = capsys.readouterr()
+    fenced_sha256 = hashlib.sha256(canonical.read_bytes()).hexdigest()
+    # A fresh install has no snapshot to check, so no rollback report exists.
+    unfenced = main(
+        [
+            "unfence-sqlite",
+            "--source",
+            str(canonical),
+            "--fence-receipt",
+            receipt,
+            "--rollback-report",
+            str(receipts / "rollback-check.json"),
+        ]
+    )
+    unfence_output = capsys.readouterr()
+    refused_sha256 = hashlib.sha256(canonical.read_bytes()).hexdigest()
+
+    generation, _ = authority_file_token(authority)
+    assert generation == 2
+    assert (fenced, fence_output.out, fence_output.err) == (
+        0,
+        (
+            "EDGE_PG_MIGRATION_FENCE_SQLITE_OK generation=2 user_version=1000002 "
+            f"source_present=false sha256={fenced_sha256}\n"
+        ),
+        "",
+    )
+    assert _user_version(canonical) == 1_000_002
+    assert (unfenced, unfence_output.out, unfence_output.err) == (
+        1,
+        "",
+        (
+            "EDGE_PG_MIGRATION_UNFENCE_SQLITE_FAILED: fence receipt records no SQLite "
+            "source; PostgreSQL stays authoritative\n"
+        ),
+    )
+    assert refused_sha256 == fenced_sha256
+
+
+@pytest.mark.parametrize("imported", [False, True], ids=["before-import", "after-import"])
+def test_cli_rolls_back_before_transfer_after_the_fence(
+    migration_names: MigrationNames,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    imported: bool,
+) -> None:
+    names = migration_names
+    owner = _owner_args(tmp_path, names)
+    authority = _provision_for_transfer(names, tmp_path, owner)
+    provisioned = authority_row(names.admin, names.schema)
+    source, snapshot = source_and_destination(tmp_path)
+    receipts = tmp_path / "receipts"
+    receipts.mkdir(mode=0o700)
+    receipt = str(receipts / "fence-receipt.json")
+    report = str(receipts / "rollback-check.json")
+    assert main(["export", "--source", str(source), "--snapshot", str(snapshot)]) == 0
+    before_sha256 = hashlib.sha256(source.read_bytes()).hexdigest()
+    before_user_version = _user_version(source)
+    fence = [
+        "fence-sqlite",
+        "--source",
+        str(source),
+        "--snapshot",
+        str(snapshot),
+        "--authority-file",
+        str(authority),
+        "--fence-receipt",
+        receipt,
+    ]
+    # SQLite never opens the fenced source: even a read-only open leaves a -shm that
+    # rollback-check denies as sqlite:shm_content.
+    assert main(fence) == 0
+    if imported:
+        assert main(["import", *owner, "--snapshot", str(snapshot)]) == 0
+    capsys.readouterr()
+
+    checked = main(
+        [
+            "rollback-check",
+            *owner,
+            "--snapshot",
+            str(snapshot),
+            "--source",
+            str(source),
+            "--fence-receipt",
+            receipt,
+            "--report",
+            report,
+        ]
+    )
+    check_output = capsys.readouterr()
+    unfenced = main(
+        [
+            "unfence-sqlite",
+            "--source",
+            str(source),
+            "--fence-receipt",
+            receipt,
+            "--rollback-report",
+            report,
+        ]
+    )
+    unfence_output = capsys.readouterr()
+
+    assert provisioned[0] == 1
+    assert provisioned[2:] == (False, False)
+    assert (checked, check_output.out, check_output.err) == (
+        0,
+        "EDGE_PG_MIGRATION_ROLLBACK_CHECK_OK result=ALLOW reasons=none\n",
+        "",
+    )
+    assert (unfenced, unfence_output.out, unfence_output.err) == (
+        0,
+        (
+            "EDGE_PG_MIGRATION_UNFENCE_SQLITE_OK result=RESTORED generation=1 "
+            f"sha256={before_sha256}\n"
+        ),
+        "",
+    )
+    assert hashlib.sha256(source.read_bytes()).hexdigest() == before_sha256
+    assert _user_version(source) == before_user_version
+    # Before transfer nothing needs a freeze: the authority is still the provisioned one.
+    assert authority_row(names.admin, names.schema) == provisioned
+    assert authority_file_token(authority)[0] == 1
