@@ -3,14 +3,11 @@ from __future__ import annotations
 import multiprocessing
 import os
 import sqlite3
-import subprocess
-import sys
 from multiprocessing.connection import Connection
 from pathlib import Path
 
 import pytest
 
-from backend.app.edge_db.bootstrap import bootstrap_database
 from backend.app.edge_db.compatibility import EdgeDatabaseError
 from backend.app.edge_db.connection import (
     RuntimeActor,
@@ -18,6 +15,9 @@ from backend.app.edge_db.connection import (
     open_runtime_database,
     write_transaction,
 )
+from backend.app.edge_db.migration.errors import MigrationError
+from backend.app.edge_db.migration.snapshot import export_snapshot
+from tests_support.sqlite_source import create_schema19_source
 
 
 def _hold_worker_write(database: str, channel: Connection) -> None:
@@ -64,7 +64,7 @@ def _hold_runtime_open(database: str, actor: str, channel: Connection) -> None:
 
 
 def _prepare_database(path: Path) -> None:
-    bootstrap_database(path)
+    create_schema19_source(path)
     connection = sqlite3.connect(path)
     try:
         connection.execute(
@@ -75,37 +75,13 @@ def _prepare_database(path: Path) -> None:
         connection.close()
 
 
-@pytest.mark.parametrize("actor", [RuntimeActor.API, RuntimeActor.API])
-def test_public_migration_refuses_while_runtime_holds_deployment_lock(
+def test_snapshot_export_refuses_while_a_real_runtime_holds_the_deployment_lock(
     tmp_path: Path,
-    actor: RuntimeActor,
 ) -> None:
     database_path = tmp_path / "edge" / "edge.sqlite3"
     _prepare_database(database_path)
-    context = multiprocessing.get_context("spawn")
-    parent_channel, child_channel = context.Pipe()
-    runtime = context.Process(
-        target=_hold_runtime_open,
-        args=(os.fspath(database_path), actor.value, child_channel),
-    )
-    runtime.start()
-    assert parent_channel.poll(10), f"{actor.value} runtime did not open"
-    assert parent_channel.recv() == "RUNTIME_OPEN"
-
-    try:
-        with pytest.raises(EdgeDatabaseError, match="deployment lock.*running runtime"):
-            bootstrap_database(database_path)
-    finally:
-        parent_channel.send("CLOSE")
-        assert parent_channel.poll(10), f"{actor.value} runtime did not close"
-        assert parent_channel.recv() == "CLOSED"
-        runtime.join(10)
-    assert runtime.exitcode == 0
-
-
-def test_module_cli_refuses_while_runtime_holds_deployment_lock(tmp_path: Path) -> None:
-    database_path = tmp_path / "edge" / "edge.sqlite3"
-    _prepare_database(database_path)
+    snapshots = tmp_path / "snapshots"
+    snapshots.mkdir()
     context = multiprocessing.get_context("spawn")
     parent_channel, child_channel = context.Pipe()
     runtime = context.Process(
@@ -117,24 +93,17 @@ def test_module_cli_refuses_while_runtime_holds_deployment_lock(tmp_path: Path) 
     assert parent_channel.recv() == "RUNTIME_OPEN"
 
     try:
-        completed = subprocess.run(
-            [sys.executable, "-m", "backend.app.edge_db", "--database", os.fspath(database_path)],
-            check=False,
-            capture_output=True,
-            text=True,
-            timeout=10,
-        )
+        with pytest.raises(
+            MigrationError, match="^source database is in use by a running runtime$"
+        ):
+            export_snapshot(database_path, snapshots / "edge.snapshot.sqlite3")
     finally:
         parent_channel.send("CLOSE")
         assert parent_channel.poll(10), "API runtime did not close"
         assert parent_channel.recv() == "CLOSED"
         runtime.join(10)
     assert runtime.exitcode == 0
-    assert completed.returncode == 1
-    assert completed.stdout == ""
-    assert "EDGE_DB_BOOTSTRAP_FAILED" in completed.stderr
-    assert "deployment lock" in completed.stderr
-    assert "running runtime" in completed.stderr
+    assert list(snapshots.iterdir()) == []
 
 
 def test_two_process_api_and_worker_writes_serialize_and_keep_integrity(tmp_path: Path) -> None:

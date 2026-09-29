@@ -64,3 +64,10 @@ services:
   # Same locally built worker tag; never try to pull it from GHCR.
   edge-model-fetch:
     pull_policy: never
+  # The locally built ml-api tag; never try to pull it from GHCR.
+  edge-db-migrator:
+    pull_policy: never
+  edge-db-cutover:
+    pull_policy: never
+  edge-refused-evidence:
+    pull_policy: never

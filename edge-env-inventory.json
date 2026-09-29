@@ -390,6 +390,30 @@
       "overlay_service_environment": true
     },
     {
+      "name": "PG_OWNER_DSN_HOST_FILE",
+      "category": "secret/bootstrap",
+      "authority": "deployment secret file",
+      "behavior": "host path of the superuser libpq DSN file; compose mounts it as the pg_owner_dsn secret into edge-db-migrator and edge-db-cutover only; required, compose refuses to render without it",
+      "compose": true,
+      "example": true
+    },
+    {
+      "name": "PG_RUNTIME_DSN_HOST_FILE",
+      "category": "secret/bootstrap",
+      "authority": "deployment secret file",
+      "behavior": "host path of the runtime role's libpq DSN file; compose mounts it as the pg_runtime_dsn secret into ml-api and edge-db-migrator, which sets the role's password from it; required, compose refuses to render without it",
+      "compose": true,
+      "example": true
+    },
+    {
+      "name": "PG_SUPERUSER_PASSWORD_HOST_FILE",
+      "category": "secret/bootstrap",
+      "authority": "deployment secret file",
+      "behavior": "host path of the PostgreSQL superuser password file; compose mounts it as the pg_superuser_password secret into the postgres service; required, compose refuses to render without it",
+      "compose": true,
+      "example": true
+    },
+    {
       "name": "RELAY_TOKEN",
       "category": "secret/bootstrap",
       "authority": "API_EDGE_RELAY_TOKEN projection",
