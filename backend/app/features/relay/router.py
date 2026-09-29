@@ -7,24 +7,25 @@ import binascii
 import hashlib
 import json
 import logging
-import sqlite3
-from collections.abc import Callable, Coroutine
-from dataclasses import dataclass
-from typing import Annotated, Any, NotRequired, Protocol, TypedDict
+import uuid
+from collections.abc import Callable, Coroutine, Iterator
+from contextlib import contextmanager
+from typing import Annotated, Any, Protocol
 
+import psycopg
 from fastapi import APIRouter, Depends, Header, HTTPException, Request, Response, status
 from fastapi.routing import APIRoute
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 from starlette.types import Message, Receive
 
-from backend.app.edge_db import EDGE_DATABASE_PATH
+from backend.app.edge_db.authority import AuthorityFenced
 from backend.app.features.audit.catalog import (
     AuditAction,
     AuditActorType,
     AuditAuthMechanism,
     empty_detail,
 )
-from backend.app.features.audit.http import append_transactional
+from backend.app.features.audit.http import audit_runtime, mutation_audit
 from backend.app.features.audit.store import AuditEvent
 from backend.app.features.audit.store import utc_now as audit_now
 from backend.app.features.cameras.router import (
@@ -32,10 +33,19 @@ from backend.app.features.cameras.router import (
     worker_config_snapshot,
 )
 from backend.app.features.cameras.store import CameraRegistryStore
-from backend.app.features.clips.catalog import CatalogConflictError, get_catalog_store
+from backend.app.features.evidence.event_outbox import (
+    AcceptedEvent,
+    EventIdentityConflict,
+    EventOutbox,
+    OutboxCapacityExceeded,
+)
+from backend.app.features.evidence.outbox_delivery import DeliveryStatus, OutboxDelivery
+from backend.app.features.evidence.outbox_dispatch import RELAY_OUTBOX_BUDGET, dispatch
+from backend.app.features.evidence.postgres_relay_projection import (
+    PostgresRelayEvidenceProjection,
+)
 from backend.app.features.evidence.relay_projection import (
     RelayEvent,
-    RelayEvidenceProjection,
     RelayEvidenceProjectionConflict,
     RelayEvidenceProjectionError,
     RelayEvidenceProjectionMissingEvent,
@@ -48,11 +58,7 @@ from contracts import AlertEventType
 from contracts.decode_diagnostics import DECODE_BACKENDS, DECODE_FALLBACK_REASONS
 from contracts.worker_config import RESTART_EPOCH_KEY
 from shared.events import envelope_limits
-from shared.events.evidence_export_contract import (
-    DeliveryDisposition,
-    DeliveryFailure,
-    EventReceipt,
-)
+from shared.events.evidence_export_contract import DeliveryDisposition, DeliveryFailure
 from shared.events.execution_records import MAX_EXECUTION_RECORD_BODY_BYTES
 from shared.events.relay_failure_log import RelayFailureLog
 
@@ -60,17 +66,10 @@ RELAY_TOKEN_HEADER = "X-Edge-Relay-Token"
 
 logger = logging.getLogger(__name__)
 
-# Catalog records are an auxiliary index, not the alert delivery path. A typical
-# clip manifest is about 600 bytes; 16 KiB leaves ample room for event evidence
-# while preventing a worker mistake from growing the SQLite catalog without bound.
-MAX_CATALOG_PAYLOAD_BYTES = 16 * 1024
 # The relay accepts at most 200 KiB of decoded inline evidence. Limit encoded
 # input before decoding so an oversized Base64 string cannot trigger allocation.
 MAX_INLINE_SNAPSHOT_BYTES = 200 * 1024
 MAX_INLINE_SNAPSHOT_BASE64_CHARS = 4 * ((MAX_INLINE_SNAPSHOT_BYTES + 2) // 3)
-# Eight container levels supports structured detector output without accepting
-# arbitrarily recursive JSON from a trusted-but-fallible worker.
-MAX_CATALOG_PAYLOAD_DEPTH = 8
 # Bound the entire HTTP body before JSON parse / Pydantic validation. Alerts may
 # carry a ~200 KiB base64 snapshot plus envelope fields; 512 KiB leaves margin
 # without accepting multi-megabyte worker mistakes as DoS amplification.
@@ -516,40 +515,7 @@ class RelayRuntimeStatusResponse(BaseModel):
     generation: int
 
 
-class _AlertKwargs(TypedDict):
-    event_type: AlertEventType
-    detected_at: str
-    probability: float
-    audit: NotRequired[dict[str, object]]
-    snapshot_bytes: NotRequired[bytes]
-    clip_id: NotRequired[str]
-
-
 class BackendIngestClient(Protocol):
-    def send_alert(
-        self,
-        *,
-        event_type: AlertEventType,
-        detected_at: str,
-        probability: float,
-        audit: dict[str, object] | None = None,
-        snapshot_bytes: bytes | None = None,
-        clip_id: str | None = None,
-    ) -> bool: ...
-
-    def send_alert_receipt(
-        self,
-        *,
-        edge_event_id: str,
-        event_type: AlertEventType,
-        detected_at: str,
-        probability: float,
-        audit: dict[str, object] | None = None,
-        snapshot_bytes: bytes | None = None,
-        clip_id: str | None = None,
-        on_accepted: Callable[[float], None] | None = None,
-    ) -> EventReceipt | DeliveryFailure: ...
-
     def send_heartbeat(self) -> bool: ...
 
 
@@ -578,14 +544,12 @@ def relay_alert(
     request: Request,
     _: Annotated[None, Depends(require_relay_alert)],
 ) -> dict[str, str]:
-    # Local catalog recording is edge-local audit trail, not backend egress --
-    # it must not depend on registry binding or the backend call's outcome
-    # (see #183, #202). Recording it up front means ml-api keeps its own
-    # record of every alert attempt even when the camera can't yet be
-    # resolved or the backend can't be reached, instead of the attempt
-    # leaving no local trace at all when _camera_binding() 403s below.
-    projected = _project_relay_event(request, payload)
-    catalog_result = None if projected else _record_catalog(request, payload)
+    """Commit the incident and its delivery obligation, then answer.
+
+    Every response is built after the admission COMMIT, so a failure before it
+    is never acknowledged. A worker retry after a lost response lands on the
+    same committed row instead of creating a second incident.
+    """
     binding = _camera_binding(request, payload.camera_id, payload.facility_id)
     # Only a Hub-issued id may address the upstream ingest API. The previous
     # `or payload.camera_id` fallback sent the worker's edge-local id, which the
@@ -595,85 +559,229 @@ def relay_alert(
     # already refuses to push under an unmapped id -- see
     # backend_heartbeat_relay._canonical_backend_camera_id.
     bound_camera_id = binding.get("backend_camera_id")
-    if not isinstance(bound_camera_id, str) or not bound_camera_id.strip():
-        # Coverage is untouched: the camera keeps streaming, and the local audit
-        # record was already written above. Only the guaranteed-reject upstream
-        # push is skipped, and the reason is named instead of arriving as a 502.
+    backend_camera_id = (
+        bound_camera_id if isinstance(bound_camera_id, str) and bound_camera_id.strip() else None
+    )
+    if backend_camera_id is None:
+        # Coverage is untouched: the camera keeps streaming and the incident is
+        # still recorded locally below. Only the guaranteed-reject upstream push
+        # is skipped, and the reason is named instead of arriving as a 502.
         _LOGGER.warning(
             "relay alert: skipping backend ingest, camera %s has no Hub mapping yet",
             payload.camera_id,
             extra={"local_camera_id": payload.camera_id},
         )
-        return _alert_response(
-            _local_accept_body(payload, projected=projected, catalog_failure=catalog_result),
-            catalog_result,
-        )
-    canonical_camera_id = bound_camera_id
-    client = _optional_backend_ingest_client(request, camera_id=canonical_camera_id)
-    if client is None:
-        # Registry-bound local accept; cloud only when store built a client.
-        return _alert_response(
-            _local_accept_body(payload, projected=projected, catalog_failure=catalog_result),
-            catalog_result,
-        )
-    alert_kwargs: _AlertKwargs = {
-        "event_type": payload.event_type,
-        "detected_at": payload.detected_at,
-        "probability": payload.probability,
-    }
-    clip_id = _payload_clip_id(payload)
-    if clip_id is not None:
-        alert_kwargs["clip_id"] = clip_id
-    # Envelope-less alerts forward the exact prior 3-field shape; audit/snapshot
-    # kwargs are added ONLY when present (backward-compat with the route contract).
-    if payload.audit is not None:
-        alert_kwargs["audit"] = payload.audit.model_dump(exclude_none=True)
-    snapshot_bytes = _decode_snapshot(payload.snapshot_jpeg_base64)
-    if snapshot_bytes is not None:
-        alert_kwargs["snapshot_bytes"] = snapshot_bytes
-    if payload.edge_event_id is not None:
-        result = client.send_alert_receipt(
-            edge_event_id=payload.edge_event_id,
-            on_accepted=lambda accepted_at: _record_alert_latency(request, payload, accepted_at),
-            **alert_kwargs,
-        )
-        if isinstance(result, DeliveryFailure):
-            _backend_ingest_alert_failures.record_failure(result, path="alerts")
-            if result.disposition is DeliveryDisposition.RETRY:
-                code = status.HTTP_503_SERVICE_UNAVAILABLE
-                # Names the failing side explicitly: this is the Hub/backend
-                # ingest API declining or timing out, not ml-api's own local
-                # SQLite projection (that failure keeps its own distinct
-                # "central evidence projection unavailable" detail below).
-                detail = f"backend ingest retryable failure: {result.code}"
-            elif result.disposition is DeliveryDisposition.COMPATIBILITY:
-                code = status.HTTP_404_NOT_FOUND
-                detail = "backend ingest rejected alert"
-            else:
-                code = result.status_code or status.HTTP_502_BAD_GATEWAY
-                detail = "backend ingest rejected alert"
-            headers = None
-            if result.retry_after_seconds is not None:
-                headers = {"Retry-After": str(max(0, int(result.retry_after_seconds)))}
-            raise HTTPException(
-                status_code=code,
-                detail=detail,
-                headers=headers,
-            )
-        _backend_ingest_alert_failures.record_success(path="alerts")
-        response = {
-            "status": result.status,
-            "edge_event_id": result.edge_event_id,
-            "event_id": result.event_id,
-        }
-        return _alert_response(response, catalog_result)
-    accepted = client.send_alert(**alert_kwargs)
-    if not accepted:
+    client = getattr(request.app.state, "backend_ingest_client", None)
+    delivery = getattr(request.app.state, "event_outbox_delivery", None)
+    forward = backend_camera_id is not None and client is not None
+    if forward and not isinstance(delivery, OutboxDelivery):
         raise HTTPException(
-            status_code=status.HTTP_502_BAD_GATEWAY,
-            detail="backend ingest rejected alert",
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="backend outbox delivery is not configured",
         )
-    return _alert_response({"status": "accepted"}, catalog_result)
+    edge_event_id = _alert_event_id(payload)
+    accepted = _accept_alert(
+        request, payload, edge_event_id, backend_camera_id=backend_camera_id, forward=forward
+    )
+    if accepted.delivery_state == "LOCAL_ONLY":
+        return _local_receipt(payload, edge_event_id)
+    if not isinstance(delivery, OutboxDelivery):
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="backend outbox delivery is not configured",
+        )
+    claim = None
+    if client is not None and accepted.delivery_state in {"PENDING", "IN_FLIGHT"}:
+        # The admission transaction is already committed: the Hub request below
+        # runs with no SQL transaction open, under its own committed lease.
+        try:
+            claim = delivery.claim_event(edge_event_id)
+        except AuthorityFenced as error:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="edge authority is fenced",
+            ) from error
+    if claim is None:
+        return _replayed_alert_response(payload, edge_event_id, delivery.status(edge_event_id))
+    result = dispatch(
+        client,
+        claim,
+        delivery,
+        on_accepted=lambda accepted_at: _record_alert_latency(request, payload, accepted_at),
+    )
+    if isinstance(result, DeliveryFailure):
+        _backend_ingest_alert_failures.record_failure(result, path="alerts")
+        raise _delivery_failure_error(result)
+    _backend_ingest_alert_failures.record_success(path="alerts")
+    if not result.event_id:
+        return _local_receipt(payload, edge_event_id)
+    return _central_receipt(payload, edge_event_id, result.event_id)
+
+
+# Id-less alerts (pre-envelope workers) get a content-derived id so a resend of
+# the same alert lands on the same committed row instead of a second incident.
+_IDLESS_ALERT_NAMESPACE = uuid.uuid5(uuid.NAMESPACE_URL, "urn:seeon-edge:relay-alert")
+
+
+def _alert_event_id(payload: RelayAlertRequest) -> str:
+    if payload.edge_event_id is not None:
+        return payload.edge_event_id
+    canonical = json.dumps(
+        payload.model_dump(
+            exclude={"edge_event_id", "attempt_ordinal", "snapshot_jpeg_base64"},
+            exclude_none=True,
+            mode="json",
+        ),
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    return str(uuid.uuid5(_IDLESS_ALERT_NAMESPACE, canonical))
+
+
+def _accept_alert(
+    request: Request,
+    payload: RelayAlertRequest,
+    edge_event_id: str,
+    *,
+    backend_camera_id: str | None,
+    forward: bool,
+) -> AcceptedEvent:
+    runtime = audit_runtime(request)
+    outbox = EventOutbox(
+        runtime.database, runtime.authority, RELAY_OUTBOX_BUDGET, audit_runtime=runtime
+    )
+    runtime.require_mutation_admission(outbox)
+    try:
+        snapshot_bytes = _decode_snapshot(payload.snapshot_jpeg_base64)
+        return outbox.accept(
+            _relay_event(payload, edge_event_id),
+            backend_camera_id=backend_camera_id,
+            forward=forward,
+            snapshot=_relay_snapshot(payload),
+            snapshot_bytes=snapshot_bytes,
+        )
+    except (EventIdentityConflict, RelayEvidenceProjectionConflict) as error:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(error)) from error
+    except OutboxCapacityExceeded as error:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="backend outbox capacity exceeded",
+            headers={"Retry-After": "5"},
+        ) from error
+    except AuthorityFenced as error:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="edge authority is fenced",
+        ) from error
+    except (ValueError, RelayEvidenceProjectionError) as error:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=str(error)
+        ) from error
+    except _REJECTED_FACTS as error:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail="relay alert violates a stored fact constraint",
+        ) from error
+
+
+# Constraint failures describe the request, not the database: answering 503
+# would make the worker resend a payload that can never be stored.
+_REJECTED_FACTS = (
+    psycopg.errors.CheckViolation,
+    psycopg.errors.NotNullViolation,
+    psycopg.DataError,
+)
+
+
+def _relay_event(payload: RelayAlertRequest, edge_event_id: str) -> RelayEvent:
+    return RelayEvent(
+        edge_event_id=edge_event_id,
+        event_type=str(payload.event_type),
+        probability=payload.probability,
+        detected_at=payload.detected_at,
+        camera_id=payload.camera_id,
+        facility_id=payload.facility_id,
+        resident_id=payload.resident_id,
+        evidence=payload.evidence,
+        audit=None if payload.audit is None else payload.audit.model_dump(exclude_none=True),
+    )
+
+
+def _relay_snapshot(payload: RelayAlertRequest) -> RelaySnapshot | None:
+    if payload.snapshot is None or payload.snapshot_jpeg_base64 is None:
+        return None
+    return RelaySnapshot(
+        snapshot_id=payload.snapshot.snapshot_id,
+        path=payload.snapshot.path,
+        sha256=payload.snapshot.sha256,
+        size_bytes=payload.snapshot.size_bytes,
+        mime_type=payload.snapshot.mime_type,
+        captured_at=payload.snapshot.captured_at,
+    )
+
+
+def _local_receipt(payload: RelayAlertRequest, edge_event_id: str) -> dict[str, str]:
+    if payload.edge_event_id is None:
+        return {"status": "accepted"}
+    return {"status": "accepted_local", "edge_event_id": edge_event_id}
+
+
+def _central_receipt(
+    payload: RelayAlertRequest, edge_event_id: str, event_id: str
+) -> dict[str, str]:
+    if payload.edge_event_id is None:
+        return {"status": "accepted"}
+    return {"status": "accepted", "edge_event_id": edge_event_id, "event_id": event_id}
+
+
+def _delivery_failure_error(result: DeliveryFailure) -> HTTPException:
+    if result.disposition is DeliveryDisposition.RETRY:
+        code = status.HTTP_503_SERVICE_UNAVAILABLE
+        # Names the failing side explicitly: this is the Hub/backend ingest API
+        # declining or timing out, not the local PostgreSQL admission, which
+        # already committed the incident and its delivery obligation.
+        detail = f"backend ingest retryable failure: {result.code}"
+    elif result.disposition is DeliveryDisposition.COMPATIBILITY:
+        code = status.HTTP_404_NOT_FOUND
+        detail = "backend ingest rejected alert"
+    else:
+        code = result.status_code or status.HTTP_502_BAD_GATEWAY
+        detail = "backend ingest rejected alert"
+    headers = None
+    if result.retry_after_seconds is not None:
+        headers = {"Retry-After": str(max(0, int(result.retry_after_seconds)))}
+    return HTTPException(status_code=code, detail=detail, headers=headers)
+
+
+def _replayed_alert_response(
+    payload: RelayAlertRequest, edge_event_id: str, stored: DeliveryStatus | None
+) -> dict[str, str]:
+    """Answer a resend from the committed delivery state instead of resending."""
+    if stored is None:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="backend outbox delivery state unavailable",
+        )
+    if stored.state == "SENT" and stored.backend_event_id:
+        return _central_receipt(payload, edge_event_id, stored.backend_event_id)
+    if stored.state in {"LOCAL_ONLY", "EXHAUSTED"} or (
+        stored.state == "REJECTED" and stored.reason == "ACCEPTED_LOCAL"
+    ):
+        # The incident is committed here; only the Hub copy is missing.
+        return _local_receipt(payload, edge_event_id)
+    if stored.state == "REJECTED":
+        raise _delivery_failure_error(
+            DeliveryFailure(
+                DeliveryDisposition.PERMANENT,
+                stored.reason or "REJECTED",
+                status_code=stored.http_status,
+            )
+        )
+    raise HTTPException(
+        status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+        detail="backend ingest delivery pending",
+        headers={"Retry-After": "5"},
+    )
 
 
 @router.post("/snapshot-attachments", status_code=status.HTTP_202_ACCEPTED)
@@ -684,30 +792,24 @@ def relay_snapshot_attachment(
 ) -> dict[str, str]:
     """Record one immutable media reference without accepting media bytes."""
 
-    if _project_snapshot_attachment(request, payload):
-        return {"status": "accepted"}
-    store = get_catalog_store(request.app)
-    if store is None:
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="snapshot attachment storage unavailable",
+    projection = _snapshot_projection(request)
+    audit = mutation_audit(
+        request,
+        lambda: _relay_audit_event(AuditAction.RELAY_SNAPSHOT_ATTACHMENT, payload.snapshot_id),
+    )
+    with _snapshot_projection_errors():
+        audit.apply(
+            projection,
+            lambda append: projection.attach_snapshot(
+                edge_event_id=payload.edge_event_id,
+                snapshot_id=payload.snapshot_id,
+                sha256=payload.sha256,
+                media_reference=payload.media_reference,
+                size_bytes=payload.size_bytes,
+                mime_type=payload.mime_type,
+                after_write=append,
+            ),
         )
-    try:
-        store.record(
-            "snapshots",
-            _snapshot_delivery_key(payload.edge_event_id, payload.snapshot_id),
-            payload.model_dump(exclude_none=True),
-        )
-    except CatalogConflictError as error:
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail="snapshot attachment conflicts with existing content identity",
-        ) from error
-    except (OSError, sqlite3.Error) as error:
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="snapshot attachment storage unavailable",
-        ) from error
     return {"status": "accepted"}
 
 
@@ -719,161 +821,67 @@ def relay_snapshot_disposition(
 ) -> dict[str, str]:
     """Durably record an unavailable or failed snapshot without touching its event."""
 
-    _project_snapshot_disposition(request, payload)
+    projection = _snapshot_projection(request)
+    audit = mutation_audit(
+        request,
+        lambda: _relay_audit_event(AuditAction.RELAY_SNAPSHOT_DISPOSITION, payload.snapshot_id),
+    )
+    with _snapshot_projection_errors():
+        audit.apply(
+            projection,
+            lambda append: projection.record_snapshot_disposition(
+                edge_event_id=payload.edge_event_id,
+                snapshot_id=payload.snapshot_id,
+                disposition=payload.disposition,
+                reason=payload.reason,
+                after_write=append,
+            ),
+        )
     return {"status": "accepted"}
 
 
-def _snapshot_delivery_key(edge_event_id: str, snapshot_id: str) -> str:
-    return hashlib.sha256(f"{edge_event_id}\0{snapshot_id}".encode()).hexdigest()
-
-
-def _relay_evidence_projection(request: Request) -> RelayEvidenceProjection | None:
-    projection = getattr(request.app.state, "relay_evidence_projection", None)
-    if isinstance(projection, RelayEvidenceProjection):
-        return projection
-    if not EDGE_DATABASE_PATH.is_file():
-        return None
-    return RelayEvidenceProjection(EDGE_DATABASE_PATH)
-
-
-def _project_relay_event(request: Request, payload: RelayAlertRequest) -> bool:
-    if payload.edge_event_id is None:
-        return False
-    projection = _relay_evidence_projection(request)
-    if projection is None:
-        return False
-    snapshot = None
-    if payload.snapshot is not None and payload.snapshot_jpeg_base64 is not None:
-        snapshot = RelaySnapshot(
-            snapshot_id=payload.snapshot.snapshot_id,
-            path=payload.snapshot.path,
-            sha256=payload.snapshot.sha256,
-            size_bytes=payload.snapshot.size_bytes,
-            mime_type=payload.snapshot.mime_type,
-            captured_at=payload.snapshot.captured_at,
+def _snapshot_projection(request: Request) -> PostgresRelayEvidenceProjection:
+    projection = getattr(request.app.state, "relay_snapshot_projection", None)
+    if not isinstance(projection, PostgresRelayEvidenceProjection):
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="snapshot projection is not configured",
         )
+    return projection
+
+
+@contextmanager
+def _snapshot_projection_errors() -> Iterator[None]:
     try:
-        projection.project_event(
-            RelayEvent(
-                edge_event_id=payload.edge_event_id,
-                event_type=str(payload.event_type),
-                probability=payload.probability,
-                detected_at=payload.detected_at,
-                camera_id=payload.camera_id,
-                facility_id=payload.facility_id,
-                resident_id=payload.resident_id,
-                evidence=payload.evidence,
-                audit=None
-                if payload.audit is None
-                else payload.audit.model_dump(exclude_none=True),
-            ),
-            snapshot,
-            after_write=lambda connection: append_transactional(
-                request,
-                connection,
-                AuditEvent(
-                    occurred_at=audit_now(),
-                    actor_id="worker-relay",
-                    action=AuditAction.RELAY_ALERT,
-                    target_id=str(payload.edge_event_id),
-                    detail=empty_detail(AuditAction.RELAY_ALERT),
-                    actor_type=AuditActorType.SERVICE,
-                    auth_mechanism=AuditAuthMechanism.RELAY_TOKEN,
-                ),
-            ),
-        )
-    except RelayEvidenceProjectionConflict as error:
+        yield
+    except (RelayEvidenceProjectionMissingEvent, RelayEvidenceProjectionConflict) as error:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(error)) from error
     except RelayEvidenceProjectionError as error:
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=str(error)
         ) from error
-    except (OSError, sqlite3.Error) as error:
+    except AuthorityFenced as error:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="central evidence projection unavailable",
+            detail="edge authority is fenced",
         ) from error
-    return True
-
-
-def _project_snapshot_attachment(request: Request, payload: RelaySnapshotAttachmentRequest) -> bool:
-    try:
-        projection = _relay_evidence_projection(request)
-        if projection is None:
-            return False
-        projection.attach_snapshot(
-            edge_event_id=payload.edge_event_id,
-            snapshot_id=payload.snapshot_id,
-            sha256=payload.sha256,
-            media_reference=payload.media_reference,
-            size_bytes=payload.size_bytes,
-            mime_type=payload.mime_type,
-            after_write=lambda connection: append_transactional(
-                request,
-                connection,
-                AuditEvent(
-                    occurred_at=audit_now(),
-                    actor_id="worker-relay",
-                    action=AuditAction.RELAY_SNAPSHOT_ATTACHMENT,
-                    target_id=payload.snapshot_id,
-                    detail=empty_detail(AuditAction.RELAY_SNAPSHOT_ATTACHMENT),
-                    actor_type=AuditActorType.SERVICE,
-                    auth_mechanism=AuditAuthMechanism.RELAY_TOKEN,
-                ),
-            ),
-        )
-    except RelayEvidenceProjectionMissingEvent as error:
-        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(error)) from error
-    except RelayEvidenceProjectionConflict as error:
-        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(error)) from error
-    except RelayEvidenceProjectionError as error:
+    except _REJECTED_FACTS as error:
         raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=str(error)
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail="snapshot record violates a stored fact constraint",
         ) from error
-    except (OSError, sqlite3.Error) as error:
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="central evidence projection unavailable",
-        ) from error
-    else:
-        return True
 
 
-def _project_snapshot_disposition(
-    request: Request, payload: RelaySnapshotDispositionRequest
-) -> None:
-    try:
-        projection = _relay_evidence_projection(request)
-        if projection is None:
-            return
-        projection.record_snapshot_disposition(
-            edge_event_id=payload.edge_event_id,
-            snapshot_id=payload.snapshot_id,
-            disposition=payload.disposition,
-            reason=payload.reason,
-            after_write=lambda connection: append_transactional(
-                request,
-                connection,
-                AuditEvent(
-                    occurred_at=audit_now(),
-                    actor_id="worker-relay",
-                    action=AuditAction.RELAY_SNAPSHOT_DISPOSITION,
-                    target_id=payload.snapshot_id,
-                    detail=empty_detail(AuditAction.RELAY_SNAPSHOT_DISPOSITION),
-                    actor_type=AuditActorType.SERVICE,
-                    auth_mechanism=AuditAuthMechanism.RELAY_TOKEN,
-                ),
-            ),
-        )
-    except RelayEvidenceProjectionMissingEvent as error:
-        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(error)) from error
-    except RelayEvidenceProjectionConflict as error:
-        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(error)) from error
-    except (OSError, sqlite3.Error) as error:
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="central evidence projection unavailable",
-        ) from error
+def _relay_audit_event(action: AuditAction, target_id: str) -> AuditEvent:
+    return AuditEvent(
+        occurred_at=audit_now(),
+        actor_id="worker-relay",
+        action=action,
+        target_id=target_id,
+        detail=empty_detail(action),
+        actor_type=AuditActorType.SERVICE,
+        auth_mechanism=AuditAuthMechanism.RELAY_TOKEN,
+    )
 
 
 @router.post("/heartbeat", status_code=status.HTTP_202_ACCEPTED)
@@ -944,162 +952,6 @@ def relay_runtime_status(
     return RelayRuntimeStatusResponse(accepted=True, generation=result.generation)
 
 
-@dataclass(frozen=True, slots=True)
-class CatalogFailure:
-    """Why the local catalog did not record an alert, and whether retrying can help.
-
-    ``permanent_status`` is the HTTP status the relay should answer with when
-    this failure is the reason it cannot accept a receipt-tracked alert
-    locally: a payload the catalog will never fit (422) or an idempotency
-    conflict (409) is the same on every retry, so the worker must be told to
-    stop rather than loop forever (#431). ``None`` means transient -- the
-    store could not be opened or the write failed operationally -- and the
-    worker should keep its copy and retry.
-    """
-
-    reason: str
-    permanent_status: int | None = None
-
-
-def _record_catalog(request: Request, payload: RelayAlertRequest) -> CatalogFailure | None:
-    permanent_status: int | None = None
-    try:
-        event = payload.model_dump(
-            exclude={"attempt_ordinal", "snapshot_jpeg_base64"}, exclude_none=True
-        )
-        rejection_reason = _catalog_payload_rejection_reason(event)
-        if rejection_reason is not None:
-            # Do not reject the relay request: the catalog is a secondary index, and
-            # an index limit must never prevent a safety alert reaching the backend.
-            # The accepted response names the catalog failure and app state/logs make
-            # it observable to local operators.
-            request.app.state.catalog_error = rejection_reason
-            logger.warning("catalog record skipped: %s", rejection_reason)
-            return CatalogFailure(rejection_reason, status.HTTP_422_UNPROCESSABLE_CONTENT)
-
-        store = get_catalog_store(request.app)
-        if store is None:
-            return CatalogFailure(
-                getattr(request.app.state, "catalog_error", "catalog unavailable")
-            )
-
-        records: list[tuple[str, str, dict[str, Any]]] = []
-        if payload.edge_event_id is not None:
-            records.append(("events", payload.edge_event_id, event))
-        if payload.snapshot is not None:
-            snapshot = payload.snapshot.model_dump(exclude_none=True)
-            records.append(("snapshots", payload.snapshot.snapshot_id, snapshot))
-        if records:
-            store.record_many(tuple(records))
-    except CatalogConflictError:
-        reason = "catalog idempotency conflict"
-        permanent_status = status.HTTP_409_CONFLICT
-    except (OSError, sqlite3.Error) as exc:
-        reason = f"catalog operational failure: {exc}"
-    except Exception as exc:  # noqa: BLE001 - auxiliary catalog failures must never block alert egress
-        reason = f"catalog unexpected failure: {exc}"
-    else:
-        return None
-
-    request.app.state.catalog_error = reason
-    logger.warning("catalog record skipped: %s", reason)
-    return CatalogFailure(reason, permanent_status)
-
-
-def _catalog_payload_rejection_reason(event: dict[str, Any]) -> str | None:
-    evidence = event.get("evidence")
-    if _json_depth(evidence) > MAX_CATALOG_PAYLOAD_DEPTH:
-        return f"catalog evidence exceeds maximum depth of {MAX_CATALOG_PAYLOAD_DEPTH}"
-    encoded = json.dumps(event, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode(
-        "utf-8"
-    )
-    if len(encoded) > MAX_CATALOG_PAYLOAD_BYTES:
-        return f"catalog payload exceeds maximum size of {MAX_CATALOG_PAYLOAD_BYTES} bytes"
-    return None
-
-
-def _json_depth(value: Any) -> int:
-    if isinstance(value, dict):
-        return 1 + max((_json_depth(item) for item in value.values()), default=0)
-    if isinstance(value, list):
-        return 1 + max((_json_depth(item) for item in value), default=0)
-    return 0
-
-
-def _local_accept_body(
-    payload: RelayAlertRequest,
-    *,
-    projected: bool,
-    catalog_failure: CatalogFailure | None,
-) -> dict[str, str]:
-    """Name a deliberate local accept so the worker can stop retrying it.
-
-    Both callers decided the event will never be pushed upstream. A bare
-    {"status": "accepted"} could not say that: the worker requires a receipt
-    echoing its edge_event_id, an absent one is indistinguishable from a mangled
-    response, and so it retried forever and wedged the durable queue behind the
-    oldest undeliverable entry (#431).
-
-    But a terminal receipt tells the worker to DELETE its copy, so it may only
-    be issued for an event this backend actually persisted. On this path nothing
-    goes upstream, so local persistence is the only copy that will exist. If the
-    projection failed and the catalog fallback also failed, claiming terminal
-    acceptance destroys the alert on both sides at once.
-
-    That is narrower than the catalog's usual rule. A catalog failure must never
-    block a safety alert from reaching the backend (#183, #202) because there
-    the upstream push carries durability -- here there is no upstream push.
-
-    The refusal must also say whether retrying can help. A transient failure
-    (store unopenable, write error) is a 503: the worker keeps its copy and
-    retries. A payload the catalog can never fit, or an idempotency conflict, is
-    the same on every attempt; answering 503 there would recreate #431 with a
-    permanent poison entry, so those carry the 4xx the failure already named
-    and the worker dead-letters the entry instead of looping.
-
-    Trade-off, stated deliberately: a terminal local accept means the alert is
-    never pushed to the Hub later, even once a mapping or client appears. Before
-    #431 the event did eventually reach the Hub, at the price of the queue
-    behind it never draining. Local persistence plus a live queue was chosen
-    over eventual upstream delivery; the projection row is the record to
-    re-drain if that is ever wanted.
-
-    Workers that sent no edge_event_id are not tracking receipts, keep their own
-    copy regardless, and get the prior body unchanged.
-    """
-    if payload.edge_event_id is None:
-        return {"status": "accepted"}
-    if not projected and catalog_failure is not None:
-        if catalog_failure.permanent_status is not None:
-            raise HTTPException(
-                status_code=catalog_failure.permanent_status,
-                detail=(
-                    "edge-local persistence rejected this alert and it is not being "
-                    f"pushed upstream; retrying cannot help ({catalog_failure.reason})"
-                ),
-            )
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail=(
-                "edge-local persistence failed and this alert is not being "
-                f"pushed upstream; retry required ({catalog_failure.reason})"
-            ),
-        )
-    return {"status": "accepted_local", "edge_event_id": payload.edge_event_id}
-
-
-def _alert_response(
-    response: dict[str, str], catalog_failure: CatalogFailure | None
-) -> dict[str, str]:
-    if catalog_failure is not None:
-        return {
-            **response,
-            "catalog": "not_recorded",
-            "catalog_reason": catalog_failure.reason,
-        }
-    return response
-
-
 def _decode_snapshot(snapshot_jpeg_base64: str | None) -> bytes | None:
     if snapshot_jpeg_base64 is None:
         return None
@@ -1163,15 +1015,6 @@ def _log_unresolved_runtime_status_cameras(
                 camera.camera_id,
                 exc.detail,
             )
-
-
-def _payload_clip_id(payload: RelayAlertRequest) -> str | None:
-    if payload.evidence is None:
-        return None
-    value = payload.evidence.get("clip_id")
-    if isinstance(value, str) and value.strip() != "":
-        return value
-    return None
 
 
 def _camera_binding(request: Request, camera_id: str, facility_id: str) -> dict[str, str | None]:

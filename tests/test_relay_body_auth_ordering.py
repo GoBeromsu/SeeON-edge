@@ -5,20 +5,21 @@ from __future__ import annotations
 import json
 import socket
 import threading
-import time
 from collections.abc import Iterator
 from types import SimpleNamespace
 
 import httpx
 import pytest
 import uvicorn
-from fastapi import HTTPException
+from fastapi import FastAPI, HTTPException
 from fastapi.testclient import TestClient
 
-from backend.app.features.cameras.store import CameraRegistryStore
+from backend.app.features.audit.postgres_runtime import PostgresAuditRuntime
 from backend.app.features.relay import router as relay_router
-from backend.app.main import create_app, no_lifespan
-from tests_support.compact_authority_db import prepare_compact_database
+from tests_support.postgres_api_app import postgres_api_app
+from tests_support.postgres_sandbox import ProductSandbox
+
+pytest_plugins = ("tests_support.postgres_sandbox",)
 
 
 def _free_tcp_port() -> int:
@@ -27,26 +28,18 @@ def _free_tcp_port() -> int:
         return int(listener.getsockname()[1])
 
 
-def _wait_until(predicate, *, timeout: float, what: str) -> None:
-    deadline = time.monotonic() + timeout
-    while not predicate():
-        if time.monotonic() >= deadline:
-            pytest.fail(f"timed out waiting for {what}")
-        time.sleep(0.01)
-
-
-def _app(tmp_path):
-    app = create_app(lifespan=no_lifespan)
-    registry_path = tmp_path / "catalog.sqlite3"
-    prepare_compact_database(registry_path)
-    registry = CameraRegistryStore(registry_path)
-    app.state.camera_registry = registry
+@pytest.fixture
+def app(
+    postgres_product_sandbox: ProductSandbox,
+    postgres_audit_runtime: PostgresAuditRuntime,
+) -> FastAPI:
+    app = postgres_api_app(postgres_product_sandbox, postgres_audit_runtime)
     app.state.edge_relay_token = "worker-secret"
     return app
 
 
-def _app_with_camera(tmp_path):
-    app = _app(tmp_path)
+@pytest.fixture
+def app_with_camera(app: FastAPI) -> FastAPI:
     app.state.camera_registry.create(
         camera_id="cam-1",
         label="cam",
@@ -57,8 +50,8 @@ def _app_with_camera(tmp_path):
     return app
 
 
-def test_oversized_content_length_is_rejected_before_body_parse(tmp_path) -> None:
-    with TestClient(_app(tmp_path)) as client:
+def test_oversized_content_length_is_rejected_before_body_parse(app: FastAPI) -> None:
+    with TestClient(app) as client:
         response = client.post(
             "/api/v1/relay/alerts",
             headers={
@@ -71,8 +64,8 @@ def test_oversized_content_length_is_rejected_before_body_parse(tmp_path) -> Non
     assert response.status_code == 413
 
 
-def test_missing_relay_token_is_rejected_without_accepting_payload(tmp_path) -> None:
-    with TestClient(_app(tmp_path)) as client:
+def test_missing_relay_token_is_rejected_without_accepting_payload(app: FastAPI) -> None:
+    with TestClient(app) as client:
         response = client.post(
             "/api/v1/relay/alerts",
             json={
@@ -86,8 +79,8 @@ def test_missing_relay_token_is_rejected_without_accepting_payload(tmp_path) -> 
     assert response.status_code == 401
 
 
-def test_authorized_small_heartbeat_is_accepted(tmp_path) -> None:
-    with TestClient(_app_with_camera(tmp_path)) as client:
+def test_authorized_small_heartbeat_is_accepted(app_with_camera: FastAPI) -> None:
+    with TestClient(app_with_camera) as client:
         response = client.post(
             "/api/v1/relay/heartbeat",
             headers={"X-Edge-Relay-Token": "worker-secret"},
@@ -124,13 +117,15 @@ def _oversized_chunks(total_bytes: int, *, chunk: int = 512) -> Iterator[bytes]:
         yield b"a" * step
 
 
-def test_chunked_oversized_body_without_content_length_is_rejected(tmp_path) -> None:
+def test_chunked_oversized_body_without_content_length_is_rejected(
+    app_with_camera: FastAPI,
+) -> None:
     # httpx streams a generator body as Transfer-Encoding: chunked with no
     # Content-Length, so the cheap header pre-check cannot catch it -- only the
     # BoundedBodyRoute streaming bound can. Body far exceeds the 4 KiB heartbeat
     # cap and must never be fully buffered for the Pydantic parse.
     over = relay_router.MAX_RELAY_HEARTBEAT_BODY_BYTES + 4096
-    with TestClient(_app_with_camera(tmp_path)) as client:
+    with TestClient(app_with_camera) as client:
         response = client.post(
             "/api/v1/relay/heartbeat",
             headers={
@@ -142,7 +137,7 @@ def test_chunked_oversized_body_without_content_length_is_rejected(tmp_path) -> 
     assert response.status_code == 413
 
 
-def test_chunked_body_without_content_length_is_accepted(tmp_path) -> None:
+def test_chunked_body_without_content_length_is_accepted(app_with_camera: FastAPI) -> None:
     body = json.dumps({"camera_id": "cam-1", "facility_id": "fac-1"}).encode("utf-8")
 
     def _stream() -> Iterator[bytes]:
@@ -151,7 +146,7 @@ def test_chunked_body_without_content_length_is_accepted(tmp_path) -> None:
         yield body[: len(body) // 2]
         yield body[len(body) // 2 :]
 
-    with TestClient(_app_with_camera(tmp_path)) as client:
+    with TestClient(app_with_camera) as client:
         response = client.post(
             "/api/v1/relay/heartbeat",
             headers={
@@ -164,10 +159,12 @@ def test_chunked_body_without_content_length_is_accepted(tmp_path) -> None:
     assert response.json()["status"] == "accepted"
 
 
-def test_unauthorized_within_limit_body_is_rejected_before_pydantic_parse(tmp_path) -> None:
+def test_unauthorized_within_limit_body_is_rejected_before_pydantic_parse(
+    app_with_camera: FastAPI,
+) -> None:
     # A within-limit body is read fine, then the auth dependency rejects the
     # missing token (401) before the payload is validated -- auth-before-parse.
-    with TestClient(_app_with_camera(tmp_path)) as client:
+    with TestClient(app_with_camera) as client:
         response = client.post(
             "/api/v1/relay/heartbeat",
             headers={"Content-Type": "application/json"},
@@ -176,12 +173,14 @@ def test_unauthorized_within_limit_body_is_rejected_before_pydantic_parse(tmp_pa
     assert response.status_code == 401
 
 
-def test_unauthorized_oversized_chunked_body_is_rejected_at_transport_bound(tmp_path) -> None:
+def test_unauthorized_oversized_chunked_body_is_rejected_at_transport_bound(
+    app_with_camera: FastAPI,
+) -> None:
     # The body bound lives at the route boundary, so an oversized chunked body is
     # rejected (413) before it is fully buffered -- an unauthenticated caller
     # cannot force the server to buffer megabytes just to reach the 401.
     over = relay_router.MAX_RELAY_HEARTBEAT_BODY_BYTES + 4096
-    with TestClient(_app_with_camera(tmp_path)) as client:
+    with TestClient(app_with_camera) as client:
         response = client.post(
             "/api/v1/relay/heartbeat",
             headers={"Content-Type": "application/json"},
@@ -190,24 +189,38 @@ def test_unauthorized_oversized_chunked_body_is_rejected_at_transport_bound(tmp_
     assert response.status_code == 413
 
 
+class _StartupSignalServer(uvicorn.Server):
+    """uvicorn server that signals an event once its sockets are listening."""
+
+    def __init__(self, config: uvicorn.Config) -> None:
+        super().__init__(config)
+        self.listening = threading.Event()
+
+    async def startup(self, sockets: list[socket.socket] | None = None) -> None:
+        await super().startup(sockets=sockets)
+        if self.started:
+            self.listening.set()
+
+
 class _LiveApp:
     """A relay app served by real uvicorn so bodies traverse a real socket."""
 
-    def __init__(self, tmp_path) -> None:
+    def __init__(self, app: FastAPI) -> None:
         self.port = _free_tcp_port()
         config = uvicorn.Config(
-            _app_with_camera(tmp_path),
+            app,
             host="127.0.0.1",
             port=self.port,
             log_level="warning",
             lifespan="off",
         )
-        self._server = uvicorn.Server(config)
+        self._server = _StartupSignalServer(config)
         self._thread = threading.Thread(
             target=self._server.run, daemon=True, name="relay-bounded-read"
         )
         self._thread.start()
-        _wait_until(lambda: self._server.started, timeout=10.0, what="relay uvicorn startup")
+        if not self._server.listening.wait(timeout=10.0):
+            pytest.fail("timed out waiting for relay uvicorn startup")
 
     @property
     def base_url(self) -> str:
@@ -218,8 +231,8 @@ class _LiveApp:
         self._thread.join(timeout=10.0)
 
 
-def test_real_uvicorn_no_content_length_oversized_is_rejected(tmp_path) -> None:
-    server = _LiveApp(tmp_path)
+def test_real_uvicorn_no_content_length_oversized_is_rejected(app_with_camera: FastAPI) -> None:
+    server = _LiveApp(app_with_camera)
     try:
         over = relay_router.MAX_RELAY_HEARTBEAT_BODY_BYTES + 4096
         with httpx.Client(base_url=server.base_url) as client:
@@ -240,8 +253,8 @@ def test_real_uvicorn_no_content_length_oversized_is_rejected(tmp_path) -> None:
     assert response.status_code == 413
 
 
-def test_real_uvicorn_no_content_length_within_limit_is_accepted(tmp_path) -> None:
-    server = _LiveApp(tmp_path)
+def test_real_uvicorn_no_content_length_within_limit_is_accepted(app_with_camera: FastAPI) -> None:
+    server = _LiveApp(app_with_camera)
     body = json.dumps({"camera_id": "cam-1", "facility_id": "fac-1"}).encode("utf-8")
 
     def _stream() -> Iterator[bytes]:

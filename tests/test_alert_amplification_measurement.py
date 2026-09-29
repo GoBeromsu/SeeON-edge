@@ -2,19 +2,21 @@
 
 This exercises the actual product delivery path (``POST /api/v1/relay/alerts``
 -> ``EdgeIngestClient`` -> ``BackendEvidenceClient`` -> real loopback HTTP) and
-measures exact E/A/B cardinality. No browser, no human adjudication, no live
-camera, and no model/policy attribution: repeated machine-positive transitions
-stay ``판정 불가`` by construction.
+measures exact E/A/B cardinality. The relay commits the incident and its outbox
+row on the PostgreSQL product sandbox before any Hub delivery, so a repeat of a
+delivered edge event is answered from the committed receipt. No browser, no human
+adjudication, no live camera, and no model/policy attribution: repeated
+machine-positive transitions stay ``판정 불가`` by construction.
 """
 
 from __future__ import annotations
 
-from collections.abc import Iterator
-from pathlib import Path
+from typing import Any
 
-import pytest
 from fastapi.testclient import TestClient
 
+from backend.app.features.audit.postgres_runtime import PostgresAuditRuntime
+from shared.events.edge_ingest_client import EdgeIngestClient
 from tests_support.alert_amplification_harness import (
     DiagnosticOutcome,
     classify_rows,
@@ -25,20 +27,39 @@ from tests_support.alert_amplification_runtime import (
     ServedFixture as _ServedFixture,
 )
 from tests_support.alert_amplification_runtime import (
+    hub_client as _hub_client,
+)
+from tests_support.alert_amplification_runtime import (
     relay_client as _relay_client,
 )
+from tests_support.postgres_sandbox import ProductSandbox
+
+pytest_plugins = ("tests_support.postgres_sandbox",)
 
 _EDGE_EVENT_ID = "00000000-0000-4000-8000-0000000000a1"
 _SECOND_EDGE_EVENT_ID = "00000000-0000-4000-8000-0000000000a2"
 
 
-@pytest.fixture(autouse=True)
-def isolate_catalog(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
-    monkeypatch.setattr(
-        "backend.app.features.clips.catalog._catalog_path",
-        lambda: tmp_path / "catalog.sqlite3",
-    )
-    yield
+class _FirstReceiptLost:
+    """Real Hub client whose first receipt is lost after the Hub accepted.
+
+    The relay records the attempt as outcome-unknown and answers retryable, so
+    the worker's retry is what reaches the Hub a second time.
+    """
+
+    def __init__(self, delivered: EdgeIngestClient) -> None:
+        self._delivered = delivered
+        self._losses = 1
+
+    def for_camera(self, _camera_id: str) -> _FirstReceiptLost:
+        return self
+
+    def send_alert_receipt(self, **kwargs: Any) -> Any:
+        receipt = self._delivered.send_alert_receipt(**kwargs)
+        if self._losses:
+            self._losses -= 1
+            raise ConnectionError("Hub receipt lost after acceptance")
+        return receipt
 
 
 def _alert(edge_event_id: str) -> dict[str, object]:
@@ -52,21 +73,26 @@ def _alert(edge_event_id: str) -> dict[str, object]:
     }
 
 
-def _post(client: TestClient, edge_event_id: str) -> dict[str, object]:
-    response = client.post(
+def _send(client: TestClient, edge_event_id: str) -> Any:
+    return client.post(
         "/api/v1/relay/alerts",
         json=_alert(edge_event_id),
         headers={"X-Edge-Relay-Token": "relay-token"},
     )
+
+
+def _post(client: TestClient, edge_event_id: str) -> dict[str, object]:
+    response = _send(client, edge_event_id)
     assert response.status_code == 202, response.text
     return response.json()
 
 
 def test_repeated_delivery_attempts_converge_to_one_backend_identity(
-    tmp_path: Path,
+    postgres_product_sandbox: ProductSandbox,
+    postgres_audit_runtime: PostgresAuditRuntime,
 ) -> None:
     with _ServedFixture() as served:
-        client = _relay_client(served.origin, tmp_path)
+        client = _relay_client(served.origin, postgres_product_sandbox, postgres_audit_runtime)
 
         first = _post(client, _EDGE_EVENT_ID)
         retry = _post(client, _EDGE_EVENT_ID)
@@ -90,11 +116,14 @@ def test_repeated_delivery_attempts_converge_to_one_backend_identity(
         assert classify_rows(rows).outcome is DiagnosticOutcome.INCONCLUSIVE
 
 
-def test_complete_chain_classifies_healthy_transport_retry(tmp_path: Path) -> None:
+def test_complete_chain_classifies_healthy_transport_retry(
+    postgres_product_sandbox: ProductSandbox,
+    postgres_audit_runtime: PostgresAuditRuntime,
+) -> None:
     from tests_support.alert_amplification_harness import IncidentProjection
 
     with _ServedFixture() as served:
-        client = _relay_client(served.origin, tmp_path)
+        client = _relay_client(served.origin, postgres_product_sandbox, postgres_audit_runtime)
         first = _post(client, _EDGE_EVENT_ID)
         _post(client, _EDGE_EVENT_ID)
 
@@ -121,11 +150,14 @@ def test_complete_chain_classifies_healthy_transport_retry(tmp_path: Path) -> No
         assert result.model_policy_cause == "판정 불가"
 
 
-def test_distinct_transitions_never_attribute_model_cause(tmp_path: Path) -> None:
+def test_distinct_transitions_never_attribute_model_cause(
+    postgres_product_sandbox: ProductSandbox,
+    postgres_audit_runtime: PostgresAuditRuntime,
+) -> None:
     from tests_support.alert_amplification_harness import IncidentProjection
 
     with _ServedFixture() as served:
-        client = _relay_client(served.origin, tmp_path)
+        client = _relay_client(served.origin, postgres_product_sandbox, postgres_audit_runtime)
         first = _post(client, _EDGE_EVENT_ID)
         second = _post(client, _SECOND_EDGE_EVENT_ID)
 
@@ -157,15 +189,23 @@ def test_distinct_transitions_never_attribute_model_cause(tmp_path: Path) -> Non
 
 
 def test_faulty_hub_identity_is_detected_through_the_real_client(
-    tmp_path: Path,
+    postgres_product_sandbox: ProductSandbox,
+    postgres_audit_runtime: PostgresAuditRuntime,
 ) -> None:
     with _ServedFixture(faulty_event_identity=True) as served:
-        client = _relay_client(served.origin, tmp_path)
-        _post(client, _EDGE_EVENT_ID)
-        _post(client, _EDGE_EVENT_ID)
+        client = _relay_client(
+            served.origin,
+            postgres_product_sandbox,
+            postgres_audit_runtime,
+            ingest_client=_FirstReceiptLost(_hub_client(served.origin)),
+        )
+        lost = _send(client, _EDGE_EVENT_ID)
+        retried = _post(client, _EDGE_EVENT_ID)
 
+        assert lost.status_code == 503, lost.text
         accepted = served.fixture.accepted_event_ids(_EDGE_EVENT_ID)
         assert len(set(accepted)) == 2
+        assert retried["event_id"] == accepted[-1]
 
         rows = rows_from_relations(
             transitions={_EDGE_EVENT_ID: "transition-1"},
@@ -178,9 +218,12 @@ def test_faulty_hub_identity_is_detected_through_the_real_client(
         assert classify_rows(rows).outcome is DiagnosticOutcome.BACKEND_IDENTITY_DUPLICATION
 
 
-def test_measured_run_touches_only_allowed_hub_routes(tmp_path: Path) -> None:
+def test_measured_run_touches_only_allowed_hub_routes(
+    postgres_product_sandbox: ProductSandbox,
+    postgres_audit_runtime: PostgresAuditRuntime,
+) -> None:
     with _ServedFixture() as served:
-        client = _relay_client(served.origin, tmp_path)
+        client = _relay_client(served.origin, postgres_product_sandbox, postgres_audit_runtime)
         _post(client, _EDGE_EVENT_ID)
         _post(client, _EDGE_EVENT_ID)
 
