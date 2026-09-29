@@ -384,7 +384,6 @@ def test_package_services_require_complete_opt_in_absence() -> None:
 def test_source_declaration_allowlist_rejects_extra_reference(tmp_path: Path) -> None:
     required = {
         "backend/app/features/connection/hub_url.py",
-        "backend/app/features/connection/store.py",
         "compose.edge.yaml",
         "scripts/edge-preflight/check-env.sh",
         "tests/conftest.py",

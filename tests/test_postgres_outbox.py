@@ -2,20 +2,32 @@
 
 from __future__ import annotations
 
-import os
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
-from pathlib import Path
 from threading import Event
 from time import monotonic
+from typing import TYPE_CHECKING
 from uuid import uuid4
 
 import psycopg
 import pytest
-from psycopg import sql
 
 from backend.app.edge_db.authority import AuthorityFenced, AuthorityToken, freeze_authority
-from backend.app.edge_db.postgres import PoolBudget, PostgresDatabase
+from backend.app.edge_db.postgres import CommitOutcomeUnknown, PoolBudget, PostgresDatabase
+from backend.app.features.audit.catalog import (
+    AuditAction,
+    AuditActorType,
+    AuditAuthMechanism,
+    empty_detail,
+)
+from backend.app.features.audit.postgres_runtime import (
+    AuditRuntimeUnavailable,
+    PendingAuditPublication,
+    PostgresAuditRuntime,
+)
+from backend.app.features.audit.postgres_store import PostgresAuditStore
+from backend.app.features.audit.sessions import AuditSession
+from backend.app.features.audit.store import AuditEvent, utc_now
 from backend.app.features.evidence.event_outbox import (
     EventIdentityConflict,
     EventOutbox,
@@ -30,38 +42,58 @@ from backend.app.features.evidence.outbox_delivery import (
 )
 from backend.app.features.evidence.relay_projection import RelayEvent, RelaySnapshot
 
-_DDL = Path(__file__).resolve().parents[1] / "backend/app/edge_db"
+if TYPE_CHECKING:
+    from tests_support.postgres_sandbox import ProductSandbox
+
+pytest_plugins = ("tests_support.postgres_sandbox",)
+
 _TIME = "2026-09-27T04:00:00.000Z"
 
 
+class _AuditClock:
+    value = 0.0
+
+    def __call__(self) -> float:
+        return self.value
+
+
 @pytest.fixture
-def store():
-    dsn = os.environ.get("SEEON_TEST_POSTGRES_DSN")
-    if not dsn:
-        pytest.skip("requires an isolated SEEON_TEST_POSTGRES_DSN; not admission evidence")
-    schema = "seeon_outbox_test_" + uuid4().hex
-    with psycopg.connect(dsn, autocommit=True, connect_timeout=5) as admin:
-        admin.execute(sql.SQL("CREATE SCHEMA {}").format(sql.Identifier(schema)))
-        database = None
-        try:
-            admin.execute(
-                sql.SQL("SET search_path TO {},pg_catalog").format(sql.Identifier(schema))
-            )
-            with admin.transaction():
-                admin.execute((_DDL / "postgres_product.sql").read_text(), prepare=False)
-                admin.execute((_DDL / "postgres_delivery.sql").read_text(), prepare=False)
-                token = AuthorityToken(1, uuid4())
-                admin.execute(
-                    "INSERT INTO deployment_authority VALUES (1,%s,%s,true,true)",
-                    (token.generation, token.writer_token),
-                )
-            database = PostgresDatabase(dsn, schema, PoolBudget(3, 3, 2.0, 4000, 2000, 3.0))
-            database.start()
-            yield EventOutbox(database, token, OutboxBudget(100, 1_048_576)), admin
-        finally:
-            if database is not None:
-                database.close()
-            admin.execute(sql.SQL("DROP SCHEMA {} CASCADE").format(sql.Identifier(schema)))
+def audit_clock() -> _AuditClock:
+    return _AuditClock()
+
+
+@pytest.fixture
+def audit_runtime(
+    postgres_product_sandbox: ProductSandbox, audit_clock: _AuditClock
+) -> PostgresAuditRuntime:
+    sandbox = postgres_product_sandbox
+    runtime = PostgresAuditRuntime(
+        PostgresAuditStore(sandbox.database, sandbox.authority),
+        maximum_snapshot_age_sec=10,
+        clock=audit_clock,
+    )
+    # Exercise real verification and session establishment, not a seeded session.
+    # This component fixture is not evidence of HTTP/lifespan activation.
+    assert runtime.verify_once()
+    assert runtime.start_session_once()
+    assert runtime.snapshot().ready
+    return runtime
+
+
+@pytest.fixture
+def store(
+    postgres_product_sandbox: ProductSandbox, audit_runtime: PostgresAuditRuntime
+) -> tuple[EventOutbox, psycopg.Connection]:
+    sandbox = postgres_product_sandbox
+    return (
+        EventOutbox(
+            sandbox.database,
+            sandbox.authority,
+            OutboxBudget(100, 1_048_576),
+            audit_runtime=audit_runtime,
+        ),
+        sandbox.admin,
+    )
 
 
 def _event():
@@ -103,19 +135,49 @@ def _delivery_history(connection):
     }
 
 
+def _publications(runtime, monkeypatch):
+    observations = []
+    committed, failed = runtime.publish_committed, runtime.publish_failed
+
+    def commit(token):
+        observations.append(("committed", None))
+        return committed(token)
+
+    def fail(token, error):
+        observations.append(("failed", error))
+        return failed(token, error)
+
+    monkeypatch.setattr(runtime, "publish_committed", commit)
+    monkeypatch.setattr(runtime, "publish_failed", fail)
+    return observations
+
+
+def _pending_publication(runtime, target):
+    event = AuditEvent(
+        occurred_at=utc_now(),
+        actor_id="worker-relay",
+        action=AuditAction.RELAY_ALERT,
+        target_id=target,
+        detail=empty_detail(AuditAction.RELAY_ALERT),
+        actor_type=AuditActorType.SERVICE,
+        auth_mechanism=AuditAuthMechanism.RELAY_TOKEN,
+    )
+    return runtime.database.transact(lambda connection: runtime.append_borrowed(connection, event))
+
+
 def test_commit_persists_incident_obligation_audit_before_receipt_and_dedupes(store):
     outbox, admin = store
     event = _event()
     receipt = outbox.accept(event, backend_camera_id="hub-camera", forward=True)
     assert receipt.edge_event_id == event.edge_event_id and not receipt.duplicate
-    assert receipt.delivery_state == "PENDING" and _counts(admin) == (1, 1, 1)
+    assert receipt.delivery_state == "PENDING" and _counts(admin) == (1, 1, 2)
     duplicate = outbox.accept(event, backend_camera_id="changed-mapping", forward=False)
     assert duplicate.duplicate and duplicate.delivery_state == "PENDING"
-    assert _counts(admin) == (1, 1, 1)
+    assert _counts(admin) == (1, 1, 2)
     assert admin.execute("SELECT backend_camera_id FROM event_outbox").fetchone() == ("hub-camera",)
     with pytest.raises(EventIdentityConflict):
         outbox.accept(replace(event, probability=0.9), backend_camera_id="hub-camera", forward=True)
-    assert _counts(admin) == (1, 1, 1)
+    assert _counts(admin) == (1, 1, 2)
 
 
 def test_failing_audit_rolls_back_incident_outbox_and_snapshot(store):
@@ -129,9 +191,9 @@ def test_failing_audit_rolls_back_incident_outbox_and_snapshot(store):
         "FOR EACH ROW EXECUTE FUNCTION reject_audit_test()"
     )
     snapshot = RelaySnapshot("snap-1", "snapshots/snap-1.jpg", "a" * 64, 20, "image/jpeg", _TIME)
-    with pytest.raises(psycopg.Error):
+    with pytest.raises(AuditRuntimeUnavailable, match="^audit runtime unavailable$"):
         outbox.accept(_event(), backend_camera_id="hub-camera", forward=True, snapshot=snapshot)
-    assert _counts(admin) == (0, 0, 0)
+    assert _counts(admin) == (0, 0, 1)
     assert admin.execute("SELECT count(*) FROM artifacts").fetchone() == (0,)
 
 
@@ -145,18 +207,23 @@ def test_concurrent_duplicate_acceptance_has_one_durable_identity(store):
         ]
         receipts = [future.result(timeout=5) for future in futures]
     assert sum(not receipt.duplicate for receipt in receipts) == 1
-    assert _counts(admin) == (1, 1, 1)
+    assert _counts(admin) == (1, 1, 2)
 
 
 def test_capacity_refusal_cannot_ack_or_remove_previous_acceptance(store):
     outbox, admin = store
-    limited = EventOutbox(outbox.database, outbox.authority, OutboxBudget(1, 1_048_576))
+    limited = EventOutbox(
+        outbox.database,
+        outbox.authority,
+        OutboxBudget(1, 1_048_576),
+        audit_runtime=outbox.audit_runtime,
+    )
     event = _event()
     limited.accept(event, backend_camera_id=None, forward=False)
     with pytest.raises(OutboxCapacityExceeded):
         limited.accept(_event(), backend_camera_id=None, forward=False)
     assert limited.accept(event, backend_camera_id=None, forward=False).duplicate
-    assert _counts(admin) == (1, 1, 1)
+    assert _counts(admin) == (1, 1, 2)
     assert _delivery(outbox).claim() is None
 
 
@@ -175,7 +242,7 @@ def test_sender_fence_blocks_new_admission_claims_and_stale_generation(store):
     )
     with pytest.raises(AuthorityFenced):
         outbox.accept(_event(), backend_camera_id=None, forward=False)
-    assert _counts(admin) == (1, 1, 1)
+    assert _counts(admin) == (1, 1, 2)
 
 
 def test_exclusive_fence_waits_for_prior_acceptance_transaction(store):
@@ -217,8 +284,9 @@ def test_exclusive_fence_waits_for_prior_acceptance_transaction(store):
     ).fetchone() == (False, False)
 
 
-def test_deferred_commit_rejection_cannot_release_event_receipt(store):
+def test_deferred_commit_rejection_cannot_release_event_receipt(store, monkeypatch):
     outbox, admin = store
+    publications = _publications(outbox.audit_runtime, monkeypatch)
     admin.execute(
         "CREATE FUNCTION reject_commit_test() RETURNS trigger LANGUAGE plpgsql "
         "AS $$ BEGIN RAISE EXCEPTION 'injected deferred failure' USING ERRCODE='23514'; END $$"
@@ -227,9 +295,15 @@ def test_deferred_commit_rejection_cannot_release_event_receipt(store):
         "CREATE CONSTRAINT TRIGGER reject_commit_test AFTER INSERT ON event_outbox "
         "DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION reject_commit_test()"
     )
-    with pytest.raises(psycopg.errors.CheckViolation):
+    with pytest.raises(psycopg.errors.CheckViolation) as raised:
         outbox.accept(_event(), backend_camera_id="hub-camera", forward=True)
-    assert _counts(admin) == (0, 0, 0)
+    assert _counts(admin) == (0, 0, 1)
+    assert publications == [("failed", raised.value)]
+    assert not outbox.audit_runtime.snapshot().ready
+    # The synchronous owner has completed rollback/exit; no tentative token
+    # remains to block closure. This is not an HTTP/lifespan drain proof.
+    outbox.audit_runtime.stop()
+    assert outbox.audit_runtime.close_session_once()
 
 
 def test_unknown_then_retry_keeps_same_event_and_append_only_history(store):
@@ -294,7 +368,7 @@ def test_expired_lease_restarts_with_durable_unknown_and_old_lease_cannot_finish
     )
     assert admin.execute("SELECT state FROM event_outbox").fetchone() == ("EXHAUSTED",)
     assert admin.execute("SELECT count(*) FROM event_delivery_results").fetchone() == (2,)
-    assert _counts(admin) == (1, 1, 1) and sender.claim() is None
+    assert _counts(admin) == (1, 1, 2) and sender.claim() is None
 
 
 @pytest.mark.parametrize("attempts", [1, 2])
@@ -344,7 +418,7 @@ def test_late_sent_observation_preserves_expiry_and_current_claim(store, attempt
         with pytest.raises(DeliveryResponseConflict):
             sender.finish(first, outcome, **(response | changes))
         assert _delivery_history(admin) == observed
-    assert sender.claim() is None and _counts(admin) == (1, 1, 1)
+    assert sender.claim() is None and _counts(admin) == (1, 1, 2)
     assert _delivery_history(admin) == observed
 
 
@@ -403,7 +477,7 @@ def test_finish_rejects_invalid_attempt_association_before_writing(store, invali
             backend_event_id="central-1",
         )
     assert _delivery_history(admin) == before
-    assert _counts(admin) == (2, 2, 2)
+    assert _counts(admin) == (2, 2, 3)
 
 
 @pytest.mark.parametrize("invalid", ["missing_attempt", "cross_event", "ordinal"])
@@ -457,7 +531,7 @@ def test_active_attempt_fk_rejects_invalid_owner_and_preserves_expiry_claim(stor
         "SELECT attempt_id,outcome,reason FROM event_delivery_results"
     ).fetchall() == [(first.attempt_id, "UNKNOWN", "LEASE_EXPIRED")]
     assert admin.execute("SELECT count(*) FROM event_delivery_observations").fetchone() == (0,)
-    assert _counts(admin) == (2, 2, 2)
+    assert _counts(admin) == (2, 2, 3)
 
 
 @pytest.mark.parametrize("disposition", ["active", "exhausted", "reclaimed", "finished"])
@@ -549,3 +623,318 @@ def test_late_response_validation_cannot_persist_unclassified_or_unbounded_field
     with pytest.raises(error):
         sender.finish(claim, **response)
     assert _delivery_history(admin) == before
+
+
+def test_admission_rejects_missing_or_incoherent_audit_ownership(
+    postgres_product_sandbox: ProductSandbox, audit_runtime: PostgresAuditRuntime
+):
+    sandbox = postgres_product_sandbox
+    budget = OutboxBudget(10, 1024)
+    with pytest.raises(TypeError, match="requires the native audit runtime"):
+        EventOutbox(sandbox.database, sandbox.authority, budget, audit_runtime=None)
+    wrong_authority = PostgresAuditRuntime(
+        PostgresAuditStore(sandbox.database, AuthorityToken(sandbox.authority.generation, uuid4())),
+        maximum_snapshot_age_sec=10,
+    )
+    with pytest.raises(ValueError, match="must share database and authority"):
+        EventOutbox(sandbox.database, sandbox.authority, budget, audit_runtime=wrong_authority)
+    other = PostgresDatabase(
+        sandbox.dsn,
+        sandbox.schema,
+        PoolBudget(
+            max_connections=1,
+            max_waiting=1,
+            acquire_timeout_sec=1,
+            statement_timeout_ms=5000,
+            lock_timeout_ms=3000,
+            startup_timeout_sec=5,
+        ),
+    )
+    try:
+        with pytest.raises(ValueError, match="must share database and authority"):
+            EventOutbox(other, sandbox.authority, budget, audit_runtime=audit_runtime)
+    finally:
+        other.close(timeout_sec=3.0)
+
+
+@pytest.mark.parametrize("stage", ["unverified", "session_missing", "expired", "stopped"])
+def test_new_acceptance_cannot_bypass_native_audit_admission(
+    postgres_product_sandbox: ProductSandbox, audit_clock: _AuditClock, stage: str
+):
+    sandbox = postgres_product_sandbox
+    runtime = PostgresAuditRuntime(
+        PostgresAuditStore(sandbox.database, sandbox.authority),
+        maximum_snapshot_age_sec=10,
+        clock=audit_clock,
+    )
+    if stage != "unverified":
+        assert runtime.verify_once()
+    if stage not in ("unverified", "session_missing"):
+        assert runtime.start_session_once()
+    if stage == "expired":
+        audit_clock.value = 10.0
+    if stage == "stopped":
+        runtime.stop()
+    outbox = EventOutbox(
+        sandbox.database,
+        sandbox.authority,
+        OutboxBudget(10, 1_048_576),
+        audit_runtime=runtime,
+    )
+    before = _counts(sandbox.admin)
+    snapshot = RelaySnapshot(
+        "snap-audit", "snapshots/snap-audit.jpg", "a" * 64, 20, "image/jpeg", _TIME
+    )
+    with pytest.raises(AuditRuntimeUnavailable):
+        outbox.accept(_event(), backend_camera_id="hub-camera", forward=True, snapshot=snapshot)
+    assert _counts(sandbox.admin) == before
+    assert sandbox.admin.execute("SELECT count(*) FROM artifacts").fetchone() == (0,)
+    assert not runtime.snapshot().ready
+
+
+def test_recovery_publication_follows_complete_owned_return(store, monkeypatch):
+    outbox, admin = store
+    runtime = outbox.audit_runtime
+    runtime.record_failure(OSError("injected prior failure"))
+    assert runtime.verify_once()
+    assert runtime.snapshot().eligible_to_attempt and not runtime.snapshot().ready
+    publications = _publications(runtime, monkeypatch)
+    transact = outbox.database.transact
+    owned_returns = []
+
+    def observe_owned_return(operation):
+        result = transact(operation)
+        owned_returns.append(result)
+        assert publications == []
+        assert not runtime.snapshot().ready
+        assert _counts(admin) == (1, 1, 3)
+        return result
+
+    monkeypatch.setattr(outbox.database, "transact", observe_owned_return)
+    accepted = outbox.accept(_event(), backend_camera_id="hub-camera", forward=True)
+    assert owned_returns == [accepted]
+    assert publications == [("committed", None)]
+    assert runtime.snapshot().ready
+    assert admin.execute("SELECT action FROM audit_events ORDER BY audit_id").fetchall() == [
+        (AuditAction.AUDIT_SESSION_START.value,),
+        (AuditAction.RECOVERY_FENCE.value,),
+        (AuditAction.RELAY_ALERT.value,),
+    ]
+
+
+@pytest.mark.parametrize("kind", ["unknown", "cancel", "exit"])
+def test_injected_loss_after_owned_commit_never_publishes_success_or_replays(
+    store, monkeypatch, kind
+):
+    """Inject after a real full owned return; not a real wire/pool-exit fault."""
+
+    class Cancelled(BaseException):
+        pass
+
+    outbox, admin = store
+    runtime = outbox.audit_runtime
+    publications = _publications(runtime, monkeypatch)
+    failure = {
+        "unknown": CommitOutcomeUnknown(),
+        "cancel": Cancelled("injected cancellation"),
+        "exit": OSError("injected lost owned result"),
+    }[kind]
+    event = _event()
+    transact = outbox.database.transact
+    attempts = []
+
+    def lose_owned_result(operation):
+        attempts.append(True)
+        transact(operation)
+        raise failure
+
+    monkeypatch.setattr(outbox.database, "transact", lose_owned_result)
+    with pytest.raises(type(failure)) as raised:
+        outbox.accept(event, backend_camera_id="hub-camera", forward=True)
+    assert raised.value is failure
+    assert attempts == [True] and publications == [("failed", failure)]
+    assert _counts(admin) == (1, 1, 2)
+    assert not runtime.snapshot().ready
+    assert runtime.snapshot().indeterminate == (kind == "unknown")
+    monkeypatch.setattr(outbox.database, "transact", transact)
+    # A producer's explicit replay can observe the committed identity without
+    # inventing another audit append or healing indeterminate runtime state.
+    duplicate = outbox.accept(event, backend_camera_id=None, forward=False)
+    assert duplicate.duplicate and duplicate.delivery_state == "PENDING"
+    assert _counts(admin) == (1, 1, 2)
+    assert publications == [("failed", failure)] and not runtime.snapshot().ready
+
+
+def test_stale_verification_allows_only_explicit_duplicate_without_publication(
+    store, audit_clock: _AuditClock, monkeypatch
+):
+    outbox, admin = store
+    publications = _publications(outbox.audit_runtime, monkeypatch)
+    event = _event()
+    outbox.accept(event, backend_camera_id="hub-camera", forward=True)
+    audit_clock.value = 10.0
+    assert not outbox.audit_runtime.snapshot().ready
+    duplicate = outbox.accept(event, backend_camera_id=None, forward=False)
+    assert duplicate.duplicate and duplicate.delivery_state == "PENDING"
+    assert publications == [("committed", None)]
+    assert not outbox.audit_runtime.snapshot().ready
+    with pytest.raises(AuditRuntimeUnavailable):
+        outbox.accept(_event(), backend_camera_id="hub-camera", forward=True)
+    assert _counts(admin) == (1, 1, 2)
+    assert publications == [("committed", None)]
+
+
+@pytest.mark.parametrize("invalid", [None, False, "not-a-publication"])
+def test_missing_audit_receipt_aborts_before_commit(store, monkeypatch, invalid):
+    outbox, admin = store
+    runtime = outbox.audit_runtime
+    publications = _publications(runtime, monkeypatch)
+    # Deliberately broken collaborator: never an implementation or gate fallback.
+    monkeypatch.setattr(runtime, "append_borrowed", lambda connection, event: invalid)
+    with pytest.raises(AuditRuntimeUnavailable, match="event audit publication is invalid"):
+        outbox.accept(_event(), backend_camera_id="hub-camera", forward=True)
+    assert _counts(admin) == (0, 0, 1) and publications == []
+    assert not runtime.snapshot().ready
+
+
+@pytest.mark.parametrize("when", ["before_validation", "after_owned_return"])
+def test_newer_failure_wins_after_known_event_commit(store, monkeypatch, when):
+    outbox, admin = store
+    runtime = outbox.audit_runtime
+    publications = _publications(runtime, monkeypatch)
+    transact = outbox.database.transact
+
+    def fail_after_owned_return(operation):
+        result = transact(operation)
+        runtime.record_failure(OSError("newer failure"))
+        return result
+
+    if when == "before_validation":
+        append = runtime.append_borrowed
+
+        def invalidate_before_validation(connection, event):
+            token = append(connection, event)
+            runtime.record_failure(OSError("newer failure"))
+            return token
+
+        monkeypatch.setattr(runtime, "append_borrowed", invalidate_before_validation)
+    else:
+        monkeypatch.setattr(outbox.database, "transact", fail_after_owned_return)
+    accepted = outbox.accept(_event(), backend_camera_id="hub-camera", forward=True)
+    assert not accepted.duplicate and accepted.delivery_state == "PENDING"
+    assert _counts(admin) == (1, 1, 2)
+    assert publications == [("committed", None)]
+    assert not runtime.snapshot().ready
+    assert runtime.snapshot().failure_code == "database_unavailable"
+
+
+@pytest.mark.parametrize("kind", ["foreign_owner", "foreign_session", "consumed", "unregistered"])
+def test_semantic_invalid_receipt_rolls_back_without_consuming_unrelated_work(
+    store, audit_clock: _AuditClock, monkeypatch, kind
+):
+    outbox, admin = store
+    runtime = outbox.audit_runtime
+    unrelated = _pending_publication(runtime, "unrelated")
+    other = None
+    original_session = None
+    if kind == "foreign_owner":
+        # Two real runtimes are an adversarial ownership fixture, not an
+        # application assembly or preseeded-session qualification shortcut.
+        other = PostgresAuditRuntime(
+            PostgresAuditStore(outbox.database, outbox.authority),
+            maximum_snapshot_age_sec=10,
+            clock=audit_clock,
+        )
+        assert other.verify_once() and other.start_session_once()
+        candidate = _pending_publication(other, "foreign-owner")
+    elif kind == "foreign_session":
+        candidate = _pending_publication(runtime, "wrong-session")
+        original_session = candidate._session
+        candidate._session = AuditSession(uuid4().hex)
+    elif kind == "consumed":
+        candidate = _pending_publication(runtime, "consumed")
+        assert runtime.publish_committed(candidate)
+    else:
+        # Matching fields and another live operation's pending count are not
+        # proof that this receipt was ever minted by append_borrowed.
+        candidate = PendingAuditPublication(runtime, unrelated._session, unrelated._revision)
+    before = _counts(admin)
+    publications = _publications(runtime, monkeypatch)
+    monkeypatch.setattr(runtime, "append_borrowed", lambda connection, event: candidate)
+    try:
+        with pytest.raises(AuditRuntimeUnavailable, match="event audit publication is invalid"):
+            outbox.accept(_event(), backend_camera_id="hub-camera", forward=True)
+        assert _counts(admin) == before and publications == []
+        assert not runtime.snapshot().ready
+        runtime.validate_publication(unrelated)
+        if other is not None:
+            other.validate_publication(candidate)
+            assert other.publish_committed(candidate)
+            other.stop()
+            assert other.close_session_once()
+        elif original_session is not None:
+            candidate._session = original_session
+            runtime.validate_publication(candidate)
+            assert not runtime.publish_committed(candidate)
+        assert not runtime.publish_committed(unrelated)
+        assert not runtime._pending
+    finally:
+        if original_session is not None:
+            candidate._session = original_session
+
+
+@pytest.mark.parametrize("kind", ["ordinary", "cancel", "unknown"])
+def test_secondary_publication_rejection_preserves_owned_failure_and_other_work(
+    store, monkeypatch, caplog, kind
+):
+    """Post-return injection tests precedence, not actual COMMIT/pool loss."""
+
+    class Cancelled(BaseException):
+        pass
+
+    outbox, admin = store
+    runtime = outbox.audit_runtime
+    unrelated = _pending_publication(runtime, "unrelated")
+    failure = {
+        "ordinary": OSError("private-owned-error"),
+        "cancel": Cancelled("private-owned-cancellation"),
+        "unknown": CommitOutcomeUnknown(),
+    }[kind]
+    append = runtime.append_borrowed
+    consume = runtime.publish_failed
+    transact = outbox.database.transact
+    publications = _publications(runtime, monkeypatch)
+    captured, attempts = [], []
+
+    def capture(connection, event):
+        token = append(connection, event)
+        captured.append(token)
+        return token
+
+    def invalidate_then_fail(operation):
+        attempts.append(True)
+        transact(operation)
+        consume(captured[0], OSError("controlled prior consumption"))
+        raise failure
+
+    monkeypatch.setattr(runtime, "append_borrowed", capture)
+    monkeypatch.setattr(outbox.database, "transact", invalidate_then_fail)
+    with pytest.raises(type(failure)) as raised:
+        outbox.accept(_event(), backend_camera_id="hub-camera", forward=True)
+    assert raised.value is failure
+    assert attempts == [True] and publications == [("failed", failure)]
+    assert _counts(admin) == (1, 1, 3)
+    assert not runtime.snapshot().ready
+    assert runtime.snapshot().indeterminate == (kind == "unknown")
+    if kind == "unknown":
+        assert runtime.snapshot().failure_code == "commit_outcome_unknown"
+    messages = [
+        record.getMessage()
+        for record in caplog.records
+        if record.name == "backend.app.features.evidence.event_outbox"
+    ]
+    assert messages == ["event audit publication accounting failed after owned failure"]
+    assert "private-owned" not in caplog.text
+    runtime.validate_publication(unrelated)
+    runtime.publish_failed(unrelated, failure)
+    assert not runtime._pending

@@ -3,10 +3,10 @@
 from __future__ import annotations
 
 from http.server import ThreadingHTTPServer
-from pathlib import Path
 
 import pytest
 
+from backend.app.features.audit.postgres_runtime import PostgresAuditRuntime
 from backend.app.features.connection.store import API_BACKEND_BASE_URL_ENV
 from tests_support.connection_api import (
     EnrollmentVerifyHandler,
@@ -16,22 +16,31 @@ from tests_support.connection_api import (
 from tests_support.connection_api import connection_client as _client
 from tests_support.connection_api import connection_store as _store
 from tests_support.connection_api import login as _login
+from tests_support.postgres_sandbox import ProductSandbox
+
+pytest_plugins = ("tests_support.postgres_sandbox",)
 
 # --------------------------------------------------------------------------
 # GET /connection
 # --------------------------------------------------------------------------
 
 
-def test_get_connection_requires_auth(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    client = _client(tmp_path, monkeypatch)
+def test_get_connection_requires_auth(
+    postgres_product_sandbox: ProductSandbox,
+    postgres_audit_runtime: PostgresAuditRuntime,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client = _client(postgres_product_sandbox, postgres_audit_runtime, monkeypatch)
     response = client.get("/api/v1/connection")
     assert response.status_code == 401
 
 
 def test_get_connection_masks_token_and_reports_configured(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    postgres_product_sandbox: ProductSandbox,
+    postgres_audit_runtime: PostgresAuditRuntime,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    store = _store(tmp_path, monkeypatch)
+    store = _store(postgres_product_sandbox)
     _ = store.save(
         {
             "facility_code": "NH-7H2K9M4QXP",
@@ -42,7 +51,7 @@ def test_get_connection_masks_token_and_reports_configured(
             "enrollment_generation": 3,
         }
     )
-    client = _client(tmp_path, monkeypatch)
+    client = _client(postgres_product_sandbox, postgres_audit_runtime, monkeypatch)
     _login(client)
 
     response = client.get("/api/v1/connection")
@@ -63,9 +72,11 @@ def test_get_connection_masks_token_and_reports_configured(
 
 
 def test_get_connection_unconfigured_when_nothing_saved(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    postgres_product_sandbox: ProductSandbox,
+    postgres_audit_runtime: PostgresAuditRuntime,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    client = _client(tmp_path, monkeypatch)
+    client = _client(postgres_product_sandbox, postgres_audit_runtime, monkeypatch)
     _login(client)
     response = client.get("/api/v1/connection")
     assert response.status_code == 200
@@ -76,10 +87,12 @@ def test_get_connection_unconfigured_when_nothing_saved(
 
 
 def test_get_connection_heartbeat_relay_absent_state_reads_disabled_with_nulls(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    postgres_product_sandbox: ProductSandbox,
+    postgres_audit_runtime: PostgresAuditRuntime,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     # no_lifespan test apps never populate backend_heartbeat_relay_state.
-    client = _client(tmp_path, monkeypatch)
+    client = _client(postgres_product_sandbox, postgres_audit_runtime, monkeypatch)
     _login(client)
     response = client.get("/api/v1/connection")
     assert response.status_code == 200
@@ -92,11 +105,13 @@ def test_get_connection_heartbeat_relay_absent_state_reads_disabled_with_nulls(
 
 
 def test_get_connection_heartbeat_relay_reflects_state_and_maps_korean_detail(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    postgres_product_sandbox: ProductSandbox,
+    postgres_audit_runtime: PostgresAuditRuntime,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     from backend.app.features.status.backend_heartbeat_relay import HeartbeatRelayState
 
-    client = _client(tmp_path, monkeypatch)
+    client = _client(postgres_product_sandbox, postgres_audit_runtime, monkeypatch)
     _login(client)
     client.app.state.backend_heartbeat_relay_task = object()  # loop "configured"
     client.app.state.backend_heartbeat_relay_state = HeartbeatRelayState(
@@ -115,11 +130,13 @@ def test_get_connection_heartbeat_relay_reflects_state_and_maps_korean_detail(
 
 
 def test_get_connection_heartbeat_relay_task_none_reads_disabled_even_with_state(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    postgres_product_sandbox: ProductSandbox,
+    postgres_audit_runtime: PostgresAuditRuntime,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     from backend.app.features.status.backend_heartbeat_relay import HeartbeatRelayState
 
-    client = _client(tmp_path, monkeypatch)
+    client = _client(postgres_product_sandbox, postgres_audit_runtime, monkeypatch)
     _login(client)
     client.app.state.backend_heartbeat_relay_task = None  # disabled via env kill-switch
     client.app.state.backend_heartbeat_relay_state = HeartbeatRelayState()
@@ -139,8 +156,12 @@ def test_get_connection_heartbeat_relay_task_none_reads_disabled_even_with_state
 # --------------------------------------------------------------------------
 
 
-def test_put_connection_requires_auth(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    client = _client(tmp_path, monkeypatch)
+def test_put_connection_requires_auth(
+    postgres_product_sandbox: ProductSandbox,
+    postgres_audit_runtime: PostgresAuditRuntime,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client = _client(postgres_product_sandbox, postgres_audit_runtime, monkeypatch)
     response = client.put(
         "/api/v1/connection",
         json={
@@ -153,14 +174,16 @@ def test_put_connection_requires_auth(tmp_path: Path, monkeypatch: pytest.Monkey
 
 
 def test_put_connection_verifies_persists_and_publishes_one_bundle_immediately(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    postgres_product_sandbox: ProductSandbox,
+    postgres_audit_runtime: PostgresAuditRuntime,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     EnrollmentVerifyHandler.reset()
     server = ThreadingHTTPServer(("127.0.0.1", 0), EnrollmentVerifyHandler)
     thread = run_server(server)
     try:
         monkeypatch.setenv(API_BACKEND_BASE_URL_ENV, f"http://127.0.0.1:{server.server_port}")
-        client = _client(tmp_path, monkeypatch)
+        client = _client(postgres_product_sandbox, postgres_audit_runtime, monkeypatch)
         _login(client)
 
         response = client.put(
@@ -199,7 +222,9 @@ def test_put_connection_verifies_persists_and_publishes_one_bundle_immediately(
 
 
 def test_put_connection_failed_verification_keeps_prior_enrollment(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    postgres_product_sandbox: ProductSandbox,
+    postgres_audit_runtime: PostgresAuditRuntime,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     EnrollmentVerifyHandler.reset()
     EnrollmentVerifyHandler.response_status = 403
@@ -207,7 +232,7 @@ def test_put_connection_failed_verification_keeps_prior_enrollment(
     thread = run_server(server)
     try:
         monkeypatch.setenv(API_BACKEND_BASE_URL_ENV, f"http://127.0.0.1:{server.server_port}")
-        store = _store(tmp_path, monkeypatch)
+        store = _store(postgres_product_sandbox)
         _ = store.save(
             {
                 "facility_code": "NH-7H2K9M4QXP",
@@ -218,7 +243,7 @@ def test_put_connection_failed_verification_keeps_prior_enrollment(
                 "enrollment_generation": 2,
             }
         )
-        client = _client(tmp_path, monkeypatch)
+        client = _client(postgres_product_sandbox, postgres_audit_runtime, monkeypatch)
         _login(client)
 
         response = client.put(

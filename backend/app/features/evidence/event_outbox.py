@@ -5,6 +5,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import json
+import logging
 from dataclasses import asdict, dataclass
 
 import psycopg
@@ -17,13 +18,27 @@ from backend.app.features.audit.catalog import (
     AuditAuthMechanism,
     empty_detail,
 )
-from backend.app.features.audit.postgres_store import append_postgres_audit
+from backend.app.features.audit.postgres_runtime import (
+    AuditRuntimeUnavailable,
+    InvalidAuditPublication,
+    PendingAuditPublication,
+    PostgresAuditRuntime,
+)
 from backend.app.features.audit.store import AuditEvent, utc_now
+from backend.app.features.evidence.postgres_relay_projection import put_snapshot
 from backend.app.features.evidence.relay_projection import (
     RelayEvent,
+    RelayEvidenceProjectionConflict,
     RelaySnapshot,
     _validate_snapshot,
 )
+
+_LOGGER = logging.getLogger(__name__)
+
+
+def _log_publication_accounting_failure() -> None:
+    # Deliberately exclude exception details and traceback from operator logs.
+    _LOGGER.error("event audit publication accounting failed after owned failure")
 
 
 class EventIdentityConflict(RuntimeError):
@@ -76,50 +91,23 @@ def _envelope(
     return encoded
 
 
-def _snapshot(connection: psycopg.Connection, incident_id: str, snapshot: RelaySnapshot) -> None:
-    expected = (
-        snapshot.snapshot_id,
-        "AVAILABLE",
-        snapshot.path,
-        snapshot.sha256,
-        snapshot.size_bytes,
-        snapshot.mime_type,
-        snapshot.captured_at,
-    )
-    row = connection.execute(
-        "SELECT artifact_id,state,contained_relpath,content_sha256,"
-        "size_bytes,mime_type,captured_at "
-        "FROM artifacts WHERE incident_id=%s AND kind='SNAPSHOT'",
-        (incident_id,),
-    ).fetchone()
-    if row is not None:
-        if tuple(row) != expected:
-            raise EventIdentityConflict("snapshot identity conflicts with accepted content")
-        return
-    connection.execute(
-        "INSERT INTO artifacts (incident_id,kind,artifact_id,state,"
-        "contained_relpath,content_sha256,"
-        "size_bytes,mime_type,captured_at,revision,created_at,updated_at) "
-        "VALUES (%s,'SNAPSHOT',%s,'AVAILABLE',%s,%s,%s,%s,%s,1,%s,%s)",
-        (
-            incident_id,
-            snapshot.snapshot_id,
-            snapshot.path,
-            snapshot.sha256,
-            snapshot.size_bytes,
-            snapshot.mime_type,
-            snapshot.captured_at,
-            snapshot.captured_at,
-            snapshot.captured_at,
-        ),
-    )
-
-
 class EventOutbox:
     def __init__(
-        self, database: PostgresDatabase, authority: AuthorityToken, budget: OutboxBudget
+        self,
+        database: PostgresDatabase,
+        authority: AuthorityToken,
+        budget: OutboxBudget,
+        *,
+        audit_runtime: PostgresAuditRuntime,
     ) -> None:
+        if not isinstance(audit_runtime, PostgresAuditRuntime):
+            raise TypeError("event admission requires the native audit runtime") from None
+        if audit_runtime.database is not database or audit_runtime.authority != authority:
+            raise ValueError(
+                "event admission and audit must share database and authority"
+            ) from None
         self.database, self.authority, self.budget = database, authority, budget
+        self.audit_runtime = audit_runtime
 
     def accept(
         self,
@@ -138,8 +126,10 @@ class EventOutbox:
         encoded = envelope.encode("utf-8")
         digest = hashlib.sha256(encoded).hexdigest()
         state = "PENDING" if forward else "LOCAL_ONLY"
+        publication: PendingAuditPublication | None = None
 
         def admit(connection: psycopg.Connection) -> AcceptedEvent:
+            nonlocal publication
             require_authority(connection, self.authority)
             # Serialize quota reservation and duplicate decisions, not SDK callbacks.
             connection.execute(
@@ -196,7 +186,12 @@ class EventOutbox:
             elif tuple(incident) != expected:
                 raise EventIdentityConflict("event ID conflicts with an existing incident")
             if snapshot is not None:
-                _snapshot(connection, incident_id, snapshot)
+                try:
+                    put_snapshot(connection, incident_id, snapshot)
+                except RelayEvidenceProjectionConflict:
+                    raise EventIdentityConflict(
+                        "snapshot identity conflicts with accepted content"
+                    ) from None
             connection.execute(
                 "INSERT INTO event_outbox (edge_event_id,envelope,envelope_sha256,envelope_bytes,"
                 "backend_camera_id,state,accepted_generation,accepted_at,retry_at) "
@@ -211,7 +206,7 @@ class EventOutbox:
                     self.authority.generation,
                 ),
             )
-            append_postgres_audit(
+            publication = self.audit_runtime.append_borrowed(
                 connection,
                 AuditEvent(
                     occurred_at=utc_now(),
@@ -223,8 +218,32 @@ class EventOutbox:
                     auth_mechanism=AuditAuthMechanism.RELAY_TOKEN,
                 ),
             )
+            try:
+                self.audit_runtime.validate_publication(publication)
+            except InvalidAuditPublication:
+                publication = None
+                failure = AuditRuntimeUnavailable("event audit publication is invalid")
+                self.audit_runtime.record_failure(failure)
+                raise failure from None
             return AcceptedEvent(event.edge_event_id, False, state)
 
         # There is no network send, response construction, or retry in this transaction.
         # The value cannot escape a failed/unknown COMMIT or failed pool release.
-        return self.database.transact(admit)
+        try:
+            accepted = self.database.transact(admit)
+        except BaseException as error:
+            if publication is not None:
+                try:
+                    self.audit_runtime.publish_failed(publication, error)
+                except InvalidAuditPublication:
+                    # Do not steal another operation's token, mask cancellation
+                    # or lose the original indeterminate-COMMIT latch.
+                    self.audit_runtime.record_failure(error)
+                    _log_publication_accounting_failure()
+            raise
+        if publication is not None:
+            # A newer failure may invalidate readiness without invalidating this
+            # known committed receipt. Never project readiness from its response.
+            self.audit_runtime.publish_committed(publication)
+        # An exact duplicate has no new mutation or audit publication.
+        return accepted
