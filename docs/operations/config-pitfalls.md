@@ -20,7 +20,7 @@ Only these values cross the production deployment boundary:
 
 Facility identity/token and camera roster have no env or static-YAML fallback.
 Enrollment and camera registration in the dashboard persist them in the
-connection-settings and camera-registry tables.
+PostgreSQL `edge_site` and `cameras` tables.
 
 ## Baked topology
 

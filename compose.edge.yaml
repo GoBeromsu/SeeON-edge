@@ -160,7 +160,7 @@ services:
       # RTSP destination policy (shared with worker). Facility LAN cameras need
       # PRIVATE=1. LOCAL is fixture-only and must stay 0 in production.
       ML_RTSP_ALLOW_PRIVATE_DESTINATIONS: ${ML_RTSP_ALLOW_PRIVATE_DESTINATIONS:-0}
-      # Execution-record diagnostics (schema 19). OFF by default; when enabled the
+      # Execution-record diagnostics. OFF by default; when enabled the
       # budget is REQUIRED (no default) and the API refuses to boot without it.
       ML_API_EXECUTION_RECORDS_ENABLED: ${ML_API_EXECUTION_RECORDS_ENABLED:-0}
       ML_API_EXECUTION_RECORDS_BUDGET_BYTES: ${ML_API_EXECUTION_RECORDS_BUDGET_BYTES:-}

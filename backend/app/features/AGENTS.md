@@ -57,11 +57,11 @@ A route that serves bytes registers `methods=HEAD_METHODS` (`shared/head_respons
 bare `@router.get` 404s the probe a player sends before it opens the media.
 One endpoint serves both methods so headers cannot drift; drop the body last
 with `drop_body_for_head`, and never read a file a HEAD will not send.
-API actor writes the compact application tables and the six schema-19
-execution-record tables. Never INSERT retired
+API actor writes the compact application tables and the six `execution_*`
+record tables. Never INSERT retired
 `control_*`, `qa_*`, `runtime_*`, `evidence_*`, or `derivative_*` families.
-Auth has no SQLite row; sessions live in
-`shared/dashboard_auth.py`. Incomplete enrollment deletes ingest and evidence
+Dashboard sessions are in memory (`shared/dashboard_auth.py`), not in
+the database. Incomplete enrollment deletes ingest and evidence
 attrs and sets `backend_configured=False`. Handlers do not
 build `EdgeIngestClient`. Drive the slice through
 `create_app(lifespan=no_lifespan)` plus an injected store, or full lifespan
