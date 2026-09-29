@@ -3,9 +3,6 @@ from __future__ import annotations
 import sqlite3
 from pathlib import Path
 
-import pytest
-
-from backend.app.edge_db.connection import RuntimeActor, open_runtime_database
 from backend.app.features.evidence.record_store import CentralEvidenceQuery
 from tests_support.postgres_sandbox import ProductSandbox
 from tests_support.sqlite_source import create_schema19_source
@@ -44,23 +41,6 @@ def test_central_evidence_schema_has_owned_strict_records_and_integrity_guards(
         assert all("STRICT" in tables[name] for name in COMPACT_EVIDENCE_TABLES)
         foreign_key_failures = connection.execute("PRAGMA foreign_key_check").fetchall()
         assert foreign_key_failures == []
-
-    api = open_runtime_database(database, actor=RuntimeActor.API)
-    try:
-        with pytest.raises(sqlite3.DatabaseError, match="CHECK constraint failed"):
-            api.execute(
-                "INSERT INTO incidents "
-                "(incident_id, edge_event_id, facility_id, camera_id, event_type, "
-                "detected_at, lifecycle_state, provenance_state, "
-                "provenance_missing_reason, review_version, revision, created_at, updated_at) "
-                "VALUES ('i','e','f','c','fall','2026-08-13T00:00:00Z',"
-                "'STAGING','MISSING','NOT_RECORDED',0,1,"
-                "'2026-08-13T00:00:00Z','2026-08-13T00:00:00Z')"
-            )
-        with pytest.raises(sqlite3.DatabaseError, match="not authorized"):
-            api.execute("ALTER TABLE incidents ADD COLUMN forbidden TEXT")
-    finally:
-        api.close()
 
 
 def test_backend_central_evidence_query_is_privacy_bounded(

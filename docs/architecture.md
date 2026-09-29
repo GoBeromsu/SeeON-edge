@@ -200,11 +200,12 @@ interface package, so neither seam is defined there.
 | Seam | Provider (worker) | Consumer (backend) |
 | --- | --- | --- |
 | `:8090` HTTP | `worker/pipeline/output/live_view_api.py` -- route matchers, relay-token header, MJPEG media type, request/response bodies | `backend/app/features/cameras/streams_router.py`, `bed_zone_router.py`, `router.py` (probe) -- path builders and response parsers |
-| `manifest.json` | `worker/pipeline/output/evidence/manifest_models.py` + `clip_manifest_payload.py` -- the fields the writer emits | `backend/app/features/clips/manifest.py` (lenient serving parser), `catalog.py` `_MANIFEST_FIELDS` (strict migration reader) |
+| `manifest.json` | `worker/pipeline/output/evidence/manifest_models.py` + `clip_manifest_payload.py` -- the fields the writer emits | `backend/app/features/clips/manifest.py` (lenient serving parser) |
 
 `tests/test_backend_worker_runtime_contracts.py` is the drift guard and the
 one sanctioned place that imports both packages: it publishes a manifest with
-the worker writer and parses it with both backend readers, asserts every path
+the worker writer, parses it with the backend serving parser and lists it
+through the PostgreSQL clip catalogue, asserts every path
 the backend builds is matched by the worker's route and by no other, and
 round-trips each worker response body (probe, pose overlay, bed zone) through
 the backend parser. A field either side adds must pass there before it ships.

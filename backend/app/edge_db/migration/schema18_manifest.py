@@ -1,4 +1,4 @@
-"""Canonical machine-readable structural contract for schema 18 and schema 19."""
+"""Structural contract for schema 18 and 19, owned by the one-time migration."""
 
 from __future__ import annotations
 

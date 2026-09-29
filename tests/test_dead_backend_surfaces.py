@@ -174,9 +174,3 @@ def test_backend_client_bundle_has_no_camera_mapper_slot() -> None:
     app = create_app(lifespan=no_lifespan)
     with TestClient(app):
         assert not hasattr(app.state, "backend_camera_mapper")
-
-
-def test_catalog_backfill_has_no_jsonl_audit_side_channel() -> None:
-    from backend.app.features.clips.catalog import CatalogStore
-
-    assert "audit_log" not in CatalogStore.backfill.__code__.co_varnames

@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import sqlite3
+import sys
 from collections.abc import Callable
 from pathlib import Path
 
@@ -25,6 +26,7 @@ from tests_support.postgres_api_app import postgres_api_app
 from tests_support.postgres_app_env import inject_sandbox_root
 from tests_support.postgres_clip_app import index_clips
 from tests_support.postgres_sandbox import ProductSandbox
+from tests_support.sqlite_source import create_schema19_source
 
 pytest_plugins = ("tests_support.postgres_sandbox",)
 
@@ -75,6 +77,15 @@ def _listed(client: TestClient) -> tuple[int, list[str]]:
     assert response.status_code == 200
     body = response.json()
     return body["pagination"]["total"], [clip["clip_id"] for clip in body["clips"]]
+
+
+def _redirect_edge_database(sentinel: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Point every loaded backend and worker binding of the SQLite path at the sentinel."""
+    for name, module in tuple(sys.modules.items()):
+        if name.split(".")[0] not in {"backend", "worker"}:
+            continue
+        if isinstance(getattr(module, "EDGE_DATABASE_PATH", None), Path):
+            monkeypatch.setattr(module, "EDGE_DATABASE_PATH", sentinel)
 
 
 def _file_versions(directory: Path) -> dict[str, tuple[str, int]]:
@@ -161,7 +172,9 @@ def test_listing_reads_the_postgres_catalog_and_never_touches_edge_sqlite(
     for index in range(3):
         _write_clip(root, index)
     admin = postgres_product_sandbox.admin
-    sentinel = tmp_path / ".central-fixture" / "edge.sqlite3"
+    sentinel = tmp_path / "sentinel-state" / "edge.sqlite3"
+    create_schema19_source(sentinel)
+    _redirect_edge_database(sentinel, monkeypatch)
 
     with TestClient(lifespan_app(root)) as client:
         _login(client)

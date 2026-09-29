@@ -1,4 +1,4 @@
-"""Schema-19 compatibility guard shared by every DDL-free runtime connection."""
+"""Schema-19 guard the one-time migration applies to the retired SQLite source."""
 
 from __future__ import annotations
 
@@ -9,11 +9,10 @@ from dataclasses import dataclass
 from enum import StrEnum
 from typing import Final
 
-from backend.app.edge_db.compact_schema import APPLICATION_TABLES, COMPACT_APPLICATION_TABLES
+from backend.app.edge_db.compact_schema import APPLICATION_TABLES
 from backend.app.edge_db.execution_records_ddl import EXECUTION_RECORD_CREATE_STATEMENTS
-from backend.app.edge_db.schema18_manifest import (
+from backend.app.edge_db.migration.schema18_manifest import (
     SchemaManifest,
-    compile_schema18_manifest,
     compile_schema19_manifest,
     read_schema_manifest,
 )
@@ -26,14 +25,14 @@ class EdgeDatabaseError(RuntimeError):
 
 @dataclass(slots=True)
 class MigrationRequiredError(EdgeDatabaseError):
-    """The database is absent or below schema 19; only bootstrap can create or extend it."""
+    """The database is empty or below schema 19; no migration path exists from it."""
 
     found: int
     minimum: int
 
     def __str__(self) -> str:
         if self.found == 0:
-            return f"edge database is not bootstrapped; schema {self.minimum} is required"
+            return f"edge database has no schema; schema {self.minimum} is required"
         return (
             f"edge database schema {self.found} is below required {self.minimum} "
             "and no migration path exists"
@@ -145,26 +144,6 @@ def verify_runtime_schema(
     return version
 
 
-def verify_schema18_contract(connection: sqlite3.Connection) -> None:
-    """Require an exact schema-18 database: ledger ends at 18, ten STRICT tables."""
-    try:
-        ledger = connection.execute(
-            "SELECT version, name, checksum FROM schema_migrations ORDER BY version"
-        ).fetchall()
-    except sqlite3.Error as error:
-        raise SchemaLedgerError("edge database schema ledger is missing or unreadable") from error
-    if not ledger or tuple(ledger[-1]) != SCHEMA_18_IDENTITY:
-        raise SchemaLedgerError("applied schema ledger does not end at schema 18")
-    if [int(entry[0]) for entry in ledger] != sorted({int(entry[0]) for entry in ledger}):
-        raise SchemaLedgerError("applied schema ledger is not a strict version sequence")
-    _verify_table_set(
-        connection,
-        expected=COMPACT_APPLICATION_TABLES,
-        compile_manifest=compile_schema18_manifest,
-        contract_label="schema 18",
-    )
-
-
 def _verify_application_tables(connection: sqlite3.Connection) -> None:
     """Require the exact schema-19 table allowlist and structural contract."""
     _verify_table_set(
@@ -222,5 +201,4 @@ __all__ = [
     "classify_schema",
     "schema19_identity_checksum",
     "verify_runtime_schema",
-    "verify_schema18_contract",
 ]
