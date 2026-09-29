@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 
 from psycopg import sql
 
@@ -159,7 +160,26 @@ def test_duplicate_and_conflict_record_dispositions(
     payload = diag.admin.execute(
         "SELECT payload FROM execution_records WHERE record_id = %s", (_hex("same"),)
     ).fetchone()
-    assert payload is not None and '"n":1' in str(payload[0])
+    assert payload is not None and json.loads(str(payload[0])) == {"n": 1}
+
+
+def test_repeated_record_id_within_batch_keeps_first(
+    postgres_diagnostics_sandbox: DiagnosticsSandbox,
+) -> None:
+    diag = postgres_diagnostics_sandbox
+    store = _store(diag)
+    original = _record(label="same", seq=1, payload={"n": 1})
+    conflicted = _record(label="same", seq=1, payload={"n": 2})
+    receipt = store.ingest_batch(_batch("repeats", (original, original, conflicted)))
+    assert receipt.storage_state is StorageState.COMMITTED
+    assert receipt.accepted == 1
+    assert receipt.duplicates == 1
+    assert receipt.rejected == ((_hex("same"), "conflict"),)
+    rows = diag.admin.execute(
+        "SELECT payload FROM execution_records WHERE record_id = %s", (_hex("same"),)
+    ).fetchall()
+    assert len(rows) == 1
+    assert json.loads(str(rows[0][0])) == {"n": 1}
 
 
 def test_oversize_rejection_writes_coverage(
@@ -280,6 +300,56 @@ def test_late_ack_uses_new_unit_and_ack_coverage(
         CoverageKind.ACK_OBSERVED_PARENT_UNKNOWN_COARSENED in kinds
     )
     assert stored_unit == (expected_unit,)
+
+
+def test_two_late_acks_in_one_batch_share_the_late_unit(
+    postgres_diagnostics_sandbox: DiagnosticsSandbox,
+) -> None:
+    diag = postgres_diagnostics_sandbox
+    store = _store(diag)
+    store.ingest_batch(
+        _batch(
+            "doomed",
+            (_record(label="doomed", unit="unit-old", seq=0, observed=10, payload={"k": "z"}),),
+        )
+    )
+    diag.database.transact(lambda connection: prune_unit(connection, "unit-old", 2))
+    acks = tuple(
+        _record(
+            label=f"ack{index}",
+            unit="unit-old",
+            kind=RecordKind.BACKEND_ACCEPTANCE,
+            seq=99 + index,
+            observed=10,
+            producer="backend",
+            outcome="accepted",
+        )
+        for index in range(2)
+    )
+    receipt = store.ingest_batch(_batch("acks", acks))
+    assert receipt.storage_state is StorageState.COMMITTED
+    assert receipt.accepted == 2
+    late_unit = late_ack_unit_id("unit-old", _hex("acks"))
+    admin = diag.admin
+    stored_units = admin.execute(
+        "SELECT causal_unit_id FROM execution_records WHERE record_id = ANY(%s)",
+        ([_hex("ack0"), _hex("ack1")],),
+    ).fetchall()
+    assert stored_units == [(late_unit,), (late_unit,)]
+    unit_count = admin.execute(
+        "SELECT record_count FROM execution_units WHERE causal_unit_id = %s", (late_unit,)
+    ).fetchone()
+    assert unit_count == (2,)
+    ack_rows = admin.execute(
+        "SELECT COUNT(*) FROM execution_coverage WHERE coverage_kind = ANY(%s)",
+        (
+            [
+                str(CoverageKind.ACK_OBSERVED_PARENT_DELETED),
+                str(CoverageKind.ACK_OBSERVED_PARENT_UNKNOWN_COARSENED),
+            ],
+        ),
+    ).fetchone()
+    assert ack_rows == (2,)
 
 
 def test_availability_is_a_span_between_contiguous_records_not_instants(
