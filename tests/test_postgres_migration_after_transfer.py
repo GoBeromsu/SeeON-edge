@@ -9,6 +9,7 @@ target the snapshot gave none, and reads a source the fence stamped by its bytes
 from __future__ import annotations
 
 import json
+import sqlite3
 from collections.abc import Callable
 from contextlib import closing
 from pathlib import Path
@@ -24,6 +25,7 @@ from backend.app.edge_db.migration.reconcile import FAIL, PASS, reconcile
 from backend.app.edge_db.migration.snapshot import export_snapshot, sidecar_paths
 from backend.app.edge_db.migration.sqlite_fence import fence_sqlite, read_fence_receipt
 from backend.app.edge_db.migration.transfer import freeze, transfer
+from backend.app.features.audit.postgres_store import PostgresAuditStore
 from backend.app.features.connection.repository import ConnectionValue
 from backend.app.features.connection.store import ConnectionSettingsStore
 from tests_support.postgres_migration import (
@@ -145,6 +147,26 @@ def test_a_target_frozen_after_transfer_passes_the_after_transfer_check(
 
     assert _verdict(after) == ("after_transfer", PASS, [])
     assert after["authority"] == {"generation": 2, "accepting": False, "egress_enabled": False}
+
+
+def test_the_runtime_audit_verifier_accepts_the_transferred_chain(
+    migration_target: MigrationTarget, tmp_path: Path
+) -> None:
+    target = migration_target
+    _, snapshot = _export(tmp_path / "old")
+    with closing(sqlite3.connect(f"file:{snapshot}?mode=ro", uri=True)) as old:
+        chain = old.execute(
+            "SELECT audit_id, record_hash FROM audit_events ORDER BY audit_id"
+        ).fetchall()
+    token = _activate(target, snapshot)
+
+    # The runtime verifies the whole chain before it serves, so the old tail must survive the copy.
+    checkpoint = PostgresAuditStore(target.database, token).verify()
+
+    assert (checkpoint.row_count, checkpoint.audit_id, checkpoint.record_hash) == (
+        len(chain),
+        *chain[-1],
+    )
 
 
 @pytest.mark.parametrize("statement", [None, _NO_SITE], ids=["site", "no-site"])

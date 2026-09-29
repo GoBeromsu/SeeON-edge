@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import dataclasses
 import hashlib
+import sqlite3
 from collections.abc import Callable
 from contextlib import closing
 from dataclasses import dataclass
@@ -246,6 +247,41 @@ def test_rollback_check_denies_diagnostics_history_the_snapshot_never_held(
         "DENY",
         [f"diagnostics_history:{table}" for table in sorted(written) if written[table]],
     )
+
+
+def _rewrite_audit_hash(target: MigrationTarget, audit_id: int, record_hash: str) -> None:
+    """Rewrite one audit hash as the schema owner, past the trigger the runtime meets."""
+    table = sql.Identifier(target.schema, "audit_events")
+    trigger = sql.Identifier("audit_events_immutable_update")
+    with target.admin.transaction():
+        target.admin.execute(sql.SQL("ALTER TABLE {} DISABLE TRIGGER {}").format(table, trigger))
+        target.admin.execute(
+            sql.SQL("UPDATE {} SET record_hash = %s WHERE audit_id = %s").format(table),
+            (record_hash, audit_id),
+        )
+        target.admin.execute(sql.SQL("ALTER TABLE {} ENABLE TRIGGER {}").format(table, trigger))
+
+
+def test_rollback_check_denies_an_audit_tail_rewritten_without_a_new_event(
+    migration_target: MigrationTarget, tmp_path: Path
+) -> None:
+    target = migration_target
+    imported = _fenced(target, tmp_path)
+    # The snapshot is not the fenced file, so SQLite may read it.
+    with closing(sqlite3.connect(f"file:{imported.snapshot}?mode=ro", uri=True)) as old:
+        audit_id, record_hash = old.execute(
+            "SELECT audit_id, record_hash FROM audit_events ORDER BY audit_id DESC LIMIT 1"
+        ).fetchone()
+    untouched = _check(target, imported)
+    _rewrite_audit_hash(target, audit_id, f"{int(record_hash, 16) ^ 1:064x}")
+
+    decision = _check(target, imported)
+
+    (audit,) = [entry for entry in decision["tables"] if entry["table"] == "audit_events"]
+    assert (untouched["result"], untouched["reasons"]) == ("ALLOW", [])
+    assert (decision["result"], decision["reasons"]) == ("DENY", ["target_history:audit_events"])
+    assert audit["snapshot"]["rows"] == audit["target"]["rows"]
+    assert (audit["only_in_snapshot"], audit["only_in_target"], audit["changed"]) == (0, 0, 1)
 
 
 @pytest.mark.parametrize(

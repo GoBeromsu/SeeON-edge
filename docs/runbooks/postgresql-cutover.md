@@ -165,7 +165,7 @@ the tool is reading.
    Expect `EDGE_PG_MIGRATION_QUEUE_DIGEST_OK queued=N temporary=N
    dead_lettered=N sha256=<queue sha>`. It refuses while `.gpu.lease` or
    `delivery-queue/.delivery-queue.lock` is held. Record the line.
-3. **Snapshot.**
+3. **Snapshot and fence the source.**
 
    ```sh
    export --source /var/lib/seeon-state/edge.sqlite3 \
@@ -180,6 +180,27 @@ the tool is reading.
    missing snapshot directory and an existing snapshot path. The snapshot is
    an online backup, so commits still in the source WAL are included. It holds
    resident data, so it is written mode `0600`, like the reports.
+
+   Then fence the source, so the old stack refuses it:
+
+   ```sh
+   fence-sqlite --source /var/lib/seeon-state/edge.sqlite3 \
+     --snapshot /var/lib/seeon-migration/edge-schema19.sqlite3 \
+     --authority-file /run/seeon-authority/authority.json \
+     --fence-receipt /var/lib/seeon-migration/fence-receipt.json
+   ```
+
+   Expect `EDGE_PG_MIGRATION_FENCE_SQLITE_OK generation=1 user_version=1000001
+   source_present=true sha256=<fenced sha>`. The generation comes from the
+   authority file. The source must still export to the snapshot's bytes, so
+   fence right after `export`. The fence keeps the pre-fence bytes beside the
+   receipt as `fence-receipt.pre-fence.sqlite3`, writes the receipt, then sets
+   the source's schema version far above any the old runtime knows, so that
+   runtime refuses the file as newer. It refuses while a runtime holds the
+   source, a source with a rollback journal, a missing source or receipt
+   directory, and a receipt that records a different fence. If it dies, rerun
+   it with the same arguments; a rerun finishes the fence or returns the
+   recorded one.
 4. **Copy and reconcile.**
 
    ```sh
@@ -187,6 +208,7 @@ the tool is reading.
    reconcile $OWNER --snapshot /var/lib/seeon-migration/edge-schema19.sqlite3 \
      --report /var/lib/seeon-migration/reconcile-before-transfer.json \
      --source /var/lib/seeon-state/edge.sqlite3 \
+     --fence-receipt /var/lib/seeon-migration/fence-receipt.json \
      --worker-state-dir /var/lib/seeon-worker-state \
      --expect-delivery-queue-sha256 <queue sha>
    ```
@@ -200,7 +222,11 @@ the tool is reading.
    The report compares every table by key and row hash, checks status
    distributions, identity floors, the audit tail, that the live source still
    equals the snapshot, that the authority is fenced, that no delivery rows
-   exist and that the queue digest is unchanged. Any failure prints
+   exist and that the queue digest is unchanged. With `--fence-receipt` it
+   also requires the source to be byte-equal to the receipt with no WAL, `-shm`
+   or journal content (`sqlite:<reason>`), and the receipt to name this
+   snapshot (`sqlite:snapshot_mismatch`). `--fence-receipt` needs `--source`;
+   without it the command is a usage error (exit 2). Any failure prints
    `EDGE_PG_MIGRATION_RECONCILE_FAILED: result=FAIL` and lists its reasons in
    the report. Do not transfer on FAIL.
 
@@ -233,6 +259,7 @@ the tool is reading.
    reconcile $OWNER --snapshot /var/lib/seeon-migration/edge-schema19.sqlite3 \
      --report /var/lib/seeon-migration/reconcile-after-transfer.json \
      --source /var/lib/seeon-state/edge.sqlite3 \
+     --fence-receipt /var/lib/seeon-migration/fence-receipt.json \
      --worker-state-dir /var/lib/seeon-worker-state \
      --expect-delivery-queue-sha256 <queue sha> \
      --after-transfer
@@ -251,7 +278,8 @@ the tool is reading.
    Without `--after-transfer` the transferred target fails
    `authority:not_fenced`, by design. Start no runtime on FAIL.
 7. **Retain** until the rollback decision is closed: the `edge-migration`
-   volume (the snapshot and both reconcile reports), the queue digest line,
+   volume (the snapshot, both reconcile reports, the fence receipt and its
+   `fence-receipt.pre-fence.sqlite3` copy), the queue digest line,
    the `edge-state` volume (`edge.sqlite3`, `edge-diagnostics.sqlite3`,
    `edge.sqlite3.schema18-backup.sqlite3`), the `worker-local-state` volume,
    the clip store, and the old `ML_API_IMAGE` and `ML_WORKER_IMAGE` digests.
@@ -299,7 +327,23 @@ imported. An edge that holds legacy data goes through `Cutover`.
    volume hides legacy data that `export` and both rollbacks need.
 
    Rerun an unknown outcome with the same arguments, as in `Cutover`, step 5.
-3. **Start the API.**
+3. **Fence the absent source**, after `transfer`: `--fresh-install` refuses a
+   source path that holds any file, a fenced one included.
+
+   ```sh
+   docker compose run --rm edge-db-cutover fence-sqlite \
+     --source /var/lib/seeon-state/edge.sqlite3 \
+     --authority-file /run/seeon-authority/authority.json \
+     --fence-receipt /var/lib/seeon-migration/fence-receipt.json
+   ```
+
+   Expect `EDGE_PG_MIGRATION_FENCE_SQLITE_OK generation=2 user_version=1000002
+   source_present=false sha256=<fenced sha>`. With no source and no
+   `--snapshot`, the fence creates a stamped empty file, so an old runtime
+   started on this volume refuses it instead of creating a new database.
+   Such a site has no SQLite rollback: `rollback-check` denies
+   `sqlite:source_absent` and `unfence-sqlite` refuses the receipt.
+4. **Start the API.**
 
    ```sh
    docker compose up -d ml-api
@@ -360,8 +404,9 @@ runtime role gets `USAGE` on it, `SELECT, INSERT, UPDATE, DELETE` on its
 `execution_*` tables, `SELECT` on its ledger, and no DDL.
 
 Migrated `execution_*` history lands in the product schema. The diagnostics
-schema starts empty and holds only rows the new runtime writes. Neither
-`reconcile` nor `rollback-check` compares it with the snapshot.
+schema starts empty and holds only rows the new runtime writes. `reconcile`
+does not compare it with the snapshot. `rollback-check` denies any row in
+it, because SQLite never saw one (see `Rollback after transfer`).
 
 `provision` refuses, and changes nothing, when the diagnostics schema:
 
@@ -402,10 +447,13 @@ Stop that process and rerun.
 
 ## Rollback before transfer
 
-The source was never modified.
+Until `fence-sqlite` runs, the source is never modified.
 
 1. Stop any running `edge-db-cutover` container.
-2. Start the old stack on the untouched `edge.sqlite3`.
+2. If `fence-sqlite` ran, run `rollback-check` and `unfence-sqlite` as in
+   `Rollback after transfer`, step 3. Skip `freeze`: before `transfer` the
+   authority is still fenced at generation 1.
+3. Start the old stack on `edge.sqlite3`.
 
 A retry needs a new snapshot path and a fresh target, because `import`
 refuses a target that already holds a snapshot. Provision a new schema name,
@@ -429,15 +477,31 @@ rerun of `provision` reuses it as it is.
 
    ```sh
    rollback-check $OWNER --snapshot /var/lib/seeon-migration/edge-schema19.sqlite3 \
+     --source /var/lib/seeon-state/edge.sqlite3 \
+     --fence-receipt /var/lib/seeon-migration/fence-receipt.json \
      --report /var/lib/seeon-migration/rollback-check.json
    ```
 
+   Do not open the fenced source with any SQLite tool, read-only included.
+
    `result=ALLOW reasons=none` means PostgreSQL holds nothing the snapshot
-   lacks. Start the old stack on the untouched `edge.sqlite3`. Optionally
-   rerun the reconcile of `Cutover`, step 6, first as evidence, with a new
-   `--report` path. It needs `--after-transfer`: the frozen target is still
-   at generation 2 and holds the `edge_site` seed, which the default mode
-   fails as `table:edge_site`.
+   lacks and the fenced source is byte-equal to its receipt. Restore the
+   pre-fence source, then start the old stack on it:
+
+   ```sh
+   unfence-sqlite --source /var/lib/seeon-state/edge.sqlite3 \
+     --fence-receipt /var/lib/seeon-migration/fence-receipt.json \
+     --rollback-report /var/lib/seeon-migration/rollback-check.json
+   ```
+
+   Expect `EDGE_PG_MIGRATION_UNFENCE_SQLITE_OK result=RESTORED generation=1
+   sha256=<pre-fence sha>`. It refuses a report that did not ALLOW, or that
+   checked a different source, snapshot or fence, and it checks the live file
+   against the receipt again before it restores the preserved copy. Optionally,
+   before `unfence-sqlite`, rerun the reconcile of `Cutover`, step 6, as
+   evidence, with a new `--report` path. It needs `--after-transfer`: the
+   frozen target is still at generation 2 and holds the `edge_site` seed,
+   which the default mode fails as `table:edge_site`.
 
    `result=DENY` means PostgreSQL has state that a restore would lose. Keep
    PostgreSQL, and either return to the old worker digest or fix forward.
@@ -453,13 +517,20 @@ rerun of `provision` reuses it as it is.
 | `ledger:entries`, `ledger:snapshot_mismatch` | The ledger is not exactly the import of this snapshot. |
 | `unimported_rows:<table>` | Rows exist without an import stamp. |
 | `target_history:<table>` | A migrated table changed after import. |
+| `diagnostics:schema` | The diagnostics schema is missing, foreign or drifted. |
+| `diagnostics_history:<table>` | The new runtime wrote diagnostics rows SQLite never saw. |
+| `sqlite:source_absent` | A fresh install: there is no SQLite file to restore. |
+| `sqlite:receipt_snapshot_mismatch` | The receipt fenced a different snapshot. |
+| `sqlite:live_changed`, `sqlite:source_missing`, `sqlite:source_not_regular` | The source is not the file the fence left. |
+| `sqlite:wal_content`, `sqlite:shm_content`, `sqlite:journal` | Something opened the fenced source, even read-only, or wrote to it. If nothing wrote, rerun `fence-sqlite` with the same arguments and check again. |
 
 Never restore the SQLite snapshot only because no new event arrived. Target
 history without a new event still denies.
 
-`rollback-check` inspects only the product schema. Live writes to the
-diagnostics schema do not deny a rollback, but a write into the product
-schema's `execution_*` tables does, as `target_history:<table>`. On rollback
+`rollback-check` inspects the product schema, the diagnostics schema and the
+fenced source. Any diagnostics row denies, as `diagnostics_history:<table>`,
+and a write into the product schema's `execution_*` tables denies as
+`target_history:<table>`. On rollback
 the diagnostics schema is abandoned or retained for inspection. It is never
 copied back into SQLite. The old stack resumes on its own
 `edge-diagnostics.sqlite3`, which never moved. Before a later cutover, drop the
