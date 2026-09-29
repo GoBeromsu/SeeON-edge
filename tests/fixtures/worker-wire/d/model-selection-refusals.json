@@ -3221,7 +3221,7 @@
     "kind": "synthetic-only",
     "recipe": "SELECTION_BASE (the synthetic digit-run document of d/model-selection.json) with one or two fields replaced, removed or added per case, passed as a Python object to parse_model_selection; non-JSON inputs (NaN, inf) are shown as {\"$nonfinite\": repr}"
   },
-  "recorder_sha256": "020bb1c6716892ac315b8350ce3939d182749cc756f7af1348341874ccbde004",
+  "recorder_sha256": "c22ea686c064e820ec15963f7e5c3fa284a9576a9d66071da656854629ea3db7",
   "repo_head": "030aaf1dc2c4a114b5d1f83ae391757ddbc3da2c",
   "review": {
     "note": "Verdicts and messages are what parse_model_selection returned or raised at 030aaf1. named_field is the dotted prefix of the message (informational; the message is the pin). Case ids are labels only; the verdict field is the golden. For accepted documents the parsed selection is recorded as as_dict(), its canonical bytes and digest.",

@@ -75,7 +75,7 @@
     "kind": "synthetic-only",
     "recipe": "four short ASCII member bodies (model.onnx is text, not ONNX) and two canonical receipts, published as bundles/<sha>/ by fetch_all from an in-process FakeSource keyed by the huggingface resolve URL; the bundle sha256 is sha256(Bundle.canonical_payload); the published tree copied (symlinks kept) and mutated: model.onnx replaced by a symlink to model-real.onnx (same bytes) in the bundle root"
   },
-  "recorder_sha256": "020bb1c6716892ac315b8350ce3939d182749cc756f7af1348341874ccbde004",
+  "recorder_sha256": "c22ea686c064e820ec15963f7e5c3fa284a9576a9d66071da656854629ea3db7",
   "repo_head": "030aaf1dc2c4a114b5d1f83ae391757ddbc3da2c",
   "review": {
     "note": "verdict, exception_class and message are what admit_model_bundle returned or raised at 030aaf1 on this tree; tree is the lstat listing relative to the case directory (models/ is the models root, outside/ sits beside it). The selection document is publication.json selection_document plus selection_changes.",

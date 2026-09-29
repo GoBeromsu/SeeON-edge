@@ -25,7 +25,7 @@
     "d/clip-manifests/unavailable.manifest.json": "58f9bd00c4a7a3623e60401c62840f11f3bd500943f7689efa30255cd0dc5ab8",
     "d/clip-playback/clip.playback-h264.json": "7ffb4c1519717e2e52b72e48622be524330655870abc4babb1833176937b62d4",
     "d/clip-thumbnail.json": "99a9d5333cba6d6895ee8ff07ca518023072dbac373b489db76ba41df4fc1609",
-    "d/codec-edges.json": "daf19a25265c3ff75ee5afc3eb0b53baea05ed4bb7286e22b87c8d03cc8fff52",
+    "d/codec-edges.json": "c775779e1b1af2cbd2a630133ddc785d2363d756e6cb4cdbe8ae7f3673d96a76",
     "d/codec-edges/queue/event-b2c0dec0-0000-4000-8000-000000000000.json": "49960951b1272de83f8761585cd9480b3860ed554ca64ec8f8846543c4343a34",
     "d/codec-edges/queue/event-b2c0dec0-0000-4000-8000-000000000001.json": "bd52dc75a300a1124602757ba6f5daef3fed93da465e8ed8285a24383892dadf",
     "d/codec-edges/queue/event-b2c0dec0-0000-4000-8000-000000000002.json": "4f548f1b4656158bd78200c42a4e33084c656dbab3db1c662e8d92ea46384d20",
@@ -57,19 +57,19 @@
     "d/flow-sealed/cases.json": "66b2a36985ee73c506987f7b47d86cdbd65332d08c3d0bc023e9f71550f0db3c",
     "d/flow-sealed/state/sealed-a-non-ascii.json": "7cf326eab8cfaf5fcd604f7082e5c12294536ef0a753cf67f82356965a2cd622",
     "d/flow-sealed/state/sealed-b-out-of-order.json": "e53b47f1ec6893c20320452f6a65dc63b72049949e7dace38609f081e6da92be",
-    "d/model-bundle-admission/digest-flip.json": "f1f09a1605adb4072808038ed9ba3cf18bde43b190c4acd14c787bc1c936f938",
-    "d/model-bundle-admission/escaping-symlink.json": "603d1c541a2f87e9eda43bcaca22436606829924a558ebd066c41671ba1cecd9",
-    "d/model-bundle-admission/extra-empty-dir.json": "9ab602cbd2c8db86b2da7be5f03e13a0bb4ff31330f33f12e9ea62be5c8a0551",
-    "d/model-bundle-admission/extra-file.json": "c07c010527debb7cc76d0f784e15efe857e9c94bd0f3bfbe48b37de92fcbf1ee",
-    "d/model-bundle-admission/extra-symlink.json": "0ef953b48b4df86d9dc404a5a744add3771e1c7ef3c86e99884ca8a6f04a4556",
-    "d/model-bundle-admission/flip-plus-extra.json": "aed3125a6470531c17e7cada4823f77c01cc10b730b063e6b0da637d500255ef",
-    "d/model-bundle-admission/in-root-symlink.json": "e5b0cec661ebcb1ba7430dc74436513277cb7e7deb8cc377d80e9904174fff10",
-    "d/model-bundle-admission/missing-member.json": "cd22f6ff01a3e45693846749447d97c73fd97b056dabee19435706e032ccaa11",
-    "d/model-bundle-admission/non-canonical-manifest.json": "e201c21f7fe51c3df66a49b99fdd90994c31cf8b6c0199b99cfb98b8df9228af",
-    "d/model-bundle-admission/ok.json": "5c2e27005421fc80c506c39f8b356e5892d28313ae7b11d0a8feec54b0c7bdea",
-    "d/model-bundle-admission/publication.json": "821055c8fb12940ebcec1b7c07dcbf36c15c666bd6e8e9bc7b87924338b425b5",
-    "d/model-bundle-admission/unknown-bundle-format.json": "50c47710ea708cda3fc46aaaf01d81570fa531050ac97f9c862e36d015c65c31",
-    "d/model-selection-refusals.json": "2f5140364b33605dc83cd7b4a3934c88046605ba36a26232534b2370fa646763",
+    "d/model-bundle-admission/digest-flip.json": "3ae89103b1736d00e51651fb9451523fc378c52fb7cfd5359ef03ab1a2089ba6",
+    "d/model-bundle-admission/extra-empty-dir.json": "42e2ff794939b2c44397d855f5e44e533d4e945ec7170d4162f29f86fe25b218",
+    "d/model-bundle-admission/extra-file.json": "236154467338211747593a495ca10c0d18423b6226fbb6251dc2d50af870197a",
+    "d/model-bundle-admission/extra-symlink.json": "ebdf60a95b72679a04d1d2b9fb2a031cf109ba79f0cf23b2483c02588751c060",
+    "d/model-bundle-admission/flip-plus-extra.json": "3c1e83368b70b397a9f238dd80a443d0daf9fdeb396e11468712f264a4f17dbb",
+    "d/model-bundle-admission/in-root-symlink.json": "24d3ada91831bec247a2b81440b9bb3730961b76cf5c4aa60c6b98fc7950860c",
+    "d/model-bundle-admission/missing-member.json": "1daa34a0f068c83d6a7d54ffa03b2e2459eba582a8ddf658cc2a9408762b9755",
+    "d/model-bundle-admission/non-canonical-manifest.json": "95328e470816fa72d5d3471365c0c511548db15e8af9e57f00333feeed768d77",
+    "d/model-bundle-admission/ok.json": "481e6918394eb82f389a042b44e23241f4c2b633b07989182139c26aa5f8302e",
+    "d/model-bundle-admission/out-of-root-symlink.json": "85751f4382d3df0da4b80de18eaea6e30eb40d8e0beb959753c0e45d3cc4b511",
+    "d/model-bundle-admission/publication.json": "b99b0c8ea6c41905cabca2f3fe836a14651dc624985a02cb8d4a78b13c5f1c2f",
+    "d/model-bundle-admission/unknown-bundle-format.json": "794e3f0e02f75c85edf47096fd970a776fb7d81bf27d6883a68aa58c96e707ef",
+    "d/model-selection-refusals.json": "a19cc2b69ae715bbdda6d5781359cacc3355ea94c06ab4075b1e54d357b1b040",
     "d/model-selection.json": "ad894cc0e868cc1a463292ae418ecc14183680bd832b1adb4b09a1787e9e549b",
     "d/models-bundle-layout.json": "099dcee5335d6e3d6c68c8d2b45ed39be402b42e133821979f63ced33ea3b963",
     "d/models-layout.json": "1a8fb4ed580ba875ec1b90c94fd11c71ac9ae75618a9ce9e87876b95b032cf93",
@@ -627,7 +627,7 @@
         10,
         14
       ],
-      "sha256": "daf19a25265c3ff75ee5afc3eb0b53baea05ed4bb7286e22b87c8d03cc8fff52",
+      "sha256": "c775779e1b1af2cbd2a630133ddc785d2363d756e6cb4cdbe8ae7f3673d96a76",
       "size_bytes": 56521,
       "wire_class": "D"
     },
@@ -1111,25 +1111,8 @@
         4,
         22
       ],
-      "sha256": "f1f09a1605adb4072808038ed9ba3cf18bde43b190c4acd14c787bc1c936f938",
+      "sha256": "3ae89103b1736d00e51651fb9451523fc378c52fb7cfd5359ef03ab1a2089ba6",
       "size_bytes": 3980,
-      "wire_class": "D"
-    },
-    {
-      "backend_parser": "Rust model-bundle admission (T8)",
-      "compare": "json-value",
-      "input": "publication.json plus case.mutation (tree listed in case.tree)",
-      "lane": "codec",
-      "normalised": [],
-      "note": "T8: verdict, refusal class and message; flip-plus-extra pins digest-before-shape",
-      "path": "d/model-bundle-admission/escaping-symlink.json",
-      "producer": "worker/runtime/provenance/model_bundle.py:admit_model_bundle",
-      "rows": [
-        4,
-        22
-      ],
-      "sha256": "603d1c541a2f87e9eda43bcaca22436606829924a558ebd066c41671ba1cecd9",
-      "size_bytes": 4312,
       "wire_class": "D"
     },
     {
@@ -1145,7 +1128,7 @@
         4,
         22
       ],
-      "sha256": "9ab602cbd2c8db86b2da7be5f03e13a0bb4ff31330f33f12e9ea62be5c8a0551",
+      "sha256": "42e2ff794939b2c44397d855f5e44e533d4e945ec7170d4162f29f86fe25b218",
       "size_bytes": 4165,
       "wire_class": "D"
     },
@@ -1162,7 +1145,7 @@
         4,
         22
       ],
-      "sha256": "c07c010527debb7cc76d0f784e15efe857e9c94bd0f3bfbe48b37de92fcbf1ee",
+      "sha256": "236154467338211747593a495ca10c0d18423b6226fbb6251dc2d50af870197a",
       "size_bytes": 4260,
       "wire_class": "D"
     },
@@ -1179,7 +1162,7 @@
         4,
         22
       ],
-      "sha256": "0ef953b48b4df86d9dc404a5a744add3771e1c7ef3c86e99884ca8a6f04a4556",
+      "sha256": "ebdf60a95b72679a04d1d2b9fb2a031cf109ba79f0cf23b2483c02588751c060",
       "size_bytes": 4199,
       "wire_class": "D"
     },
@@ -1196,7 +1179,7 @@
         4,
         22
       ],
-      "sha256": "aed3125a6470531c17e7cada4823f77c01cc10b730b063e6b0da637d500255ef",
+      "sha256": "3c1e83368b70b397a9f238dd80a443d0daf9fdeb396e11468712f264a4f17dbb",
       "size_bytes": 4270,
       "wire_class": "D"
     },
@@ -1213,7 +1196,7 @@
         4,
         22
       ],
-      "sha256": "e5b0cec661ebcb1ba7430dc74436513277cb7e7deb8cc377d80e9904174fff10",
+      "sha256": "24d3ada91831bec247a2b81440b9bb3730961b76cf5c4aa60c6b98fc7950860c",
       "size_bytes": 4230,
       "wire_class": "D"
     },
@@ -1230,7 +1213,7 @@
         4,
         22
       ],
-      "sha256": "cd22f6ff01a3e45693846749447d97c73fd97b056dabee19435706e032ccaa11",
+      "sha256": "1daa34a0f068c83d6a7d54ffa03b2e2459eba582a8ddf658cc2a9408762b9755",
       "size_bytes": 3651,
       "wire_class": "D"
     },
@@ -1247,7 +1230,7 @@
         4,
         22
       ],
-      "sha256": "e201c21f7fe51c3df66a49b99fdd90994c31cf8b6c0199b99cfb98b8df9228af",
+      "sha256": "95328e470816fa72d5d3471365c0c511548db15e8af9e57f00333feeed768d77",
       "size_bytes": 3996,
       "wire_class": "D"
     },
@@ -1264,8 +1247,25 @@
         4,
         22
       ],
-      "sha256": "5c2e27005421fc80c506c39f8b356e5892d28313ae7b11d0a8feec54b0c7bdea",
+      "sha256": "481e6918394eb82f389a042b44e23241f4c2b633b07989182139c26aa5f8302e",
       "size_bytes": 6350,
+      "wire_class": "D"
+    },
+    {
+      "backend_parser": "Rust model-bundle admission (T8)",
+      "compare": "json-value",
+      "input": "publication.json plus case.mutation (tree listed in case.tree)",
+      "lane": "codec",
+      "normalised": [],
+      "note": "T8: verdict, refusal class and message; flip-plus-extra pins digest-before-shape",
+      "path": "d/model-bundle-admission/out-of-root-symlink.json",
+      "producer": "worker/runtime/provenance/model_bundle.py:admit_model_bundle",
+      "rows": [
+        4,
+        22
+      ],
+      "sha256": "85751f4382d3df0da4b80de18eaea6e30eb40d8e0beb959753c0e45d3cc4b511",
+      "size_bytes": 4315,
       "wire_class": "D"
     },
     {
@@ -1281,7 +1281,7 @@
         4,
         22
       ],
-      "sha256": "821055c8fb12940ebcec1b7c07dcbf36c15c666bd6e8e9bc7b87924338b425b5",
+      "sha256": "b99b0c8ea6c41905cabca2f3fe836a14651dc624985a02cb8d4a78b13c5f1c2f",
       "size_bytes": 16139,
       "wire_class": "D"
     },
@@ -1298,7 +1298,7 @@
         4,
         22
       ],
-      "sha256": "50c47710ea708cda3fc46aaaf01d81570fa531050ac97f9c862e36d015c65c31",
+      "sha256": "794e3f0e02f75c85edf47096fd970a776fb7d81bf27d6883a68aa58c96e707ef",
       "size_bytes": 4329,
       "wire_class": "D"
     },
@@ -1314,7 +1314,7 @@
       "rows": [
         2
       ],
-      "sha256": "2f5140364b33605dc83cd7b4a3934c88046605ba36a26232534b2370fa646763",
+      "sha256": "a19cc2b69ae715bbdda6d5781359cacc3355ea94c06ab4075b1e54d357b1b040",
       "size_bytes": 201671,
       "wire_class": "D"
     },
@@ -2222,7 +2222,7 @@
     "codec": {
       "python": "3.12.13",
       "recorder": "record_wire_b2_codec.py (lane exec-b2a; kept outside the repo; see recorder_sha256)",
-      "recorder_sha256": "020bb1c6716892ac315b8350ce3939d182749cc756f7af1348341874ccbde004",
+      "recorder_sha256": "c22ea686c064e820ec15963f7e5c3fa284a9576a9d66071da656854629ea3db7",
       "repo_head": "030aaf1dc2c4a114b5d1f83ae391757ddbc3da2c"
     },
     "p04c6": {
@@ -2557,7 +2557,6 @@
       "gaps": [],
       "goldens": [
         "d/model-bundle-admission/digest-flip.json",
-        "d/model-bundle-admission/escaping-symlink.json",
         "d/model-bundle-admission/extra-empty-dir.json",
         "d/model-bundle-admission/extra-file.json",
         "d/model-bundle-admission/extra-symlink.json",
@@ -2566,6 +2565,7 @@
         "d/model-bundle-admission/missing-member.json",
         "d/model-bundle-admission/non-canonical-manifest.json",
         "d/model-bundle-admission/ok.json",
+        "d/model-bundle-admission/out-of-root-symlink.json",
         "d/model-bundle-admission/publication.json",
         "d/model-bundle-admission/unknown-bundle-format.json",
         "d/models-bundle-layout.json",
@@ -2613,7 +2613,6 @@
       "goldens": [
         "d/engine-identity-refusals.json",
         "d/model-bundle-admission/digest-flip.json",
-        "d/model-bundle-admission/escaping-symlink.json",
         "d/model-bundle-admission/extra-empty-dir.json",
         "d/model-bundle-admission/extra-file.json",
         "d/model-bundle-admission/extra-symlink.json",
@@ -2622,6 +2621,7 @@
         "d/model-bundle-admission/missing-member.json",
         "d/model-bundle-admission/non-canonical-manifest.json",
         "d/model-bundle-admission/ok.json",
+        "d/model-bundle-admission/out-of-root-symlink.json",
         "d/model-bundle-admission/publication.json",
         "d/model-bundle-admission/unknown-bundle-format.json",
         "r/capabilities.request.json",
