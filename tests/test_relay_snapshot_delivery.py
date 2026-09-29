@@ -1,26 +1,29 @@
+"""Snapshot companion routes on the PostgreSQL product root.
+
+The oracles read committed ``artifacts``, ``incidents`` and ``audit_events``
+rows through the sandbox admin connection.
+"""
+
 from __future__ import annotations
 
 import json
-import sqlite3
 import threading
 from collections.abc import Iterator, Mapping
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from pathlib import Path
-from typing import ClassVar, cast
+from typing import ClassVar
 
 import pytest
-from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from backend.app.features.cameras.store import CameraRegistryStore
-from backend.app.features.clips.catalog import CatalogStore
-from backend.app.features.evidence.relay_projection import RelayEvidenceProjection
-from backend.app.main import create_app, no_lifespan
+from backend.app.features.audit.postgres_runtime import PostgresAuditRuntime
 from shared.events.evidence_export_client import RelayEvidenceClient
 from shared.events.evidence_export_contract import DeliveryDisposition, DeliveryFailure
-from tests_support.compact_authority_db import prepare_compact_database
+from tests_support.postgres_sandbox import ProductSandbox
+from tests_support.relay_postgres_runtime import RELAY_TOKEN, artifact_count, relay_postgres_app
 
-TOKEN = "relay-token"
+pytest_plugins = ("tests_support.postgres_sandbox",)
+
+TOKEN = RELAY_TOKEN
 EVENT_ID = "00000000-0000-4000-8000-000000000020"
 ATTACHMENT = {
     "edge_event_id": EVENT_ID,
@@ -39,34 +42,38 @@ DISPOSITION = {
 
 
 @pytest.fixture
-def client(tmp_path: Path) -> Iterator[TestClient]:
-    app = create_app(lifespan=no_lifespan)
-    app.state.edge_relay_token = TOKEN
-    registry_path = tmp_path / "registry.sqlite3"
-    prepare_compact_database(registry_path)
-    registry = CameraRegistryStore(registry_path)
-    registry.create(
-        camera_id="camera-1",
-        label="camera-1",
-        rtsp_url="rtsp://example/camera-1",
-        space_id=None,
-        status="online",
-        backend_camera_id="camera-1",
-    )
-    app.state.camera_registry = registry
-    app.state.relay_evidence_projection = RelayEvidenceProjection(registry_path)
-    app.state.edge_database_path = registry_path
-    app.state.catalog_store = CatalogStore.open(tmp_path / "catalog.sqlite3")
+def client(
+    postgres_product_sandbox: ProductSandbox, postgres_audit_runtime: PostgresAuditRuntime
+) -> Iterator[TestClient]:
+    app = relay_postgres_app(postgres_product_sandbox, postgres_audit_runtime)
     with TestClient(app) as test_client:
         yield test_client
-    app.state.catalog_store.close()
 
 
 def _post(client: TestClient, path: str, payload: Mapping[str, object]):
     return client.post(path, json=payload, headers={"X-Edge-Relay-Token": TOKEN})
 
 
-def test_snapshot_attachment_is_idempotent_and_rebinding_conflicts(client: TestClient) -> None:
+def _audit_count(sandbox: ProductSandbox, action: str) -> int:
+    row = sandbox.admin.execute(
+        "SELECT count(*) FROM audit_events WHERE action = %s", (action,)
+    ).fetchone()
+    assert row is not None
+    return int(row[0])
+
+
+def _incident(sandbox: ProductSandbox) -> tuple[object, ...] | None:
+    return sandbox.admin.execute(
+        "SELECT edge_event_id, event_type, revision, review_version "
+        "FROM incidents WHERE edge_event_id = %s",
+        (EVENT_ID,),
+    ).fetchone()
+
+
+def test_snapshot_attachment_is_idempotent_and_rebinding_conflicts(
+    client: TestClient, postgres_product_sandbox: ProductSandbox
+) -> None:
+    sandbox = postgres_product_sandbox
     path = "/api/v1/relay/snapshot-attachments"
     event = {
         "edge_event_id": EVENT_ID,
@@ -88,22 +95,16 @@ def test_snapshot_attachment_is_idempotent_and_rebinding_conflicts(client: TestC
     assert conflict.status_code == 409
     assert "content identity" in conflict.json()["detail"]
     assert invalid.status_code == 422
-    database = Path(client.app.state.edge_database_path)
-    with sqlite3.connect(database) as connection:
-        artifact_count = connection.execute(
-            "SELECT COUNT(*) FROM artifacts WHERE artifact_id='snapshot-1'"
-        ).fetchone()[0]
-        audit_count = connection.execute(
-            "SELECT COUNT(*) FROM audit_events WHERE action='relay.snapshot-attachment'"
-        ).fetchone()[0]
-    assert artifact_count == 1
-    assert audit_count == 2
-    assert client.app.state.catalog_store.records("snapshots") == []
+    assert sandbox.admin.execute(
+        "SELECT artifact_id, content_sha256 FROM artifacts WHERE kind = 'SNAPSHOT'"
+    ).fetchall() == [("snapshot-1", "a" * 64)]
+    assert _audit_count(sandbox, "relay.snapshot-attachment") == 2
 
 
 def test_snapshot_disposition_is_durable_and_never_changes_referenced_event(
-    client: TestClient,
+    client: TestClient, postgres_product_sandbox: ProductSandbox
 ) -> None:
+    sandbox = postgres_product_sandbox
     event = {
         "edge_event_id": EVENT_ID,
         "event_type": "bed-exit",
@@ -113,32 +114,22 @@ def test_snapshot_disposition_is_durable_and_never_changes_referenced_event(
         "facility_id": "facility-1",
     }
     assert _post(client, "/api/v1/relay/alerts", event).status_code == 202
-    database = Path(client.app.state.edge_database_path)
-    with sqlite3.connect(database) as connection:
-        before = connection.execute(
-            "SELECT edge_event_id,event_type,revision FROM incidents WHERE edge_event_id=?",
-            (EVENT_ID,),
-        ).fetchone()
+    before = _incident(sandbox)
 
     response = _post(client, "/api/v1/relay/snapshot-dispositions", DISPOSITION)
 
     assert response.status_code == 202
-    with sqlite3.connect(database) as connection:
-        after = connection.execute(
-            "SELECT edge_event_id,event_type,revision FROM incidents WHERE edge_event_id=?",
-            (EVENT_ID,),
-        ).fetchone()
-        disposition = connection.execute(
-            "SELECT state,reason FROM artifacts WHERE incident_id=("
-            "SELECT incident_id FROM incidents WHERE edge_event_id=?) AND kind='SNAPSHOT'",
-            (EVENT_ID,),
-        ).fetchone()
-    assert after == before
-    assert disposition == ("UNAVAILABLE", "UNAVAILABLE:camera offline")
+    assert before is not None
+    assert _incident(sandbox) == before
+    assert sandbox.admin.execute(
+        "SELECT state, reason FROM artifacts WHERE incident_id = ("
+        "SELECT incident_id FROM incidents WHERE edge_event_id = %s) AND kind = 'SNAPSHOT'",
+        (EVENT_ID,),
+    ).fetchone() == ("UNAVAILABLE", "UNAVAILABLE:camera offline")
 
 
 def test_snapshot_disposition_route_commits_canonical_action_and_detail(
-    client: TestClient,
+    client: TestClient, postgres_product_sandbox: ProductSandbox
 ) -> None:
     event = {
         "edge_event_id": EVENT_ID,
@@ -153,13 +144,10 @@ def test_snapshot_disposition_route_commits_canonical_action_and_detail(
     response = _post(client, "/api/v1/relay/snapshot-dispositions", DISPOSITION)
 
     assert response.status_code == 202
-    app = cast(FastAPI, client.app)
-    database = Path(app.state.edge_database_path)
-    with sqlite3.connect(database) as connection:
-        rows = connection.execute(
-            "SELECT action,target_id,actor_type,auth_mechanism,detail_json "
-            "FROM audit_events WHERE target_id='snapshot-missing'"
-        ).fetchall()
+    rows = postgres_product_sandbox.admin.execute(
+        "SELECT action, target_id, actor_type, auth_mechanism, detail_json "
+        "FROM audit_events WHERE target_id = 'snapshot-missing'"
+    ).fetchall()
     assert rows == [
         (
             "relay.snapshot-disposition",
@@ -171,7 +159,9 @@ def test_snapshot_disposition_route_commits_canonical_action_and_detail(
     ]
 
 
-def test_snapshot_attachment_rejects_inline_media_payload(client: TestClient) -> None:
+def test_snapshot_attachment_rejects_inline_media_payload(
+    client: TestClient, postgres_product_sandbox: ProductSandbox
+) -> None:
     response = _post(
         client,
         "/api/v1/relay/snapshot-attachments",
@@ -179,7 +169,8 @@ def test_snapshot_attachment_rejects_inline_media_payload(client: TestClient) ->
     )
 
     assert response.status_code == 422
-    assert client.app.state.catalog_store.records("snapshots") == []
+    assert artifact_count(postgres_product_sandbox) == 0
+    assert _audit_count(postgres_product_sandbox, "relay.snapshot-attachment") == 0
 
 
 class _OutcomeHandler(BaseHTTPRequestHandler):

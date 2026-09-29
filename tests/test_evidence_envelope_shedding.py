@@ -12,10 +12,8 @@ import pytest
 from fastapi.testclient import TestClient
 
 import shared.events.envelope_limits as limits
-from backend.app.edge_db.bootstrap import bootstrap_database
-from backend.app.features.evidence.record_store import CentralEvidenceQuery
+from backend.app.features.audit.postgres_runtime import PostgresAuditRuntime
 from backend.app.features.relay.router import RelayAlertRequest
-from backend.app.main import create_app, no_lifespan
 from shared.events.delivery_queue import DeliveryQueue
 from shared.events.evidence_export_contract import DeliveryFailure, EventReceipt
 from tests_support.alert_amplification_runtime import (
@@ -25,6 +23,7 @@ from tests_support.alert_amplification_runtime import (
     ServedFixture,
     relay_client,
 )
+from tests_support.postgres_sandbox import ProductSandbox
 from worker.pipeline.output.evidence.event_payload import WorkerEventPayload
 from worker.pipeline.output.evidence.evidence_sender import (
     EvidenceSender,
@@ -32,6 +31,8 @@ from worker.pipeline.output.evidence.evidence_sender import (
     SenderStep,
 )
 from worker.pipeline.output.evidence.evidence_stager import DurableEvidenceStager
+
+pytest_plugins = ("tests_support.postgres_sandbox",)
 
 _EDGE_EVENT_ID = "00000000-0000-4000-8000-0000000000e1"
 _DETECTED_AT = "2026-08-22T03:53:43Z"
@@ -86,10 +87,8 @@ def _stager(queue_directory: Path) -> DurableEvidenceStager:
     )
 
 
-def _incidents(database: Path) -> list[dict[str, object]]:
-    app = create_app(lifespan=no_lifespan)
-    app.state.central_evidence_query = CentralEvidenceQuery(database)
-    with TestClient(app) as client:
+def _incidents(relay: TestClient) -> list[dict[str, object]]:
+    with TestClient(relay.app) as client:
         assert (
             client.post(
                 "/api/v1/auth/session", json={"username": "admin", "password": "admin"}
@@ -113,11 +112,12 @@ def test_required_alert_field_source_tracks_relay_model() -> None:
 
 
 def test_oversized_event_is_shed_off_wire_and_delivered_to_incident_projection(
-    tmp_path: Path, caplog: pytest.LogCaptureFixture
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+    postgres_product_sandbox: ProductSandbox,
+    postgres_audit_runtime: PostgresAuditRuntime,
 ) -> None:
     queue_directory = tmp_path / "delivery-queue"
-    database = tmp_path / "edge.sqlite3"
-    bootstrap_database(database)
     stager = _stager(queue_directory)
     stager.stage(_event())
 
@@ -134,7 +134,7 @@ def test_oversized_event_is_shed_off_wire_and_delivered_to_incident_projection(
     assert values["probability"] == 0.97
 
     with ServedFixture() as served:
-        relay = relay_client(served.origin, tmp_path, database=database)
+        relay = relay_client(served.origin, postgres_product_sandbox, postgres_audit_runtime)
         transport = RelayTransport(relay)
         sender = EvidenceSender(
             queue_directory,
@@ -158,5 +158,5 @@ def test_oversized_event_is_shed_off_wire_and_delivered_to_incident_projection(
         for message in warnings
     )
 
-    [incident] = _incidents(database)
+    [incident] = _incidents(relay)
     assert incident["edge_event_id"] == _EDGE_EVENT_ID
