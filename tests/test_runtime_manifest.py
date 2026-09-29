@@ -1,14 +1,11 @@
 from __future__ import annotations
 
 import json
-import sqlite3
 from dataclasses import replace
 from pathlib import Path
 
 import pytest
 
-from backend.app.edge_db.bootstrap import bootstrap_database
-from backend.app.edge_db.compatibility import CURRENT_SCHEMA_RANGE
 from shared.detection_policies import default_policy_bundle, make_effective_policy
 from tests_support.pose_bbox56_bundle_artifact import write_pose_bbox56_bundle
 from worker.adapters.model.ort_pose_bbox56 import load_packaged_fall_bundle
@@ -597,7 +594,6 @@ def test_local_manifest_record_preserves_opaque_camera_identity_bytes(
     assert serialized_id.encode("utf-8") == camera_id.encode("utf-8")
 
     database = tmp_path / "edge.sqlite3"
-    bootstrap_database(database)
     store = AppliedRuntimeManifestStore(database)
     store.persist(
         manifest,
@@ -612,8 +608,9 @@ def test_local_manifest_record_preserves_opaque_camera_identity_bytes(
 
 
 def test_store_publishes_idempotent_manifest_envelopes_without_runtime_ddl(tmp_path: Path) -> None:
-    database = tmp_path / "edge.sqlite3"
-    bootstrap_database(database)
+    # Its own state directory: the autouse central SQLite fixture also lives under tmp_path.
+    database = tmp_path / "edge-state" / "edge.sqlite3"
+    database.parent.mkdir(mode=0o700)
     manifest = _manifest()
     store = AppliedRuntimeManifestStore(database)
 
@@ -631,26 +628,15 @@ def test_store_publishes_idempotent_manifest_envelopes_without_runtime_ddl(tmp_p
     )
     assert len(tuple((database.parent / "runtime-provenance").glob("*.json"))) == 2
     assert not (database.parent / "delivery-queue").exists()
-    with sqlite3.connect(database) as connection:
-        assert connection.execute("PRAGMA user_version").fetchone() == (
-            CURRENT_SCHEMA_RANGE.maximum,
-        )
-        tables = {
-            str(row[0])
-            for row in connection.execute(
-                "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'"
-            )
-        }
-        assert "runtime_manifest_contents" not in tables
-        readback = json.loads((database.parent / "applied-runtime-manifest.json").read_text())
-        assert readback["manifest_sha256"] == manifest.sha256
-        assert readback["canonical_json"] == manifest.canonical_json
-        assert (database.parent / "applied-runtime-manifest.json").stat().st_mode & 0o777 == 0o600
+    assert list(database.parent.rglob("*.sqlite3*")) == []
+    readback = json.loads((database.parent / "applied-runtime-manifest.json").read_text())
+    assert readback["manifest_sha256"] == manifest.sha256
+    assert readback["canonical_json"] == manifest.canonical_json
+    assert (database.parent / "applied-runtime-manifest.json").stat().st_mode & 0o777 == 0o600
 
 
 def test_manifest_readback_contains_canonical_manifest_reference(tmp_path: Path) -> None:
     database = tmp_path / "edge.sqlite3"
-    bootstrap_database(database)
     manifest = _manifest()
     AppliedRuntimeManifestStore(database).persist(
         manifest,
@@ -679,7 +665,6 @@ def test_event_stager_rejects_noncanonical_runtime_manifest_identity(
 
 def test_store_refuses_boot_identity_reuse_for_different_manifest(tmp_path: Path) -> None:
     database = tmp_path / "edge.sqlite3"
-    bootstrap_database(database)
     store = AppliedRuntimeManifestStore(database)
     store.persist(_manifest(), boot_instance_id="boot:fixed", applied_at="2026-08-13T00:00:00Z")
 

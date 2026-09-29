@@ -5,7 +5,6 @@ from pathlib import Path
 
 import pytest
 
-from backend.app.edge_db.bootstrap import bootstrap_database
 from backend.app.edge_db.compact_schema import SCHEMA_18_STATEMENTS
 from backend.app.edge_db.compatibility import SchemaLedgerError
 from backend.app.edge_db.connection import RuntimeActor, open_runtime_database
@@ -14,11 +13,12 @@ from backend.app.edge_db.schema18_manifest import (
     compile_schema19_manifest,
     read_schema_manifest,
 )
+from tests_support.sqlite_source import create_schema19_source
 
 
 def _fresh(tmp_path: Path) -> Path:
     database = tmp_path / "edge.sqlite3"
-    bootstrap_database(database)
+    create_schema19_source(database)
     return database
 
 

@@ -7,7 +7,7 @@ as provider, owns the routes it serves and the ``manifest.json`` it writes
 as consumer, owns the paths it calls and the parsers it reads with
 (``backend/app/features/cameras/*``, ``backend/app/features/clips/*``). There
 is deliberately no shared edge-internal contract module -- ``contracts/`` is
-the byte-mirrored ML vocabulary (ADR-0006), not an interface package.
+the ML vocabulary (ADR-0006), not an interface package.
 
 This file is the sanctioned meeting point: it imports both packages and
 round-trips real provider output through the real consumer parser, so drift
