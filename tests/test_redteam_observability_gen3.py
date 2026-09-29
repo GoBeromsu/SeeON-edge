@@ -27,6 +27,11 @@ from worker.pipeline.diagnostics.exporter import ExecutionRecordExporter
 from worker.pipeline.diagnostics.lanes import LANE_OVERFLOW_CAUSE, ExecutionRecordLanes
 from worker.runtime.flow.policy_pump import NativePolicyPump
 
+pytest_plugins = (
+    "tests_support.postgres_sandbox",
+    "tests_support.postgres_diagnostics_sandbox",
+)
+
 _CAMERA = "cam-1"
 _BOOT_OVERFLOW = "boot-1"
 _BOOT_OTHER = "boot-2"
@@ -119,7 +124,9 @@ class _FailThenReal:
         return self._inner.post_batch(batch)
 
 
-def test_g3_1_interleaved_boots_isolate_overflow_and_restart_sequences(tmp_path) -> None:
+def test_g3_1_interleaved_boots_isolate_overflow_and_restart_sequences(
+    tmp_path, postgres_product_sandbox, postgres_audit_runtime, postgres_lifespan_diagnostics_schema
+) -> None:
     isolated = ExecutionRecordLanes(lane_capacity=2)
     _interleave_two_boots(isolated)
     other = isolated.drain_for(_CAMERA, _BOOT_OTHER, limit=8)
@@ -138,7 +145,14 @@ def test_g3_1_interleaved_boots_isolate_overflow_and_restart_sequences(tmp_path)
     lanes = ExecutionRecordLanes(lane_capacity=2)
     _interleave_two_boots(lanes)
     exporter = None
-    with serve_backend(tmp_path, budget_bytes=_BUDGET_BYTES, relay_token=_RELAY_TOKEN) as backend:
+    with serve_backend(
+        tmp_path,
+        budget_bytes=_BUDGET_BYTES,
+        relay_token=_RELAY_TOKEN,
+        sandbox=postgres_product_sandbox,
+        audit_runtime=postgres_audit_runtime,
+        diagnostics_schema=postgres_lifespan_diagnostics_schema,
+    ) as backend:
         try:
             exporter = _exporter(
                 lanes, backend.base_url, backend.relay_token, batch_max=32, flush_ms=_FLUSH_MS
@@ -185,7 +199,9 @@ def test_g3_1_interleaved_boots_isolate_overflow_and_restart_sequences(tmp_path)
                 exporter.stop()
 
 
-def test_g3_2_loss_only_lane_is_exported_without_a_later_valid_record(tmp_path) -> None:
+def test_g3_2_loss_only_lane_is_exported_without_a_later_valid_record(
+    tmp_path, postgres_product_sandbox, postgres_audit_runtime, postgres_lifespan_diagnostics_schema
+) -> None:
     """A lane holding only loss (records-empty) still reaches the Backend.
 
     The public way to a records-empty loss lane is an export failure: the
@@ -203,7 +219,14 @@ def test_g3_2_loss_only_lane_is_exported_without_a_later_valid_record(tmp_path) 
     assert (_CAMERA, _BOOT_OVERFLOW) in lanes.cameras_with_work()
 
     exporter = None
-    with serve_backend(tmp_path, budget_bytes=_BUDGET_BYTES, relay_token=_RELAY_TOKEN) as backend:
+    with serve_backend(
+        tmp_path,
+        budget_bytes=_BUDGET_BYTES,
+        relay_token=_RELAY_TOKEN,
+        sandbox=postgres_product_sandbox,
+        audit_runtime=postgres_audit_runtime,
+        diagnostics_schema=postgres_lifespan_diagnostics_schema,
+    ) as backend:
         try:
             exporter = _exporter(
                 lanes, backend.base_url, backend.relay_token, batch_max=8, flush_ms=_FLUSH_MS
@@ -233,11 +256,20 @@ def test_g3_2_loss_only_lane_is_exported_without_a_later_valid_record(tmp_path) 
                 exporter.stop()
 
 
-def test_g3_3_export_failed_gap_delivers_without_new_record(tmp_path) -> None:
+def test_g3_3_export_failed_gap_delivers_without_new_record(
+    tmp_path, postgres_product_sandbox, postgres_audit_runtime, postgres_lifespan_diagnostics_schema
+) -> None:
     lanes = ExecutionRecordLanes(lane_capacity=8)
     assert lanes.try_emit(_lane_record(seq=0, observed=1_000)) is True
     exporter = None
-    with serve_backend(tmp_path, budget_bytes=_BUDGET_BYTES, relay_token=_RELAY_TOKEN) as backend:
+    with serve_backend(
+        tmp_path,
+        budget_bytes=_BUDGET_BYTES,
+        relay_token=_RELAY_TOKEN,
+        sandbox=postgres_product_sandbox,
+        audit_runtime=postgres_audit_runtime,
+        diagnostics_schema=postgres_lifespan_diagnostics_schema,
+    ) as backend:
         try:
             inner = ExecutionRecordsClient(backend.base_url, backend.relay_token)
             client = _FailThenReal(inner)

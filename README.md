@@ -30,7 +30,7 @@ The edge runtime brings together an RTSP inference worker, a control/status gate
 | `shared/` | Backend↔worker wire code in `shared.events` |
 | `contracts/` | Top-level vendored contract leaf (ADR-0006) |
 
-Training is maintained separately in `SeniorAILab/eldercare-dataset-ops`. The repository retains the `eldercare-fall-ml` deployment identity and its existing image names and environment-variable prefixes.
+Historical training lived in the archived `SeniorAILab/eldercare-dataset-ops`. The repository retains the `eldercare-fall-ml` deployment identity and its existing image names and environment-variable prefixes.
 
 ## Setup
 

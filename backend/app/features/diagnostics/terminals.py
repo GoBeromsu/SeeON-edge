@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-import sqlite3
+import psycopg
 
 from backend.app.features.diagnostics.coverage import UNSCOPED_GAP_CAUSE
 from backend.app.features.diagnostics.records import (
@@ -12,7 +12,7 @@ from backend.app.features.diagnostics.records import (
 )
 
 
-def refresh_unit_terminals(connection: sqlite3.Connection, unit_horizon_ns: int) -> None:
+def refresh_unit_terminals(connection: psycopg.Connection, unit_horizon_ns: int) -> None:
     """Mark units terminal by a lane watermark or by a newer (boot, epoch).
 
     Horizon closure is scoped to one (camera, boot, generation, epoch) lane.
@@ -42,25 +42,25 @@ def refresh_unit_terminals(connection: sqlite3.Connection, unit_horizon_ns: int)
                       AND (
                           (gap.source_generation = execution_units.source_generation
                            AND gap.stream_epoch = execution_units.stream_epoch)
-                          OR (gap.cause = ? AND gap.exact = 0)
+                          OR (gap.cause = %s AND gap.exact = 0)
                       )
-                      AND (gap.coverage_kind != ? OR gap.exact = 0)
+                      AND (gap.coverage_kind != %s OR gap.exact = 0)
                       AND gap.from_ns <= execution_units.last_observed_ns
                       AND gap.to_ns >= execution_units.first_observed_ns
-                ) THEN ?
-                WHEN execution_units.causal_state = ? THEN execution_units.causal_state
+                ) THEN %s
+                WHEN execution_units.causal_state = %s THEN execution_units.causal_state
                 WHEN EXISTS (
                     SELECT 1 FROM execution_coverage AS gap
                     WHERE gap.camera_id = execution_units.camera_id
                       AND gap.worker_boot_id = execution_units.worker_boot_id
                       AND gap.source_generation = execution_units.source_generation
                       AND gap.stream_epoch = execution_units.stream_epoch
-                      AND gap.coverage_kind = ?
+                      AND gap.coverage_kind = %s
                       AND gap.exact = 1
                       AND gap.from_ns <= execution_units.last_observed_ns
                       AND gap.to_ns >= execution_units.first_observed_ns
-                ) THEN ?
-                ELSE ?
+                ) THEN %s
+                ELSE %s
             END
         FROM (
             SELECT camera_id, worker_boot_id, source_generation, stream_epoch,
@@ -74,8 +74,8 @@ def refresh_unit_terminals(connection: sqlite3.Connection, unit_horizon_ns: int)
           AND execution_units.stream_epoch = lane.stream_epoch
           AND (
               (execution_units.terminal = 0
-               AND lane.watermark_ns - execution_units.last_observed_ns > ?)
-              OR (execution_units.terminal = 1 AND execution_units.causal_state IN (?, ?))
+               AND lane.watermark_ns - execution_units.last_observed_ns > %s)
+              OR (execution_units.terminal = 1 AND execution_units.causal_state IN (%s, %s))
           )
         """,
         (
@@ -95,8 +95,8 @@ def refresh_unit_terminals(connection: sqlite3.Connection, unit_horizon_ns: int)
         """
         UPDATE execution_units
         SET terminal = 1,
-            causal_state = CASE WHEN execution_units.causal_state = ?
-                THEN ? ELSE ? END
+            causal_state = CASE WHEN execution_units.causal_state = %s
+                THEN %s ELSE %s END
         FROM (
             SELECT lane.camera_id AS camera_id,
                    lane.worker_boot_id AS worker_boot_id,
@@ -129,7 +129,7 @@ def refresh_unit_terminals(connection: sqlite3.Connection, unit_horizon_ns: int)
     seal_final_segments(connection)
 
 
-def seal_final_segments(connection: sqlite3.Connection) -> None:
+def seal_final_segments(connection: psycopg.Connection) -> None:
     """Promote a pending segment only when every member causal unit is terminal.
 
     An open unit elsewhere on the lane does not hold an older segment pending.
@@ -140,8 +140,8 @@ def seal_final_segments(connection: sqlite3.Connection) -> None:
     connection.execute(
         """
         UPDATE execution_segments
-        SET storage_state = ?
-        WHERE storage_state = ?
+        SET storage_state = %s
+        WHERE storage_state = %s
           AND NOT EXISTS (
               SELECT 1
               FROM execution_records AS record
@@ -155,7 +155,7 @@ def seal_final_segments(connection: sqlite3.Connection) -> None:
     )
 
 
-def force_oldest_units_terminal(connection: sqlite3.Connection, count: int = 1) -> int:
+def force_oldest_units_terminal(connection: psycopg.Connection, count: int = 1) -> int:
     """Pressure fallback: close ``count`` globally oldest non-terminal units.
 
     Oldest matches ``next_prunable_unit`` once the row is terminal: least
@@ -169,24 +169,18 @@ def force_oldest_units_terminal(connection: sqlite3.Connection, count: int = 1) 
         """
         SELECT causal_unit_id FROM execution_units
         WHERE terminal = 0
-        ORDER BY last_observed_ns, causal_unit_id
-        LIMIT ?
+        ORDER BY last_observed_ns, causal_unit_id COLLATE pg_catalog."C"
+        LIMIT %s
         """,
         (count,),
     ).fetchall()
-    connection.executemany(
+    connection.execute(
         """
         UPDATE execution_units
-        SET terminal = 1, causal_state = ?
-        WHERE causal_unit_id = ? AND terminal = 0
+        SET terminal = 1, causal_state = %s
+        WHERE causal_unit_id = ANY(%s) AND terminal = 0
         """,
-        [
-            (
-                str(UnitCausalState.INCOMPLETE_UNKNOWN),
-                str(row[0]),
-            )
-            for row in rows
-        ],
+        (str(UnitCausalState.INCOMPLETE_UNKNOWN), [str(row[0]) for row in rows]),
     )
     if rows:
         seal_final_segments(connection)

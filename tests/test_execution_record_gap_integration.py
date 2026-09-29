@@ -3,18 +3,12 @@
 from __future__ import annotations
 
 import json
-import sqlite3
-from contextlib import closing
 from dataclasses import replace
 
+import psycopg
 import pytest
+from psycopg import sql
 
-from backend.app.edge_db.bootstrap import bootstrap_database
-from backend.app.edge_db.connection import (
-    RuntimeActor,
-    open_runtime_database,
-    write_transaction,
-)
 from backend.app.features.diagnostics.prune import prune_unit
 from backend.app.features.diagnostics.records import CoverageKind, StorageState, UnitCausalState
 from backend.app.features.diagnostics.retention import RetentionBudget, used_bytes
@@ -28,8 +22,11 @@ from shared.events.execution_records import (
     WireProvenance,
     WireRecord,
 )
+from tests_support.postgres_diagnostics_sandbox import DiagnosticsSandbox
 from worker.pipeline.diagnostics.exporter import ExecutionRecordExporter
 from worker.pipeline.diagnostics.lanes import ExecutionRecordLanes
+
+pytest_plugins = ("tests_support.postgres_diagnostics_sandbox",)
 
 _PROVENANCE = WireProvenance("rev", "image", "model", "cal", "pre", "config", "policy")
 
@@ -55,19 +52,20 @@ def _batch(records=(), gaps=()):
     return WireBatch("synthetic", "opaque-boot", _PROVENANCE, records, gaps)
 
 
-def _execution_snapshot(connect):
-    with closing(connect()) as connection:
-        return {
-            table: connection.execute(f"SELECT * FROM {table} ORDER BY 1").fetchall()
-            for table in (
-                "execution_provenance",
-                "execution_segments",
-                "execution_units",
-                "execution_records",
-                "execution_coverage",
-                "execution_batches",
-            )
-        }
+def _execution_snapshot(diag: DiagnosticsSandbox):
+    return {
+        table: diag.admin.execute(
+            sql.SQL("SELECT * FROM {} ORDER BY 1").format(sql.Identifier(table))
+        ).fetchall()
+        for table in (
+            "execution_provenance",
+            "execution_segments",
+            "execution_units",
+            "execution_records",
+            "execution_coverage",
+            "execution_batches",
+        )
+    }
 
 
 def _unit_states(connection):
@@ -80,8 +78,8 @@ def _unit_states(connection):
 
 
 class _StoreClient:
-    def __init__(self, store, connect):
-        self.store, self.connect = store, connect
+    def __init__(self, store, diag: DiagnosticsSandbox):
+        self.store, self.diag = store, diag
         self.posted = []
         self.old_states = []
         self.fail_gap_once = False
@@ -96,46 +94,37 @@ class _StoreClient:
         result = self.store.ingest_batch(
             ingest_batch_from_wire(decoded, backend_build_revision="api-rev")
         )
-        connection = self.connect()
-        try:
-            self.old_states.append(
-                connection.execute(
-                    "SELECT terminal, causal_state FROM execution_units WHERE causal_unit_id = ?",
-                    ("old",),
-                ).fetchone()
-            )
-        finally:
-            connection.close()
+        self.old_states.append(
+            self.diag.admin.execute(
+                "SELECT terminal, causal_state FROM execution_units WHERE causal_unit_id = %s",
+                ("old",),
+            ).fetchone()
+        )
         return wire_receipt_from_store(result)
 
 
 @pytest.fixture
-def stack(tmp_path):
-    path = tmp_path / "edge.sqlite3"
-    bootstrap_database(path)
-
-    def connect():
-        return open_runtime_database(path, actor=RuntimeActor.API)
-
+def stack(postgres_diagnostics_sandbox: DiagnosticsSandbox):
+    diag = postgres_diagnostics_sandbox
     # This fixture must admit a cap-full record; it is NOT a deployment budget.
     store = ExecutionRecordStore(
-        connect,
+        diag.database,
         RetentionBudget(
             total_bytes=512 * 1024 * 1024, unit_horizon_ns=100, coverage_rows_per_epoch=1
         ),
     )
-    client = _StoreClient(store, connect)
+    client = _StoreClient(store, diag)
     lanes = ExecutionRecordLanes(lane_capacity=8)
     exporter = ExecutionRecordExporter(
         lanes=lanes, client=client, provenance=_PROVENANCE, batch_max=8, flush_ms=50
     )
-    return connect, client, lanes, exporter
+    return diag, client, lanes, exporter
 
 
 @pytest.mark.parametrize("generation,epoch", [(0, 0), (7, 11)])
 @pytest.mark.parametrize("fail_gap", [False, True])
 def test_split_loss_commits_before_later_terminal_watermark(stack, generation, epoch, fail_gap):
-    connect, client, lanes, exporter = stack
+    diag, client, lanes, exporter = stack
     assert lanes.try_emit(_record(0, "old", 10, generation, epoch))
     exporter.flush_once()
     assert lanes.try_emit(_record(1, "old", 10, generation, epoch))
@@ -148,13 +137,13 @@ def test_split_loss_commits_before_later_terminal_watermark(stack, generation, e
     assert len(_batch((future,)).encode()) == MAX_EXECUTION_RECORD_BODY_BYTES
     client.fail_gap_once = fail_gap
     assert lanes.try_emit(future)
-    before_gap_attempt = _execution_snapshot(connect)
+    before_gap_attempt = _execution_snapshot(diag)
     exporter.flush_once()
     split = client.posted[1:]
     assert split[0].gaps and not split[0].records
     if fail_gap:
         assert len(split) == 1
-        assert _execution_snapshot(connect) == before_gap_attempt
+        assert _execution_snapshot(diag) == before_gap_attempt
         assert client.old_states[-1][0] == 0
         exporter.flush_once()
         split = client.posted[1:]
@@ -168,19 +157,15 @@ def test_split_loss_commits_before_later_terminal_watermark(stack, generation, e
     assert committed_split[1].records == (future,) and not committed_split[1].gaps
     assert not lanes.cameras_with_work()
     assert client.old_states[-1] == (1, UnitCausalState.INCOMPLETE_KNOWN)
-    connection = connect()
-    try:
-        gaps = connection.execute(
-            "SELECT source_generation, stream_epoch, exact, record_count FROM execution_coverage"
-        ).fetchall()
-    finally:
-        connection.close()
+    gaps = diag.admin.execute(
+        "SELECT source_generation, stream_epoch, exact, record_count FROM execution_coverage"
+    ).fetchall()
     assert gaps == [(generation, epoch, 1, 1)]
     assert all(len(batch.encode()) <= MAX_EXECUTION_RECORD_BODY_BYTES for batch in client.posted)
 
 
 def test_legacy_unscoped_loss_is_unknown_even_after_coarsening(stack):
-    connect, client, lanes, exporter = stack
+    diag, client, lanes, exporter = stack
     # Legacy wire has no scope keys and must never borrow the next record's scope.
     for seq in (0, 1):
         gap = WireGap("policy", seq, seq, 10, 10, 1, "export-failed")
@@ -190,27 +175,23 @@ def test_legacy_unscoped_loss_is_unknown_even_after_coarsening(stack):
     assert lanes.try_emit(_record(3, "future", 1000, 7, 11))
     exporter.flush_once()
     assert client.old_states[-1] == (1, UnitCausalState.INCOMPLETE_UNKNOWN)
-    connection = connect()
-    try:
-        gaps = connection.execute(
-            "SELECT coverage_kind, exact, record_count, cause FROM execution_coverage"
-        ).fetchall()
-    finally:
-        connection.close()
+    gaps = diag.admin.execute(
+        "SELECT coverage_kind, exact, record_count, cause FROM execution_coverage"
+    ).fetchall()
     assert gaps == [("UNKNOWN_COARSENED", 0, 2, "scope-unresolved")]
 
 
 def test_late_loss_never_upgrades_forced_unknown_terminal(stack):
-    connect, client, lanes, exporter = stack
+    diag, client, lanes, exporter = stack
     assert lanes.try_emit(_record(0, "old", 10, 7, 11))
     exporter.flush_once()
-    connection = connect()
-    try:
-        connection.execute(
-            "UPDATE execution_units SET terminal = 1, causal_state = 'INCOMPLETE_UNKNOWN'"
+    diag.database.transact(
+        lambda connection: (
+            connection.execute(
+                "UPDATE execution_units SET terminal = 1, causal_state = 'INCOMPLETE_UNKNOWN'"
+            ).rowcount
         )
-    finally:
-        connection.close()
+    )
     assert lanes.try_emit(_record(1, "old", 10, 7, 11))
     dropped = lanes.drain_for("synthetic", "opaque-boot", limit=8)
     assert dropped is not None
@@ -220,7 +201,7 @@ def test_late_loss_never_upgrades_forced_unknown_terminal(stack):
 
 
 def test_delayed_loss_downgrades_previously_complete_unit(stack):
-    _connect, client, lanes, exporter = stack
+    _diag, client, lanes, exporter = stack
     assert lanes.try_emit(_record(0, "old", 10, 0, 0))
     exporter.flush_once()
     assert lanes.try_emit(_record(1, "old", 10, 0, 0))
@@ -264,12 +245,12 @@ def test_storage_unavailable_receipt_retains_loss_until_committed():
 
 @pytest.mark.parametrize("refusal_attempts", [2, 17])
 def test_gap_only_capacity_refusal_recovers_same_id_exactly_once(stack, refusal_attempts):
-    connect, client, _lanes, _exporter = stack
+    diag, client, _lanes, _exporter = stack
     sufficient_budget = client.store.budget
     refusal_budget = replace(sufficient_budget, total_bytes=256)
     committed_at_ns = (refusal_attempts + 1) * 100
     ticks = iter(range(100, committed_at_ns + 1, 100))
-    client.store = ExecutionRecordStore(connect, refusal_budget, clock=lambda: next(ticks))
+    client.store = ExecutionRecordStore(diag.database, refusal_budget, clock=lambda: next(ticks))
     batch = _batch(gaps=(WireGap("policy", 1, 1, 10, 10, 1, "export-failed", 7, 11),))
 
     for attempt in range(1, refusal_attempts + 1):
@@ -279,7 +260,7 @@ def test_gap_only_capacity_refusal_recovers_same_id_exactly_once(stack, refusal_
         assert refused.storage_state == StorageState.STORAGE_UNAVAILABLE
         assert (refused.accepted, refused.duplicates, refused.rejected) == (0, 0, ())
         assert refused.committed_at_ns == refused_at_ns
-        refused_rows = _execution_snapshot(connect)
+        refused_rows = _execution_snapshot(diag)
         for table in (
             "execution_provenance",
             "execution_segments",
@@ -289,70 +270,68 @@ def test_gap_only_capacity_refusal_recovers_same_id_exactly_once(stack, refusal_
             assert refused_rows[table] == []
         assert len(refused_rows["execution_batches"]) == 1
         assert len(refused_rows["execution_coverage"]) == refusal_budget.coverage_rows_per_epoch
-        with closing(connect()) as connection:
-            # The refusal envelope cannot fit in this deliberately tiny budget.
-            assert used_bytes(connection) > refusal_budget.high_water
-            coverage = connection.execute(
-                """
-                SELECT camera_id, worker_boot_id, source_generation, stream_epoch,
-                       coverage_kind, producer, from_sequence, to_sequence,
-                       from_ns, to_ns, record_count, exact, cause, recorded_at_ns
-                FROM execution_coverage ORDER BY coverage_id
-                """
-            ).fetchall()
-            assert coverage == [
-                (
-                    batch.camera_id,
-                    batch.worker_boot_id,
-                    0,
-                    0,
-                    CoverageKind.STORAGE_UNAVAILABLE
-                    if attempt == 1
-                    else CoverageKind.UNKNOWN_COARSENED,
-                    None,
-                    None,
-                    None,
-                    100,
-                    refused_at_ns,
-                    0,
-                    0,
-                    "capacity" if attempt == 1 else "coarsened",
-                    refused_at_ns,
-                )
-            ]
-            receipt_row = connection.execute(
-                """
-                SELECT batch_id, received_at_ns, accepted_records, duplicate_records,
-                       rejected_records, receipt FROM execution_batches
-                """
-            ).fetchone()
-            assert receipt_row[:5] == (batch.batch_id, refused_at_ns, 0, 0, 0)
-            assert json.loads(receipt_row[5]) == refused.to_json()
+        # The refusal envelope cannot fit in this deliberately tiny budget.
+        assert used_bytes(diag.admin) > refusal_budget.high_water
+        coverage = diag.admin.execute(
+            """
+            SELECT camera_id, worker_boot_id, source_generation, stream_epoch,
+                   coverage_kind, producer, from_sequence, to_sequence,
+                   from_ns, to_ns, record_count, exact, cause, recorded_at_ns
+            FROM execution_coverage ORDER BY coverage_id
+            """
+        ).fetchall()
+        assert coverage == [
+            (
+                batch.camera_id,
+                batch.worker_boot_id,
+                0,
+                0,
+                CoverageKind.STORAGE_UNAVAILABLE
+                if attempt == 1
+                else CoverageKind.UNKNOWN_COARSENED,
+                None,
+                None,
+                None,
+                100,
+                refused_at_ns,
+                0,
+                0,
+                "capacity" if attempt == 1 else "coarsened",
+                refused_at_ns,
+            )
+        ]
+        receipt_row = diag.admin.execute(
+            """
+            SELECT batch_id, received_at_ns, accepted_records, duplicate_records,
+                   rejected_records, receipt FROM execution_batches
+            """
+        ).fetchone()
+        assert receipt_row[:5] == (batch.batch_id, refused_at_ns, 0, 0, 0)
+        assert json.loads(receipt_row[5]) == refused.to_json()
 
     client.store.budget = sufficient_budget
     committed = client.post_batch(batch)
     assert committed == replace(
         refused, storage_state=str(StorageState.COMMITTED), committed_at_ns=committed_at_ns
     )
-    with closing(connect()) as connection:
-        gaps = connection.execute(
-            """
-            SELECT source_generation, stream_epoch, producer, from_sequence,
-                   to_sequence, from_ns, to_ns, record_count, exact, cause
-            FROM execution_coverage WHERE coverage_kind = ?
-            """,
-            (str(CoverageKind.MISSING_NOT_RECORDED),),
-        ).fetchall()
-        assert gaps == [(7, 11, "policy", 1, 1, 10, 10, 1, 1, "export-failed")]
-        receipt_row = connection.execute(
-            """
-            SELECT batch_id, received_at_ns, accepted_records, duplicate_records,
-                   rejected_records, receipt FROM execution_batches
-            """
-        ).fetchone()
-        assert receipt_row[:5] == (batch.batch_id, committed_at_ns, 0, 0, 0)
-        assert json.loads(receipt_row[5]) == committed.to_json()
-    committed_rows = _execution_snapshot(connect)
+    gaps = diag.admin.execute(
+        """
+        SELECT source_generation, stream_epoch, producer, from_sequence,
+               to_sequence, from_ns, to_ns, record_count, exact, cause
+        FROM execution_coverage WHERE coverage_kind = %s
+        """,
+        (str(CoverageKind.MISSING_NOT_RECORDED),),
+    ).fetchall()
+    assert gaps == [(7, 11, "policy", 1, 1, 10, 10, 1, 1, "export-failed")]
+    receipt_row = diag.admin.execute(
+        """
+        SELECT batch_id, received_at_ns, accepted_records, duplicate_records,
+               rejected_records, receipt FROM execution_batches
+        """
+    ).fetchone()
+    assert receipt_row[:5] == (batch.batch_id, committed_at_ns, 0, 0, 0)
+    assert json.loads(receipt_row[5]) == committed.to_json()
+    committed_rows = _execution_snapshot(diag)
     assert len(committed_rows["execution_batches"]) == 1
     assert len(committed_rows["execution_provenance"]) == 1
     # One refusal control row and one actual scoped gap row, in separate lanes.
@@ -364,64 +343,63 @@ def test_gap_only_capacity_refusal_recovers_same_id_exactly_once(stack, refusal_
 
     # A new store must return the durable commit even under renewed pressure.
     client.store = ExecutionRecordStore(
-        connect, refusal_budget, clock=lambda: committed_at_ns + 100
+        diag.database, refusal_budget, clock=lambda: committed_at_ns + 100
     )
     assert client.post_batch(batch) == committed
     assert client.posted == [batch] * (refusal_attempts + 2)
-    assert _execution_snapshot(connect) == committed_rows
+    assert _execution_snapshot(diag) == committed_rows
 
 
 def test_gap_only_retry_error_rolls_back_to_durable_refusal(stack, monkeypatch):
     from backend.app.features.diagnostics import store as store_module
 
-    connect, client, _lanes, _exporter = stack
+    diag, client, _lanes, _exporter = stack
     sufficient_budget = client.store.budget
     ticks = iter((100, 200, 300))
     client.store = ExecutionRecordStore(
-        connect, replace(sufficient_budget, total_bytes=256), clock=lambda: next(ticks)
+        diag.database, replace(sufficient_budget, total_bytes=256), clock=lambda: next(ticks)
     )
     batch = _batch(gaps=(WireGap("policy", 1, 1, 10, 10, 1, "export-failed", 7, 11),))
     refused = client.post_batch(batch)
     assert refused.storage_state == StorageState.STORAGE_UNAVAILABLE
-    before = _execution_snapshot(connect)
+    before = _execution_snapshot(diag)
     client.store.budget = sufficient_budget
     real_enforce_budget = store_module.enforce_budget
 
     def fail_after_enforcement(connection, budget, now_ns, *, meter):
         assert real_enforce_budget(connection, budget, now_ns, meter=meter)
         receipt_text = connection.execute(
-            "SELECT receipt FROM execution_batches WHERE batch_id = ?", (batch.batch_id,)
+            "SELECT receipt FROM execution_batches WHERE batch_id = %s", (batch.batch_id,)
         ).fetchone()[0]
         assert json.loads(receipt_text)["storage_state"] == StorageState.COMMITTED
         assert connection.execute(
-            "SELECT SUM(record_count) FROM execution_coverage WHERE coverage_kind = ?",
+            "SELECT SUM(record_count) FROM execution_coverage WHERE coverage_kind = %s",
             (str(CoverageKind.MISSING_NOT_RECORDED),),
         ).fetchone() == (1,)
-        raise sqlite3.OperationalError("injected failure after capacity enforcement")
+        raise psycopg.DataError("injected failure after capacity enforcement")
 
     with monkeypatch.context() as patch:
         patch.setattr(store_module, "enforce_budget", fail_after_enforcement)
-        with pytest.raises(sqlite3.OperationalError, match="injected failure"):
+        with pytest.raises(psycopg.DataError, match="injected failure"):
             client.post_batch(batch)
     # The refusal, including its original timestamp, and all six tables survive.
-    assert _execution_snapshot(connect) == before
+    assert _execution_snapshot(diag) == before
     committed = client.post_batch(batch)
     assert committed == replace(
         refused, storage_state=str(StorageState.COMMITTED), committed_at_ns=300
     )
-    with closing(connect()) as connection:
-        assert connection.execute(
-            """
-            SELECT COUNT(*), SUM(record_count) FROM execution_coverage
-            WHERE coverage_kind = ?
-            """,
-            (str(CoverageKind.MISSING_NOT_RECORDED),),
-        ).fetchone() == (1, 1)
+    assert diag.admin.execute(
+        """
+        SELECT COUNT(*), SUM(record_count) FROM execution_coverage
+        WHERE coverage_kind = %s
+        """,
+        (str(CoverageKind.MISSING_NOT_RECORDED),),
+    ).fetchone() == (1, 1)
 
 
 @pytest.mark.parametrize("survivor_span", [(20, 40), (10, 20)])
 def test_contiguous_prune_extension_downgrades_terminal_in_same_transaction(stack, survivor_span):
-    connect, client, _lanes, _exporter = stack
+    diag, client, _lanes, _exporter = stack
     first_ns, last_ns = survivor_span
     records = (
         replace(_record(0, "pruned-0", 0, 7, 11), producer="p"),
@@ -459,51 +437,57 @@ def test_contiguous_prune_extension_downgrades_terminal_in_same_transaction(stac
             (0, UnitCausalState.INCOMPLETE_UNKNOWN),
         )
     )
-    with closing(connect()) as connection:
-        assert _unit_states(connection) == expected_states
-        connection.execute(
-            "UPDATE execution_units SET causal_state = ? WHERE causal_unit_id = ?",
-            (str(UnitCausalState.INCOMPLETE_UNKNOWN), "previously-unknown"),
+    assert _unit_states(diag.admin) == expected_states
+    diag.database.transact(
+        lambda connection: (
+            connection.execute(
+                "UPDATE execution_units SET causal_state = %s WHERE causal_unit_id = %s",
+                (str(UnitCausalState.INCOMPLETE_UNKNOWN), "previously-unknown"),
+            ).rowcount
         )
-        expected_states["previously-unknown"] = (1, UnitCausalState.INCOMPLETE_UNKNOWN)
-        with write_transaction(connection):
-            freed, lane = prune_unit(connection, "pruned-0", 1100)
-            assert freed > 0
-            assert lane == ("synthetic", "opaque-boot", 7, 11)
-        del expected_states["pruned-0"]
-        assert _unit_states(connection) == expected_states
-        first_coverage = connection.execute(
+    )
+    expected_states["previously-unknown"] = (1, UnitCausalState.INCOMPLETE_UNKNOWN)
+    freed, lane = diag.database.transact(
+        lambda connection: prune_unit(connection, "pruned-0", 1100)
+    )
+    assert freed > 0
+    assert lane == ("synthetic", "opaque-boot", 7, 11)
+    del expected_states["pruned-0"]
+    assert _unit_states(diag.admin) == expected_states
+    first_coverage = diag.admin.execute(
+        """
+        SELECT coverage_id, coverage_kind, producer, from_sequence, to_sequence,
+               from_ns, to_ns, record_count, exact FROM execution_coverage
+        """
+    ).fetchall()
+    assert len(first_coverage) == 1
+    coverage_id = first_coverage[0][0]
+    assert first_coverage[0][1:] == (CoverageKind.DELETED_BY_CAPACITY, "p", 0, 0, 0, 0, 1, 1)
+    before_extension = _execution_snapshot(diag)
+    extended_states = dict(expected_states)
+    del extended_states["pruned-1"]
+    extended_states["survivor"] = (1, UnitCausalState.INCOMPLETE_UNKNOWN)
+
+    def prune_then_abort(connection: psycopg.Connection) -> None:
+        prune_unit(connection, "pruned-1", 1200)
+        assert _unit_states(connection) == extended_states
+        raise RuntimeError("abort prune")
+
+    with pytest.raises(RuntimeError, match="abort prune"):
+        diag.database.transact(prune_then_abort)
+    assert _execution_snapshot(diag) == before_extension
+
+    def prune_and_check(connection: psycopg.Connection) -> None:
+        prune_unit(connection, "pruned-1", 1200)
+        # No refresh or coarsening is allowed to repair certainty afterward.
+        assert _unit_states(connection) == extended_states
+        coverage = connection.execute(
             """
             SELECT coverage_id, coverage_kind, producer, from_sequence, to_sequence,
                    from_ns, to_ns, record_count, exact FROM execution_coverage
             """
         ).fetchall()
-        assert len(first_coverage) == 1
-        coverage_id = first_coverage[0][0]
-        assert first_coverage[0][1:] == (CoverageKind.DELETED_BY_CAPACITY, "p", 0, 0, 0, 0, 1, 1)
-        before_extension = _execution_snapshot(connect)
-        extended_states = dict(expected_states)
-        del extended_states["pruned-1"]
-        extended_states["survivor"] = (1, UnitCausalState.INCOMPLETE_UNKNOWN)
-        with pytest.raises(RuntimeError, match="abort prune"):
-            with write_transaction(connection):
-                prune_unit(connection, "pruned-1", 1200)
-                assert _unit_states(connection) == extended_states
-                raise RuntimeError("abort prune")
-        assert _execution_snapshot(connect) == before_extension
+        assert coverage == [(coverage_id, CoverageKind.DELETED_BY_CAPACITY, "p", 0, 1, 0, 30, 2, 1)]
 
-        with write_transaction(connection):
-            prune_unit(connection, "pruned-1", 1200)
-            # No refresh or coarsening is allowed to repair certainty afterward.
-            assert _unit_states(connection) == extended_states
-            coverage = connection.execute(
-                """
-                SELECT coverage_id, coverage_kind, producer, from_sequence, to_sequence,
-                       from_ns, to_ns, record_count, exact FROM execution_coverage
-                """
-            ).fetchall()
-            assert coverage == [
-                (coverage_id, CoverageKind.DELETED_BY_CAPACITY, "p", 0, 1, 0, 30, 2, 1)
-            ]
-    with closing(connect()) as connection:
-        assert _unit_states(connection) == extended_states
+    diag.database.transact(prune_and_check)
+    assert _unit_states(diag.admin) == extended_states

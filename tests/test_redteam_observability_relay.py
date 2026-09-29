@@ -6,6 +6,7 @@ import hashlib
 import json
 import time
 from collections.abc import Iterator
+from dataclasses import dataclass
 from pathlib import Path
 
 import httpx
@@ -14,19 +15,25 @@ from fastapi.testclient import TestClient
 from observability_stack_fixtures import serve_backend
 
 from backend.app.core.config import get_settings
-from backend.app.edge_db.bootstrap import bootstrap_database
-from backend.app.edge_db.connection import RuntimeActor, open_runtime_database
+from backend.app.features.audit.postgres_runtime import PostgresAuditRuntime
 from backend.app.features.diagnostics.records import CoverageKind, StorageState
 from backend.app.features.diagnostics.retention import RetentionBudget
 from backend.app.features.diagnostics.store import ExecutionRecordStore
 from backend.app.features.relay.router import RELAY_TOKEN_HEADER
-from backend.app.main import create_app, no_lifespan
 from shared.events.execution_records import (
     MAX_EXECUTION_RECORD_BODY_BYTES,
     PROCESS_SCOPE,
     WireBatch,
     WireProvenance,
     WireRecord,
+)
+from tests_support.postgres_api_app import postgres_api_app
+from tests_support.postgres_diagnostics_sandbox import DiagnosticsSandbox
+from tests_support.postgres_sandbox import ProductSandbox
+
+pytest_plugins = (
+    "tests_support.postgres_sandbox",
+    "tests_support.postgres_diagnostics_sandbox",
 )
 
 _RELAY_TOKEN = "relay-token"
@@ -86,33 +93,47 @@ def enabled_settings(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     get_settings.cache_clear()
 
 
-def _enabled_client(tmp_path: Path, *, budget_bytes: int = _BUDGET_BYTES) -> TestClient:
-    database = tmp_path / "edge.sqlite3"
-    bootstrap_database(database)
-    app = create_app(lifespan=no_lifespan)
+@dataclass(frozen=True, slots=True)
+class _PgStack:
+    """Product root, its audit runtime and the diagnostics schema for one test."""
+
+    sandbox: ProductSandbox
+    audit_runtime: PostgresAuditRuntime
+    diagnostics: DiagnosticsSandbox
+
+
+@pytest.fixture
+def pg_stack(
+    postgres_product_sandbox: ProductSandbox,
+    postgres_audit_runtime: PostgresAuditRuntime,
+    postgres_diagnostics_sandbox: DiagnosticsSandbox,
+) -> _PgStack:
+    return _PgStack(postgres_product_sandbox, postgres_audit_runtime, postgres_diagnostics_sandbox)
+
+
+def _enabled_client(stack: _PgStack, *, budget_bytes: int = _BUDGET_BYTES) -> TestClient:
+    app = postgres_api_app(stack.sandbox, stack.audit_runtime)
     app.state.edge_relay_token = _RELAY_TOKEN
     app.state.backend_build_revision = _BUILD_REVISION
     app.state.execution_record_store = ExecutionRecordStore(
-        lambda: open_runtime_database(database, actor=RuntimeActor.API),
+        stack.diagnostics.database,
         RetentionBudget(total_bytes=budget_bytes),
     )
     return TestClient(app)
 
 
-def _count(path: Path, table: str) -> int:
-    connection = open_runtime_database(path, actor=RuntimeActor.API)
-    try:
-        return int(connection.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0])
-    finally:
-        connection.close()
+def _count(diagnostics: DiagnosticsSandbox, table: str) -> int:
+    row = diagnostics.admin.execute(f"SELECT count(*) FROM {table}").fetchone()
+    assert row is not None
+    return int(row[0])
 
 
 def _hex(label: str) -> str:
     return hashlib.sha256(label.encode()).hexdigest()
 
 
-def test_a1_tampered_record_id_is_422(tmp_path: Path, enabled_settings: None) -> None:
-    client = _enabled_client(tmp_path)
+def test_a1_tampered_record_id_is_422(pg_stack: _PgStack, enabled_settings: None) -> None:
+    client = _enabled_client(pg_stack)
     body = _batch(_record(0)).to_json()
     body["records"][0]["record_id"] = "0" * 64
     response = client.post(_PATH, json=body, headers={RELAY_TOKEN_HEADER: _RELAY_TOKEN})
@@ -120,8 +141,8 @@ def test_a1_tampered_record_id_is_422(tmp_path: Path, enabled_settings: None) ->
     assert "record_id" in response.json()["detail"]
 
 
-def test_a2_tampered_batch_id_is_422(tmp_path: Path, enabled_settings: None) -> None:
-    client = _enabled_client(tmp_path)
+def test_a2_tampered_batch_id_is_422(pg_stack: _PgStack, enabled_settings: None) -> None:
+    client = _enabled_client(pg_stack)
     body = _batch(_record(0)).to_json()
     body["batch_id"] = "f" * 64
     response = client.post(_PATH, json=body, headers={RELAY_TOKEN_HEADER: _RELAY_TOKEN})
@@ -129,8 +150,8 @@ def test_a2_tampered_batch_id_is_422(tmp_path: Path, enabled_settings: None) -> 
     assert "batch_id" in response.json()["detail"]
 
 
-def test_a3_unknown_record_kind_is_422(tmp_path: Path, enabled_settings: None) -> None:
-    client = _enabled_client(tmp_path)
+def test_a3_unknown_record_kind_is_422(pg_stack: _PgStack, enabled_settings: None) -> None:
+    client = _enabled_client(pg_stack)
     body = _batch(_record(0)).to_json()
     body["records"][0]["record_kind"] = "not.a.kind"
     del body["batch_id"]
@@ -141,9 +162,9 @@ def test_a3_unknown_record_kind_is_422(tmp_path: Path, enabled_settings: None) -
 
 
 def test_a4_process_scoped_kind_with_stream_epoch_is_422(
-    tmp_path: Path, enabled_settings: None
+    pg_stack: _PgStack, enabled_settings: None
 ) -> None:
-    client = _enabled_client(tmp_path)
+    client = _enabled_client(pg_stack)
     valid = _record(
         0,
         record_kind="backend.acceptance",
@@ -163,8 +184,8 @@ def test_a4_process_scoped_kind_with_stream_epoch_is_422(
     assert "process-scoped" in detail or "PROCESS_SCOPE" in detail
 
 
-def test_a5_body_exactly_at_cap_is_not_413(tmp_path: Path, enabled_settings: None) -> None:
-    client = _enabled_client(tmp_path)
+def test_a5_body_exactly_at_cap_is_not_413(pg_stack: _PgStack, enabled_settings: None) -> None:
+    client = _enabled_client(pg_stack)
     payload = b"{" + (b" " * (MAX_EXECUTION_RECORD_BODY_BYTES - 2)) + b"}"
     assert len(payload) == MAX_EXECUTION_RECORD_BODY_BYTES
     response = client.post(
@@ -176,8 +197,8 @@ def test_a5_body_exactly_at_cap_is_not_413(tmp_path: Path, enabled_settings: Non
     assert response.status_code == 422
 
 
-def test_a6_body_one_byte_over_cap_is_413(tmp_path: Path, enabled_settings: None) -> None:
-    client = _enabled_client(tmp_path)
+def test_a6_body_one_byte_over_cap_is_413(pg_stack: _PgStack, enabled_settings: None) -> None:
+    client = _enabled_client(pg_stack)
     payload = b"{" + (b" " * (MAX_EXECUTION_RECORD_BODY_BYTES - 1)) + b"}"
     assert len(payload) == MAX_EXECUTION_RECORD_BODY_BYTES + 1
     response = client.post(
@@ -188,14 +209,14 @@ def test_a6_body_one_byte_over_cap_is_413(tmp_path: Path, enabled_settings: None
     assert response.status_code == 413
 
 
-def test_a7_missing_relay_token_is_401(tmp_path: Path, enabled_settings: None) -> None:
-    client = _enabled_client(tmp_path)
+def test_a7_missing_relay_token_is_401(pg_stack: _PgStack, enabled_settings: None) -> None:
+    client = _enabled_client(pg_stack)
     response = client.post(_PATH, json=_batch(_record(0)).to_json())
     assert response.status_code == 401
 
 
-def test_a8_wrong_relay_token_is_403(tmp_path: Path, enabled_settings: None) -> None:
-    client = _enabled_client(tmp_path)
+def test_a8_wrong_relay_token_is_403(pg_stack: _PgStack, enabled_settings: None) -> None:
+    client = _enabled_client(pg_stack)
     response = client.post(
         _PATH,
         json=_batch(_record(0)).to_json(),
@@ -205,10 +226,10 @@ def test_a8_wrong_relay_token_is_403(tmp_path: Path, enabled_settings: None) -> 
 
 
 def test_a9_duplicate_batch_replay_is_byte_identical(
-    tmp_path: Path, enabled_settings: None
+    pg_stack: _PgStack, enabled_settings: None
 ) -> None:
-    database = tmp_path / "edge.sqlite3"
-    client = _enabled_client(tmp_path)
+    database = pg_stack.diagnostics
+    client = _enabled_client(pg_stack)
     payload = _batch(_record(0), _record(1)).to_json()
     first = client.post(_PATH, json=payload, headers={RELAY_TOKEN_HEADER: _RELAY_TOKEN})
     assert first.status_code == 200
@@ -221,11 +242,11 @@ def test_a9_duplicate_batch_replay_is_byte_identical(
     assert _count(database, "execution_batches") == 1
 
 
-def test_a10_conflicting_record_keeps_original(tmp_path: Path, enabled_settings: None) -> None:
-    database = tmp_path / "edge-state" / "edge.sqlite3"
-    bootstrap_database(database)
+def test_a10_conflicting_record_keeps_original(
+    postgres_diagnostics_sandbox: DiagnosticsSandbox, enabled_settings: None
+) -> None:
     store = ExecutionRecordStore(
-        lambda: open_runtime_database(database, actor=RuntimeActor.API),
+        postgres_diagnostics_sandbox.database,
         RetentionBudget(total_bytes=_BUDGET_BYTES),
     )
     from backend.app.features.diagnostics.records import (
@@ -285,21 +306,17 @@ def test_a10_conflicting_record_keeps_original(tmp_path: Path, enabled_settings:
     )
     assert conflict.accepted == 0
     assert conflict.rejected == ((record_id, "conflict"),)
-    connection = open_runtime_database(database, actor=RuntimeActor.API)
-    try:
-        payload = connection.execute(
-            "SELECT payload FROM execution_records WHERE record_id = ?", (record_id,)
-        ).fetchone()
-    finally:
-        connection.close()
+    payload = postgres_diagnostics_sandbox.admin.execute(
+        "SELECT payload FROM execution_records WHERE record_id = %s", (record_id,)
+    ).fetchone()
     assert payload is not None and '"n":1' in str(payload[0])
-    assert _count(database, "execution_records") == 1
+    assert _count(postgres_diagnostics_sandbox, "execution_records") == 1
 
 
 def test_a11_payload_over_max_record_bytes_writes_rejected_oversize(
-    tmp_path: Path, enabled_settings: None
+    pg_stack: _PgStack, enabled_settings: None
 ) -> None:
-    client = _enabled_client(tmp_path, budget_bytes=512 * 1024)
+    client = _enabled_client(pg_stack, budget_bytes=512 * 1024)
     budget = RetentionBudget(total_bytes=512 * 1024)
     record = _record(0, payload={"blob": "x" * (budget.max_record_bytes + 8)})
     response = client.post(
@@ -309,24 +326,16 @@ def test_a11_payload_over_max_record_bytes_writes_rejected_oversize(
     body = response.json()
     assert body["accepted"] == 0
     assert body["rejected"] == [[record.record_id, "oversize"]]
-    database = tmp_path / "edge.sqlite3"
-    connection = open_runtime_database(database, actor=RuntimeActor.API)
-    try:
-        kinds = {
-            str(row[0])
-            for row in connection.execute("SELECT coverage_kind FROM execution_coverage")
-        }
-        records = connection.execute("SELECT COUNT(*) FROM execution_records").fetchone()
-    finally:
-        connection.close()
+    admin = pg_stack.diagnostics.admin
+    kinds = {str(row[0]) for row in admin.execute("SELECT coverage_kind FROM execution_coverage")}
     assert CoverageKind.REJECTED_OVERSIZE in kinds
-    assert records == (0,)
+    assert _count(pg_stack.diagnostics, "execution_records") == 0
 
 
 def test_a12_valid_json_that_is_not_an_object_is_422(
-    tmp_path: Path, enabled_settings: None
+    pg_stack: _PgStack, enabled_settings: None
 ) -> None:
-    client = _enabled_client(tmp_path)
+    client = _enabled_client(pg_stack)
     array_body = client.post(_PATH, json=[1, 2, 3], headers={RELAY_TOKEN_HEADER: _RELAY_TOKEN})
     assert array_body.status_code == 422
     string_body = client.post(
@@ -337,11 +346,11 @@ def test_a12_valid_json_that_is_not_an_object_is_422(
     assert string_body.status_code == 422
 
 
-def test_a13_ten_k_record_batch_is_bounded(tmp_path: Path) -> None:
-    database = tmp_path / "edge-state" / "edge.sqlite3"
-    bootstrap_database(database)
+def test_a13_ten_k_record_batch_is_bounded(
+    postgres_diagnostics_sandbox: DiagnosticsSandbox,
+) -> None:
     store = ExecutionRecordStore(
-        lambda: open_runtime_database(database, actor=RuntimeActor.API),
+        postgres_diagnostics_sandbox.database,
         RetentionBudget(total_bytes=32 * 2**20),
     )
     from backend.app.features.diagnostics.records import (
@@ -400,15 +409,17 @@ def test_a13_ten_k_record_batch_is_bounded(tmp_path: Path) -> None:
     )
 
 
-def test_b6_query_from_ns_greater_than_to_ns_is_422(tmp_path: Path, enabled_settings: None) -> None:
-    client = _enabled_client(tmp_path)
+def test_b6_query_from_ns_greater_than_to_ns_is_422(
+    pg_stack: _PgStack, enabled_settings: None
+) -> None:
+    client = _enabled_client(pg_stack)
     _login(client)
     response = client.get(_QUERY, params={"camera_id": "cam-1", "from_ns": 20, "to_ns": 10})
     assert response.status_code == 422
 
 
-def test_b7_query_limit_zero_is_422(tmp_path: Path, enabled_settings: None) -> None:
-    client = _enabled_client(tmp_path)
+def test_b7_query_limit_zero_is_422(pg_stack: _PgStack, enabled_settings: None) -> None:
+    client = _enabled_client(pg_stack)
     _login(client)
     response = client.get(
         _QUERY, params={"camera_id": "cam-1", "from_ns": 0, "to_ns": 10, "limit": 0}
@@ -416,8 +427,8 @@ def test_b7_query_limit_zero_is_422(tmp_path: Path, enabled_settings: None) -> N
     assert response.status_code == 422
 
 
-def test_b8_query_limit_501_is_422(tmp_path: Path, enabled_settings: None) -> None:
-    client = _enabled_client(tmp_path)
+def test_b8_query_limit_501_is_422(pg_stack: _PgStack, enabled_settings: None) -> None:
+    client = _enabled_client(pg_stack)
     _login(client)
     response = client.get(
         _QUERY, params={"camera_id": "cam-1", "from_ns": 0, "to_ns": 10, "limit": 501}
@@ -425,8 +436,10 @@ def test_b8_query_limit_501_is_422(tmp_path: Path, enabled_settings: None) -> No
     assert response.status_code == 422
 
 
-def test_b9_cursor_from_other_camera_never_leaks(tmp_path: Path, enabled_settings: None) -> None:
-    client = _enabled_client(tmp_path)
+def test_b9_cursor_from_other_camera_never_leaks(
+    pg_stack: _PgStack, enabled_settings: None
+) -> None:
+    client = _enabled_client(pg_stack)
     first = client.post(
         _PATH,
         json=_batch(_record(0), _record(1), _record(2)).to_json(),
@@ -465,8 +478,20 @@ def test_b9_cursor_from_other_camera_never_leaks(tmp_path: Path, enabled_setting
         assert cameras <= {"unit-2"} or records == []
 
 
-def test_live_uvicorn_relay_and_query_adversarial(tmp_path: Path) -> None:
-    with serve_backend(tmp_path, budget_bytes=_BUDGET_BYTES, relay_token=_RELAY_TOKEN) as backend:
+def test_live_uvicorn_relay_and_query_adversarial(
+    tmp_path: Path,
+    postgres_product_sandbox: ProductSandbox,
+    postgres_audit_runtime: PostgresAuditRuntime,
+    postgres_lifespan_diagnostics_schema: str,
+) -> None:
+    with serve_backend(
+        tmp_path,
+        budget_bytes=_BUDGET_BYTES,
+        relay_token=_RELAY_TOKEN,
+        sandbox=postgres_product_sandbox,
+        audit_runtime=postgres_audit_runtime,
+        diagnostics_schema=postgres_lifespan_diagnostics_schema,
+    ) as backend:
         url = f"{backend.base_url}{_PATH}"
         headers = {RELAY_TOKEN_HEADER: backend.relay_token}
         tampered = _batch(_record(0)).to_json()

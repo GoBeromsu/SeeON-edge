@@ -2,36 +2,40 @@
 
 from __future__ import annotations
 
-import multiprocessing
-import os
-import sqlite3
 from collections.abc import Iterator
-from multiprocessing.connection import Connection
-from pathlib import Path
 
+import psycopg
 import pytest
+from fastapi import FastAPI
 from fastapi.testclient import TestClient
+from psycopg import sql
 from pydantic import ValidationError
 
 from backend.app.core.config import Settings, get_settings
-from backend.app.edge_db import DIAGNOSTICS_DATABASE_FILENAME, open_diagnostics_database
-from backend.app.edge_db.bootstrap import (
-    bootstrap_database,
-    bootstrap_diagnostics_database,
-    deployment_lock,
-)
-from backend.app.edge_db.connection import RuntimeActor, open_runtime_database, write_transaction
+from backend.app.edge_db.postgres import PoolBudget, PostgresDatabase
+from backend.app.features.audit.catalog import AuditAction
+from backend.app.features.audit.postgres_runtime import PostgresAuditRuntime
 from backend.app.features.diagnostics.retention import RetentionBudget
 from backend.app.features.diagnostics.store import ExecutionRecordStore
 from backend.app.features.relay.router import RELAY_TOKEN_HEADER
 from backend.app.lifespan import lifespan
-from backend.app.main import create_app, no_lifespan
+from backend.app.main import create_app
 from shared.events.execution_records import (
     MAX_EXECUTION_RECORD_BODY_BYTES,
     WireBatch,
     WireGap,
     WireProvenance,
     WireRecord,
+)
+from tests_support.postgres_api_app import postgres_api_app
+from tests_support.postgres_app_env import inject_sandbox_root
+from tests_support.postgres_diagnostics_sandbox import DiagnosticsSandbox
+from tests_support.postgres_sandbox import ProductSandbox
+
+pytest_plugins = (
+    "tests_support.postgres_sandbox",
+    "tests_support.postgres_app_env",
+    "tests_support.postgres_diagnostics_sandbox",
 )
 
 _RELAY_TOKEN = "relay-token"
@@ -89,21 +93,6 @@ def _login(client: TestClient) -> None:
     assert response.status_code == 204
 
 
-def _hold_diagnostics_write(diagnostics_path: str, channel: Connection) -> None:
-    """Stand in for an in-flight ingest write: hold edge-diagnostics.sqlite3's
-    writer lock until told to commit (#579/#580, S4)."""
-    connection = open_diagnostics_database(Path(diagnostics_path))
-    try:
-        connection.execute("BEGIN IMMEDIATE")
-        channel.send("LOCKED")
-        assert channel.recv() == "COMMIT"
-        connection.commit()
-        channel.send("COMMITTED")
-    finally:
-        connection.close()
-        channel.close()
-
-
 @pytest.fixture
 def enabled_settings(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("ML_API_EXECUTION_RECORDS_ENABLED", "true")
@@ -114,21 +103,38 @@ def enabled_settings(monkeypatch: pytest.MonkeyPatch) -> None:
     get_settings.cache_clear()
 
 
-def _enabled_client(tmp_path: Path) -> TestClient:
-    database = tmp_path / "edge.sqlite3"
-    bootstrap_database(database)
-    app = create_app(lifespan=no_lifespan)
+@pytest.fixture
+def product_app(
+    postgres_product_sandbox: ProductSandbox, postgres_audit_runtime: PostgresAuditRuntime
+) -> FastAPI:
+    """A no-lifespan app on the sandbox root, so ``_login`` reaches a real session."""
+    app = postgres_api_app(postgres_product_sandbox, postgres_audit_runtime)
     app.state.edge_relay_token = _RELAY_TOKEN
+    return app
+
+
+def _client_with_store(app: FastAPI, store: ExecutionRecordStore) -> TestClient:
     app.state.backend_build_revision = _BUILD_REVISION
-    app.state.execution_record_store = ExecutionRecordStore(
-        lambda: open_runtime_database(database, actor=RuntimeActor.API),
-        RetentionBudget(total_bytes=_BUDGET_BYTES),
-    )
+    app.state.execution_record_store = store
     return TestClient(app)
 
 
-def test_relay_post_requires_token(tmp_path: Path, enabled_settings: None) -> None:
-    client = _enabled_client(tmp_path)
+@pytest.fixture
+def enabled_client(
+    enabled_settings: None,
+    product_app: FastAPI,
+    postgres_diagnostics_sandbox: DiagnosticsSandbox,
+) -> TestClient:
+    return _client_with_store(
+        product_app,
+        ExecutionRecordStore(
+            postgres_diagnostics_sandbox.database, RetentionBudget(total_bytes=_BUDGET_BYTES)
+        ),
+    )
+
+
+def test_relay_post_requires_token(enabled_client: TestClient) -> None:
+    client = enabled_client
     missing = client.post(_PATH, json=_batch(_record(0)).to_json())
     assert missing.status_code == 401
     wrong = client.post(
@@ -139,8 +145,8 @@ def test_relay_post_requires_token(tmp_path: Path, enabled_settings: None) -> No
     assert wrong.status_code == 403
 
 
-def test_oversized_content_length_is_rejected(tmp_path: Path, enabled_settings: None) -> None:
-    client = _enabled_client(tmp_path)
+def test_oversized_content_length_is_rejected(enabled_client: TestClient) -> None:
+    client = enabled_client
     response = client.post(
         _PATH,
         headers={
@@ -153,8 +159,8 @@ def test_oversized_content_length_is_rejected(tmp_path: Path, enabled_settings: 
     assert response.status_code == 413
 
 
-def test_chunked_oversized_body_is_rejected(tmp_path: Path, enabled_settings: None) -> None:
-    client = _enabled_client(tmp_path)
+def test_chunked_oversized_body_is_rejected(enabled_client: TestClient) -> None:
+    client = enabled_client
     over = MAX_EXECUTION_RECORD_BODY_BYTES + 4096
     response = client.post(
         _PATH,
@@ -167,8 +173,8 @@ def test_chunked_oversized_body_is_rejected(tmp_path: Path, enabled_settings: No
     assert response.status_code == 413
 
 
-def test_contract_violation_is_422(tmp_path: Path, enabled_settings: None) -> None:
-    client = _enabled_client(tmp_path)
+def test_contract_violation_is_422(enabled_client: TestClient) -> None:
+    client = enabled_client
     body = _batch(_record(0)).to_json()
     body["records"][0]["record_id"] = "0" * 64
     bad_id = client.post(_PATH, json=body, headers={RELAY_TOKEN_HEADER: _RELAY_TOKEN})
@@ -183,10 +189,8 @@ def test_contract_violation_is_422(tmp_path: Path, enabled_settings: None) -> No
     assert "record_kind" in bad_kind.json()["detail"]
 
 
-def test_committed_receipt_round_trip_and_idempotent_replay(
-    tmp_path: Path, enabled_settings: None
-) -> None:
-    client = _enabled_client(tmp_path)
+def test_committed_receipt_round_trip_and_idempotent_replay(enabled_client: TestClient) -> None:
+    client = enabled_client
     payload = _batch(_record(0), _record(1)).to_json()
     first = client.post(_PATH, json=payload, headers={RELAY_TOKEN_HEADER: _RELAY_TOKEN})
     assert first.status_code == 200
@@ -200,18 +204,16 @@ def test_committed_receipt_round_trip_and_idempotent_replay(
     assert replay.json() == receipt
 
 
-def test_storage_unavailable_receipt_is_still_200(tmp_path: Path, enabled_settings: None) -> None:
-    database = tmp_path / "edge.sqlite3"
-    bootstrap_database(database)
-    app = create_app(lifespan=no_lifespan)
-    app.state.edge_relay_token = _RELAY_TOKEN
-    app.state.backend_build_revision = _BUILD_REVISION
-
-    app.state.execution_record_store = ExecutionRecordStore(
-        lambda: open_runtime_database(database, actor=RuntimeActor.API),
-        RetentionBudget(total_bytes=256),
+@pytest.mark.usefixtures("enabled_settings")
+def test_storage_unavailable_receipt_is_still_200(
+    product_app: FastAPI, postgres_diagnostics_sandbox: DiagnosticsSandbox
+) -> None:
+    client = _client_with_store(
+        product_app,
+        ExecutionRecordStore(
+            postgres_diagnostics_sandbox.database, RetentionBudget(total_bytes=256)
+        ),
     )
-    client = TestClient(app)
     response = client.post(
         _PATH,
         json=_batch(_record(0)).to_json(),
@@ -222,10 +224,8 @@ def test_storage_unavailable_receipt_is_still_200(tmp_path: Path, enabled_settin
     assert response.json()["accepted"] == 0
 
 
-def test_disabled_feature_answers_503(tmp_path: Path) -> None:
-    app = create_app(lifespan=no_lifespan)
-    app.state.edge_relay_token = _RELAY_TOKEN
-    client = TestClient(app)
+def test_disabled_feature_answers_503(product_app: FastAPI) -> None:
+    client = TestClient(product_app)
     ingest = client.post(
         _PATH,
         json=_batch(_record(0)).to_json(),
@@ -242,36 +242,50 @@ def test_disabled_feature_answers_503(tmp_path: Path) -> None:
     assert query.json()["detail"] == "execution records disabled"
 
 
-def test_missing_diagnostics_database_answers_503(tmp_path: Path, enabled_settings: None) -> None:
-    """edge-diagnostics.sqlite3 missing (bootstrap never ran) must not leak an
-    opaque 500 -- EdgeDatabaseError is mapped to a clear 503 (#579/#580, round 2)."""
-    app = create_app(lifespan=no_lifespan)
-    app.state.edge_relay_token = _RELAY_TOKEN
-    app.state.backend_build_revision = _BUILD_REVISION
-    missing = tmp_path / "edge-diagnostics.sqlite3"
-    app.state.execution_record_store = ExecutionRecordStore(
-        lambda: open_diagnostics_database(missing),
-        RetentionBudget(total_bytes=_BUDGET_BYTES),
+@pytest.mark.usefixtures("enabled_settings")
+def test_missing_diagnostics_database_answers_503(
+    product_app: FastAPI, postgres_diagnostics_sandbox: DiagnosticsSandbox
+) -> None:
+    """A diagnostics database that refuses admission (server down at boot, so
+    ``open_diagnostics_database`` could not start its pool) must not leak an
+    opaque 500 -- PostgresUnavailable is mapped to a clear 503 (#579/#580, round 2)."""
+    unstarted = PostgresDatabase(
+        postgres_diagnostics_sandbox.dsn,
+        postgres_diagnostics_sandbox.schema,
+        PoolBudget(
+            max_connections=1,
+            max_waiting=1,
+            acquire_timeout_sec=1.0,
+            statement_timeout_ms=5000,
+            lock_timeout_ms=3000,
+            startup_timeout_sec=5.0,
+        ),
     )
-    client = TestClient(app)
+    client = _client_with_store(
+        product_app, ExecutionRecordStore(unstarted, RetentionBudget(total_bytes=_BUDGET_BYTES))
+    )
     ingest = client.post(
         _PATH,
         json=_batch(_record(0)).to_json(),
         headers={RELAY_TOKEN_HEADER: _RELAY_TOKEN},
     )
     assert ingest.status_code == 503
-    assert ingest.json()["detail"] == "diagnostics store unavailable: run edge-db bootstrap"
+    assert ingest.json()["detail"] == (
+        "diagnostics store unavailable: check PostgreSQL and run migration provision"
+    )
     _login(client)
     query = client.get(
         _QUERY,
         params={"camera_id": "cam-1", "from_ns": 0, "to_ns": 10},
     )
     assert query.status_code == 503
-    assert query.json()["detail"] == "diagnostics store unavailable: run edge-db bootstrap"
+    assert query.json()["detail"] == (
+        "diagnostics store unavailable: check PostgreSQL and run migration provision"
+    )
 
 
-def test_query_requires_dashboard_session(tmp_path: Path, enabled_settings: None) -> None:
-    client = _enabled_client(tmp_path)
+def test_query_requires_dashboard_session(enabled_client: TestClient) -> None:
+    client = enabled_client
     response = client.get(
         _QUERY,
         params={"camera_id": "cam-1", "from_ns": 0, "to_ns": 10},
@@ -279,8 +293,8 @@ def test_query_requires_dashboard_session(tmp_path: Path, enabled_settings: None
     assert response.status_code == 401
 
 
-def test_query_returns_records_and_unknown_tails(tmp_path: Path, enabled_settings: None) -> None:
-    client = _enabled_client(tmp_path)
+def test_query_returns_records_and_unknown_tails(enabled_client: TestClient) -> None:
+    client = enabled_client
     payload = _batch(_record(0), _record(1), _record(2)).to_json()
     posted = client.post(_PATH, json=payload, headers={RELAY_TOKEN_HEADER: _RELAY_TOKEN})
     assert posted.status_code == 200
@@ -317,8 +331,8 @@ def test_query_returns_records_and_unknown_tails(tmp_path: Path, enabled_setting
     assert rest.json()["next_cursor"] is None
 
 
-def test_query_limit_bounds_are_422(tmp_path: Path, enabled_settings: None) -> None:
-    client = _enabled_client(tmp_path)
+def test_query_limit_bounds_are_422(enabled_client: TestClient) -> None:
+    client = enabled_client
     _login(client)
     too_low = client.get(
         _QUERY,
@@ -346,8 +360,9 @@ def test_boot_refuses_when_enabled_without_budget(monkeypatch: pytest.MonkeyPatc
     get_settings.cache_clear()
 
 
+@pytest.mark.usefixtures("postgres_app_env", "postgres_lifespan_diagnostics_schema")
 def test_lifespan_constructs_store_when_enabled(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, enabled_settings: None
+    monkeypatch: pytest.MonkeyPatch, enabled_settings: None
 ) -> None:
     monkeypatch.setenv("API_EDGE_RELAY_TOKEN", _RELAY_TOKEN)
     app = create_app(lifespan=lifespan)
@@ -356,27 +371,23 @@ def test_lifespan_constructs_store_when_enabled(
         assert client.app.state.backend_build_revision == _BUILD_REVISION
 
 
+@pytest.mark.usefixtures("enabled_settings", "postgres_app_env")
 def test_lifespan_diagnostics_query_and_product_write_skip_a_pending_diagnostics_write(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, enabled_settings: None
+    monkeypatch: pytest.MonkeyPatch,
+    postgres_product_sandbox: ProductSandbox,
+    postgres_audit_runtime: PostgresAuditRuntime,
+    postgres_lifespan_diagnostics_schema: str,
 ) -> None:
-    """Through the real lifespan wiring: while another process holds
-    edge-diagnostics.sqlite3's writer lock (standing in for an in-flight
-    ingest write), a diagnostics query and a product-database write both
-    complete promptly. Separate SQLite files have independent writer locks,
-    so this holds structurally once execution-record telemetry lives in its
-    own file next to edge.sqlite3 (see backend/app/edge_db/diagnostics_connection.py).
-    Replaces the old direct-connection N4 test that lived in
-    tests/test_edge_db_concurrency.py (#579/#580, S4).
+    """Through the real lifespan wiring: while another session holds the
+    diagnostics ingest lock (standing in for an in-flight ingest write), a
+    diagnostics query and a product write both complete. The diagnostics store
+    has its own schema and pool, and a snapshot query never takes the ingest
+    lock (#579/#580, S4).
     """
-    import backend.app.lifespan as lifespan_module
-
     monkeypatch.setenv("API_EDGE_RELAY_TOKEN", _RELAY_TOKEN)
-    database = lifespan_module.EDGE_DATABASE_PATH
-    diagnostics_path = database.parent / DIAGNOSTICS_DATABASE_FILENAME
-    with deployment_lock(diagnostics_path.parent) as lock:
-        bootstrap_diagnostics_database(diagnostics_path, lock=lock)
-
     app = create_app(lifespan=lifespan)
+    inject_sandbox_root(app, postgres_product_sandbox, postgres_audit_runtime)
+    admin = postgres_product_sandbox.admin
     with TestClient(app) as client:
         posted = client.post(
             _PATH,
@@ -386,39 +397,29 @@ def test_lifespan_diagnostics_query_and_product_write_skip_a_pending_diagnostics
         assert posted.status_code == 200
         _login(client)
 
-        context = multiprocessing.get_context("spawn")
-        holder_parent, holder_child = context.Pipe()
-        holder = context.Process(
-            target=_hold_diagnostics_write,
-            args=(os.fspath(diagnostics_path), holder_child),
-        )
-        holder.start()
-        assert holder_parent.poll(10), "diagnostics writer did not acquire its write lock"
-        assert holder_parent.recv() == "LOCKED"
+        holder = psycopg.connect(postgres_product_sandbox.dsn, connect_timeout=5)
         try:
+            # The first statement of every ingest transaction.
+            holder.execute(
+                sql.SQL("LOCK TABLE {}.execution_batches IN SHARE ROW EXCLUSIVE MODE").format(
+                    sql.Identifier(postgres_lifespan_diagnostics_schema)
+                )
+            )
             query = client.get(
                 _QUERY,
                 params={"camera_id": "cam-1", "from_ns": 0, "to_ns": 5_000},
             )
             assert query.status_code == 200
+            assert [row["producer_sequence"] for row in query.json()["records"]] == [0]
 
-            connection = open_runtime_database(database, actor=RuntimeActor.API)
-            try:
-                with write_transaction(connection):
-                    connection.execute(
-                        "INSERT INTO edge_site (id,updated_at) VALUES (1,'2026-09-24T00:00:00Z')"
-                    )
-            finally:
-                connection.close()
+            # A governed product write: the session read appends an audit event.
+            session = client.get("/api/v1/auth/session")
+            assert session.status_code == 204
+            committed = admin.execute(
+                "SELECT count(*) FROM audit_events WHERE action = %s",
+                (AuditAction.AUTH_SESSION_READ.value,),
+            ).fetchone()
+            assert committed == (1,)
         finally:
-            holder_parent.send("COMMIT")
-            assert holder_parent.poll(10), "diagnostics writer did not commit"
-            assert holder_parent.recv() == "COMMITTED"
-            holder.join(10)
-        assert holder.exitcode == 0
-
-    connection = sqlite3.connect(database)
-    try:
-        assert connection.execute("SELECT id FROM edge_site WHERE id=1").fetchone() == (1,)
-    finally:
-        connection.close()
+            holder.rollback()
+            holder.close()
