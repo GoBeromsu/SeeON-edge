@@ -6,11 +6,9 @@ import hashlib
 import hmac
 import json
 import logging
-import sqlite3
 import urllib.error
 import urllib.request
 import uuid
-from collections.abc import Callable
 from typing import Annotated, Literal
 
 from fastapi import (
@@ -31,7 +29,8 @@ from backend.app.features.audit.catalog import (
     camera_probe_detail,
     empty_detail,
 )
-from backend.app.features.audit.http import append_transactional
+from backend.app.features.audit.http import mutation_audit
+from backend.app.features.audit.postgres_runtime import AuditMutation
 from backend.app.features.audit.store import AuditEvent
 from backend.app.features.audit.store import utc_now as audit_now
 from backend.app.features.cameras.bed_zone_router import BedZonePayload, BedZoneRegionPayload
@@ -56,7 +55,7 @@ from backend.app.features.cameras.topology import (
     TopologyConflictError,
 )
 from backend.app.features.clips.storage_location_store import ClipStorageLocationStore
-from backend.app.features.connection.store import ConnectionSettingsStore
+from backend.app.features.connection.store import get_connection_settings_store
 from backend.app.features.detection_settings.policy_store import (
     DetectionPolicyStore,
     PolicyActivationRefused,
@@ -354,12 +353,16 @@ def create_topology_floor(
     background_tasks: BackgroundTasks,
 ) -> dict[str, object]:
     actor = _authorize(request)
+    store = _store(request.app)
     try:
-        _store(request.app).create_floor(
-            edge_ref=payload.edge_ref,
-            name=payload.name,
-            order_index=payload.order_index,
-            after_write=_audit_hook(request, actor, AuditAction.LOCATION_CREATE, payload.edge_ref),
+        _camera_mutation(request, actor, AuditAction.LOCATION_CREATE, payload.edge_ref).apply(
+            store,
+            lambda append: store.create_floor(
+                edge_ref=payload.edge_ref,
+                name=payload.name,
+                order_index=payload.order_index,
+                after_write=append,
+            ),
         )
     except TopologyConflictError as error:
         raise _topology_conflict(error) from error
@@ -375,11 +378,16 @@ def update_topology_floor(
     background_tasks: BackgroundTasks,
 ) -> dict[str, object]:
     actor = _authorize(request)
-    if not _store(request.app).update_floor(
-        edge_ref,
-        name=payload.name,
-        order_index=payload.order_index,
-        after_write=_audit_hook(request, actor, AuditAction.LOCATION_UPDATE, edge_ref),
+    store = _store(request.app)
+    if not _camera_mutation(request, actor, AuditAction.LOCATION_UPDATE, edge_ref).apply(
+        store,
+        lambda append: store.update_floor(
+            edge_ref,
+            name=payload.name,
+            order_index=payload.order_index,
+            after_write=append,
+        ),
+        expects_audit=bool,
     ):
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="floor not found")
     background_tasks.add_task(_trigger_roster_sync, request.app)
@@ -391,10 +399,12 @@ def delete_topology_floor(
     edge_ref: str, request: Request, background_tasks: BackgroundTasks
 ) -> Response:
     actor = _authorize(request)
+    store = _store(request.app)
     try:
-        changed = _store(request.app).delete_floor(
-            edge_ref,
-            after_write=_audit_hook(request, actor, AuditAction.LOCATION_DELETE, edge_ref),
+        changed = _camera_mutation(request, actor, AuditAction.LOCATION_DELETE, edge_ref).apply(
+            store,
+            lambda append: store.delete_floor(edge_ref, after_write=append),
+            expects_audit=bool,
         )
     except TopologyConflictError as error:
         raise _topology_conflict(error) from error
@@ -411,13 +421,17 @@ def create_topology_room(
     background_tasks: BackgroundTasks,
 ) -> dict[str, object]:
     actor = _authorize(request)
+    store = _store(request.app)
     try:
-        _store(request.app).create_room(
-            edge_ref=payload.edge_ref,
-            floor_edge_ref=payload.floor_edge_ref,
-            name=payload.name,
-            legacy_canonical_space_id=payload.legacy_canonical_space_id,
-            after_write=_audit_hook(request, actor, AuditAction.LOCATION_CREATE, payload.edge_ref),
+        _camera_mutation(request, actor, AuditAction.LOCATION_CREATE, payload.edge_ref).apply(
+            store,
+            lambda append: store.create_room(
+                edge_ref=payload.edge_ref,
+                floor_edge_ref=payload.floor_edge_ref,
+                name=payload.name,
+                legacy_canonical_space_id=payload.legacy_canonical_space_id,
+                after_write=append,
+            ),
         )
     except TopologyConflictError as error:
         raise _topology_conflict(error) from error
@@ -433,10 +447,11 @@ def update_topology_room(
     background_tasks: BackgroundTasks,
 ) -> dict[str, str]:
     actor = _authorize(request)
-    if not _store(request.app).update_room(
-        edge_ref,
-        name=payload.name,
-        after_write=_audit_hook(request, actor, AuditAction.LOCATION_UPDATE, edge_ref),
+    store = _store(request.app)
+    if not _camera_mutation(request, actor, AuditAction.LOCATION_UPDATE, edge_ref).apply(
+        store,
+        lambda append: store.update_room(edge_ref, name=payload.name, after_write=append),
+        expects_audit=bool,
     ):
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="room not found")
     background_tasks.add_task(_trigger_roster_sync, request.app)
@@ -448,10 +463,12 @@ def delete_topology_room(
     edge_ref: str, request: Request, background_tasks: BackgroundTasks
 ) -> Response:
     actor = _authorize(request)
+    store = _store(request.app)
     try:
-        changed = _store(request.app).delete_room(
-            edge_ref,
-            after_write=_audit_hook(request, actor, AuditAction.LOCATION_DELETE, edge_ref),
+        changed = _camera_mutation(request, actor, AuditAction.LOCATION_DELETE, edge_ref).apply(
+            store,
+            lambda append: store.delete_room(edge_ref, after_write=append),
+            expects_audit=bool,
         )
     except TopologyConflictError as error:
         raise _topology_conflict(error) from error
@@ -485,23 +502,27 @@ def create_camera(
     probe = _probe_rtsp_url(request, rtsp_url)
     provisional_id = str(uuid.uuid4())
     now = utc_now_iso()
+    store = _store(request.app)
     try:
-        record = _store(request.app).create(
-            camera_id=provisional_id,
-            label=payload.label,
-            rtsp_url=rtsp_url,
-            space_id=payload.space_id,
-            status=status_from_probe(probe),
-            backend_camera_id=None,
-            mapping_pending=False,
-            decode_backend=decode_backend,
-            floor=floor,
-            last_probed_at=now,
-            last_ok_at=now if probe.ok else None,
-            never_connected=not probe.ok,
-            edge_ref=payload.edge_ref,
-            room_edge_ref=payload.room_edge_ref,
-            after_write=_audit_hook(request, actor, AuditAction.CAMERA_CREATE, provisional_id),
+        record = _camera_mutation(request, actor, AuditAction.CAMERA_CREATE, provisional_id).apply(
+            store,
+            lambda append: store.create(
+                camera_id=provisional_id,
+                label=payload.label,
+                rtsp_url=rtsp_url,
+                space_id=payload.space_id,
+                status=status_from_probe(probe),
+                backend_camera_id=None,
+                mapping_pending=False,
+                decode_backend=decode_backend,
+                floor=floor,
+                last_probed_at=now,
+                last_ok_at=now if probe.ok else None,
+                never_connected=not probe.ok,
+                edge_ref=payload.edge_ref,
+                room_edge_ref=payload.room_edge_ref,
+                after_write=append,
+            ),
         )
     except DuplicateCameraError as exc:
         raise _duplicate_camera_error(exc) from exc
@@ -522,7 +543,8 @@ def test_camera(
     payload: TestCameraRequest | None = None,
 ) -> dict[str, object]:
     actor = _authorize(request)
-    record = _store(request.app).get(camera_id)
+    store = _store(request.app)
+    record = store.get(camera_id)
     if record is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="camera not found")
 
@@ -535,7 +557,7 @@ def test_camera(
     # 저장된 URL을 실제로 검사했을 때만 카메라 상태를 갱신한다. draft를
     # 검사해놓고 저장된 카메라를 "정상"으로 표시하면 거짓 신호가 된다.
     # External probe I/O has already happened and cannot be rolled back; only its
-    # persisted local outcome and audit evidence share the SQLite transaction.
+    # persisted local outcome and audit evidence share the native transaction.
     if target_url == stored_url:
         now = utc_now_iso()
         updates: dict[str, object] = {"last_probed_at": now}
@@ -549,10 +571,10 @@ def test_camera(
             target_id=camera_id,
             detail=camera_probe_detail(probe.ok, probe.error_class),
         )
-        _store(request.app).update(
-            camera_id,
-            updates,
-            after_write=lambda connection: append_transactional(request, connection, event),
+        mutation_audit(request, lambda: event).apply(
+            store,
+            lambda append: store.update(camera_id, updates, after_write=append),
+            expects_audit=lambda result: result is not None,
         )
     return _probe_response(probe)
 
@@ -565,7 +587,8 @@ def update_camera(
     background_tasks: BackgroundTasks,
 ) -> dict[str, object]:
     actor = _authorize(request)
-    current = _store(request.app).get(camera_id)
+    store = _store(request.app)
+    current = store.get(camera_id)
     if current is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="camera not found")
     if not payload.model_fields_set:
@@ -595,10 +618,10 @@ def update_camera(
         updates["room_edge_ref"] = payload.room_edge_ref
 
     try:
-        updated = _store(request.app).update(
-            camera_id,
-            updates,
-            after_write=_audit_hook(request, actor, AuditAction.CAMERA_UPDATE, camera_id),
+        updated = _camera_mutation(request, actor, AuditAction.CAMERA_UPDATE, camera_id).apply(
+            store,
+            lambda append: store.update(camera_id, updates, after_write=append),
+            expects_audit=lambda result: result is not None,
         )
     except DuplicateCameraError as exc:
         raise _duplicate_camera_error(exc) from exc
@@ -688,20 +711,16 @@ def delete_camera(
     background_tasks: BackgroundTasks,
 ) -> Response:
     actor = _authorize(request)
-    existing = _store(request.app).get(camera_id)
-    if existing is None or not _store(request.app).delete(
-        camera_id,
-        after_write=_audit_hook(request, actor, AuditAction.CAMERA_DELETE, camera_id),
+    store = _store(request.app)
+    existing = store.get(camera_id)
+    if existing is None or not _camera_mutation(
+        request, actor, AuditAction.CAMERA_DELETE, camera_id
+    ).apply(
+        store,
+        lambda append: store.delete(camera_id, after_write=append),
+        expects_audit=bool,
     ):
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="camera not found")
-    # A bed zone may be keyed by either the local registry id or the
-    # canonical backend_camera_id (see _lookup_bed_zone) depending on which
-    # id was canonical when it was recognized -- delete both so a re-created
-    # camera with the same id never inherits a stale polygon.
-    canonical_id = existing.get("backend_camera_id")
-    _bed_zone_store(request.app).delete(camera_id)
-    if isinstance(canonical_id, str) and canonical_id and canonical_id != camera_id:
-        _bed_zone_store(request.app).delete(canonical_id)
     background_tasks.add_task(_trigger_roster_sync, request.app)
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
@@ -760,7 +779,7 @@ def worker_config_snapshot(
 ) -> dict[str, object]:
     snapshot = _store(request.app).snapshot()
     bed_zones = _bed_zone_store(request.app).get_all()
-    facility_id = _connection_settings_store(request.app).load().facility_id
+    facility_id = get_connection_settings_store(request.app).load().facility_id
     cameras = []
     policy_cameras: list[PolicyCameraIdentity] = []
     for record in _snapshot_camera_records(snapshot):
@@ -808,7 +827,7 @@ def worker_config_snapshot(
         decode_backend = record.get("decode_backend")
         if decode_backend is not None:
             camera["decode_backend"] = decode_backend
-        bed_zone = _lookup_bed_zone(bed_zones, canonical_id, record.get("id"))
+        bed_zone = _lookup_bed_zone(bed_zones, record.get("id"))
         if bed_zone is not None:
             camera["bed_zone_regions"] = [region.as_dict() for region in bed_zone.regions]
             camera["bed_zone_image_width"] = bed_zone.image_width
@@ -979,7 +998,7 @@ def acknowledge_applied_detection_policies(
     request: Request, *, facility_id: str, config_version: int | None
 ) -> None:
     """Move pending activations to applied only after a restarted worker heartbeats."""
-    enrolled_facility = _connection_settings_store(request.app).load().facility_id
+    enrolled_facility = get_connection_settings_store(request.app).load().facility_id
     if enrolled_facility != facility_id or config_version is None:
         return
     expected = worker_config_snapshot(request).get("config_version")
@@ -1033,32 +1052,28 @@ def _apply_numeric_detection_policies(
 
 def _detection_policy_store(app: FastAPI) -> DetectionPolicyStore:
     store = getattr(app.state, "detection_policy_store", None)
+    if store is None:
+        raise RuntimeError("detection policy store is not injected")
     if not isinstance(store, DetectionPolicyStore):
-        store = DetectionPolicyStore.from_env()
-        app.state.detection_policy_store = store
+        raise TypeError("detection policy store has invalid type")
     return store
-
-
-def _connection_settings_store(app: FastAPI) -> ConnectionSettingsStore:
-    store = getattr(app.state, "connection_settings_store", None)
-    if isinstance(store, ConnectionSettingsStore):
-        return store
-    return ConnectionSettingsStore.from_env()
 
 
 def _detection_settings_store(app: FastAPI) -> DetectionSettingsStore:
     store = getattr(app.state, "detection_settings_store", None)
+    if store is None:
+        raise RuntimeError("detection settings store is not injected")
     if not isinstance(store, DetectionSettingsStore):
-        store = DetectionSettingsStore(_store(app).path)
-        app.state.detection_settings_store = store
+        raise TypeError("detection settings store has invalid type")
     return store
 
 
 def _clip_storage_location_store(app: FastAPI) -> ClipStorageLocationStore:
     store = getattr(app.state, "clip_storage_location_store", None)
+    if store is None:
+        raise RuntimeError("clip storage location store is not injected")
     if not isinstance(store, ClipStorageLocationStore):
-        store = ClipStorageLocationStore(_store(app).path)
-        app.state.clip_storage_location_store = store
+        raise TypeError("clip storage location store has invalid type")
     return store
 
 
@@ -1164,7 +1179,7 @@ def _public_snapshot(
         )
         if isinstance(local_id, str) and local_id:
             camera["sync"] = camera_sync_view(app, local_id)
-        bed_zone = _lookup_bed_zone(bed_zones, canonical_id, local_id)
+        bed_zone = _lookup_bed_zone(bed_zones, local_id)
         camera["bed_zone"] = bed_zone.as_dict() if bed_zone is not None else None
         backend_id = explicit_backend_by_record_index.get(
             index, fallback_backend_by_record_index.get(index)
@@ -1204,7 +1219,6 @@ def _public_snapshot(
         # a duplicate offline tile beside the live one.
         if backend_camera.camera_id in claimed_roster_ids:
             continue
-        roster_bed_zone = bed_zones.get(backend_camera.camera_id)
         cameras.append(
             {
                 "id": backend_camera.camera_id,
@@ -1219,7 +1233,7 @@ def _public_snapshot(
                 "created_at": backend_camera.created_at,
                 "space_name": backend_camera.space_name,
                 "floor_name": backend_camera.floor_name,
-                "bed_zone": roster_bed_zone.as_dict() if roster_bed_zone is not None else None,
+                "bed_zone": None,
             }
         )
     return {
@@ -1284,36 +1298,30 @@ def _snapshot_camera_records(
 
 def _store(app: FastAPI) -> CameraRegistryStore:
     store = getattr(app.state, "camera_registry", None)
+    if store is None:
+        raise RuntimeError("camera registry is not injected")
     if not isinstance(store, CameraRegistryStore):
-        store = CameraRegistryStore.from_env()
-        app.state.camera_registry = store
+        raise TypeError("camera registry has invalid type")
     return store
 
 
 def _bed_zone_store(app: FastAPI) -> BedZoneStore:
     store = getattr(app.state, "bed_zone_store", None)
+    if store is None:
+        raise RuntimeError("bed zone store is not injected")
     if not isinstance(store, BedZoneStore):
-        store = BedZoneStore(_store(app).path)
-        app.state.bed_zone_store = store
+        raise TypeError("bed zone store has invalid type")
     return store
 
 
-def _lookup_bed_zone(
-    bed_zones: dict[str, BedZone], canonical_id: object, local_id: object
-) -> BedZone | None:
-    """Match a persisted bed zone by canonical id first, then local registry
-    id, mirroring _heartbeat_camera_fields' candidate-id fallback: the
-    recognize endpoint may have been called with either id historically, and
-    a backend mapping can change which id is canonical after the fact."""
-    for candidate in (canonical_id, local_id):
-        if isinstance(candidate, str) and candidate in bed_zones:
-            return bed_zones[candidate]
-    return None
+def _lookup_bed_zone(bed_zones: dict[str, BedZone], local_id: object) -> BedZone | None:
+    """Native zones belong to the local camera row, never a Hub identifier alias."""
+    return bed_zones.get(local_id) if isinstance(local_id, str) else None
 
 
-def _audit_hook(
+def _camera_mutation(
     request: Request, actor: str, action: AuditAction, target_id: str
-) -> Callable[[sqlite3.Connection], None]:
+) -> AuditMutation:
     event = AuditEvent(
         occurred_at=audit_now(),
         actor_id=actor,
@@ -1321,7 +1329,7 @@ def _audit_hook(
         target_id=target_id,
         detail=empty_detail(action),
     )
-    return lambda connection: append_transactional(request, connection, event)
+    return mutation_audit(request, lambda: event)
 
 
 def _authorize(request: Request) -> str:

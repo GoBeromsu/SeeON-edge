@@ -1,0 +1,52 @@
+{
+  "cameras": [
+    {
+      "camera_id": "cmsnw6rjc01vhlh01oswn99yq",
+      "decode": {
+        "fallback_count": 0,
+        "last_reason": null,
+        "requested": "auto",
+        "selected": "nvdec",
+        "updated_at_sec": 1787000000.0
+      },
+      "detection": {
+        "decision_completed": 0,
+        "expected": false,
+        "inference_admitted": 0,
+        "inference_overwritten": 0,
+        "inference_succeeded": 0
+      }
+    }
+  ],
+  "clip_export": {
+    "enabled": true,
+    "version": 2
+  },
+  "clip_recorder": {
+    "active_clips": 0,
+    "available": true,
+    "dropped_events": 0,
+    "dropped_frames": 0,
+    "encoder": "h264_nvenc",
+    "failed_writes": 0,
+    "finalized_clips": 4,
+    "video_unavailable_clips": 1
+  },
+  "facility_id": "facility-1",
+  "generation": null,
+  "gpu": {
+    "captured_at_sec": 1787000000.0,
+    "cuda_context_ok": true,
+    "device_name": "NVIDIA GeForce RTX 5070 Ti",
+    "driver_version": "580.65.06",
+    "nvml_available": true,
+    "nvml_error": null
+  },
+  "seq": 1,
+  "worker": {
+    "alive": true,
+    "pid": 4242,
+    "profile_boot_error": null,
+    "started_at_sec": 1786999940.0
+  }
+}

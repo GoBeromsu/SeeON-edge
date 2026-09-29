@@ -14,15 +14,15 @@ import pytest
 from fastapi.testclient import TestClient
 
 from backend.app.core.config import reject_retired_backend_environment
-from backend.app.features.cameras.store import CameraRegistryStore
-from backend.app.features.connection.store import (
-    API_BACKEND_BASE_URL_ENV,
-    ConnectionSettingsStore,
-)
+from backend.app.features.audit.postgres_runtime import PostgresAuditRuntime
+from backend.app.features.connection.store import API_BACKEND_BASE_URL_ENV
 from backend.app.features.status.heartbeat_store import HeartbeatStore
 from backend.app.main import create_app, no_lifespan
-from tests_support.compact_authority_db import prepare_compact_database
+from tests_support.postgres_api_app import postgres_api_app
+from tests_support.postgres_sandbox import ProductSandbox
 from worker.runtime.config.pull_models import BackendWorkerConfigPayload
+
+pytest_plugins = ("tests_support.postgres_sandbox",)
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 PRODUCTION_ROOTS = (
@@ -32,17 +32,15 @@ PRODUCTION_ROOTS = (
 )
 
 
-@pytest.fixture(autouse=True)
-def _compact_databases(tmp_path: Path) -> None:
-    for name in ("connection.sqlite3", "catalog.sqlite3", "empty.sqlite3"):
-        prepare_compact_database(tmp_path / name)
-
-
-def _client_with_registry(tmp_path: Path, *, camera_id: str = "cam-1") -> TestClient:
-    app = create_app(lifespan=no_lifespan)
+def _client_with_registry(
+    sandbox: ProductSandbox,
+    audit_runtime: PostgresAuditRuntime,
+    *,
+    camera_id: str = "cam-1",
+) -> TestClient:
+    app = postgres_api_app(sandbox, audit_runtime)
     app.state.edge_relay_token = "relay-token"
-    store = CameraRegistryStore(tmp_path / "catalog.sqlite3")
-    store.create(
+    app.state.camera_registry.create(
         camera_id=camera_id,
         label="Room",
         rtsp_url="rtsp://example/stream",
@@ -50,7 +48,6 @@ def _client_with_registry(tmp_path: Path, *, camera_id: str = "cam-1") -> TestCl
         status="online",
         backend_camera_id=camera_id,
     )
-    app.state.camera_registry = store
     return TestClient(app)
 
 
@@ -61,28 +58,15 @@ class TestNoCameraInventoryAuthority:
 
 
 class TestConnectionFacilityDbOnly:
-    def test_env_facility_id_does_not_seed_load(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        monkeypatch.setenv("API_FACILITY_ID", "facility-from-env")
-        monkeypatch.setenv(API_BACKEND_BASE_URL_ENV, "https://api.example.com")
-        monkeypatch.delenv("EDGE_FACILITY_TOKEN", raising=False)
-        store = ConnectionSettingsStore(tmp_path / "connection.sqlite3")
-        settings = store.load()
-        assert settings.facility_id is None
-        assert settings.events_url is not None
-
     def test_configured_requires_facility_id_and_token(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+        self,
+        postgres_product_sandbox: ProductSandbox,
+        postgres_audit_runtime: PostgresAuditRuntime,
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         monkeypatch.setenv(API_BACKEND_BASE_URL_ENV, "https://api.example.com")
-        store = ConnectionSettingsStore(tmp_path / "connection.sqlite3")
-        monkeypatch.setattr(
-            ConnectionSettingsStore,
-            "from_env",
-            classmethod(lambda cls: store),
-        )
-        app = create_app(lifespan=no_lifespan)
+        app = postgres_api_app(postgres_product_sandbox, postgres_audit_runtime)
+        store = app.state.connection_settings_store
         client = TestClient(app)
         login = client.post("/api/v1/auth/session", json={"username": "admin", "password": "admin"})
         assert login.status_code == 204
@@ -116,8 +100,12 @@ class TestWorkerConfigPullLocalFacility:
         assert len(config.cameras) == 1
         assert config.cameras[0].facility_id == "local"
 
-    def test_worker_config_snapshot_omits_facility_stamp(self, tmp_path: Path) -> None:
-        client = _client_with_registry(tmp_path)
+    def test_worker_config_snapshot_omits_facility_stamp(
+        self,
+        postgres_product_sandbox: ProductSandbox,
+        postgres_audit_runtime: PostgresAuditRuntime,
+    ) -> None:
+        client = _client_with_registry(postgres_product_sandbox, postgres_audit_runtime)
         response = client.get(
             "/api/v1/cameras/worker-config",
             headers={"X-Edge-Relay-Token": "relay-token"},
@@ -132,10 +120,13 @@ class TestWorkerConfigPullLocalFacility:
 
 class TestRelayRegistryOnly:
     def test_alert_accepts_registry_camera_without_env_facility(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+        self,
+        postgres_product_sandbox: ProductSandbox,
+        postgres_audit_runtime: PostgresAuditRuntime,
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         monkeypatch.delenv("API_FACILITY_ID", raising=False)
-        client = _client_with_registry(tmp_path)
+        client = _client_with_registry(postgres_product_sandbox, postgres_audit_runtime)
         # No backend client: local accept still OK; binding must not 403.
         response = client.post(
             "/api/v1/relay/alerts",
@@ -152,12 +143,14 @@ class TestRelayRegistryOnly:
         assert response.json()["status"] == "accepted"
 
     def test_alert_unknown_camera_without_inventory_rescue(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+        self,
+        postgres_product_sandbox: ProductSandbox,
+        postgres_audit_runtime: PostgresAuditRuntime,
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         monkeypatch.delenv("API_FACILITY_ID", raising=False)
-        app = create_app(lifespan=no_lifespan)
+        app = postgres_api_app(postgres_product_sandbox, postgres_audit_runtime)
         app.state.edge_relay_token = "relay-token"
-        app.state.camera_registry = CameraRegistryStore(tmp_path / "empty.sqlite3")
         # Leftover inventory must not rescue unknown cameras.
         app.state.camera_inventory = {"ghost": {"camera_id": "ghost", "facility_id": "fac"}}
         client = TestClient(app)
@@ -207,9 +200,13 @@ class TestRelayRegistryOnly:
 
 
 class TestStatusFromRegistry:
-    def test_never_seen_comes_from_registry_not_inventory(self, tmp_path: Path) -> None:
-        app = create_app(lifespan=no_lifespan)
-        store = CameraRegistryStore(tmp_path / "catalog.sqlite3")
+    def test_never_seen_comes_from_registry_not_inventory(
+        self,
+        postgres_product_sandbox: ProductSandbox,
+        postgres_audit_runtime: PostgresAuditRuntime,
+    ) -> None:
+        app = postgres_api_app(postgres_product_sandbox, postgres_audit_runtime)
+        store = app.state.camera_registry
         store.create(
             camera_id="reg-a",
             label="A",
@@ -224,7 +221,6 @@ class TestStatusFromRegistry:
             space_id=None,
             status="online",
         )
-        app.state.camera_registry = store
         app.state.camera_inventory = {"inv-ghost": {"camera_id": "inv-ghost", "facility_id": "fac"}}
         beats = HeartbeatStore(stale_after_sec=90.0)
         beats.record("reg-a", "local")

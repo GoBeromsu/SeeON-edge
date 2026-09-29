@@ -1,0 +1,1462 @@
+{
+  "compare_rules": {
+    "bytes": "exact byte equality",
+    "json-value": "parse both sides and compare values after dropping 'normalised' fields",
+    "jsonl-lines-rebuild": "the golden holds the file as {file_name, lines, trailing_newline}; rebuild the bytes as '\\n'.join(lines) plus '\\n' when trailing_newline, then require exact byte equality with the producer's file named file_name",
+    "mjpeg-part-framing": "framing is the contract, payload bytes are encoder-specific: the producer's first multipart part must equal part_head_template with <content-length> replaced by the decimal payload length, then the payload, then part_tail byte for byte; the payload must be the JPEG the producer was given, unchanged; recorded_payload_* and recorded_part_sha256 describe the Python recording and are not compared"
+  },
+  "files_sha256": {
+    "d/clip-analysis/clip.analysis.json": "7b42a6107011dd1cbd7854b144834adabd409ce7f6bf3c4cf156d6427b60fc2b",
+    "d/clip-analysis/clip.analysis.json.sha256": "22c1023568feca0e3331aa547391144b33417ba1bf226e102782e3d7b6989192",
+    "d/clip-playback/clip.playback-h264.json": "7ffb4c1519717e2e52b72e48622be524330655870abc4babb1833176937b62d4",
+    "d/config-lkg/current.json": "3d2fcfb2af0b92ffd9a725798da7881ab41dd48a29ff8e8e8f8eefe73c5ad961",
+    "d/config-lkg/revisions/00000000000000000002-00000000000000000007-00000000000000000005.json": "3d2fcfb2af0b92ffd9a725798da7881ab41dd48a29ff8e8e8f8eefe73c5ad961",
+    "d/delivery-queue-dead-letter/queue-dead-letter/422.0.event-a5e15ff2-90fd-4764-be74-a7da4f573cc9.json": "fc7a8aa478a9078bb720b66b6bfd817d92492d530a31f7801e678c1081a8b905",
+    "d/delivery-queue/attachment-05d867440a7fae84651f59fffbea2b57faa3942ecb0f6b79716a6873ba01e9e7.json": "a86c0e046fce7a9347681d444881afa53f2269ca848588d9e1ccad787fcf3116",
+    "d/delivery-queue/clip-3c30d6568aa365b7abbdf561cbb3234bd102fce015112be7010ec16821b30848.json": "8b4ab8e32ddf0afd1309a88a840e60252b2e1a06105ccac500492f41bab65c1b",
+    "d/delivery-queue/clip-c222ba2454b7d045af80aa9f2a5ff97ebcccc641ada2a321be8195e0b7933a78.json": "6542f4273a9daaabffc37156241475f5c7c8b54bc68b9cba7ab2717bdfcf1b14",
+    "d/delivery-queue/clip-fb4271979957cd5b20b1078f7c3a2e13eaba5661c34a0a8d37e4387023d111e8.json": "d10387aec43f493abafbac178b19695fb013703e1696bc0d7973147c61c7d8b2",
+    "d/delivery-queue/disposition-d6681ffe537c67cb3880ffbf5edaa522cd5bfe992a5f99a034c3471ba257c405.json": "9370f1b2f2d86c7006e71ec89bc5754b7bd8079ab1ff3939a4e4551095f04d3c",
+    "d/delivery-queue/event-a5e15ff2-90fd-4764-be74-a7da4f573cc9.json": "fc7a8aa478a9078bb720b66b6bfd817d92492d530a31f7801e678c1081a8b905",
+    "d/engine-identity.json": "d97dffe367deb592f215d04195e143392c785e7d5049b61147f16dc161d71c0c",
+    "d/model-selection.json": "ad894cc0e868cc1a463292ae418ecc14183680bd832b1adb4b09a1787e9e549b",
+    "d/models-bundle-layout.json": "099dcee5335d6e3d6c68c8d2b45ed39be402b42e133821979f63ced33ea3b963",
+    "d/models-layout.json": "1a8fb4ed580ba875ec1b90c94fd11c71ac9ae75618a9ce9e87876b95b032cf93",
+    "d/replay-engine/bed-exit-v1.input.json": "2df388136c0d8fcc74b7d7c5e9cad3baac187d32dafb27a9dcb1cb347163242e",
+    "d/replay-engine/bed-exit-v1.json": "8168fcf787a5c567642aa7470aea0389437de96255dda9f365ebb159b23f5586",
+    "d/replay-engine/fall-v2.input.json": "484eacd5a3ead0df2c76b5889830ed7f8396e2e9b0b2191e44dea47b956cc873",
+    "d/replay-engine/fall-v2.json": "91ba1eaac9a2b7ff8a8bb562ab56c0bb6c7358a47bbf30c3bae452067e1b6b54",
+    "d/replay-trace/7ec7c11be0c6ec04.lines.json": "a9f0a945d9b4051628043d58b46b42176492a2363b1a4aac4ad420afebf42036",
+    "d/replay-trace/replay-wire-trace.canonical.json": "ce501282eb142a0abb8108e86ad12e09dba7fe3ef8d5bb83847cdff0013fddc3",
+    "h/bed-zone.json": "793714aa4a73340d4dbb507486c0004aaaf8f0176534ef75afe5da95aaa3590a",
+    "h/clip-analysis.json": "2695f40e0172fc8621f9cd84049a939a964685c8f067789d64570c8ceadca15f",
+    "h/pose.json": "4d518e8ba3d4a846c432b9739d231d575b08f57812b79dc26c7552a54f459a9d",
+    "h/preview-render-labels.json": "3cf7f530edfd16c93d4ea9f0c0fad2bbd64523054f42babbb9b19caf43a50429",
+    "h/probe.json": "4a9324bfbd99d704a6d2cf5bb915c6b9e3ee7799b59be68f4bced83a605da028",
+    "h/replay-truncated.json": "3eded740479b09e557986aa22472f338866b0eb1473b9158613e4c38d901f9ef",
+    "h/replay.json": "f5cf9a7c01578d268df7e13f10f6d9e1abfc6d102d7570e43d81c31875b46d94",
+    "h/snapshot.json": "4cd38001d111f51a619f7e15447220904304ecc59b24bac87cea886ba2cfa873",
+    "h/stream-first-part.json": "5495eff70ca3a8ecfca05b234593bdca9588ca183d54ec49f3f6ce9f48b34307",
+    "h/stream-relay.json": "e5f56738941ee5f0043ca42463650eda949a72d1f3b9e902d1ccc74c5d23db32",
+    "h/stream.json": "3b5178402481e3a67e72c9952958620fe35534c7181021f00744ede972e9a616",
+    "r/alert.json": "8686d0e89dba6a595f1ac0bbe791fc99122c5b3f33628e7671a1bb687daf9fa7",
+    "r/alert.response.json": "f9af99233204cf8183393e701543ce520aecfd76db3d462ad604d6220c802cf8",
+    "r/capabilities.request.json": "ffe7500814755096c61c511f3da779d253420a53b22fe162370040a8e3bfddce",
+    "r/capabilities.response.json": "8869f6b1ec42c9474083ccf93184abbaa647357becc9980830e1a6662081be94",
+    "r/clip-put-ready.json": "cc7023485900c17adc52c3d8fd456e9499b4c652ba3f94d6f789b0ee632afef1",
+    "r/clip-put-ready.response.json": "380ddd848747dd4489c5306cf2230257d1a5a0e5f3340f0a07290f08ad024858",
+    "r/clip-put-unavailable-capture-failed.json": "6dbb55cba1b320341ef9123cea23e1c9b609b999074f750be5ec25af3ba1307d",
+    "r/clip-put-unavailable-corrupt.json": "ebc2ded5f0e01cc29aea91ee053381cc83864008014961e6e4efdf917ba5c1f6",
+    "r/execution-records.json": "d5d706512c5446afae53f75094fde15fda4926bd8e122843d390f8bfee1a5d98",
+    "r/execution-records.model-evidence.json": "2a0248b2331c2a2acb09943eba691ba263f52bb5c24d3bf583a75c7ad705d1e6",
+    "r/execution-records.model-evidence.response.json": "d917a674f303916906e5af92c6677b83dfd5510baff066d9f57bc10d02108c88",
+    "r/execution-records.response.json": "93ae1c96fcf8122f153cbbbc7075c232900b6ee882ba1f6cfc9e1b7352c4137c",
+    "r/heartbeat.json": "6eaed7e2ca16b70cfa79018918bb2e2f1fc4c670ebd318f1bc0218381104acdc",
+    "r/relay-dispositions.json": "1cee08a4b2821fe7200352f69aa4d5054bdb0ab66f34648acf3c16a67acf3833",
+    "r/release-identity.response.json": "d53ca3a3091ad0aaf95da0272fd7915a365cbaf2af793146403b5bb6898392b3",
+    "r/runtime-status-boot-failure.json": "2f91f86b6ca49256ac2959ccca21111a2fc689e9eaacc9d87f02151ac56b1925",
+    "r/runtime-status-steady.json": "d34d6bd972437cca37e0cb41a3f1548425573029c47500e80d587f7323930580",
+    "r/runtime-status.response.json": "d0ebad60e66372d85c6cac8601fd7dd768e43770616b7adbbce24f3417e0db94",
+    "r/snapshot-attachment.json": "15183db6990c05a08247a1d10caec922e8db37b589a6da4e06e01c5941b86a29",
+    "r/snapshot-disposition.json": "c473642dabc81f05007cc7d1267e0dc52f1f05f879e6f0ee2bee7397db5723f3",
+    "r/worker-config.response.json": "ab1dfdb1b168de70d6531f158ce1854f4b1ee9f57b3d64aa035e1a61c54d9d3d"
+  },
+  "fixed_inputs": {
+    "camera_id": "cmsnw6rjc01vhlh01oswn99yq",
+    "clip_id": "22222222-2222-4222-8222-222222222222",
+    "facility_id": "facility-1",
+    "relay_token": "<relay-token> (synthetic, redacted in transport headers)",
+    "relay_url": "http://relay.invalid:8000",
+    "rtsp_url": "rtsp://camera.invalid/stream",
+    "uuid4": "uuid.uuid4 patched to UUID(int=n, version=4), n=1,2,...",
+    "wall_clock_sec": 1787000000.0
+  },
+  "gaps": [
+    {
+      "missing_producer": "a model-publication tool that writes the selection document",
+      "reason": "no in-repo writer produces the selection document; the golden is ModelSelection.as_dict serialised with canonical_json_bytes",
+      "rows": [
+        2
+      ],
+      "what": "selection document as written in production"
+    },
+    {
+      "missing_producer": "a GPU execution-record producer (Rust AcceleratorEvidence)",
+      "reason": "no Python producer emits an accelerator value: Python execution records have no accelerator field and the CPU ORT runner declares none. The model evidence the record does carry (raw_logit, applied_temperature, class_origins) is recorded in r/execution-records.model-evidence.json",
+      "rows": [
+        9
+      ],
+      "what": "execution-record accelerator value"
+    },
+    {
+      "missing_producer": "a pinned ffmpeg build producing the H.264 rendition",
+      "reason": "ffmpeg is replaced by a stand-in that writes fixed bytes; transcoder output is not deterministic across builds",
+      "rows": [
+        12
+      ],
+      "what": "playback rendition MP4 bytes"
+    },
+    {
+      "missing_producer": "worker runtime status on a GPU host",
+      "reason": "GPU telemetry depends on the host; the recorded runtime status normalises these fields",
+      "rows": [
+        13
+      ],
+      "what": "live NVML/CUDA runtime values"
+    },
+    {
+      "missing_producer": "a /replay endpoint that replays the canonical ReplayTrace and can report reproducible=true",
+      "reason": "POST /replay runs the legacy AnalysisTrace path (worker/replay/engine.py:replay_camera), which always reports reproducible=false; parse_worker_replay refuses every such response, so no accepted exchange exists to record. The deterministic engine output is recorded in-process under d/replay-engine/",
+      "rows": [
+        15
+      ],
+      "what": "HTTP-accepted (reproducible=true) /replay exchange"
+    },
+    {
+      "missing_producer": "a worker RTSP probe implementation wired into MjpegServer",
+      "reason": "the production server wires probe=None, so every live probe answers error_class=unavailable; ok/auth/timeout/decode come from a faked probe callable",
+      "rows": [
+        16
+      ],
+      "what": "production /probe success path"
+    },
+    {
+      "missing_producer": "worker/pipeline/output/preview_renderer.py:PreviewRenderer.render on a host with the production font",
+      "reason": "the renderer draws with Pillow and NotoSansCJK, which is absent on this host; only labels, colours and geometry are recorded",
+      "rows": [
+        17
+      ],
+      "what": "preview pixels (drawn boxes, fills and Korean text)"
+    },
+    {
+      "missing_producer": "worker bed-zone recognizer with the production bed-seg model",
+      "reason": "the recognizer is faked; ORT inference on a real snapshot would need resident imagery",
+      "rows": [
+        18
+      ],
+      "what": "bed segmentation model output"
+    },
+    {
+      "missing_producer": "worker/adapters/model/clip_reanalysis.py with the production models and decoder",
+      "reason": "the supervisor is faked and the ClipAnalysisResult is authored; decoding and pose/bed inference are not run",
+      "rows": [
+        19
+      ],
+      "what": "clip analysis compute"
+    },
+    {
+      "missing_producer": "worker/tools/edge_engine_build.py build path on the Jetson/GPU image",
+      "reason": "hashes cover synthetic stand-in files; building a TensorRT engine needs the GPU image",
+      "rows": [
+        21
+      ],
+      "what": "real TensorRT engine and DeepStream build identity"
+    }
+  ],
+  "goldens": [
+    {
+      "backend_parser": "shared/events/clip_analysis_wire.py:decode_clip_analysis (round-trip equal); h/clip-analysis.json get-with-sidecar reads the same bytes",
+      "compare": "bytes",
+      "input": "authored ClipAnalysisResult: one available frame with one box, one bed triangle, 640x360, time base 1/90000",
+      "normalised": [],
+      "path": "d/clip-analysis/clip.analysis.json",
+      "producer": "shared/events/clip_analysis_wire.py:encode_clip_analysis",
+      "rows": [
+        19
+      ],
+      "sha256": "7b42a6107011dd1cbd7854b144834adabd409ce7f6bf3c4cf156d6427b60fc2b",
+      "size_bytes": 731,
+      "wire_class": "D"
+    },
+    {
+      "backend_parser": "backend clip store sidecar digest check (exercised in h/clip-analysis.json get-with-sidecar)",
+      "compare": "bytes",
+      "input": "sha256 of d/clip-analysis/clip.analysis.json",
+      "normalised": [],
+      "path": "d/clip-analysis/clip.analysis.json.sha256",
+      "producer": "sidecar digest line (sha256 hex + newline) as read by backend/app/features/clips/store.py",
+      "rows": [
+        19
+      ],
+      "sha256": "22c1023568feca0e3331aa547391144b33417ba1bf226e102782e3d7b6989192",
+      "size_bytes": 65,
+      "wire_class": "D"
+    },
+    {
+      "backend_parser": "backend/app/features/clips/store.py:ClipStore._read_playback_attestation -> {'rendition': 'clip.playback-h264.098bc4117d9a0bb9.mp4', 'rendition_sha256': '098bc4117d9a0bb913e7e304822caf417d13ee06aa6a727526267bb60680ce7d', 'pts_identical': True}",
+      "compare": "bytes",
+      "input": "clip bytes b'clip' with sha256 manifest; ffprobe reports hevc; ffmpeg stand-in writes b'synthetic-h264-rendition'; VideoTiming(1, 90000, (0, 3000))",
+      "normalised": [],
+      "path": "d/clip-playback/clip.playback-h264.json",
+      "producer": "worker/pipeline/output/evidence/playback_rendition_publish.py:write_playback_rendition",
+      "producer_result": "<work>/rendition-store/clips/22222222-2222-4222-8222-222222222222/clip.playback-h264.098bc4117d9a0bb9.mp4",
+      "rendition_files": [
+        "clip.mp4",
+        "clip.playback-h264.098bc4117d9a0bb9.mp4",
+        "clip.playback-h264.json",
+        "manifest.json"
+      ],
+      "rows": [
+        12
+      ],
+      "sha256": "7ffb4c1519717e2e52b72e48622be524330655870abc4babb1833176937b62d4",
+      "size_bytes": 297,
+      "tool_argv": [
+        [
+          "ffprobe",
+          "-v",
+          "error",
+          "-select_streams",
+          "v:0",
+          "-show_entries",
+          "stream=codec_name",
+          "-of",
+          "csv=p=0",
+          "<clip-dir>/clip.mp4"
+        ],
+        [
+          "ffmpeg",
+          "-nostdin",
+          "-loglevel",
+          "error",
+          "-y",
+          "-i",
+          "<clip-dir>/clip.mp4",
+          "-map",
+          "0:v:0",
+          "-an",
+          "-c:v",
+          "libx264",
+          "-preset",
+          "veryfast",
+          "-crf",
+          "23",
+          "-pix_fmt",
+          "yuv420p",
+          "-fps_mode",
+          "passthrough",
+          "-enc_time_base",
+          "-1",
+          "-video_track_timescale",
+          "90000",
+          "-movflags",
+          "+faststart",
+          "<clip-dir>/.playback-rendition.<tmp>.mp4"
+        ]
+      ],
+      "tool_argv_normalised": [
+        "clip directory -> <clip-dir>",
+        "tempfile suffix .playback-rendition.<random>.mp4 -> .playback-rendition.<tmp>.mp4"
+      ],
+      "wire_class": "D"
+    },
+    {
+      "backend_parser": "n/a (on-disk format)",
+      "compare": "bytes",
+      "input": "r/worker-config.response.json pulled and saved as last-known-good (directive generation=2 version=7 registry=5)",
+      "normalised": [],
+      "path": "d/config-lkg/current.json",
+      "producer": "worker/runtime/config/config_pull.py:load_worker_config_from_relay -> worker/runtime/config/lkg_store.py:WorkerConfigLkgStore.save",
+      "rows": [
+        3
+      ],
+      "sha256": "3d2fcfb2af0b92ffd9a725798da7881ab41dd48a29ff8e8e8f8eefe73c5ad961",
+      "size_bytes": 576,
+      "wire_class": "D"
+    },
+    {
+      "backend_parser": "n/a (on-disk format)",
+      "compare": "bytes",
+      "input": "r/worker-config.response.json pulled and saved as last-known-good (directive generation=2 version=7 registry=5)",
+      "normalised": [],
+      "path": "d/config-lkg/revisions/00000000000000000002-00000000000000000007-00000000000000000005.json",
+      "producer": "worker/runtime/config/config_pull.py:load_worker_config_from_relay -> worker/runtime/config/lkg_store.py:WorkerConfigLkgStore.save",
+      "rows": [
+        3
+      ],
+      "sha256": "3d2fcfb2af0b92ffd9a725798da7881ab41dd48a29ff8e8e8f8eefe73c5ad961",
+      "size_bytes": 576,
+      "wire_class": "D"
+    },
+    {
+      "backend_parser": "n/a (on-disk format)",
+      "compare": "bytes",
+      "input": "EVENT fixture staged then dead-lettered with status_code=422",
+      "normalised": [],
+      "path": "d/delivery-queue-dead-letter/queue-dead-letter/422.0.event-a5e15ff2-90fd-4764-be74-a7da4f573cc9.json",
+      "producer": "shared/events/delivery_queue.py:DeliveryQueue.dead_letter",
+      "rows": [
+        10
+      ],
+      "sha256": "fc7a8aa478a9078bb720b66b6bfd817d92492d530a31f7801e678c1081a8b905",
+      "size_bytes": 908,
+      "wire_class": "D"
+    },
+    {
+      "backend_parser": "n/a (on-disk format; consumer is d2 Rust drain)",
+      "compare": "bytes",
+      "input": "queue entry kind=SNAPSHOT_ATTACHMENT: staged EVENT fixture, one snapshot attachment, one disposition, three ClipEntry",
+      "normalised": [],
+      "path": "d/delivery-queue/attachment-05d867440a7fae84651f59fffbea2b57faa3942ecb0f6b79716a6873ba01e9e7.json",
+      "producer": "worker/pipeline/output/evidence/evidence_stager.py:DurableEvidenceStager + shared/events/delivery_queue.py:DeliveryQueue.try_admit",
+      "rows": [
+        10
+      ],
+      "sha256": "a86c0e046fce7a9347681d444881afa53f2269ca848588d9e1ccad787fcf3116",
+      "size_bytes": 395,
+      "wire_class": "D"
+    },
+    {
+      "backend_parser": "n/a (on-disk format; consumer is d2 Rust drain)",
+      "compare": "bytes",
+      "input": "queue entry kind=CLIP: staged EVENT fixture, one snapshot attachment, one disposition, three ClipEntry",
+      "normalised": [],
+      "path": "d/delivery-queue/clip-3c30d6568aa365b7abbdf561cbb3234bd102fce015112be7010ec16821b30848.json",
+      "producer": "worker/pipeline/output/evidence/evidence_stager.py:DurableEvidenceStager + shared/events/delivery_queue.py:DeliveryQueue.try_admit",
+      "rows": [
+        10
+      ],
+      "sha256": "8b4ab8e32ddf0afd1309a88a840e60252b2e1a06105ccac500492f41bab65c1b",
+      "size_bytes": 492,
+      "wire_class": "D"
+    },
+    {
+      "backend_parser": "n/a (on-disk format; consumer is d2 Rust drain)",
+      "compare": "bytes",
+      "input": "queue entry kind=CLIP: staged EVENT fixture, one snapshot attachment, one disposition, three ClipEntry",
+      "normalised": [],
+      "path": "d/delivery-queue/clip-c222ba2454b7d045af80aa9f2a5ff97ebcccc641ada2a321be8195e0b7933a78.json",
+      "producer": "worker/pipeline/output/evidence/evidence_stager.py:DurableEvidenceStager + shared/events/delivery_queue.py:DeliveryQueue.try_admit",
+      "rows": [
+        10
+      ],
+      "sha256": "6542f4273a9daaabffc37156241475f5c7c8b54bc68b9cba7ab2717bdfcf1b14",
+      "size_bytes": 489,
+      "wire_class": "D"
+    },
+    {
+      "backend_parser": "n/a (on-disk format; consumer is d2 Rust drain)",
+      "compare": "bytes",
+      "input": "queue entry kind=CLIP: staged EVENT fixture, one snapshot attachment, one disposition, three ClipEntry",
+      "normalised": [],
+      "path": "d/delivery-queue/clip-fb4271979957cd5b20b1078f7c3a2e13eaba5661c34a0a8d37e4387023d111e8.json",
+      "producer": "worker/pipeline/output/evidence/evidence_stager.py:DurableEvidenceStager + shared/events/delivery_queue.py:DeliveryQueue.try_admit",
+      "rows": [
+        10
+      ],
+      "sha256": "d10387aec43f493abafbac178b19695fb013703e1696bc0d7973147c61c7d8b2",
+      "size_bytes": 656,
+      "wire_class": "D"
+    },
+    {
+      "backend_parser": "n/a (on-disk format; consumer is d2 Rust drain)",
+      "compare": "bytes",
+      "input": "queue entry kind=SNAPSHOT_DISPOSITION: staged EVENT fixture, one snapshot attachment, one disposition, three ClipEntry",
+      "normalised": [],
+      "path": "d/delivery-queue/disposition-d6681ffe537c67cb3880ffbf5edaa522cd5bfe992a5f99a034c3471ba257c405.json",
+      "producer": "worker/pipeline/output/evidence/evidence_stager.py:DurableEvidenceStager + shared/events/delivery_queue.py:DeliveryQueue.try_admit",
+      "rows": [
+        10
+      ],
+      "sha256": "9370f1b2f2d86c7006e71ec89bc5754b7bd8079ab1ff3939a4e4551095f04d3c",
+      "size_bytes": 273,
+      "wire_class": "D"
+    },
+    {
+      "backend_parser": "n/a (on-disk format; consumer is d2 Rust drain)",
+      "compare": "bytes",
+      "input": "queue entry kind=EVENT: staged EVENT fixture, one snapshot attachment, one disposition, three ClipEntry",
+      "normalised": [],
+      "path": "d/delivery-queue/event-a5e15ff2-90fd-4764-be74-a7da4f573cc9.json",
+      "producer": "worker/pipeline/output/evidence/evidence_stager.py:DurableEvidenceStager + shared/events/delivery_queue.py:DeliveryQueue.try_admit",
+      "rows": [
+        10
+      ],
+      "sha256": "fc7a8aa478a9078bb720b66b6bfd817d92492d530a31f7801e678c1081a8b905",
+      "size_bytes": 908,
+      "wire_class": "D"
+    },
+    {
+      "backend_parser": "worker/runtime/flow/cold_start.py:verify_engine_identity -> {'batch_size': '1', 'engine_sha256': '4cdc83eb03cc830add0aae46bc5e0819f6705ac92400088d9e7ba52a5206c522', 'image_digest': 'sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee', 'inf",
+      "compare": "bytes",
+      "input": "six synthetic files b'synthetic-<role>'; image_digest sha256:eee...; batch_size 1",
+      "normalised": [],
+      "path": "d/engine-identity.json",
+      "producer": "worker/tools/edge_engine_build.py:identity_for (json.dumps sort_keys + newline)",
+      "rows": [
+        21
+      ],
+      "sha256": "d97dffe367deb592f215d04195e143392c785e7d5049b61147f16dc161d71c0c",
+      "size_bytes": 646,
+      "wire_class": "D"
+    },
+    {
+      "backend_parser": "contracts/model_selection.py:parse_model_selection (round-trip equal); worker/runtime/provenance/model_bundle.py:desired_model_bundle_from_selection_document -> {'bundle_sha256': '2222222222222222222222222222222222222222222222222222222222222222', 'identities': {'dataset': '5555555555555555555555555555555555555555555555555555555555555555', 'evaluation': '66666",
+      "compare": "bytes",
+      "input": "synthetic digests (repeated hex digits), SeniorAILab/synthetic locators",
+      "normalised": [],
+      "path": "d/model-selection.json",
+      "producer": "contracts/model_selection.py:ModelSelection.as_dict + canonical_json_bytes",
+      "rows": [
+        2
+      ],
+      "sha256": "ad894cc0e868cc1a463292ae418ecc14183680bd832b1adb4b09a1787e9e549b",
+      "size_bytes": 1342,
+      "wire_class": "D"
+    },
+    {
+      "backend_parser": "worker/runtime/provenance/model_bundle.py:admit_model_bundle + worker/adapters/model/ort_pose_bbox56.py:OrtPoseBbox56Runner.from_admitted_bundle (run inside fetch_all)",
+      "compare": "json-value",
+      "input": "the seeded pose-bbox56 test bundle published on a synthetic huggingface source, its model-selection document, and two flat github-release artifacts; fetched twice",
+      "normalised": [
+        "log: the fetch_bundle mkdtemp suffix under bundles/.<sha>. is <mkdtemp>"
+      ],
+      "note": "bundle_sha256 depends on bundle-manifest.json, which pins model.pt; torch.save output differs between the arm64 recorder host and x86_64, so the bundle sha is host-specific while model.onnx is not. Recorded with env={}, so no auth header is sent.",
+      "path": "d/models-bundle-layout.json",
+      "producer": "worker/tools/fetch_models/fetcher.py:fetch_all (selection_path set; source faked, sidecar_root under the recorder work dir)",
+      "rows": [
+        22
+      ],
+      "sha256": "099dcee5335d6e3d6c68c8d2b45ed39be402b42e133821979f63ced33ea3b963",
+      "size_bytes": 20813,
+      "wire_class": "D"
+    },
+    {
+      "backend_parser": "worker/tools/fetch_models/manifest.py:parse_manifest",
+      "compare": "json-value",
+      "input": "two synthetic artifacts from a github-release source; fetched twice",
+      "normalised": [],
+      "path": "d/models-layout.json",
+      "producer": "worker/tools/fetch_models/fetcher.py:fetch_all (source faked, sidecar_root under the recorder work dir)",
+      "rows": [
+        22
+      ],
+      "sha256": "1a8fb4ed580ba875ec1b90c94fd11c71ac9ae75618a9ce9e87876b95b032cf93",
+      "size_bytes": 2068,
+      "wire_class": "D"
+    },
+    {
+      "backend_parser": "contracts/replay_trace.py:decode_document (round-trip equal)",
+      "compare": "bytes",
+      "input": "tests/fixtures/replay/reconnect-control-v2.json row 0: 48 frames with its track at bbox (0.25,0,0.75,0.5,0.9), then 32 frames with row 2's out-of-bed track; 66_666_667 ns steps, seq 0..79; camera_id camera-replay",
+      "normalised": [],
+      "path": "d/replay-engine/bed-exit-v1.input.json",
+      "producer": "contracts/replay_trace.py:encode_document",
+      "rows": [
+        15
+      ],
+      "sha256": "2df388136c0d8fcc74b7d7c5e9cad3baac187d32dafb27a9dcb1cb347163242e",
+      "size_bytes": 50751,
+      "wire_class": "D"
+    },
+    {
+      "backend_parser": "contracts/replay_trace.py:decode_document reads the input; the run is compared as a value",
+      "compare": "json-value",
+      "input": "d/replay-engine/bed-exit-v1.input.json under the recorded policy; replayed twice, both runs equal",
+      "normalised": [],
+      "path": "d/replay-engine/bed-exit-v1.json",
+      "producer": "worker/replay/engine.py:replay + replay_run_json",
+      "rows": [
+        15
+      ],
+      "sha256": "8168fcf787a5c567642aa7470aea0389437de96255dda9f365ebb159b23f5586",
+      "size_bytes": 71084,
+      "wire_class": "D"
+    },
+    {
+      "backend_parser": "contracts/replay_trace.py:decode_document (round-trip equal)",
+      "compare": "bytes",
+      "input": "45 copies of tests/fixtures/replay/gap-control-v2.json row 0 at 66_666_667 ns steps, seq 0..44; camera_id camera-replay",
+      "normalised": [],
+      "path": "d/replay-engine/fall-v2.input.json",
+      "producer": "contracts/replay_trace.py:encode_document",
+      "rows": [
+        15
+      ],
+      "sha256": "484eacd5a3ead0df2c76b5889830ed7f8396e2e9b0b2191e44dea47b956cc873",
+      "size_bytes": 28500,
+      "wire_class": "D"
+    },
+    {
+      "backend_parser": "contracts/replay_trace.py:decode_document reads the input; the run is compared as a value",
+      "compare": "json-value",
+      "input": "d/replay-engine/fall-v2.input.json under the recorded policy; replayed twice, both runs equal",
+      "normalised": [],
+      "path": "d/replay-engine/fall-v2.json",
+      "producer": "worker/replay/engine.py:replay + replay_run_json",
+      "rows": [
+        15
+      ],
+      "sha256": "91ba1eaac9a2b7ff8a8bb562ab56c0bb6c7358a47bbf30c3bae452067e1b6b54",
+      "size_bytes": 38008,
+      "wire_class": "D"
+    },
+    {
+      "backend_parser": "contracts/replay_trace.py:decode_jsonl (round-trip equal)",
+      "compare": "jsonl-lines-rebuild",
+      "encode_jsonl_equal": true,
+      "input": "one nvdcf row, one tracked COCO-17 track, one bed polygon on 640x480",
+      "normalised": [],
+      "path": "d/replay-trace/7ec7c11be0c6ec04.lines.json",
+      "producer": "worker/pipeline/trace/replay_trace_writer.py:ReplayTraceWriter.append",
+      "rows": [
+        15
+      ],
+      "sha256": "a9f0a945d9b4051628043d58b46b42176492a2363b1a4aac4ad420afebf42036",
+      "size_bytes": 832,
+      "wire_class": "D",
+      "writer_file_sha256": "c4f369ec4c14d6d16c5e012b47c51e80e1ee7d58cc45c63406f8e56800f8b651"
+    },
+    {
+      "backend_parser": "shared/events/replay_wire.py:decode_replay_trace",
+      "compare": "bytes",
+      "input": "the one-frame trace sent to POST /replay in h/replay.json",
+      "normalised": [],
+      "path": "d/replay-trace/replay-wire-trace.canonical.json",
+      "producer": "shared/events/replay_wire.py:decode_replay_trace(...).canonical_json",
+      "rows": [
+        15
+      ],
+      "sha256": "ce501282eb142a0abb8108e86ad12e09dba7fe3ef8d5bb83847cdff0013fddc3",
+      "size_bytes": 738,
+      "wire_class": "D"
+    },
+    {
+      "backend_parser": "backend/app/features/cameras/bed_zone_router.py:recognize_bed_zone -> BedZoneResponse",
+      "compare": "json-value",
+      "input": "64x48 black JPEG snapshot; recognizer returns one 4-point polygon or raises BedZoneNotFoundError; empty snapshot for 503",
+      "normalised": [
+        "request.timeout_sec",
+        "backend.result.bed_zone.recognized_at"
+      ],
+      "path": "h/bed-zone.json",
+      "producer": "worker/pipeline/output/_mjpeg_http.py:POST /overlay/{id}/bed-zone/recognize (recognizer and snapshot faked)",
+      "rows": [
+        16,
+        18
+      ],
+      "sha256": "793714aa4a73340d4dbb507486c0004aaaf8f0176534ef75afe5da95aaa3590a",
+      "size_bytes": 8731,
+      "wire_class": "H"
+    },
+    {
+      "backend_parser": "backend/app/features/clips/analysis_router.py via create_app TestClient -> ClipAnalysisResponse",
+      "compare": "json-value",
+      "input": "clip bytes b'clip' with READY v2 worker manifest and finalized backend manifest; supervisor outcomes per case; sidecar from encode_clip_analysis for get-with-sidecar",
+      "normalised": [
+        "request.timeout_sec"
+      ],
+      "path": "h/clip-analysis.json",
+      "producer": "worker/pipeline/output/_clip_analysis_http.py:handle_get/handle_post (supervisor faked)",
+      "rows": [
+        16,
+        19
+      ],
+      "sha256": "2695f40e0172fc8621f9cd84049a939a964685c8f067789d64570c8ceadca15f",
+      "size_bytes": 17704,
+      "wire_class": "H"
+    },
+    {
+      "backend_parser": "backend/app/features/cameras/streams_router.py:_pose_request -> PoseOverlayResponse",
+      "compare": "json-value",
+      "input": "camera-1 registered; POST {person:false,bed:true}",
+      "normalised": [
+        "request.timeout_sec"
+      ],
+      "path": "h/pose.json",
+      "producer": "worker/pipeline/output/_mjpeg_http.py:GET/POST /overlay/{id}/pose",
+      "rows": [
+        16,
+        17
+      ],
+      "sha256": "4d518e8ba3d4a846c432b9739d231d575b08f57812b79dc26c7552a54f459a9d",
+      "size_bytes": 5773,
+      "wire_class": "H"
+    },
+    {
+      "backend_parser": "n/a: rendered into JPEG pixels on the worker; no backend consumer",
+      "compare": "json-value",
+      "input": "FallPreviewState none/normal 0.12/suspected 0.87/suspected without probability; two bed polygons on 640x480",
+      "normalised": [],
+      "path": "h/preview-render-labels.json",
+      "producer": "worker/pipeline/output/preview_renderer.py:PreviewRenderer._status_color/_person_label/_scaled_beds/_bed_number_at/_scaled_coordinate",
+      "rows": [
+        17
+      ],
+      "sha256": "3cf7f530edfd16c93d4ea9f0c0fad2bbd64523054f42babbb9b19caf43a50429",
+      "size_bytes": 3842,
+      "wire_class": "H"
+    },
+    {
+      "backend_parser": "backend/app/features/cameras/router.py:_probe_rtsp_url and _probe_result_from_worker",
+      "compare": "json-value",
+      "input": "rtsp://camera.invalid/stream; resolver patched (8.8.8.8 or OSError); probe fake raises MjpegProbeError(auth|timeout), RuntimeError (decode) or returns _unavailable_probe",
+      "normalised": [
+        "request.timeout_sec"
+      ],
+      "path": "h/probe.json",
+      "producer": "worker/pipeline/output/_mjpeg_http.py:POST /probe via mjpeg_server.MjpegServer (probe callable faked per error class)",
+      "rows": [
+        16
+      ],
+      "sha256": "4a9324bfbd99d704a6d2cf5bb915c6b9e3ee7799b59be68f4bced83a605da028",
+      "size_bytes": 8060,
+      "wire_class": "H"
+    },
+    {
+      "backend_parser": "scripts/ops/replay-runtime-analysis.py:parse_worker_replay refuses (ReplayResponseError: worker refused incomplete replay input)",
+      "compare": "json-value",
+      "input": "the h/replay.json one-frame trace with truncation handoff_dropped_frames=2, pruned_frames=1; bed_exit v1 image-default policy",
+      "normalised": [],
+      "path": "h/replay-truncated.json",
+      "producer": "worker/pipeline/output/_mjpeg_http.py:POST /replay (_replay_run_payload)",
+      "rows": [
+        15,
+        16
+      ],
+      "sha256": "3eded740479b09e557986aa22472f338866b0eb1473b9158613e4c38d901f9ef",
+      "size_bytes": 6199,
+      "wire_class": "H"
+    },
+    {
+      "backend_parser": "scripts/ops/replay-runtime-analysis.py:parse_worker_replay refuses (ReplayResponseError: worker refused incomplete replay input)",
+      "compare": "json-value",
+      "input": "one-frame empty-scene trace; bed_exit v1 image-default policy; fall v2 with replay_fall_model=None for 422",
+      "normalised": [],
+      "path": "h/replay.json",
+      "producer": "worker/pipeline/output/_mjpeg_http.py:POST /replay (_replay_run_payload)",
+      "rows": [
+        15,
+        16
+      ],
+      "sha256": "f5cf9a7c01578d268df7e13f10f6d9e1abfc6d102d7570e43d81c31875b46d94",
+      "size_bytes": 17494,
+      "wire_class": "H"
+    },
+    {
+      "backend_parser": "backend/app/features/cameras/streams_router.py:_content_type",
+      "compare": "json-value",
+      "input": "LatestFrameStore with camera-1 (one 64x48 black JPEG, frame_index=1) and camera-empty",
+      "normalised": [],
+      "path": "h/snapshot.json",
+      "producer": "worker/pipeline/output/mjpeg_server.py:_handle_snapshot",
+      "rows": [
+        16
+      ],
+      "sha256": "4cd38001d111f51a619f7e15447220904304ecc59b24bac87cea886ba2cfa873",
+      "size_bytes": 2991,
+      "wire_class": "H"
+    },
+    {
+      "backend_parser": "relayed as opaque bytes by backend streams_router; boundary checked in h/stream.json",
+      "compare": "mjpeg-part-framing",
+      "input": "64x48 black JPEG republished every 50 ms; the server frames the published JPEG bytes unchanged (passthrough, no re-encode): the recorder asserts the part payload equals the published bytes",
+      "normalised": [
+        "part_head_template Content-Length value -> <content-length>"
+      ],
+      "path": "h/stream-first-part.json",
+      "producer": "worker/pipeline/output/_mjpeg_http.py:GET /stream/{id} multipart writer (L535-539)",
+      "rows": [
+        16
+      ],
+      "sha256": "5495eff70ca3a8ecfca05b234593bdca9588ca183d54ec49f3f6ce9f48b34307",
+      "size_bytes": 358,
+      "wire_class": "H"
+    },
+    {
+      "backend_parser": "backend/app/features/cameras/streams_router.py:camera_stream (_worker_relay_headers, _upstream_unavailable, StreamingResponse)",
+      "compare": "json-value",
+      "input": "create_app(lifespan=None) with a minted dashboard session, driven over raw ASGI so the unbounded stream can be cut after its first part; no camera_registry, so the backend id is passed through; the upstream is the real worker server on loopback with the publisher from h/stream.json",
+      "normalised": [
+        "request.headers.cookie -> <dashboard-session>",
+        "upstream.headers x-edge-relay-token -> <relay-token>"
+      ],
+      "path": "h/stream-relay.json",
+      "producer": "backend/app/features/cameras/streams_router.py:camera_stream relaying worker/pipeline/output/_mjpeg_http.py:GET /stream/{id}",
+      "rows": [
+        16
+      ],
+      "sha256": "e5f56738941ee5f0043ca42463650eda949a72d1f3b9e902d1ccc74c5d23db32",
+      "size_bytes": 3161,
+      "wire_class": "H"
+    },
+    {
+      "backend_parser": "backend/app/features/cameras/streams_router.py:_stream_content_type",
+      "compare": "json-value",
+      "input": "camera-1 with frames; camera-empty with STREAM_FIRST_FRAME_TIMEOUT_SECONDS patched to 0.3",
+      "normalised": [],
+      "path": "h/stream.json",
+      "producer": "worker/pipeline/output/_mjpeg_http.py:GET /stream/{id}",
+      "rows": [
+        16
+      ],
+      "sha256": "3b5178402481e3a67e72c9952958620fe35534c7181021f00744ede972e9a616",
+      "size_bytes": 3058,
+      "wire_class": "H"
+    },
+    {
+      "backend_parser": "ok: backend.app.features.relay.router.RelayAlertRequest.model_validate",
+      "compare": "json-value",
+      "input": "EVENT fixture staged with config_version=7 and runtime manifest sha",
+      "normalised": [],
+      "path": "r/alert.json",
+      "producer": "shared/events/evidence_export_client.py:RelayEvidenceClient via worker/pipeline/output/evidence/evidence_sender.py:EvidenceSender.run_once",
+      "rows": [
+        10,
+        23
+      ],
+      "sha256": "8686d0e89dba6a595f1ac0bbe791fc99122c5b3f33628e7671a1bb687daf9fa7",
+      "size_bytes": 515,
+      "transport": {
+        "body_sha256": "b46c952dbab4cfbdf0d32ef647582ae5f3d847bbf417c899a593e16c1b9bf899",
+        "headers": {
+          "Content-Type": "application/json",
+          "X-Edge-Relay-Token": "<relay-token>"
+        },
+        "method": "POST",
+        "path": "/api/v1/relay/alerts",
+        "query": "",
+        "timeout_sec": 16.0
+      },
+      "wire_class": "R"
+    },
+    {
+      "authored": "canned-response",
+      "backend_parser": "n/a (relay router returns this shape; worker parser shared/events/evidence_http_transport.py:parse_event_result accepted it)",
+      "compare": "json-value",
+      "input": "response to r/alert.json",
+      "normalised": [],
+      "path": "r/alert.response.json",
+      "producer": "canned relay answer (accepted with upstream id)",
+      "rows": [
+        10,
+        23
+      ],
+      "sha256": "f9af99233204cf8183393e701543ce520aecfd76db3d462ad604d6220c802cf8",
+      "size_bytes": 118,
+      "wire_class": "R"
+    },
+    {
+      "backend_parser": "ok: backend route GET /api/v1/relay/capabilities (backend.app.main.create_app)",
+      "compare": "json-value",
+      "input": "GET capabilities for the fixture camera",
+      "normalised": [],
+      "path": "r/capabilities.request.json",
+      "producer": "shared/events/evidence_export_client.py:RelayEvidenceClient.probe_capabilities",
+      "rows": [
+        4,
+        5,
+        23
+      ],
+      "sha256": "ffe7500814755096c61c511f3da779d253420a53b22fe162370040a8e3bfddce",
+      "size_bytes": 220,
+      "wire_class": "R"
+    },
+    {
+      "authored": "canned-response",
+      "backend_parser": "ok: backend.app.features.evidence.router.CapabilityResponse.model_validate",
+      "compare": "json-value",
+      "input": "GET capabilities for the fixture camera; canned backend answer",
+      "normalised": [],
+      "parsed_by_worker": "BackendCapabilities(event_idempotency=1, clip_export=1)",
+      "path": "r/capabilities.response.json",
+      "producer": "shared/events/evidence_export_client.py:RelayEvidenceClient.probe_capabilities (request); response canned",
+      "rows": [
+        4,
+        5,
+        23
+      ],
+      "sha256": "8869f6b1ec42c9474083ccf93184abbaa647357becc9980830e1a6662081be94",
+      "size_bytes": 49,
+      "transport": {
+        "body_sha256": null,
+        "headers": {
+          "X-Edge-Relay-Token": "<relay-token>"
+        },
+        "method": "GET",
+        "path": "/api/v1/relay/capabilities",
+        "query": "camera_id=cmsnw6rjc01vhlh01oswn99yq",
+        "timeout_sec": 16.0
+      },
+      "wire_class": "R"
+    },
+    {
+      "backend_parser": "ok: TypeAdapter(Annotated).validate_python",
+      "compare": "json-value",
+      "input": "ClipEntry local_state=VERIFIED unavailable_reason=None state_version=1",
+      "normalised": [],
+      "path": "r/clip-put-ready.json",
+      "producer": "shared/events/evidence_export_client.py:RelayEvidenceClient via worker/pipeline/output/evidence/evidence_sender.py:EvidenceSender.run_once",
+      "rows": [
+        12,
+        23
+      ],
+      "sha256": "cc7023485900c17adc52c3d8fd456e9499b4c652ba3f94d6f789b0ee632afef1",
+      "size_bytes": 508,
+      "transport": {
+        "body_sha256": "47ee4ec7c1076f2e78dca5c2298e2b3a27187e678d97110b2344295b1f81bb20",
+        "headers": {
+          "Content-Type": "application/json",
+          "X-Edge-Relay-Token": "<relay-token>"
+        },
+        "method": "PUT",
+        "path": "/api/v1/relay/clips/clip-ready-0001",
+        "query": "",
+        "timeout_sec": 16.0
+      },
+      "wire_class": "R"
+    },
+    {
+      "authored": "canned-response",
+      "backend_parser": "ok: backend.app.features.evidence.router.ClipReceiptResponse.model_validate",
+      "compare": "json-value",
+      "input": "response to r/clip-put-ready.json",
+      "normalised": [],
+      "path": "r/clip-put-ready.response.json",
+      "producer": "canned backend clip receipt",
+      "rows": [
+        12,
+        23
+      ],
+      "sha256": "380ddd848747dd4489c5306cf2230257d1a5a0e5f3340f0a07290f08ad024858",
+      "size_bytes": 181,
+      "wire_class": "R"
+    },
+    {
+      "backend_parser": "ok: TypeAdapter(Annotated).validate_python",
+      "compare": "json-value",
+      "input": "ClipEntry local_state=UNAVAILABLE unavailable_reason=NO_FRAMES state_version=1",
+      "normalised": [],
+      "path": "r/clip-put-unavailable-capture-failed.json",
+      "producer": "shared/events/evidence_export_client.py:RelayEvidenceClient via worker/pipeline/output/evidence/evidence_sender.py:EvidenceSender.run_once",
+      "rows": [
+        12,
+        23
+      ],
+      "sha256": "6dbb55cba1b320341ef9123cea23e1c9b609b999074f750be5ec25af3ba1307d",
+      "size_bytes": 222,
+      "transport": {
+        "body_sha256": "b554286a48d276841ed62e702ae4313f84e522a83b5104b47e477c1a09f56b58",
+        "headers": {
+          "Content-Type": "application/json",
+          "X-Edge-Relay-Token": "<relay-token>"
+        },
+        "method": "PUT",
+        "path": "/api/v1/relay/clips/clip-noframes-0002",
+        "query": "",
+        "timeout_sec": 16.0
+      },
+      "wire_class": "R"
+    },
+    {
+      "backend_parser": "ok: TypeAdapter(Annotated).validate_python",
+      "compare": "json-value",
+      "input": "ClipEntry local_state=UNAVAILABLE unavailable_reason=CORRUPT state_version=2",
+      "normalised": [],
+      "path": "r/clip-put-unavailable-corrupt.json",
+      "producer": "shared/events/evidence_export_client.py:RelayEvidenceClient via worker/pipeline/output/evidence/evidence_sender.py:EvidenceSender.run_once",
+      "rows": [
+        12,
+        23
+      ],
+      "sha256": "ebc2ded5f0e01cc29aea91ee053381cc83864008014961e6e4efdf917ba5c1f6",
+      "size_bytes": 215,
+      "transport": {
+        "body_sha256": "f1c9e18b929e9efd31681fb0c5a48df7b30b0e954b84301d88bdc6fe41dcfa54",
+        "headers": {
+          "Content-Type": "application/json",
+          "X-Edge-Relay-Token": "<relay-token>"
+        },
+        "method": "PUT",
+        "path": "/api/v1/relay/clips/clip-corrupt-0003",
+        "query": "",
+        "timeout_sec": 16.0
+      },
+      "wire_class": "R"
+    },
+    {
+      "backend_parser": "ok: shared.events.execution_records.WireBatch.from_json + backend.app.features.diagnostics.wire.ingest_batch_from_wire (as backend/app/features/diagnostics/router.py:ingest_execution_records)",
+      "compare": "json-value",
+      "input": "two model.score records (frame_seq 100,101) for one camera/boot",
+      "normalised": [],
+      "path": "r/execution-records.json",
+      "producer": "worker/pipeline/diagnostics/exporter.py:ExecutionRecordExporter.flush_once via shared/events/execution_records_client.py:ExecutionRecordsClient.post_batch",
+      "rows": [
+        9,
+        14,
+        23
+      ],
+      "sha256": "d5d706512c5446afae53f75094fde15fda4926bd8e122843d390f8bfee1a5d98",
+      "size_bytes": 2094,
+      "transport": {
+        "body_sha256": "076079993ea98c9c1930bd62f05f47bf02cf7759f74bd93fca5a7c18fded588b",
+        "headers": {
+          "Content-Type": "application/json",
+          "X-Edge-Relay-Token": "<relay-token>"
+        },
+        "method": "POST",
+        "path": "/api/v1/relay/execution-records",
+        "query": "",
+        "timeout_sec": 2.0
+      },
+      "wire_class": "R"
+    },
+    {
+      "backend_parser": "ok: shared.events.execution_records.WireBatch.from_json + backend.app.features.diagnostics.wire.ingest_batch_from_wire (as backend/app/features/diagnostics/router.py:ingest_execution_records)",
+      "compare": "json-value",
+      "input": "the seeded pose-bbox56 test bundle (tests_support/pose_bbox56_bundle_artifact.py) on CPU ORT; track 1 fed tests/fixtures_fall_pose_bbox56_v1.json raw_cases[0].expected_rows[0].row for 30 frames; the 30th update is due and scored",
+      "normalised": [],
+      "note": "batch is the posted body; runner_output is the runner's return value, equal to a direct predict on the same window. The float32 logit is host-dependent in its last bit (ORT CPU kernels): arm64 gives 0x1.83b052p-2 and x86_64 0x1.83b054p-2; the derived probabilities are equal on both hosts. provenance.model_digest is the bundle's model.pt member digest (published_weights_digest, as worker.py composes it), calibration_digest its calibration.json member digest and preprocessing_identity the bundle's; model.pt bytes differ between hosts, so model_digest is host-dependent too. The other provenance fields are environment constants. No accelerator value exists on this path.",
+      "path": "r/execution-records.model-evidence.json",
+      "producer": "worker/adapters/model/ort_pose_bbox56.py:load_packaged_fall_bundle runner, OrtPoseBbox56Runner.predict via worker/domains/fall/classifier.py:FallWindowClassifier.update, recorded by worker/pipeline/diagnostics/emit_policy.py:model_score_record and sent by worker/pipeline/diagnostics/exporter.py:ExecutionRecordExporter.flush_once with worker/pipeline/diagnostics/provenance.py:build_wire_provenance",
+      "rows": [
+        9,
+        14,
+        23
+      ],
+      "sha256": "2a0248b2331c2a2acb09943eba691ba263f52bb5c24d3bf583a75c7ad705d1e6",
+      "size_bytes": 2138,
+      "transport": {
+        "body_sha256": "48b82a7fa37ce72f13f1ec50dd4d1093adb01b52d05331dd6a67255a460c17aa",
+        "headers": {
+          "Content-Type": "application/json",
+          "X-Edge-Relay-Token": "<relay-token>"
+        },
+        "method": "POST",
+        "path": "/api/v1/relay/execution-records",
+        "query": "",
+        "timeout_sec": 2.0
+      },
+      "wire_class": "R"
+    },
+    {
+      "authored": "canned-response",
+      "backend_parser": "ok: backend.app.features.diagnostics.schemas.ExecutionRecordReceiptResponse.model_validate",
+      "compare": "json-value",
+      "input": "response to r/execution-records.model-evidence.json",
+      "normalised": [
+        "committed_at_ns"
+      ],
+      "path": "r/execution-records.model-evidence.response.json",
+      "producer": "canned backend receipt echoing batch_id",
+      "rows": [
+        9,
+        14,
+        23
+      ],
+      "sha256": "d917a674f303916906e5af92c6677b83dfd5510baff066d9f57bc10d02108c88",
+      "size_bytes": 213,
+      "wire_class": "R"
+    },
+    {
+      "authored": "canned-response",
+      "backend_parser": "ok: backend.app.features.diagnostics.schemas.ExecutionRecordReceiptResponse.model_validate",
+      "compare": "json-value",
+      "input": "response to r/execution-records.json",
+      "normalised": [
+        "committed_at_ns"
+      ],
+      "path": "r/execution-records.response.json",
+      "producer": "canned backend receipt echoing batch_id",
+      "rows": [
+        9,
+        14,
+        23
+      ],
+      "sha256": "93ae1c96fcf8122f153cbbbc7075c232900b6ee882ba1f6cfc9e1b7352c4137c",
+      "size_bytes": 213,
+      "wire_class": "R"
+    },
+    {
+      "backend_parser": "ok: backend.app.features.relay.router.RelayHeartbeatRequest.model_validate",
+      "compare": "json-value",
+      "input": "camera READY transition, worker.version=7",
+      "normalised": [],
+      "note": "relay_heartbeat_url is supplied by WorkerConfig; the path here is the configured value",
+      "path": "r/heartbeat.json",
+      "producer": "worker/runtime/worker.py:HeartbeatReporter.mark_ready",
+      "rows": [
+        13,
+        23
+      ],
+      "sha256": "6eaed7e2ca16b70cfa79018918bb2e2f1fc4c670ebd318f1bc0218381104acdc",
+      "size_bytes": 101,
+      "transport": {
+        "body_sha256": "79327653a6ba78294f14ac1784aaffd3c13860ee88b09cddac91ec41af037323",
+        "headers": {
+          "Content-Type": "application/json",
+          "X-Edge-Relay-Token": "<relay-token>"
+        },
+        "method": "POST",
+        "path": "/api/v1/relay/heartbeat",
+        "query": "",
+        "timeout_sec": 6.0
+      },
+      "wire_class": "R"
+    },
+    {
+      "authored": "hand-authored-rows",
+      "backend_parser": "n/a (worker-side response classification)",
+      "compare": "json-value",
+      "consumer": "d1 Rust relay client vs loopback server; d1b tests/test_evidence_http_transport.py",
+      "input": "hand-authored relay responses with an injected clock",
+      "normalised": [],
+      "path": "r/relay-dispositions.json",
+      "producer": "shared/events/evidence_http_transport.py:parse_event_result/parse_clip_result/classify_http_failure/_retry_after",
+      "rows": [
+        10,
+        23
+      ],
+      "sha256": "1cee08a4b2821fe7200352f69aa4d5054bdb0ab66f34648acf3c16a67acf3833",
+      "size_bytes": 11734,
+      "wire_class": "R"
+    },
+    {
+      "authored": "backend-output",
+      "backend_parser": "ok: produced by backend.app.routes.health.release_identity()",
+      "compare": "json-value",
+      "input": "current shared.release_identity constants",
+      "normalised": [],
+      "path": "r/release-identity.response.json",
+      "producer": "backend/app/routes/health.py:release_identity (response); worker/runtime/config/release_pair.py:require_api_release_identity (request + check)",
+      "rows": [
+        3,
+        23
+      ],
+      "sha256": "d53ca3a3091ad0aaf95da0272fd7915a365cbaf2af793146403b5bb6898392b3",
+      "size_bytes": 70,
+      "transport": {
+        "body_sha256": null,
+        "headers": {
+          "Accept": "application/json"
+        },
+        "method": "GET",
+        "path": "/health/release-identity",
+        "query": "",
+        "timeout_sec": 5.0
+      },
+      "wire_class": "R"
+    },
+    {
+      "authored": "new-contract",
+      "authored_reason": "worker/runtime/worker.py:898 always sends profile_boot_error=None; the Rust GPU lane (c1) is the first producer of a non-null value",
+      "backend_parser": "ok: backend.app.features.relay.router.RelayRuntimeStatusRequest.model_validate",
+      "compare": "json-value",
+      "consumer": "c1 Rust GPU-lane process test (exit 4, one POST /runtime-status); c1b tests/test_api_runtime_status.py::test_profile_boot_failure_status_with_no_cameras_is_accepted",
+      "input": "no cameras registered, clip recorder unavailable, cuda_context_ok=false, worker.alive=false, profile_boot_error=cuda_unavailable",
+      "normalised": [
+        "gpu.captured_at_sec",
+        "worker.pid",
+        "worker.started_at_sec"
+      ],
+      "path": "r/runtime-status-boot-failure.json",
+      "producer": "worker/runtime/telemetry/runtime_status_sender.py:RuntimeStatusSender.publish_once (values authored)",
+      "rows": [
+        13,
+        23
+      ],
+      "sha256": "2f91f86b6ca49256ac2959ccca21111a2fc689e9eaacc9d87f02151ac56b1925",
+      "size_bytes": 745,
+      "transport": {
+        "body_sha256": "b19db5e45cf72740a885d0f4f28da64b39a707de9bd8fc3e51b72af28270484f",
+        "headers": {
+          "Authorization": "<relay-token>",
+          "Content-Type": "application/json"
+        },
+        "method": "POST",
+        "path": "/api/v1/relay/runtime-status",
+        "query": "",
+        "timeout_sec": 2.0
+      },
+      "wire_class": "R"
+    },
+    {
+      "backend_parser": "ok: backend.app.features.relay.router.RelayRuntimeStatusRequest.model_validate",
+      "compare": "json-value",
+      "input": "one camera auto->nvdec, clip recorder available, GPU ok, worker alive; wall clock fixed",
+      "normalised": [
+        "gpu.captured_at_sec",
+        "worker.pid",
+        "worker.started_at_sec",
+        "cameras[].decode.updated_at_sec",
+        "gpu.driver_version",
+        "gpu.device_name"
+      ],
+      "path": "r/runtime-status-steady.json",
+      "producer": "worker/runtime/telemetry/runtime_status_sender.py:RuntimeStatusSender.publish_once over RelayRuntimeStatusTransport",
+      "rows": [
+        13,
+        23
+      ],
+      "sha256": "d34d6bd972437cca37e0cb41a3f1548425573029c47500e80d587f7323930580",
+      "size_bytes": 1156,
+      "transport": {
+        "body_sha256": "a5cf24091c23a9e5079804505beeea06376b594bad42d87aebf41d9dfb4b70d4",
+        "headers": {
+          "Authorization": "<relay-token>",
+          "Content-Type": "application/json"
+        },
+        "method": "POST",
+        "path": "/api/v1/relay/runtime-status",
+        "query": "",
+        "timeout_sec": 2.0
+      },
+      "wire_class": "R"
+    },
+    {
+      "authored": "canned-response",
+      "backend_parser": "ok: backend.app.features.relay.router.RelayRuntimeStatusResponse.model_validate",
+      "compare": "json-value",
+      "input": "response to r/runtime-status-steady.json",
+      "normalised": [],
+      "path": "r/runtime-status.response.json",
+      "producer": "canned backend runtime-status answer",
+      "rows": [
+        13,
+        23
+      ],
+      "sha256": "d0ebad60e66372d85c6cac8601fd7dd768e43770616b7adbbce24f3417e0db94",
+      "size_bytes": 42,
+      "wire_class": "R"
+    },
+    {
+      "backend_parser": "ok: backend.app.features.relay.router.RelaySnapshotAttachmentRequest.model_validate",
+      "compare": "json-value",
+      "input": "attach_snapshot(snapshot-0001, 18342 bytes image/jpeg)",
+      "normalised": [],
+      "path": "r/snapshot-attachment.json",
+      "producer": "shared/events/evidence_export_client.py:RelayEvidenceClient via worker/pipeline/output/evidence/evidence_sender.py:EvidenceSender.run_once",
+      "rows": [
+        11,
+        23
+      ],
+      "sha256": "15183db6990c05a08247a1d10caec922e8db37b589a6da4e06e01c5941b86a29",
+      "size_bytes": 303,
+      "transport": {
+        "body_sha256": "7842a8fe3b9759b93637fa729867c65ff13ec4806b239bf83b550ba7f1ae0853",
+        "headers": {
+          "Content-Type": "application/json",
+          "X-Edge-Relay-Token": "<relay-token>"
+        },
+        "method": "POST",
+        "path": "/api/v1/relay/snapshot-attachments",
+        "query": "",
+        "timeout_sec": 16.0
+      },
+      "wire_class": "R"
+    },
+    {
+      "backend_parser": "ok: backend.app.features.relay.router.RelaySnapshotDispositionRequest.model_validate",
+      "compare": "json-value",
+      "input": "record_snapshot_disposition(UNAVAILABLE, snapshot_store_unconfigured) as event_sink.py:116",
+      "normalised": [],
+      "path": "r/snapshot-disposition.json",
+      "producer": "shared/events/evidence_export_client.py:RelayEvidenceClient via worker/pipeline/output/evidence/evidence_sender.py:EvidenceSender.run_once",
+      "rows": [
+        11,
+        23
+      ],
+      "sha256": "c473642dabc81f05007cc7d1267e0dc52f1f05f879e6f0ee2bee7397db5723f3",
+      "size_bytes": 171,
+      "transport": {
+        "body_sha256": "5bb5295b70101ac557e3d81233f4fff2ee286bad421e1b3444ce1777d44ca4dc",
+        "headers": {
+          "Content-Type": "application/json",
+          "X-Edge-Relay-Token": "<relay-token>"
+        },
+        "method": "POST",
+        "path": "/api/v1/relay/snapshot-dispositions",
+        "query": "",
+        "timeout_sec": 16.0
+      },
+      "wire_class": "R"
+    },
+    {
+      "authored": "canned-response",
+      "backend_parser": "ok: backend.app.features.cameras.router.WorkerConfigResponse.model_validate (response built through it)",
+      "compare": "json-value",
+      "input": "one camera, clip export on, config_version=7, restart_epoch=2",
+      "normalised": [],
+      "parsed_by_worker": "WorkerConfigPoll",
+      "path": "r/worker-config.response.json",
+      "producer": "backend WorkerConfigResponse (response); worker/runtime/config/config_pull.py:pull_worker_config_poll (request + parse)",
+      "rows": [
+        3,
+        23
+      ],
+      "sha256": "ab1dfdb1b168de70d6531f158ce1854f4b1ee9f57b3d64aa035e1a61c54d9d3d",
+      "size_bytes": 664,
+      "transport": {
+        "body_sha256": null,
+        "headers": {
+          "Accept": "application/json",
+          "X-edge-relay-token": "<relay-token>"
+        },
+        "method": "GET",
+        "path": "/api/v1/cameras/worker-config",
+        "query": "",
+        "timeout_sec": 5.0
+      },
+      "wire_class": "R"
+    }
+  ],
+  "lock_files_excluded": [],
+  "oracle_sources_sha256": {
+    "backend/app/features/cameras/bed_zone_router.py": "662c592ef9d4ce3b533b0f54d1e362775aa2d682312812254939b2424e143d50",
+    "backend/app/features/cameras/router.py": "16ee3d92e3d2baf73978ea280a7e535413ab83adad759ae9a2a81e7d27499ffd",
+    "backend/app/features/cameras/streams_router.py": "ec31919a26bb9ab1a62fe239d0719cf052f22817476861acfc85cfeb00e0e2c4",
+    "backend/app/features/clips/analysis_router.py": "6790ec9c4c22146ae949e2094b23b5e3115a2e5984b0a4e62518085baba74f81",
+    "backend/app/features/clips/store.py": "eeda3ffbcafdb695841ccc97da118faaa30c9b51cb5bfe9d65afbc343e7a4367",
+    "backend/app/features/diagnostics/router.py": "3a0d50251ffcd218bb0be82c33741c3fad07103b16b8a7f47dfba8720284909f",
+    "backend/app/routes/health.py": "ea1e03df38678fffd09818e97afc1cea3568c5c142735e8f92c5225c0a5aaa18",
+    "contracts/model_selection.py": "e431fa90a46da8c7b5aeb2a2b625b32bfecd4cc534ea19cb91dcb1acbea46de6",
+    "contracts/replay_trace.py": "ef3950d2675cd571030f8b5bf53674a52027986a7ffc9f90c9c3a794a0f96e5b",
+    "scripts/ops/replay-runtime-analysis.py": "01ff571d224a4490b68ab54376bb8015e7399d14e1e93a626b721c9b1bec6d29",
+    "shared/events/clip_analysis_wire.py": "f23467c8524072219a988390846e04d3712c0a526639fb17b0f1fbc19122bbcd",
+    "shared/events/delivery_queue.py": "cc156e7d7421cc8b3b2ba9f457a127476d041fa601d9e3a35469f0ae2a8c3705",
+    "shared/events/evidence_export_client.py": "372946107f3cbaca551bf99a1fe5762bad7dab86bfd5944c672556e61ac4fdd4",
+    "shared/events/evidence_http_transport.py": "7029889c9bc76efb6cfd8a170961b61b05746def9e7be196e93cf6134584abd7",
+    "shared/events/execution_records_client.py": "22404e7db39aad2e9617635302b50428978d4be45faba531fc1ceaa47d97b168",
+    "shared/events/replay_wire.py": "02805cffeddbf32a5b2daa786a6cd42bc45a19ef8a3d78fb9a4554579e3f13d7",
+    "worker/adapters/model/ort_pose_bbox56.py": "feb883ce9fc5689e36b51ce922c65515e7a11d7740ea02922e3d03b98d3cb820",
+    "worker/domains/fall/classifier.py": "026a2a6bf0244f0da2e847d1d40999dfbf30a5927d1ac833b1da07e088c7e314",
+    "worker/pipeline/diagnostics/emit_policy.py": "5dd1b808d4b4c3d8894aea0ee2adc3682eb7251a8d3dd55fbb94946db99df880",
+    "worker/pipeline/diagnostics/exporter.py": "b5fe553747dd07ef15781c68323f8a93ef70f90de4a29541b75261b68f20bb02",
+    "worker/pipeline/diagnostics/provenance.py": "082918d091c6adacb63d5f91a2b70a3665d639b7b66a8eb445825eacbab2112e",
+    "worker/pipeline/output/_clip_analysis_http.py": "89b8dba86aca6def552fea1e1c551f3075242bcbcf5272ff3c6b15e53cb59470",
+    "worker/pipeline/output/_mjpeg_http.py": "42ca83d28af768f1cdf679343cd0abab97f5dd990801fff484a9b70a33ef65c2",
+    "worker/pipeline/output/evidence/evidence_sender.py": "a43ca8529156aa1c3fade3bf9ffa71b05df8343f063e927d36ea3c8fe72919c3",
+    "worker/pipeline/output/evidence/evidence_stager.py": "c61a937b8181fac1fca3cc0e71529bbc76e7dfe66050f4d08317b1f977c9f51f",
+    "worker/pipeline/output/evidence/playback_rendition_publish.py": "28f634917292e417ab2f9393331f0e6885c773b546a303ad34aebe404b62c757",
+    "worker/pipeline/output/mjpeg_server.py": "23f891284a16333a949d6f5f2eb2259fab16b2f3fdd360ab8b29f1a7c6f5b9c2",
+    "worker/pipeline/output/preview_renderer.py": "007956562019d24ecffefb157b740a780105d4a24b7c6ae5c062b48f468572e7",
+    "worker/pipeline/trace/replay_trace_writer.py": "12b1099f5fc7119452cb3a0ce102ec56b471765c962021139ddafdaed7ff3276",
+    "worker/replay/engine.py": "713b2ec29fdd1117c0d4624777bc4238a8f5ef47fbe40c92fe04e7b73eae2df0",
+    "worker/runtime/config/config_pull.py": "ad49d2791d025dffa9f2ea2007f298b9f011356f894cd86f7513544001c17180",
+    "worker/runtime/config/lkg_store.py": "03452f78e26dccaff5f201b4db0a93eaa5ccd5931ff2edfd0f569435ff6031b8",
+    "worker/runtime/config/release_pair.py": "7b349655b50731ad70156450e054ff55a8960e92fd5d0818426fa83b74d93ce6",
+    "worker/runtime/flow/cold_start.py": "3a35e253b9f0bdeed3c676321ca9eaabca1147bbd83017b29ac86bb1bbb40d74",
+    "worker/runtime/provenance/model_bundle.py": "d4bf1c368d680051b346d0a8ea999c58d98342041ada5dc24307b0c51378f39f",
+    "worker/runtime/telemetry/runtime_status_sender.py": "47bb568c70e8c4c4e6d10a66f92666630d020e5744614b61f81124256522031c",
+    "worker/runtime/worker.py": "f6391cca2501d220e9595dfc06f00a8b8977bbbc28e0f969dbebbd28237831f7",
+    "worker/tools/edge_engine_build.py": "636e6991397f2c2f219198461eb38066697407961b9fc6a8fc2b7697f598ce83",
+    "worker/tools/fetch_models/fetcher.py": "597863c89103fec54577354b871687fb4f3e99a05c25bec328ed447c98b94fd0",
+    "worker/tools/fetch_models/manifest.py": "194779f56a464412b72442ec06793ee22a81cbc4b97eb01f2ce3cd926528dcae"
+  },
+  "packages": {
+    "fastapi": "0.136.3",
+    "numpy": "2.4.6",
+    "onnx": "1.22.0",
+    "onnxruntime": "1.29.0",
+    "opencv-python": null,
+    "opencv-python-headless": "4.13.0.92",
+    "pillow": "12.2.0",
+    "pydantic": "2.13.4",
+    "starlette": "1.2.1",
+    "torch": "2.13.0"
+  },
+  "python": "3.12.13",
+  "recorder": "record_wire_p4.py (pass-1 record_wire.py plus the pass-4 sections; kept outside the repo; see recorder_sha256)",
+  "recorder_commit": "working-tree:4e0e9f4df73626a9ee8d5f0027633adf44aad758308e3b7a05ae1a7d93f367f5",
+  "recorder_sha256": "4e0e9f4df73626a9ee8d5f0027633adf44aad758308e3b7a05ae1a7d93f367f5",
+  "repo_head": "030aaf1dc2c4a114b5d1f83ae391757ddbc3da2c",
+  "row_index": {
+    "10": {
+      "gaps": [],
+      "goldens": [
+        "d/delivery-queue-dead-letter/queue-dead-letter/422.0.event-a5e15ff2-90fd-4764-be74-a7da4f573cc9.json",
+        "d/delivery-queue/attachment-05d867440a7fae84651f59fffbea2b57faa3942ecb0f6b79716a6873ba01e9e7.json",
+        "d/delivery-queue/clip-3c30d6568aa365b7abbdf561cbb3234bd102fce015112be7010ec16821b30848.json",
+        "d/delivery-queue/clip-c222ba2454b7d045af80aa9f2a5ff97ebcccc641ada2a321be8195e0b7933a78.json",
+        "d/delivery-queue/clip-fb4271979957cd5b20b1078f7c3a2e13eaba5661c34a0a8d37e4387023d111e8.json",
+        "d/delivery-queue/disposition-d6681ffe537c67cb3880ffbf5edaa522cd5bfe992a5f99a034c3471ba257c405.json",
+        "d/delivery-queue/event-a5e15ff2-90fd-4764-be74-a7da4f573cc9.json",
+        "r/alert.json",
+        "r/alert.response.json",
+        "r/relay-dispositions.json"
+      ]
+    },
+    "11": {
+      "gaps": [],
+      "goldens": [
+        "r/snapshot-attachment.json",
+        "r/snapshot-disposition.json"
+      ]
+    },
+    "12": {
+      "gaps": [
+        "playback rendition MP4 bytes"
+      ],
+      "goldens": [
+        "d/clip-playback/clip.playback-h264.json",
+        "r/clip-put-ready.json",
+        "r/clip-put-ready.response.json",
+        "r/clip-put-unavailable-capture-failed.json",
+        "r/clip-put-unavailable-corrupt.json"
+      ]
+    },
+    "13": {
+      "gaps": [
+        "live NVML/CUDA runtime values"
+      ],
+      "goldens": [
+        "r/heartbeat.json",
+        "r/runtime-status-boot-failure.json",
+        "r/runtime-status-steady.json",
+        "r/runtime-status.response.json"
+      ]
+    },
+    "14": {
+      "gaps": [],
+      "goldens": [
+        "r/execution-records.json",
+        "r/execution-records.model-evidence.json",
+        "r/execution-records.model-evidence.response.json",
+        "r/execution-records.response.json"
+      ]
+    },
+    "15": {
+      "gaps": [
+        "HTTP-accepted (reproducible=true) /replay exchange"
+      ],
+      "goldens": [
+        "d/replay-engine/bed-exit-v1.input.json",
+        "d/replay-engine/bed-exit-v1.json",
+        "d/replay-engine/fall-v2.input.json",
+        "d/replay-engine/fall-v2.json",
+        "d/replay-trace/7ec7c11be0c6ec04.lines.json",
+        "d/replay-trace/replay-wire-trace.canonical.json",
+        "h/replay-truncated.json",
+        "h/replay.json"
+      ]
+    },
+    "16": {
+      "gaps": [
+        "production /probe success path"
+      ],
+      "goldens": [
+        "h/bed-zone.json",
+        "h/clip-analysis.json",
+        "h/pose.json",
+        "h/probe.json",
+        "h/replay-truncated.json",
+        "h/replay.json",
+        "h/snapshot.json",
+        "h/stream-first-part.json",
+        "h/stream-relay.json",
+        "h/stream.json"
+      ]
+    },
+    "17": {
+      "gaps": [
+        "preview pixels (drawn boxes, fills and Korean text)"
+      ],
+      "goldens": [
+        "h/pose.json",
+        "h/preview-render-labels.json"
+      ]
+    },
+    "18": {
+      "gaps": [
+        "bed segmentation model output"
+      ],
+      "goldens": [
+        "h/bed-zone.json"
+      ]
+    },
+    "19": {
+      "gaps": [
+        "clip analysis compute"
+      ],
+      "goldens": [
+        "d/clip-analysis/clip.analysis.json",
+        "d/clip-analysis/clip.analysis.json.sha256",
+        "h/clip-analysis.json"
+      ]
+    },
+    "2": {
+      "gaps": [
+        "selection document as written in production"
+      ],
+      "goldens": [
+        "d/model-selection.json"
+      ]
+    },
+    "21": {
+      "gaps": [
+        "real TensorRT engine and DeepStream build identity"
+      ],
+      "goldens": [
+        "d/engine-identity.json"
+      ]
+    },
+    "22": {
+      "gaps": [],
+      "goldens": [
+        "d/models-bundle-layout.json",
+        "d/models-layout.json"
+      ]
+    },
+    "23": {
+      "gaps": [],
+      "goldens": [
+        "r/alert.json",
+        "r/alert.response.json",
+        "r/capabilities.request.json",
+        "r/capabilities.response.json",
+        "r/clip-put-ready.json",
+        "r/clip-put-ready.response.json",
+        "r/clip-put-unavailable-capture-failed.json",
+        "r/clip-put-unavailable-corrupt.json",
+        "r/execution-records.json",
+        "r/execution-records.model-evidence.json",
+        "r/execution-records.model-evidence.response.json",
+        "r/execution-records.response.json",
+        "r/heartbeat.json",
+        "r/relay-dispositions.json",
+        "r/release-identity.response.json",
+        "r/runtime-status-boot-failure.json",
+        "r/runtime-status-steady.json",
+        "r/runtime-status.response.json",
+        "r/snapshot-attachment.json",
+        "r/snapshot-disposition.json",
+        "r/worker-config.response.json"
+      ]
+    },
+    "3": {
+      "gaps": [],
+      "goldens": [
+        "d/config-lkg/current.json",
+        "d/config-lkg/revisions/00000000000000000002-00000000000000000007-00000000000000000005.json",
+        "r/release-identity.response.json",
+        "r/worker-config.response.json"
+      ]
+    },
+    "4": {
+      "gaps": [],
+      "goldens": [
+        "r/capabilities.request.json",
+        "r/capabilities.response.json"
+      ]
+    },
+    "5": {
+      "gaps": [],
+      "goldens": [
+        "r/capabilities.request.json",
+        "r/capabilities.response.json"
+      ]
+    },
+    "9": {
+      "gaps": [
+        "execution-record accelerator value"
+      ],
+      "goldens": [
+        "r/execution-records.json",
+        "r/execution-records.model-evidence.json",
+        "r/execution-records.model-evidence.response.json",
+        "r/execution-records.response.json"
+      ]
+    }
+  },
+  "schema": "seeon-worker-wire-goldens/v1"
+}

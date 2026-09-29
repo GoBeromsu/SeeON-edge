@@ -1,0 +1,231 @@
+{
+  "bed_number_at": [
+    {
+      "bed_number": 1,
+      "point": [
+        80,
+        60
+      ]
+    },
+    {
+      "bed_number": 2,
+      "point": [
+        240,
+        60
+      ]
+    },
+    {
+      "bed_number": null,
+      "point": [
+        5,
+        200
+      ]
+    }
+  ],
+  "colors_rgb": {
+    "_BED_COLOR": [
+      245,
+      158,
+      11
+    ],
+    "_NORMAL_COLOR": [
+      34,
+      197,
+      94
+    ],
+    "_SUSPECTED_COLOR": [
+      239,
+      68,
+      68
+    ],
+    "_UNKNOWN_COLOR": [
+      59,
+      130,
+      246
+    ]
+  },
+  "person_labels": [
+    {
+      "bed_number": null,
+      "confidence": 0.25,
+      "label": "사람 25%",
+      "state": "none"
+    },
+    {
+      "bed_number": null,
+      "confidence": 0.25,
+      "label": "사람 25% · 정상",
+      "state": "normal"
+    },
+    {
+      "bed_number": null,
+      "confidence": 0.25,
+      "label": "사람 25% · 낙상 의심 0.87",
+      "state": "suspected"
+    },
+    {
+      "bed_number": null,
+      "confidence": 0.25,
+      "label": "사람 25% · 낙상 의심",
+      "state": "suspected-no-probability"
+    },
+    {
+      "bed_number": 2,
+      "confidence": 0.25,
+      "label": "사람 25% · 침대2",
+      "state": "none"
+    },
+    {
+      "bed_number": 2,
+      "confidence": 0.25,
+      "label": "사람 25% · 침대2 · 정상",
+      "state": "normal"
+    },
+    {
+      "bed_number": 2,
+      "confidence": 0.25,
+      "label": "사람 25% · 침대2 · 낙상 의심 0.87",
+      "state": "suspected"
+    },
+    {
+      "bed_number": 2,
+      "confidence": 0.25,
+      "label": "사람 25% · 침대2 · 낙상 의심",
+      "state": "suspected-no-probability"
+    },
+    {
+      "bed_number": null,
+      "confidence": 0.9,
+      "label": "사람 90%",
+      "state": "none"
+    },
+    {
+      "bed_number": null,
+      "confidence": 0.9,
+      "label": "사람 90% · 정상",
+      "state": "normal"
+    },
+    {
+      "bed_number": null,
+      "confidence": 0.9,
+      "label": "사람 90% · 낙상 의심 0.87",
+      "state": "suspected"
+    },
+    {
+      "bed_number": null,
+      "confidence": 0.9,
+      "label": "사람 90% · 낙상 의심",
+      "state": "suspected-no-probability"
+    },
+    {
+      "bed_number": 2,
+      "confidence": 0.9,
+      "label": "사람 90% · 침대2",
+      "state": "none"
+    },
+    {
+      "bed_number": 2,
+      "confidence": 0.9,
+      "label": "사람 90% · 침대2 · 정상",
+      "state": "normal"
+    },
+    {
+      "bed_number": 2,
+      "confidence": 0.9,
+      "label": "사람 90% · 침대2 · 낙상 의심 0.87",
+      "state": "suspected"
+    },
+    {
+      "bed_number": 2,
+      "confidence": 0.9,
+      "label": "사람 90% · 침대2 · 낙상 의심",
+      "state": "suspected-no-probability"
+    }
+  ],
+  "scaled_beds_640x480_to_320x240": [
+    [
+      [
+        5,
+        5
+      ],
+      [
+        155,
+        5
+      ],
+      [
+        155,
+        115
+      ],
+      [
+        5,
+        115
+      ]
+    ],
+    [
+      [
+        165,
+        5
+      ],
+      [
+        315,
+        5
+      ],
+      [
+        315,
+        115
+      ],
+      [
+        165,
+        115
+      ]
+    ]
+  ],
+  "scaled_coordinate": [
+    {
+      "output": 320,
+      "result": 0,
+      "source": 640,
+      "value": 0
+    },
+    {
+      "output": 320,
+      "result": 319,
+      "source": 640,
+      "value": 639
+    },
+    {
+      "output": 320,
+      "result": 160,
+      "source": 640,
+      "value": 321
+    },
+    {
+      "output": 1280,
+      "result": 200,
+      "source": 640,
+      "value": 100
+    }
+  ],
+  "status_color": {
+    "none": [
+      59,
+      130,
+      246
+    ],
+    "normal": [
+      34,
+      197,
+      94
+    ],
+    "suspected": [
+      239,
+      68,
+      68
+    ],
+    "suspected-no-probability": [
+      239,
+      68,
+      68
+    ]
+  }
+}

@@ -2,12 +2,16 @@
 
 from __future__ import annotations
 
+import pytest
+from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from backend.app.features.cameras.store import CameraRegistryStore
-from backend.app.main import create_app, no_lifespan
+from backend.app.features.audit.postgres_runtime import PostgresAuditRuntime
 from shared.rtsp_url_policy import ALLOW_LOCAL_RTSP_ENV, ALLOW_PRIVATE_RTSP_ENV
-from tests_support.compact_authority_db import prepare_compact_database
+from tests_support.postgres_api_app import postgres_api_app
+from tests_support.postgres_sandbox import ProductSandbox
+
+pytest_plugins = ("tests_support.postgres_sandbox",)
 
 
 def _login(client: TestClient) -> None:
@@ -18,19 +22,21 @@ def _login(client: TestClient) -> None:
     assert response.status_code == 204
 
 
-def _app(tmp_path):
-    app = create_app(lifespan=no_lifespan)
-    registry_path = tmp_path / "catalog.sqlite3"
-    prepare_compact_database(registry_path)
-    app.state.camera_registry = CameraRegistryStore(registry_path)
+@pytest.fixture
+def app(
+    postgres_product_sandbox: ProductSandbox, postgres_audit_runtime: PostgresAuditRuntime
+) -> FastAPI:
+    app = postgres_api_app(postgres_product_sandbox, postgres_audit_runtime)
     app.state.edge_relay_token = "worker-secret"
     return app
 
 
-def test_create_camera_rejects_loopback_and_metadata_urls(tmp_path, monkeypatch) -> None:
+def test_create_camera_rejects_loopback_and_metadata_urls(
+    app: FastAPI, monkeypatch: pytest.MonkeyPatch
+) -> None:
     monkeypatch.setenv("ML_API_WORKER_PROBE_ORIGIN", "")
     monkeypatch.delenv(ALLOW_LOCAL_RTSP_ENV, raising=False)
-    with TestClient(_app(tmp_path)) as client:
+    with TestClient(app) as client:
         _login(client)
         loopback = client.post(
             "/api/v1/cameras",
@@ -57,10 +63,12 @@ def test_create_camera_rejects_loopback_and_metadata_urls(tmp_path, monkeypatch)
     assert ok.json()["rtsp_url_masked"].startswith("rtsp://")
 
 
-def test_local_allowance_admits_loopback_fixture_url(tmp_path, monkeypatch) -> None:
+def test_local_allowance_admits_loopback_fixture_url(
+    app: FastAPI, monkeypatch: pytest.MonkeyPatch
+) -> None:
     monkeypatch.setenv("ML_API_WORKER_PROBE_ORIGIN", "")
     monkeypatch.setenv(ALLOW_LOCAL_RTSP_ENV, "1")
-    with TestClient(_app(tmp_path)) as client:
+    with TestClient(app) as client:
         _login(client)
         response = client.post(
             "/api/v1/cameras",
@@ -69,10 +77,11 @@ def test_local_allowance_admits_loopback_fixture_url(tmp_path, monkeypatch) -> N
     assert response.status_code == 201
 
 
-def test_patch_camera_rejects_private_destination_without_allowance(tmp_path, monkeypatch) -> None:
+def test_patch_camera_rejects_private_destination_without_allowance(
+    app: FastAPI, monkeypatch: pytest.MonkeyPatch
+) -> None:
     monkeypatch.setenv("ML_API_WORKER_PROBE_ORIGIN", "")
     monkeypatch.delenv(ALLOW_LOCAL_RTSP_ENV, raising=False)
-    app = _app(tmp_path)
     store = app.state.camera_registry
     store.create(
         camera_id="cam-1",
@@ -95,11 +104,13 @@ def test_patch_camera_rejects_private_destination_without_allowance(tmp_path, mo
     assert accepted.status_code == 200
 
 
-def test_private_allowance_admits_facility_lan_url(tmp_path, monkeypatch) -> None:
+def test_private_allowance_admits_facility_lan_url(
+    app: FastAPI, monkeypatch: pytest.MonkeyPatch
+) -> None:
     monkeypatch.setenv("ML_API_WORKER_PROBE_ORIGIN", "")
     monkeypatch.delenv(ALLOW_LOCAL_RTSP_ENV, raising=False)
     monkeypatch.setenv(ALLOW_PRIVATE_RTSP_ENV, "1")
-    with TestClient(_app(tmp_path)) as client:
+    with TestClient(app) as client:
         _login(client)
         response = client.post(
             "/api/v1/cameras",
@@ -108,11 +119,13 @@ def test_private_allowance_admits_facility_lan_url(tmp_path, monkeypatch) -> Non
     assert response.status_code == 201
 
 
-def test_private_destination_rejected_when_private_flag_is_zero(tmp_path, monkeypatch) -> None:
+def test_private_destination_rejected_when_private_flag_is_zero(
+    app: FastAPI, monkeypatch: pytest.MonkeyPatch
+) -> None:
     monkeypatch.setenv("ML_API_WORKER_PROBE_ORIGIN", "")
     monkeypatch.delenv(ALLOW_LOCAL_RTSP_ENV, raising=False)
     monkeypatch.setenv(ALLOW_PRIVATE_RTSP_ENV, "0")
-    with TestClient(_app(tmp_path)) as client:
+    with TestClient(app) as client:
         _login(client)
         response = client.post(
             "/api/v1/cameras",
@@ -121,7 +134,9 @@ def test_private_destination_rejected_when_private_flag_is_zero(tmp_path, monkey
     assert response.status_code == 400
 
 
-def test_create_camera_rejects_hostname_that_resolves_to_metadata(tmp_path, monkeypatch) -> None:
+def test_create_camera_rejects_hostname_that_resolves_to_metadata(
+    app: FastAPI, monkeypatch: pytest.MonkeyPatch
+) -> None:
     monkeypatch.setenv("ML_API_WORKER_PROBE_ORIGIN", "")
     monkeypatch.delenv(ALLOW_LOCAL_RTSP_ENV, raising=False)
     monkeypatch.delenv(ALLOW_PRIVATE_RTSP_ENV, raising=False)
@@ -133,7 +148,7 @@ def test_create_camera_rejects_hostname_that_resolves_to_metadata(tmp_path, monk
         "resolve_host_a_aaaa",
         lambda _host: ("169.254.169.254",),
     )
-    with TestClient(_app(tmp_path)) as client:
+    with TestClient(app) as client:
         _login(client)
         response = client.post(
             "/api/v1/cameras",
@@ -144,7 +159,7 @@ def test_create_camera_rejects_hostname_that_resolves_to_metadata(tmp_path, monk
 
 
 def test_create_camera_rejects_hostname_that_resolves_to_private_without_allowance(
-    tmp_path, monkeypatch
+    app: FastAPI, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setenv("ML_API_WORKER_PROBE_ORIGIN", "")
     monkeypatch.delenv(ALLOW_LOCAL_RTSP_ENV, raising=False)
@@ -153,7 +168,7 @@ def test_create_camera_rejects_hostname_that_resolves_to_private_without_allowan
     import shared.rtsp_url_policy as policy
 
     monkeypatch.setattr(policy, "resolve_host_a_aaaa", lambda _host: ("10.0.0.9",))
-    with TestClient(_app(tmp_path)) as client:
+    with TestClient(app) as client:
         _login(client)
         response = client.post(
             "/api/v1/cameras",

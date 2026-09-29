@@ -4,11 +4,14 @@ from __future__ import annotations
 
 import hashlib
 import json
-import sqlite3
+from collections.abc import Mapping
 from dataclasses import dataclass
-from typing import cast
+from typing import Any, cast
 
-from backend.app.edge_db.configuration import utc_now
+import psycopg
+from psycopg.rows import dict_row
+
+from backend.app.edge_db.postgres import PostgresError
 from backend.app.features.detection_settings.policy_models import (
     ActivationStatus,
     PolicyActivation,
@@ -41,6 +44,19 @@ class PolicyRecord:
     refusal_reason: str | None
 
 
+class DetectionPolicyNotInitialized(PostgresError):
+    def __init__(self) -> None:
+        super().__init__("detection policy bootstrap row is missing")
+
+
+class InvalidPolicyRecord(PolicyActivationRefused):
+    """A malformed snapshot row, retained only for a fenced compare-and-mark."""
+
+    def __init__(self, row: Mapping[str, Any], reason: str) -> None:
+        self.row = row
+        super().__init__(int(row["policy_id"]), reason)
+
+
 _RAW_SELECT = (
     "SELECT p.policy_id,p.facility_id,p.camera_id,p.module_id,p.module_version,p.schema_id,"
     "p.schema_version,p.active_values_json,p.active_content_sha256,p.previous_present,"
@@ -50,8 +66,17 @@ _RAW_SELECT = (
 )
 
 
+def require_policy_site(connection: psycopg.Connection, *, lock: bool = False) -> None:
+    with connection.cursor(row_factory=dict_row) as cursor:
+        row = cursor.execute(
+            "SELECT id FROM edge_site WHERE id=1" + (" FOR UPDATE" if lock else "")
+        ).fetchone()
+    if row is None:
+        raise DetectionPolicyNotInitialized()
+
+
 def effective_policy(
-    connection: sqlite3.Connection,
+    connection: psycopg.Connection,
     facility_id: str,
     camera_id: str | None,
     module_id: str,
@@ -83,7 +108,7 @@ def effective_policy(
 
 
 def policy_record(
-    connection: sqlite3.Connection,
+    connection: psycopg.Connection,
     facility_id: str,
     camera_id: str | None,
     module_id: str,
@@ -95,13 +120,9 @@ def policy_record(
     try:
         record = decode_policy_record(raw)
     except (PolicyDocumentError, TypeError, ValueError) as error:
-        reason = str(error)
-        connection.execute(
-            "UPDATE policies SET status='failed',refusal_reason=?,applied_at=NULL,updated_at=? "
-            "WHERE policy_id=?",
-            (reason, utc_now(), int(raw[0])),
-        )
-        raise PolicyActivationRefused(int(raw[0]), reason) from error
+        # Snapshot projections are READ ONLY. The owner marks this exact row
+        # failed in a separate fenced transaction, never from the read cursor.
+        raise InvalidPolicyRecord(raw, str(error)) from error
     if record.status == "failed":
         raise PolicyActivationRefused(
             record.policy_id, record.refusal_reason or "activation is marked failed"
@@ -110,48 +131,57 @@ def policy_record(
 
 
 def raw_policy_record(
-    connection: sqlite3.Connection,
+    connection: psycopg.Connection,
     facility_id: str,
     camera_id: str | None,
     module_id: str,
     module_version: int,
-) -> tuple[object, ...] | None:
-    camera_clause = "p.camera_id IS NULL" if camera_id is None else "p.camera_id=?"
+) -> dict[str, Any] | None:
+    camera_clause = "p.camera_id IS NULL" if camera_id is None else "p.camera_id=%s"
     params = (
         (facility_id, module_id, module_version)
         if camera_id is None
         else (facility_id, camera_id, module_id, module_version)
     )
-    return connection.execute(
-        _RAW_SELECT
-        + f" WHERE p.facility_id=? AND {camera_clause} AND p.module_id=? AND p.module_version=?",
-        params,
-    ).fetchone()
+    with connection.cursor(row_factory=dict_row) as cursor:
+        return cursor.execute(
+            _RAW_SELECT + f" WHERE p.facility_id=%s AND {camera_clause}"
+            " AND p.module_id=%s AND p.module_version=%s",
+            params,
+        ).fetchone()
 
 
-def decode_policy_record(row: tuple[object, ...]) -> PolicyRecord:
-    status = _status(row[13])
-    active = None if status == "failed" else decode_policy_values(row[7], row[8], row)
-    previous = None if status == "failed" else decode_policy_values(row[10], row[11], row)
+def decode_policy_record(row: Mapping[str, Any]) -> PolicyRecord:
+    status = _status(row["status"])
+    active = (
+        None
+        if status == "failed"
+        else decode_policy_values(row["active_values_json"], row["active_content_sha256"], row)
+    )
+    previous = (
+        None
+        if status == "failed"
+        else decode_policy_values(row["previous_values_json"], row["previous_content_sha256"], row)
+    )
     return PolicyRecord(
-        int(row[0]),
-        str(row[1]),
-        None if row[2] is None else str(row[2]),
-        str(row[3]),
-        int(row[4]),
-        str(row[5]),
-        int(row[6]),
+        int(row["policy_id"]),
+        str(row["facility_id"]),
+        None if row["camera_id"] is None else str(row["camera_id"]),
+        str(row["module_id"]),
+        int(row["module_version"]),
+        str(row["schema_id"]),
+        int(row["schema_version"]),
         active,
-        bool(row[9]),
+        bool(row["previous_present"]),
         previous,
-        int(row[12]),
+        int(row["activation_generation"]),
         status,
-        None if row[14] is None else str(row[14]),
+        None if row["refusal_reason"] is None else str(row["refusal_reason"]),
     )
 
 
 def decode_policy_values(
-    value: object, digest: object, row: tuple[object, ...]
+    value: object, digest: object, row: Mapping[str, Any]
 ) -> NumericPolicy | None:
     if value is None:
         return None
@@ -159,16 +189,17 @@ def decode_policy_values(
     if hashlib.sha256(encoded.encode()).hexdigest() != str(digest):
         raise PolicyDocumentError("policy content hash mismatch")
     return parse_policy_values(
-        module_id=str(row[3]),
-        module_version=int(row[4]),
-        schema_id=str(row[5]),
-        schema_version=int(row[6]),
+        module_id=str(row["module_id"]),
+        module_version=int(row["module_version"]),
+        schema_id=str(row["schema_id"]),
+        schema_version=int(row["schema_version"]),
         values=json.loads(encoded),
     )
 
 
-def record_by_id(connection: sqlite3.Connection, policy_id: int) -> PolicyRecord:
-    row = connection.execute(_RAW_SELECT + " WHERE p.policy_id=?", (policy_id,)).fetchone()
+def record_by_id(connection: psycopg.Connection, policy_id: int) -> PolicyRecord:
+    with connection.cursor(row_factory=dict_row) as cursor:
+        row = cursor.execute(_RAW_SELECT + " WHERE p.policy_id=%s", (policy_id,)).fetchone()
     if row is None:
         raise PolicyDocumentError("policy row is missing")
     return decode_policy_record(row)
@@ -195,21 +226,29 @@ def activation(record: PolicyRecord, external_camera_id: str | None) -> PolicyAc
     )
 
 
-def database_camera_id(connection: sqlite3.Connection, camera_id: str | None) -> str | None:
+def database_camera_id(connection: psycopg.Connection, camera_id: str | None) -> str | None:
     if camera_id is None:
         return None
-    row = connection.execute(
-        "SELECT camera_id FROM cameras WHERE camera_id=? OR backend_camera_id=?",
-        (camera_id, camera_id),
-    ).fetchone()
-    return camera_id if row is None else str(row[0])
+    with connection.cursor(row_factory=dict_row) as cursor:
+        # Worker/Hub IDs win over local IDs when the namespaces overlap.
+        row = cursor.execute(
+            "SELECT camera_id FROM cameras WHERE camera_id=%s OR backend_camera_id=%s "
+            "ORDER BY CASE WHEN backend_camera_id=%s THEN 0 ELSE 1 END, "
+            'camera_id COLLATE "C" LIMIT 1',
+            (camera_id, camera_id, camera_id),
+        ).fetchone()
+    return camera_id if row is None else str(row["camera_id"])
 
 
-def external_camera_id(row: tuple[object, ...]) -> str | None:
-    return None if row[15] is None and row[2] is None else str(row[15] or row[2])
+def external_camera_id(row: Mapping[str, Any]) -> str | None:
+    return (
+        None
+        if row["backend_camera_id"] is None and row["camera_id"] is None
+        else str(row["backend_camera_id"] or row["camera_id"])
+    )
 
 
-def try_policy_record(raw: tuple[object, ...] | None) -> PolicyRecord | None:
+def try_policy_record(raw: Mapping[str, Any] | None) -> PolicyRecord | None:
     if raw is None:
         return None
     try:
@@ -222,8 +261,8 @@ def record_token(record: PolicyRecord | None) -> int:
     return 0 if record is None else record.generation
 
 
-def raw_token(raw: tuple[object, ...] | None) -> int:
-    return 0 if raw is None else int(raw[12])
+def raw_token(raw: Mapping[str, Any] | None) -> int:
+    return 0 if raw is None else int(raw["activation_generation"])
 
 
 def raw_select() -> str:

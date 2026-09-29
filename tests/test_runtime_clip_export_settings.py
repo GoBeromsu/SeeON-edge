@@ -9,11 +9,11 @@ import pytest
 from fastapi.testclient import TestClient
 from pydantic import ValidationError
 
-from backend.app.edge_db.bootstrap import bootstrap_database
-from backend.app.features.cameras.store import CameraRegistryStore
+from backend.app.features.audit.postgres_runtime import PostgresAuditRuntime
 from backend.app.features.runtime_settings.store import RuntimeSettingsStore
-from backend.app.main import create_app, no_lifespan
 from contracts.worker_config import PulledWorkerConfig
+from tests_support.postgres_api_app import postgres_api_app
+from tests_support.postgres_sandbox import ProductSandbox
 from worker.runtime.config import (
     BackendWorkerConfigPayload,
     JsonObject,
@@ -22,45 +22,42 @@ from worker.runtime.config import (
     pull_worker_config_poll,
 )
 
+pytest_plugins = ("tests_support.postgres_sandbox",)
+
 DASHBOARD_LOGIN = {"username": "admin", "password": "admin"}
 RELAY_HEADERS = {"X-Edge-Relay-Token": "relay-token"}
-
-
-@pytest.fixture(autouse=True)
-def _migrated_compact_database(tmp_path: Path) -> None:
-    bootstrap_database(tmp_path / "catalog.sqlite3")
 
 
 def _login(client: TestClient) -> None:
     assert client.post("/api/v1/auth/session", json=DASHBOARD_LOGIN).status_code == 204
 
 
-def _app(tmp_path: Path):
-    app = create_app(lifespan=no_lifespan)
-    database = tmp_path / "catalog.sqlite3"
+def _app(sandbox: ProductSandbox, audit_runtime: PostgresAuditRuntime):
+    app = postgres_api_app(sandbox, audit_runtime)
     app.state.edge_relay_token = "relay-token"
-    app.state.camera_registry = CameraRegistryStore(database)
-    app.state.runtime_settings_store = RuntimeSettingsStore(database)
     return app
 
 
-def test_fresh_store_defaults_clip_export_off_at_version_zero(tmp_path: Path) -> None:
-    setting = RuntimeSettingsStore(tmp_path / "catalog.sqlite3").get()
+def test_fresh_store_defaults_clip_export_off_at_version_zero(
+    postgres_product_sandbox: ProductSandbox,
+) -> None:
+    sandbox = postgres_product_sandbox
+    setting = RuntimeSettingsStore(sandbox.database, sandbox.authority).get()
 
     assert setting.clip_export_enabled is False
     assert setting.version == 0
 
 
 def test_store_persists_changes_and_only_advances_version_when_value_changes(
-    tmp_path: Path,
+    postgres_product_sandbox: ProductSandbox,
 ) -> None:
-    database = tmp_path / "catalog.sqlite3"
-    store = RuntimeSettingsStore(database)
+    sandbox = postgres_product_sandbox
+    store = RuntimeSettingsStore(sandbox.database, sandbox.authority)
 
     enabled = store.set_clip_export_enabled(True)
     unchanged = store.set_clip_export_enabled(True)
     disabled = store.set_clip_export_enabled(False)
-    reopened = RuntimeSettingsStore(database).get()
+    reopened = RuntimeSettingsStore(sandbox.database, sandbox.authority).get()
 
     assert (enabled.clip_export_enabled, enabled.version) == (True, 1)
     assert unchanged == enabled
@@ -68,8 +65,11 @@ def test_store_persists_changes_and_only_advances_version_when_value_changes(
     assert reopened == disabled
 
 
-def test_runtime_settings_api_requires_dashboard_auth_and_round_trips(tmp_path: Path) -> None:
-    with TestClient(_app(tmp_path)) as client:
+def test_runtime_settings_api_requires_dashboard_auth_and_round_trips(
+    postgres_product_sandbox: ProductSandbox,
+    postgres_audit_runtime: PostgresAuditRuntime,
+) -> None:
+    with TestClient(_app(postgres_product_sandbox, postgres_audit_runtime)) as client:
         denied_get = client.get("/api/v1/runtime-settings")
         denied_put = client.put(
             "/api/v1/runtime-settings",
@@ -91,9 +91,10 @@ def test_runtime_settings_api_requires_dashboard_auth_and_round_trips(tmp_path: 
 
 
 def test_runtime_settings_put_requires_strict_boolean_and_expected_version(
-    tmp_path: Path,
+    postgres_product_sandbox: ProductSandbox,
+    postgres_audit_runtime: PostgresAuditRuntime,
 ) -> None:
-    with TestClient(_app(tmp_path)) as client:
+    with TestClient(_app(postgres_product_sandbox, postgres_audit_runtime)) as client:
         _login(client)
         malformed = [
             client.put(
@@ -109,9 +110,13 @@ def test_runtime_settings_put_requires_strict_boolean_and_expected_version(
 
 
 def test_two_clients_use_optimistic_concurrency_and_noop_does_not_advance_version(
-    tmp_path: Path,
+    postgres_product_sandbox: ProductSandbox,
+    postgres_audit_runtime: PostgresAuditRuntime,
 ) -> None:
-    with TestClient(_app(tmp_path)) as first, TestClient(_app(tmp_path)) as second:
+    with (
+        TestClient(_app(postgres_product_sandbox, postgres_audit_runtime)) as first,
+        TestClient(_app(postgres_product_sandbox, postgres_audit_runtime)) as second,
+    ):
         _login(first)
         _login(second)
         first_version = first.get("/api/v1/runtime-settings").json()["version"]
@@ -141,9 +146,10 @@ def test_two_clients_use_optimistic_concurrency_and_noop_does_not_advance_versio
 
 
 def test_worker_config_projects_effective_runtime_setting_without_restart_change(
-    tmp_path: Path,
+    postgres_product_sandbox: ProductSandbox,
+    postgres_audit_runtime: PostgresAuditRuntime,
 ) -> None:
-    app = _app(tmp_path)
+    app = _app(postgres_product_sandbox, postgres_audit_runtime)
     app.state.restart_epoch = 7
     app.state.config_version = 11
     app.state.pulled_config = PulledWorkerConfig(
@@ -269,8 +275,11 @@ def test_new_worker_payload_threads_runtime_setting_and_version() -> None:
     assert worker.clip_export_version == 4
 
 
-def test_status_exposes_effective_runtime_setting_and_version(tmp_path: Path) -> None:
-    app = _app(tmp_path)
+def test_status_exposes_effective_runtime_setting_and_version(
+    postgres_product_sandbox: ProductSandbox,
+    postgres_audit_runtime: PostgresAuditRuntime,
+) -> None:
+    app = _app(postgres_product_sandbox, postgres_audit_runtime)
     app.state.runtime_settings_store.set_clip_export_enabled(True)
 
     response = TestClient(app).get("/api/v1/status")

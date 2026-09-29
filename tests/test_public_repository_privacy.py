@@ -192,9 +192,6 @@ _SYNTHETIC_RTSP_FIXTURES = {
     Path("tests/test_camera_roster_sync.py"): {
         "rtsp://user:password@camera/private",
     },
-    Path("tests/test_camera_topology_store.py"): {
-        "rtsp://operator:private@10.0.0.9/live",
-    },
     Path("tests/test_sources_rtsp.py"): {
         "rtsp://user:password@camera.local/live",
         "rtsp://user:secret@camera.local/live?token=abc",
@@ -212,6 +209,16 @@ _SYNTHETIC_RTSP_FIXTURES = {
     },
     Path("tests/test_clips_catalog.py"): {
         "rtsp://operator:fixture-password@example.test/live",
+    },
+    Path("tests/test_postgres_cameras.py"): {
+        # PostgreSQL 카메라 저장소가 자격증명을 마스킹하고, 자격증명만 다른 URL 을
+        # 같은 스트림으로 식별하는지 증명하는 입력값이다. 호스트는 모두 예약
+        # 도메인(.invalid, RFC 2606)이고 자격증명은 고정 더미 값이다.
+        "rtsp://operator:synthetic-private@camera.invalid/live",
+        "rtsp://***:***@redacted-camera/live",
+        "rtsp://original:secret@camera-a.invalid/live/?a=1&b=2",
+        "RTSP://different:credentials@CAMERA-A.invalid:554/live/?b=2&a=1",
+        "RTSP://other:secret@CAMERA.invalid:554/live/",
     },
     Path("tests/test_worker_config_lifecycle.py"): {
         "rtsp://user:camera-pass@camera/live",
@@ -515,6 +522,59 @@ def _is_public_safe_contract_fixture(relative: Path, blob: bytes) -> bool:
     return metadata.get("redaction") == _CONTRACT_FIXTURE_REDACTION_NOTICE
 
 
+# Python-worker wire goldens recorded for the Rust worker port. Their wire
+# contract carries both "camera_id" and "facility_id", which trips the
+# two-identity-field heuristic below even though every value is synthetic.
+# The exemption holds only while every camera_id/facility_id value anywhere in
+# the JSON document comes from this allowlist and no resident_id/subject_id key
+# exists, so a recorded real identifier still trips the guard.
+_WORKER_WIRE_FIXTURE_ROOT = ("tests", "fixtures", "worker-wire")
+_WORKER_WIRE_SYNTHETIC_IDENTIFIERS = {
+    "camera_id": frozenset(
+        {
+            "camera-replay",
+            "camera-replay-http",
+            # Synthetic cuid from tests/test_worker_relay_payload_contract.py.
+            "cmsnw6rjc01vhlh01oswn99yq",
+        }
+    ),
+    "facility_id": frozenset({"facility-1"}),
+}
+_WORKER_WIRE_FORBIDDEN_KEYS = frozenset({"resident_id", "subject_id"})
+
+
+def _worker_wire_identifiers_are_synthetic(value: object) -> bool:
+    if isinstance(value, dict):
+        for key, child in value.items():
+            normalized = str(key).strip().lower()
+            if normalized in _WORKER_WIRE_FORBIDDEN_KEYS:
+                return False
+            allowed = _WORKER_WIRE_SYNTHETIC_IDENTIFIERS.get(normalized)
+            if allowed is not None and (not isinstance(child, str) or child not in allowed):
+                return False
+            if not _worker_wire_identifiers_are_synthetic(child):
+                return False
+        return True
+    if isinstance(value, list):
+        return all(_worker_wire_identifiers_are_synthetic(item) for item in value)
+    return True
+
+
+def _is_public_safe_worker_wire_fixture(relative: Path, blob: bytes) -> bool:
+    root_depth = len(_WORKER_WIRE_FIXTURE_ROOT)
+    if len(relative.parts) <= root_depth:
+        return False
+    if relative.parts[:root_depth] != _WORKER_WIRE_FIXTURE_ROOT:
+        return False
+    if relative.suffix != ".json":
+        return False
+    try:
+        document = json.loads(blob.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        return False
+    return _worker_wire_identifiers_are_synthetic(document)
+
+
 def _is_public_safe_structured_fixture(relative: Path, blob: bytes) -> bool:
     if relative not in PUBLIC_SAFE_STRUCTURED_FIXTURES:
         return False
@@ -576,6 +636,7 @@ def test_tracked_tree_contains_no_data_or_private_binary_assets() -> None:
             _looks_like_sensitive_dataset(blob)
             and not _is_public_safe_structured_fixture(relative, blob)
             and not _is_public_safe_contract_fixture(relative, blob)
+            and not _is_public_safe_worker_wire_fixture(relative, blob)
         )
         if _contains_forbidden_control_bytes(blob):
             violations.append(f"{relative}:control-bytes")

@@ -25,27 +25,31 @@ parser, so they do not re-enter the fixture/parser self-consistency loop.
 
 from __future__ import annotations
 
-from pathlib import Path
-
 from fastapi.testclient import TestClient
 from test_api_ingest_relay import FakeBackendIngestClient
 
-from backend.app.edge_db.bootstrap import bootstrap_database
+from backend.app.features.audit.postgres_runtime import PostgresAuditRuntime
 from backend.app.features.cameras.router import _mapping_state
-from backend.app.features.cameras.store import CameraRegistryStore
-from backend.app.main import create_app, no_lifespan
+from tests_support.postgres_api_app import postgres_api_app
+from tests_support.postgres_sandbox import ProductSandbox
+
+pytest_plugins = ("tests_support.postgres_sandbox",)
 
 _LOCAL_ID = "11111111-2222-3333-4444-555555555555"
 _HUB_ID = "cmsnvr-abc123"
 _RELAY_HEADERS = {"X-Edge-Relay-Token": "relay-token"}
 
 
-def _app_with_camera(tmp_path: Path, *, backend_camera_id: str | None, pending: bool = False):
-    app = create_app(lifespan=no_lifespan)
+def _app_with_camera(
+    sandbox: ProductSandbox,
+    audit_runtime: PostgresAuditRuntime,
+    *,
+    backend_camera_id: str | None,
+    pending: bool = False,
+):
+    app = postgres_api_app(sandbox, audit_runtime)
     app.state.edge_relay_token = "relay-token"
-    path = tmp_path / "catalog.sqlite3"
-    bootstrap_database(path)
-    store = CameraRegistryStore(path)
+    store = app.state.camera_registry
     store.create(
         camera_id=_LOCAL_ID,
         label="Room 101",
@@ -55,7 +59,6 @@ def _app_with_camera(tmp_path: Path, *, backend_camera_id: str | None, pending: 
         backend_camera_id=backend_camera_id,
         mapping_pending=pending,
     )
-    app.state.camera_registry = store
     return app, store
 
 
@@ -69,13 +72,18 @@ def _alert_body(camera_id: str) -> dict[str, object]:
     }
 
 
-def test_relay_alert_never_egresses_local_id_for_unmapped_camera(tmp_path) -> None:
+def test_relay_alert_never_egresses_local_id_for_unmapped_camera(
+    postgres_product_sandbox: ProductSandbox,
+    postgres_audit_runtime: PostgresAuditRuntime,
+) -> None:
     """An unmapped camera must not have its local id pushed to the Hub.
 
     The old code sent ``binding.get("camera_id") or payload.camera_id``, so the
     edge-local UUID reached the Hub and came back as FACILITY_BINDING_MISMATCH.
     """
-    app, _ = _app_with_camera(tmp_path, backend_camera_id=None)
+    app, _ = _app_with_camera(
+        postgres_product_sandbox, postgres_audit_runtime, backend_camera_id=None
+    )
     fake = FakeBackendIngestClient()
     app.state.backend_ingest_client = fake
 
@@ -91,9 +99,14 @@ def test_relay_alert_never_egresses_local_id_for_unmapped_camera(tmp_path) -> No
     assert fake.alerts == []
 
 
-def test_relay_alert_egresses_hub_id_when_mapped(tmp_path) -> None:
+def test_relay_alert_egresses_hub_id_when_mapped(
+    postgres_product_sandbox: ProductSandbox,
+    postgres_audit_runtime: PostgresAuditRuntime,
+) -> None:
     """A mapped camera egresses under the Hub-issued id, not the local one."""
-    app, _ = _app_with_camera(tmp_path, backend_camera_id=_HUB_ID)
+    app, _ = _app_with_camera(
+        postgres_product_sandbox, postgres_audit_runtime, backend_camera_id=_HUB_ID
+    )
     fake = FakeBackendIngestClient()
     app.state.backend_ingest_client = fake
 
@@ -108,14 +121,19 @@ def test_relay_alert_egresses_hub_id_when_mapped(tmp_path) -> None:
     assert len(fake.alerts) == 1
 
 
-def test_worker_config_still_serves_unmapped_camera(tmp_path) -> None:
+def test_worker_config_still_serves_unmapped_camera(
+    postgres_product_sandbox: ProductSandbox,
+    postgres_audit_runtime: PostgresAuditRuntime,
+) -> None:
     """Coverage must survive an unmapped camera.
 
     worker-config.cameras is the worker's ingest set. Omitting an unmapped
     camera here would stop fall detection for that room, which is a strictly
     worse failure than a rejected upstream submission.
     """
-    app, _ = _app_with_camera(tmp_path, backend_camera_id=None)
+    app, _ = _app_with_camera(
+        postgres_product_sandbox, postgres_audit_runtime, backend_camera_id=None
+    )
     app.state.backend_ingest_client = FakeBackendIngestClient()
 
     with TestClient(app) as client:

@@ -4,8 +4,9 @@ from __future__ import annotations
 
 import logging
 import os
-import sqlite3
 import stat
+from collections.abc import Iterator
+from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Annotated, BinaryIO, Literal, Never, Protocol, runtime_checkable
@@ -14,22 +15,20 @@ from uuid import UUID
 from fastapi import APIRouter, Header, HTTPException, Request, status
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
-from backend.app.edge_db import EDGE_DATABASE_PATH
 from backend.app.features.audit.catalog import (
     AuditAction,
     AuditActorType,
     AuditAuthMechanism,
     empty_detail,
 )
-from backend.app.features.audit.http import AuditUnavailableError, append_transactional
+from backend.app.features.audit.http import mutation_audit
 from backend.app.features.audit.store import AuditEvent, utc_now
 from backend.app.features.clips.store import CLIP_STORE_DIR_ENV, DEFAULT_CLIP_STORE_DIR
-from backend.app.features.evidence.compact_receipts import CompactArtifactReceiptStore
+from backend.app.features.evidence.postgres_receipts import PostgresArtifactReceiptStore
 from backend.app.features.evidence.receipt_store import (
     ArtifactReceipt,
     ArtifactReceiptConflictError,
     ArtifactReceiptPersistenceError,
-    ArtifactReceiptStore,
     ArtifactReceiptVerificationError,
     VerifiedArtifact,
     verified_artifact,
@@ -210,81 +209,52 @@ def export_clip(
                 "message": "camera has no backend mapping; clip export cannot address the backend",
             },
         )
+    receipt_store = _receipt_store(request)
+    audit = mutation_audit(
+        request,
+        lambda: AuditEvent(
+            occurred_at=utc_now(),
+            actor_id="worker-relay",
+            action=AuditAction.EVIDENCE_RECEIPT,
+            target_id=clip_id,
+            detail=empty_detail(AuditAction.EVIDENCE_RECEIPT),
+            actor_type=AuditActorType.SERVICE,
+            auth_mechanism=AuditAuthMechanism.RELAY_TOKEN,
+        ),
+    )
+    audit.require_admission(receipt_store)
     client = _backend_client(request, bound_camera_id)
     if isinstance(payload, ReadyClipPayload):
-        try:
-            media = _verified_media(request, clip_id, payload)
-        except ArtifactReceiptVerificationError as exc:
-            raise HTTPException(
-                status_code=(
-                    status.HTTP_404_NOT_FOUND
-                    if str(exc) == "artifact is unavailable"
-                    else status.HTTP_409_CONFLICT
-                ),
-                detail="clip media unavailable"
-                if str(exc) == "artifact is unavailable"
-                else "clip media mismatch",
-            ) from exc
-        try:
+        media = _ready_media(request, clip_id, payload)
+        # This route owns the supplied descriptor through persistence AND
+        # network egress, including cancellation and post-COMMIT failures.
+        with media.handle:
             receipt = ArtifactReceipt(clip_id, payload.sha256, payload.size_bytes)
-            receipt_store = _receipt_store(request)
-            if isinstance(receipt_store, CompactArtifactReceiptStore):
-                _ = receipt_store.commit_verified(
-                    receipt,
-                    media,
-                    after_write=lambda connection: append_transactional(
-                        request,
-                        connection,
-                        AuditEvent(
-                            occurred_at=utc_now(),
-                            actor_id="worker-relay",
-                            action=AuditAction.EVIDENCE_RECEIPT,
-                            target_id=clip_id,
-                            detail=empty_detail(AuditAction.EVIDENCE_RECEIPT),
-                            actor_type=AuditActorType.SERVICE,
-                            auth_mechanism=AuditAuthMechanism.RELAY_TOKEN,
-                        ),
+            with _receipt_errors(ready=True):
+                audit.apply(
+                    receipt_store,
+                    lambda append: receipt_store.commit_verified(
+                        receipt, media, after_write=append
                     ),
                 )
-            else:
-                _ = receipt_store.commit(receipt)
-        except AuditUnavailableError:
-            media.handle.close()
-            raise
-        except ArtifactReceiptVerificationError as exc:
-            media.handle.close()
-            raise HTTPException(
-                status_code=status.HTTP_409_CONFLICT,
-                detail="clip media changed before receipt commit",
-            ) from exc
-        except ArtifactReceiptConflictError as exc:
-            media.handle.close()
-            raise HTTPException(
-                status_code=status.HTTP_409_CONFLICT, detail="artifact receipt conflicts"
-            ) from exc
-        except (ArtifactReceiptPersistenceError, OSError, sqlite3.Error) as exc:
-            media.handle.close()
-            raise HTTPException(
-                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-                detail="artifact receipt persistence unavailable",
-            ) from exc
-        request_payload = _ReadyRequest(
-            clip_id=clip_id,
-            camera_id=bound_camera_id,
-            event_refs=tuple(payload.event_refs),
-            state_version=payload.state_version,
-            sha256=payload.sha256,
-            size_bytes=payload.size_bytes,
-            mime_type=payload.mime_type,
-            codec=payload.codec,
-            duration_ms=payload.duration_ms,
-            clip_start_at=payload.clip_start_at,
-            clip_end_at=payload.clip_end_at,
-            finalized_at=payload.finalized_at,
-        )
-        with media.handle:
+            request_payload = _ReadyRequest(
+                clip_id=clip_id,
+                camera_id=bound_camera_id,
+                event_refs=tuple(payload.event_refs),
+                state_version=payload.state_version,
+                sha256=payload.sha256,
+                size_bytes=payload.size_bytes,
+                mime_type=payload.mime_type,
+                codec=payload.codec,
+                duration_ms=payload.duration_ms,
+                clip_start_at=payload.clip_start_at,
+                clip_end_at=payload.clip_end_at,
+                finalized_at=payload.finalized_at,
+            )
+            audit.require_admission(receipt_store)
             result = client.publish_ready(request_payload, media.handle)
     else:
+        audit.require_admission(receipt_store)
         result = client.report_unavailable(
             _UnavailableRequest(
                 clip_id=clip_id,
@@ -294,28 +264,18 @@ def export_clip(
                 reason=payload.reason,
             )
         )
+        if not isinstance(result, DeliveryFailure):
+            # Keep the explicit unavailable-receipt zero-audit contract.
+            # Admission is rechecked after the external effect; refusing
+            # local persistence cannot undo a report already sent upstream.
+            with _receipt_errors(ready=False):
+                audit.apply(
+                    receipt_store,
+                    lambda _append: receipt_store.commit_unavailable(clip_id, payload.reason),
+                    expects_audit=lambda _result: False,
+                )
     if isinstance(result, DeliveryFailure):
         _raise_failure(result)
-    if isinstance(payload, UnavailableClipPayload):
-        receipt_store = _receipt_store(request)
-        if isinstance(receipt_store, CompactArtifactReceiptStore):
-            try:
-                receipt_store.commit_unavailable(clip_id, payload.reason)
-            except ArtifactReceiptVerificationError as exc:
-                raise HTTPException(
-                    status_code=status.HTTP_409_CONFLICT,
-                    detail="clip manifest unavailable",
-                ) from exc
-            except ArtifactReceiptConflictError as exc:
-                raise HTTPException(
-                    status_code=status.HTTP_409_CONFLICT,
-                    detail="artifact receipt conflicts",
-                ) from exc
-            except (ArtifactReceiptPersistenceError, OSError, sqlite3.Error) as exc:
-                raise HTTPException(
-                    status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-                    detail="artifact receipt persistence unavailable",
-                ) from exc
     return ClipReceiptResponse(
         clip_id=result.clip_id,
         state=result.state,
@@ -325,6 +285,40 @@ def export_clip(
     )
 
 
+@contextmanager
+def _receipt_errors(*, ready: bool) -> Iterator[None]:
+    """Map persistence errors only; external transport is not a write owner."""
+    try:
+        yield
+    except ArtifactReceiptVerificationError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="clip media changed before receipt commit"
+            if ready
+            else "clip manifest unavailable",
+        ) from exc
+    except ArtifactReceiptConflictError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT, detail="artifact receipt conflicts"
+        ) from exc
+    except (ArtifactReceiptPersistenceError, OSError) as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="artifact receipt persistence unavailable",
+        ) from exc
+
+
+def _ready_media(request: Request, clip_id: str, payload: ReadyClipPayload) -> VerifiedArtifact:
+    try:
+        return _verified_media(request, clip_id, payload)
+    except ArtifactReceiptVerificationError as exc:
+        unavailable = str(exc) == "artifact is unavailable"
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND if unavailable else status.HTTP_409_CONFLICT,
+            detail="clip media unavailable" if unavailable else "clip media mismatch",
+        ) from exc
+
+
 def _verified_media(
     request: Request,
     clip_id: str,
@@ -332,53 +326,51 @@ def _verified_media(
 ) -> VerifiedArtifact:
     root_value = getattr(request.app.state, "clip_store_root", None)
     root = Path(root_value or os.environ.get(CLIP_STORE_DIR_ENV, DEFAULT_CLIP_STORE_DIR))
-    directory_fds: list[int] = []
-    media_fd: int | None = None
-    try:
-        directory_fds.append(os.open(root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW))
-        for component in ("clips", clip_id):
-            directory_fds.append(
-                os.open(
-                    component,
-                    os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
-                    dir_fd=directory_fds[-1],
+    with ExitStack() as media_owner:
+        try:
+            with ExitStack() as directories:
+                directory_fd = os.open(root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+                directories.callback(os.close, directory_fd)
+                for component in ("clips", clip_id):
+                    directory_fd = os.open(
+                        component,
+                        os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
+                        dir_fd=directory_fd,
+                    )
+                    directories.callback(os.close, directory_fd)
+                media_fd = os.open(
+                    "clip.mp4",
+                    os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK,
+                    dir_fd=directory_fd,
                 )
-            )
-        media_fd = os.open(
-            "clip.mp4",
-            os.O_RDONLY | os.O_NOFOLLOW,
-            dir_fd=directory_fds[-1],
-        )
-        file_stat = os.fstat(media_fd)
-    except OSError as exc:
-        raise ArtifactReceiptVerificationError("artifact is unavailable") from exc
-    finally:
-        for directory_fd in reversed(directory_fds):
-            os.close(directory_fd)
-    if media_fd is None:
-        raise ArtifactReceiptVerificationError("artifact is unavailable")
-    handle = os.fdopen(media_fd, "rb", closefd=True)
-    if not stat.S_ISREG(file_stat.st_mode):
-        handle.close()
-        raise ArtifactReceiptVerificationError("artifact is not regular")
-    verified = verified_artifact(handle)
-    if (verified.sha256, verified.size_bytes) != (payload.sha256, payload.size_bytes):
-        handle.close()
-        raise ArtifactReceiptVerificationError("artifact does not match receipt")
-    return verified
+                try:
+                    handle = os.fdopen(media_fd, "rb", closefd=True)
+                except BaseException:
+                    os.close(media_fd)
+                    raise
+                media_owner.enter_context(handle)
+                file_stat = os.fstat(handle.fileno())
+        except OSError as exc:
+            raise ArtifactReceiptVerificationError("artifact is unavailable") from exc
+        if not stat.S_ISREG(file_stat.st_mode):
+            raise ArtifactReceiptVerificationError("artifact is not regular")
+        verified = verified_artifact(handle)
+        if (verified.sha256, verified.size_bytes) != (payload.sha256, payload.size_bytes):
+            raise ArtifactReceiptVerificationError("artifact does not match receipt")
+        media_owner.pop_all()
+        return verified
 
 
 def _enabled(request: Request) -> bool:
     return get_runtime_settings_store(request.app).get().clip_export_enabled
 
 
-def _receipt_store(request: Request) -> ArtifactReceiptStore:
+def _receipt_store(request: Request) -> PostgresArtifactReceiptStore:
     store = getattr(request.app.state, "artifact_receipt_store", None)
-    if not isinstance(store, ArtifactReceiptStore):
-        root_value = getattr(request.app.state, "clip_store_root", None)
-        root = Path(root_value or os.environ.get(CLIP_STORE_DIR_ENV, DEFAULT_CLIP_STORE_DIR))
-        store = CompactArtifactReceiptStore(EDGE_DATABASE_PATH, root)
-        request.app.state.artifact_receipt_store = store
+    if store is None:
+        raise RuntimeError("artifact receipt store is not injected")
+    if not isinstance(store, PostgresArtifactReceiptStore):
+        raise TypeError("artifact receipt store has invalid type")
     return store
 
 

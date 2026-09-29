@@ -28,7 +28,7 @@ from fastapi import APIRouter, FastAPI, HTTPException, Query, Request, status
 from pydantic import BaseModel, ConfigDict
 
 from backend.app.features.audit.catalog import AuditAction, empty_detail
-from backend.app.features.audit.http import append_transactional
+from backend.app.features.audit.http import mutation_audit
 from backend.app.features.audit.store import AuditEvent, utc_now
 from backend.app.features.clips.storage_location_store import ClipStorageLocationStore
 from backend.app.features.clips.store import CLIP_STORE_DIR_ENV, DEFAULT_CLIP_STORE_DIR
@@ -122,9 +122,10 @@ def put_clip_storage_location(
         target_id=selected or "clip-store",
         detail=empty_detail(AuditAction.CLIP_STORAGE_UPDATE),
     )
-    _location_store(request.app).put(
-        selected,
-        after_write=lambda connection: append_transactional(request, connection, event),
+    store = _location_store(request.app)
+    mutation_audit(request, lambda: event).apply(
+        store,
+        lambda append: store.put(selected, after_write=append),
     )
     return _storage_snapshot(request.app)
 
@@ -220,9 +221,10 @@ def _list_subdirectories(root: Path, segments: list[str]) -> list[str]:
 
 def _location_store(app: FastAPI) -> ClipStorageLocationStore:
     store = getattr(app.state, "clip_storage_location_store", None)
+    if store is None:
+        raise RuntimeError("clip storage location store is not injected")
     if not isinstance(store, ClipStorageLocationStore):
-        store = ClipStorageLocationStore.from_env()
-        app.state.clip_storage_location_store = store
+        raise TypeError("clip storage location store has invalid type")
     return store
 
 

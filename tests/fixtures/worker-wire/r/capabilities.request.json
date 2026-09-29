@@ -1,0 +1,10 @@
+{
+  "body_sha256": null,
+  "headers": {
+    "X-Edge-Relay-Token": "<relay-token>"
+  },
+  "method": "GET",
+  "path": "/api/v1/relay/capabilities",
+  "query": "camera_id=cmsnw6rjc01vhlh01oswn99yq",
+  "timeout_sec": 16.0
+}

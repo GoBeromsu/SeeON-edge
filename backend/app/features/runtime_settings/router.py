@@ -8,7 +8,7 @@ from fastapi import APIRouter, HTTPException, Request, status
 from pydantic import BaseModel, ConfigDict, Field
 
 from backend.app.features.audit.catalog import AuditAction, empty_detail
-from backend.app.features.audit.http import append_transactional
+from backend.app.features.audit.http import mutation_audit
 from backend.app.features.audit.store import AuditEvent, utc_now
 from backend.app.features.runtime_settings.store import (
     RuntimeSettingsVersionConflict,
@@ -54,11 +54,15 @@ def put_runtime_settings(
         target_id="runtime-settings",
         detail=empty_detail(AuditAction.RUNTIME_SETTINGS_UPDATE),
     )
+    store = get_runtime_settings_store(request.app)
     try:
-        setting = get_runtime_settings_store(request.app).set_clip_export_enabled(
-            payload.clip_export_enabled,
-            expected_version=payload.expected_version,
-            after_write=lambda connection: append_transactional(request, connection, event),
+        setting = mutation_audit(request, lambda: event).apply(
+            store,
+            lambda append: store.set_clip_export_enabled(
+                payload.clip_export_enabled,
+                expected_version=payload.expected_version,
+                after_write=append,
+            ),
         )
     except RuntimeSettingsVersionConflict as exc:
         raise HTTPException(
