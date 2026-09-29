@@ -21,7 +21,12 @@ Allowed: the package under test, pytest, local helpers. Forbidden as default inp
 - Central `edge.sqlite3` is a per-test tmp file. `EDGE_DATABASE_PATH` is monkeypatched on every module that reads it.
 - Dashboard bootstrap is explicit `API_DASHBOARD_*`. Unconfigured-path tests must `delenv`.
 - `API_BACKEND_ALLOW_INSECURE_HTTP=1` is a fixture opt-in. HTTPS-policy tests unset it.
-- `DashboardCredentialsStore.from_env` and `ConnectionSettingsStore.from_env` resolve under `tmp_path`. Never `~/.local/state/ml-api` or `/var/lib/ml-api`.
+- `DashboardCredentialsStore.from_env` resolves under `tmp_path`. Never `~/.local/state/ml-api` or `/var/lib/ml-api`.
+- PostgreSQL connection settings require an injected owner and authority; use
+  `tests_support.postgres_sandbox.postgres_product_sandbox`. There is no
+  connection-settings path/from-env override. The sandbox owns only its unique
+  test namespace, closes its pool before dropping it, and requires an explicit
+  `SEEON_TEST_POSTGRES_DSN`; a missing DSN fails, never skips.
 - `Path.home()` redirects to `tmp_path`. Don't rewrite `HOME`.
 - RTSP DNS is stubbed. Real `getaddrinfo` lives in `test_rtsp_url_policy.py`.
 - Process umask is `0o022`. Insecure-mode tests `chmod` the path. `mkdir(..., mode=...)` sets the leaf only. Create each parent with an explicit mode when a validator walks the tree.
@@ -76,6 +81,8 @@ uv run pytest -m integration
 uv run pytest -q -m heavy
 uv run --group lint lint-imports
 ```
+
+Every run needs `SEEON_TEST_POSTGRES_DSN` pointing at a disposable PostgreSQL 18 database (CI starts one per shard). A missing DSN fails the PostgreSQL tests.
 
 Need `mediamtx` on PATH for `real_stack`. A missing tool skips. After an import boundary change, update `[tool.importlinter]` and the matching AGENTS files in the same commit.
 

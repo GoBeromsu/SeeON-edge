@@ -7,6 +7,8 @@ from backend.app.features.clips.catalog import CatalogStore, get_catalog_store
 from backend.app.main import create_app, no_lifespan
 from backend.app.shared.state_dir import resolve_state_dir
 
+pytest_plugins = ("tests_support.postgres_sandbox", "tests_support.postgres_app_env")
+
 
 def test_health_live_ok() -> None:
     with TestClient(create_app(lifespan=no_lifespan)) as client:
@@ -24,6 +26,7 @@ def test_health_ready_503_while_booting() -> None:
     assert response.json()["reason"] == "booting"
 
 
+@pytest.mark.usefixtures("postgres_app_env")
 def test_health_ready_200_when_catalog_path_is_unwritable(monkeypatch: pytest.MonkeyPatch) -> None:
     """Boot/readiness must never depend on the catalog being writable: the
     catalog is opened lazily on first relay use (see
@@ -48,6 +51,7 @@ def test_health_ready_200_when_catalog_path_is_unwritable(monkeypatch: pytest.Mo
     assert get_catalog_store(app) is None
 
 
+@pytest.mark.usefixtures("postgres_app_env")
 def test_health_ready_200_after_gateway_lifespan_boot() -> None:
     app = create_app()
     with TestClient(app) as client:
@@ -57,6 +61,7 @@ def test_health_ready_200_after_gateway_lifespan_boot() -> None:
     assert response.json() == {"ready": True, "status": "ready"}
 
 
+@pytest.mark.usefixtures("postgres_app_env")
 def test_lifespan_boot_logs_resolved_state_directory(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
@@ -72,6 +77,7 @@ def test_lifespan_boot_logs_resolved_state_directory(
     assert any(record.getMessage() == expected for record in caplog.records)
 
 
+@pytest.mark.usefixtures("postgres_app_env")
 def test_fastapi_lifespan_does_not_assemble_ml_runtime() -> None:
     app = create_app()
 

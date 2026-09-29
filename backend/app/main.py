@@ -7,14 +7,17 @@ from collections.abc import AsyncGenerator, Callable
 from contextlib import AbstractAsyncContextManager, asynccontextmanager
 from pathlib import Path
 
+import psycopg
 from fastapi import APIRouter, FastAPI
 from fastapi.staticfiles import StaticFiles
 
 from backend.app.core.config import get_settings
+from backend.app.edge_db.postgres import PostgresError
 from backend.app.features.audit.http import (
     AuditUnavailableError,
     audit_unavailable_handler,
 )
+from backend.app.features.audit.postgres_runtime import AuditRuntimeUnavailable
 from backend.app.features.audit.router import router as audit_router
 from backend.app.features.auth.router import router as auth_router
 from backend.app.features.cameras.bed_zone_router import router as bed_zone_router
@@ -38,6 +41,7 @@ from backend.app.features.status.system_router import router as system_router
 from backend.app.lifespan import lifespan as serving_lifespan
 from backend.app.routes import health as health_routes
 from backend.app.routes.models import router as models_router
+from backend.app.shared.dashboard_credentials import DashboardCredentialsStoreError
 
 LifespanFactory = Callable[[FastAPI], AbstractAsyncContextManager[None]]
 
@@ -52,6 +56,10 @@ def create_app(*, lifespan: LifespanFactory | None = serving_lifespan) -> FastAP
         lifespan=lifespan,
     )
     app.add_exception_handler(AuditUnavailableError, audit_unavailable_handler)
+    app.add_exception_handler(AuditRuntimeUnavailable, audit_unavailable_handler)
+    app.add_exception_handler(PostgresError, audit_unavailable_handler)
+    app.add_exception_handler(psycopg.Error, audit_unavailable_handler)
+    app.add_exception_handler(DashboardCredentialsStoreError, audit_unavailable_handler)
     # relay 토큰의 유일한 출처는 `app.state.edge_relay_token`이다. 인증
     # 호출부는 이 값만 읽는다(env를 다시 읽지 않는다). 여기서 채워 두면
     # lifespan이 도는 서빙 경로와 lifespan 없이 만드는 테스트 경로가 같은

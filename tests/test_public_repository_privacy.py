@@ -915,8 +915,12 @@ _TEST_STEPS = [
         # The matrix value is passed through `env:` and read back as `$SHARD`.
         # Interpolating `${{ matrix.shard }}` into the script body splices
         # expression text into the shell source before bash parses it; `$SHARD`
-        # is a value the shell reads, never source it compiles.
-        "env": {"SHARD": "${{ matrix.shard }}"},
+        # is a value the shell reads, never source it compiles. The DSN points
+        # at the job's own postgres service below and carries no credential.
+        "env": {
+            "SHARD": "${{ matrix.shard }}",
+            "SEEON_TEST_POSTGRES_DSN": "postgresql://postgres@127.0.0.1:5432/seeon_test",
+        },
         "run": _SHARD_DISCOVERY
         + (
             'if [ "${#shard_files[@]}" -eq 0 ]; then\n'
@@ -981,6 +985,23 @@ _EXPECTED_JOBS: dict[str, dict[str, object]] = {
             "matrix": {"shard": ["1", "2", "3", "4"]},
         },
         "env": {"SHARD_TOTAL": "4"},
+        # The only admitted service: a digest-pinned image that cannot be
+        # repointed, trust auth with no secret, published only on the job runner.
+        "services": {
+            "postgres": {
+                "image": (
+                    "postgres@sha256:"
+                    "9e73daeb439141c2b11eea2463f5f1a3b269fd90d897b41cddb7cb440f21aa5d"
+                ),
+                "env": {"POSTGRES_HOST_AUTH_METHOD": "trust", "POSTGRES_DB": "seeon_test"},
+                "command": "-c fsync=on -c synchronous_commit=on -c max_connections=200",
+                "ports": ["5432:5432"],
+                "options": (
+                    '--health-cmd "pg_isready -h 127.0.0.1 -U postgres -d seeon_test"'
+                    " --health-interval 2s --health-timeout 5s --health-retries 30"
+                ),
+            }
+        },
         "steps": _TEST_STEPS,
     },
     "ci-ok": {
@@ -1871,7 +1892,7 @@ def test_shard_discovery_in_ci_matches_the_partition_modelled_here() -> None:
     assert "LC_ALL=C sort" in _SHARD_DISCOVERY
     assert "'NR % total == shard % total'" in _SHARD_DISCOVERY
     # And the matrix value reaches the script as data, never as spliced source.
-    assert step["env"] == {"SHARD": "${{ matrix.shard }}"}
+    assert step["env"]["SHARD"] == "${{ matrix.shard }}"
     assert "${{ matrix.shard }}" not in run
 
 

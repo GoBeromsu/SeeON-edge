@@ -1,7 +1,7 @@
 """Exercise native constraints in test-owned PostgreSQL namespaces, not SQLite.
 
-SEEON_TEST_POSTGRES_DSN must target an isolated service. A missing DSN skips the
-ordinary suite and does not establish field acceptance.
+SEEON_TEST_POSTGRES_DSN must target an isolated service. A missing or invalid DSN
+fails before any connection is opened; it never skips.
 """
 
 from __future__ import annotations
@@ -46,7 +46,10 @@ class _Schemas:
 def postgres_schemas():
     dsn = os.environ.get("SEEON_TEST_POSTGRES_DSN")
     if dsn is None:
-        pytest.skip("requires an isolated SEEON_TEST_POSTGRES_DSN; not field acceptance")
+        pytest.fail(
+            "SEEON_TEST_POSTGRES_DSN is required; point it at an isolated test database",
+            pytrace=False,
+        )
     if not dsn.strip() or "\x00" in dsn:
         pytest.fail("SEEON_TEST_POSTGRES_DSN must be nonblank without NUL bytes", pytrace=False)
     try:
@@ -87,17 +90,19 @@ def postgres_delivery_schema(postgres_schemas):
 
 
 @pytest.mark.parametrize("dsn", [None, "", " \t\n", "synthetic\x00dsn"])
-def test_schema_fixture_rejects_invalid_opt_in_before_connect(monkeypatch, dsn):
+def test_schema_fixture_rejects_missing_or_invalid_dsn_before_connect(monkeypatch, dsn):
     monkeypatch.setattr(os, "environ", {} if dsn is None else {"SEEON_TEST_POSTGRES_DSN": dsn})
 
     def forbidden_connect(*args, **kwargs):
-        pytest.fail("invalid opt-in must not open an ambient connection")
+        pytest.fail("a missing or invalid DSN must not open an ambient connection")
 
     monkeypatch.setattr(psycopg, "connect", forbidden_connect)
-    expected = pytest.skip.Exception if dsn is None else pytest.fail.Exception
-    message = "requires an isolated" if dsn is None else "nonblank without NUL"
-    with pytest.raises(expected, match=message):
+    # Skipped is caught too, so a regression to skipping fails here instead of hiding.
+    with pytest.raises((pytest.fail.Exception, pytest.skip.Exception)) as outcome:
         next(postgres_schemas.__wrapped__())
+    assert outcome.type is pytest.fail.Exception
+    message = "SEEON_TEST_POSTGRES_DSN is required" if dsn is None else "nonblank without NUL"
+    assert message in str(outcome.value)
 
 
 @pytest.mark.parametrize("failure", [psycopg.OperationalError, OSError, ValueError, TypeError])

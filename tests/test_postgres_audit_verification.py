@@ -219,7 +219,7 @@ def test_quoted_mixed_case_namespace_uses_exact_canonical_captured_path(
         _refuses(store, caplog)
         _refuses(store, caplog, checkpoint)
     finally:
-        database.close()
+        database.close(timeout_sec=3.0)
         sandbox.admin.execute(sql.SQL("DROP SCHEMA {} CASCADE").format(sql.Identifier(schema)))
 
 
@@ -1356,6 +1356,6 @@ def test_already_safe_owner_unavailability_remains_typed(
     postgres_product_sandbox,
     audit_store,
 ) -> None:
-    postgres_product_sandbox.database.close()
+    postgres_product_sandbox.database.close(timeout_sec=3.0)
     with pytest.raises(PostgresUnavailable, match="owner is not running"):
         audit_store.verify()

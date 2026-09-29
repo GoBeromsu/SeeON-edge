@@ -49,6 +49,17 @@ class PersistedDashboardCredentials:
     password_hash: bytes
     updated_at: str
 
+    @classmethod
+    def from_password(cls, *, username: str, password: str) -> PersistedDashboardCredentials:
+        salt = os.urandom(_SALT_BYTES)
+        return cls(
+            username=username,
+            algorithm=_ALGORITHM_SCRYPT,
+            salt=salt,
+            password_hash=_hash_password(password, salt),
+            updated_at=datetime.now(UTC).isoformat(timespec="milliseconds").replace("+00:00", "Z"),
+        )
+
     def verify_password(self, password: str) -> bool:
         if self.algorithm != _ALGORITHM_SCRYPT:
             return False

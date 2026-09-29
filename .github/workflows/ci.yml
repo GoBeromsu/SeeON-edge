@@ -105,6 +105,28 @@ jobs:
         shard: [1, 2, 3, 4]
     env:
       SHARD_TOTAL: "4"
+    # Every shard gets its own disposable PostgreSQL 18, so the PostgreSQL tests
+    # run instead of failing on a missing SEEON_TEST_POSTGRES_DSN. The image is
+    # pinned by digest because a tag can be repointed. Trust auth carries no
+    # secret into this pull_request job, and the database lives only as long as
+    # the job. The `-c` args match the host test runner so CI and host runs see
+    # the same server settings. The health check uses TCP because the image's
+    # init-time server listens only on the unix socket; a socket probe could
+    # report ready before init finishes.
+    services:
+      postgres:
+        image: postgres@sha256:9e73daeb439141c2b11eea2463f5f1a3b269fd90d897b41cddb7cb440f21aa5d
+        env:
+          POSTGRES_HOST_AUTH_METHOD: trust
+          POSTGRES_DB: seeon_test
+        command: -c fsync=on -c synchronous_commit=on -c max_connections=200
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -h 127.0.0.1 -U postgres -d seeon_test"
+          --health-interval 2s
+          --health-timeout 5s
+          --health-retries 30
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
@@ -159,6 +181,7 @@ jobs:
       - name: Run test shard ${{ matrix.shard }} of 4
         env:
           SHARD: ${{ matrix.shard }}
+          SEEON_TEST_POSTGRES_DSN: postgresql://postgres@127.0.0.1:5432/seeon_test
         run: |
           mapfile -t shard_files < <(
             git ls-files -- '*.py' |

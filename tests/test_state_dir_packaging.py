@@ -15,7 +15,6 @@ import pytest
 import yaml
 
 from backend.app.edge_db import EDGE_DATABASE_PATH, EDGE_STATE_DIRECTORY
-from backend.app.features.cameras.store import CameraRegistryStore
 from worker.runtime.config.lkg_store import WorkerConfigLkgStore
 from worker.runtime.lease import GPU_LEASE_FILENAME
 
@@ -119,7 +118,7 @@ def test_dockerfiles_declare_no_volume_for_state_dir() -> None:
 # --- compose owns one central database volume -----------------------------
 
 
-@pytest.mark.parametrize("service", ["edge-db-migrator", "ml-api"])
+@pytest.mark.parametrize("service", ["edge-db-cutover", "ml-api"])
 def test_compose_mounts_central_state_at_baked_path(compose: dict, service: str) -> None:
     target = _compose_named_volume_target(compose, service, "edge-state")
     assert target == EXPECTED_EDGE_STATE_DIR
@@ -198,13 +197,11 @@ def test_shared_edge_database_path_matches_compose_mount(compose: dict) -> None:
     )
 
 
-def test_worker_config_cache_is_local_and_api_database_is_central() -> None:
+def test_worker_config_cache_is_local_to_the_worker_state_directory() -> None:
     worker_path = WorkerConfigLkgStore().database_path
-    api_path = CameraRegistryStore.from_env().path
 
     assert worker_path.name == "config-lkg"
     assert worker_path.parent == Path.home() / ".local/state/ml-worker"
-    assert api_path.name == EDGE_DATABASE_PATH.name
 
 
 # --- the GPU lease remains in the worker-local state directory -------------
