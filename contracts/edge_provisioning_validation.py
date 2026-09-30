@@ -20,9 +20,7 @@ _UUID_V7: Final = re.compile(
 _EDGE_REF: Final = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9._:-]{0,63}$")
 _CANONICAL_ID: Final = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 _SHA256: Final = re.compile(r"^[a-f0-9]{64}$")
-_RFC3339_MILLIS_UTC: Final = re.compile(
-    r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$"
-)
+_RFC3339_MILLIS_UTC: Final = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$")
 _EMPTY_FIELDS: Final[frozenset[str]] = frozenset()
 
 
@@ -129,10 +127,7 @@ def require_initial_alias_scope(snapshot: TopologySnapshot) -> None:
     generation = snapshot.principal.enrollment_generation
     revision = snapshot.client_revision
     is_initial = (
-        type(generation) is int
-        and generation == 1
-        and type(revision) is int
-        and revision == 1
+        type(generation) is int and generation == 1 and type(revision) is int and revision == 1
     )
     if aliases_present and not is_initial:
         raise ContractViolation("legacy aliases require generation 1 client revision 1")

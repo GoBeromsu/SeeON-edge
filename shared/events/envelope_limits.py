@@ -89,9 +89,7 @@ def maximum_serialized_envelope_bytes() -> int:
         },
     )
     return max(
-        len(
-            json.dumps(envelope, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode()
-        )
+        len(json.dumps(envelope, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode())
         for envelope in envelopes
     )
 

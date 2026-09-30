@@ -110,9 +110,7 @@ def parse_topology_manifest(
     for entry in entries:
         expected_parent_kind = _PARENT_KIND[entry.kind]
         parent_kind = (
-            None
-            if entry.parent_canonical_id is None
-            else kind_by_id.get(entry.parent_canonical_id)
+            None if entry.parent_canonical_id is None else kind_by_id.get(entry.parent_canonical_id)
         )
         if expected_parent_kind is None and entry.parent_canonical_id is not None:
             raise ContractViolation("floors cannot have parents")

@@ -110,10 +110,7 @@ _FLOW = ProfileSpec(
     concrete_stages_available=True,
 )
 CANONICAL_PROFILE_REGISTRY: Final[Mapping[str, ProfileSpec]] = MappingProxyType(
-    {
-        spec.name: spec
-        for spec in (_FLOW,)
-    }
+    {spec.name: spec for spec in (_FLOW,)}
 )
 PROFILE_ALIASES: Final[Mapping[str, str]] = MappingProxyType(
     {

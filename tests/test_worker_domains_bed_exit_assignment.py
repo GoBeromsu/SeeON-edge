@@ -241,9 +241,7 @@ def test_track_id_churn_during_continuous_occupancy_preserves_arm_progress() -> 
             time_sec=2.0,
             frame_index=2,
             bed_region=BedRegionDebugSnapshot(source=BedRegionCacheState.FRESH),
-            bed_pose_features=frame_pose_features(
-                lying_in_bed(track_id=SUCCESSOR_ID, bed_id=0)
-            ),
+            bed_pose_features=frame_pose_features(lying_in_bed(track_id=SUCCESSOR_ID, bed_id=0)),
         )
     )
 

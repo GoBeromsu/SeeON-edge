@@ -517,9 +517,7 @@ class BedExitMonitor:
                 )
                 successor.last_time_sec = assignment.last_time_sec
                 self._assignments[recipient] = successor
-                unclaimed_live = [
-                    (pid, box) for pid, box in unclaimed_live if pid != recipient
-                ]
+                unclaimed_live = [(pid, box) for pid, box in unclaimed_live if pid != recipient]
                 self._episodes.reassociate_bed_exit(
                     EpisodeProposal(
                         camera_id=self._config.camera_id,
@@ -528,9 +526,7 @@ class BedExitMonitor:
                         track_id=recipient,
                         bed_id=successor.bed_id,
                         frame_index=input_value.frame_index,
-                        time_sec=(
-                            0.0 if input_value.time_sec is None else input_value.time_sec
-                        ),
+                        time_sec=(0.0 if input_value.time_sec is None else input_value.time_sec),
                         qualifying=False,
                         probability=1.0,
                         domain="bed_exit",
@@ -766,11 +762,7 @@ class BedExitMonitor:
                     reason=reason,
                     previous_state="armed" if assignment.armed else "arming",
                     current_state=(
-                        "triggered"
-                        if triggered
-                        else "armed"
-                        if assignment.armed
-                        else "arming"
+                        "triggered" if triggered else "armed" if assignment.armed else "arming"
                     ),
                     triggered=triggered,
                     track_id=person_id,

@@ -58,8 +58,7 @@ def _serialize_floor(floor: TopologyFloor) -> JsonRecord:
         "name": floor.name,
         "orderIndex": floor.order_index,
         "rooms": [
-            _serialize_room(room)
-            for room in sorted(floor.rooms, key=lambda item: item.edge_ref)
+            _serialize_room(room) for room in sorted(floor.rooms, key=lambda item: item.edge_ref)
         ],
     }
 

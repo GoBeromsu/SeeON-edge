@@ -17,9 +17,7 @@ SCHEMA_VERSION: Final = 2
 POSE_BBOX56_PREPROCESSING_IDENTITY: Final = "coco17-xyc-plus-pose-head-xyxy-valid-f32-v1"
 _SHA256_RE: Final = re.compile(r"^[0-9a-f]{64}$")
 _REVISION_RE: Final = re.compile(r"^[0-9a-f]{40}$")
-_SOURCE_LOCATOR_RE: Final = re.compile(
-    r"^[A-Za-z0-9][A-Za-z0-9._-]*/[A-Za-z0-9][A-Za-z0-9._-]*$"
-)
+_SOURCE_LOCATOR_RE: Final = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*/[A-Za-z0-9][A-Za-z0-9._-]*$")
 _TIMESTAMP_RE: Final = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z$")
 
 

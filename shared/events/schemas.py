@@ -16,8 +16,6 @@ EventLifecycle: TypeAlias = Literal["detected", "updated", "resolved"]
 CLOCK_SOURCE_EDGE_WALL: Final = "edge_wall_clock"
 
 
-
-
 @dataclass(frozen=True, slots=True)
 class EmittedEvent:
     facility: str
@@ -65,6 +63,8 @@ def build_emitted_event(
         front_event_type=front_event_type(normalized_event_type),
         evidence={} if evidence is None else dict(evidence),
     )
+
+
 def build_audit_envelope(
     *,
     model_version: str | None,
@@ -79,8 +79,6 @@ def build_audit_envelope(
     if operating_threshold is not None:
         envelope["operating_threshold"] = operating_threshold
     return envelope
-
-
 
 
 __all__ = [

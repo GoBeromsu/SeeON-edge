@@ -223,11 +223,11 @@ __all__ = [
     "StatusSnapshot",
     "StatusStore",
 ]
+
+
 class LifecycleEvent(Protocol):
     event_type: str
     camera_id: str
     facility_id: str
     category: str
     detail: str | None
-
-

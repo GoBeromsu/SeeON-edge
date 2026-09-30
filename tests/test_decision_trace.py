@@ -297,9 +297,7 @@ def test_bed_exit_trace_distinguishes_outside_dwell_exit_from_stale_track_clear(
     # re-arm (no posture evidence this time), then disappears entirely.
     # Absence must not fire -- the track is simply retired.
     assert detector.update(_input(inside, frame_index=3, time_sec=3.0)) == ()
-    assert (
-        detector.update(_input(outside, frame_index=4, time_sec=4.0)) == ()
-    )
+    assert detector.update(_input(outside, frame_index=4, time_sec=4.0)) == ()
     disappeared = detector.update(_input(outside, frame_index=5, time_sec=5.0, live=()))
     assert disappeared == ()
     stale_trace = detector.last_trace_snapshots[0]

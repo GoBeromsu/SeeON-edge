@@ -147,9 +147,7 @@ def test_person_label_reads_confidence_bed_and_state_without_tracker_counter() -
     assert "#" not in label(0.5, FallPreviewState(7, "normal", None), 1)
 
 
-def test_absent_fall_state_is_unknown_not_normal(
-    renderer: PreviewRenderer, jpeg: bytes
-) -> None:
+def test_absent_fall_state_is_unknown_not_normal(renderer: PreviewRenderer, jpeg: bytes) -> None:
     absent = _pixels(
         renderer.render(
             jpeg,
