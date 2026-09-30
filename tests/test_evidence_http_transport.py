@@ -1,9 +1,28 @@
 from __future__ import annotations
 
+import json
+from datetime import UTC, datetime, tzinfo
+from pathlib import Path
+from typing import Any
+
 import pytest
 
-from shared.events.evidence_export_contract import DeliveryDisposition
+import shared.events.evidence_http_transport as transport_module
+from shared.events.evidence_export_contract import (
+    ClipReceipt,
+    DeliveryDisposition,
+    DeliveryFailure,
+    EventReceipt,
+)
 from shared.events.evidence_http_transport import classify_http_failure
+
+# d1b: the relay-disposition wire contract the Rust relay client (d1) also replays.
+# The manifest names this file as its Python consumer.
+_RELAY_GOLDEN_PATH = (
+    Path(__file__).parent / "fixtures" / "worker-wire" / "r" / "relay-dispositions.json"
+)
+_RELAY_GOLDEN: dict[str, Any] = json.loads(_RELAY_GOLDEN_PATH.read_text(encoding="utf-8"))
+_PARSER_SOURCE = "shared/events/evidence_http_transport.py"
 
 
 @pytest.mark.parametrize("status", (401, 403))
@@ -117,3 +136,89 @@ def test_a_terminal_local_accept_requires_that_something_was_persisted() -> None
         "a backend that could not persist the alert must not cause the worker "
         "to drop it; the event would then exist nowhere"
     )
+
+
+@pytest.fixture
+def injected_relay_clock(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Pin the parser's wall clock to the golden's injected_now_utc."""
+    injected_now = datetime.fromisoformat(_RELAY_GOLDEN["injected_now_utc"])
+
+    class _InjectedDatetime(datetime):
+        @classmethod
+        def now(cls, tz: tzinfo | None = None) -> datetime:
+            return injected_now.astimezone(tz or UTC)
+
+    monkeypatch.setattr(transport_module, "datetime", _InjectedDatetime)
+
+
+def _replay_relay_row(row: dict[str, Any]) -> EventReceipt | ClipReceipt | DeliveryFailure:
+    response = row["response"]
+    body = response["body"]
+    body_bytes = None if body is None else body.encode("utf-8")
+    request = row["request"]
+    parser = row["parser"]
+    if parser == f"{_PARSER_SOURCE}:parse_event_result":
+        return transport_module.parse_event_result(
+            (response["status"], response["headers"], body_bytes or b""),
+            request["expected_edge_event_id"],
+        )
+    if parser == f"{_PARSER_SOURCE}:parse_clip_result":
+        return transport_module.parse_clip_result(
+            (response["status"], response["headers"], body_bytes or b""),
+            request["expected_clip_id"],
+            request["expected_state_version"],
+        )
+    if parser == f"{_PARSER_SOURCE}:classify_http_failure":
+        return transport_module.classify_http_failure(
+            response["status"], response["headers"], body_bytes
+        )
+    pytest.fail(f"relay golden row {row['name']!r} names an unknown parser {parser!r}")
+
+
+def _relay_result_view(result: EventReceipt | ClipReceipt | DeliveryFailure) -> dict[str, Any]:
+    if isinstance(result, EventReceipt):
+        return {
+            "kind": "EventReceipt",
+            "status": result.status,
+            "edge_event_id": result.edge_event_id,
+            "event_id": result.event_id,
+        }
+    if isinstance(result, ClipReceipt):
+        return {
+            "kind": "ClipReceipt",
+            "clip_id": result.clip_id,
+            "state": result.state,
+            "state_version": result.state_version,
+            "sha256": result.sha256,
+            "size_bytes": result.size_bytes,
+        }
+    return {
+        "kind": "failure",
+        "code": str(result.code),
+        "disposition": result.disposition.value,
+        "status_code": result.status_code,
+        "retry_after_seconds": result.retry_after_seconds,
+    }
+
+
+@pytest.mark.usefixtures("injected_relay_clock")
+@pytest.mark.parametrize("row", _RELAY_GOLDEN["rows"], ids=lambda row: row["name"])
+def test_relay_disposition_golden_row_replays_through_the_python_parser(
+    row: dict[str, Any],
+) -> None:
+    result = _replay_relay_row(row)
+
+    assert _relay_result_view(result) == row["result"]
+
+
+@pytest.mark.usefixtures("injected_relay_clock")
+@pytest.mark.parametrize(
+    ("retry_after", "expected_seconds"),
+    sorted(_RELAY_GOLDEN["retry_after_direct"].items()),
+)
+def test_relay_retry_after_golden_replays_through_the_python_parser(
+    retry_after: str, expected_seconds: float | None
+) -> None:
+    failure = classify_http_failure(503, {"Retry-After": retry_after})
+
+    assert failure.retry_after_seconds == expected_seconds

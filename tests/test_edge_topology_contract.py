@@ -158,6 +158,7 @@ def test_edge_worker_runtime_status_environment_contract() -> None:
         "ML_WORKER_FLOW_TRACKER_LIBRARY",
         "ML_WORKER_FLOW_RECORD_DIR",
         "ML_WORKER_FLOW_RECORD_CACHE_SECONDS",
+        "ML_WORKER_FLOW_RTSP_RECONNECT_INTERVAL_SEC",
         "ML_WORKER_FLOW_FRAME_WIDTH",
         "ML_WORKER_FLOW_FRAME_HEIGHT",
         "ML_WORKER_FLOW_BATCH_SIZE",
@@ -195,6 +196,9 @@ def test_edge_worker_runtime_status_environment_contract() -> None:
         "${ML_RTSP_ALLOW_LOCAL_DESTINATIONS:-0}"
     )
     assert worker_environment["ML_WORKER_PROFILE"] == "flow"
+    # The deployed reconnect interval is the production default (5 s); the harness
+    # alone sets 0 in-process, never through compose.
+    assert worker_environment["ML_WORKER_FLOW_RTSP_RECONNECT_INTERVAL_SEC"] == "5"
     assert worker_environment["ML_WORKER_CLIP_ANALYSIS_CPU"] == ("${ML_WORKER_CLIP_ANALYSIS_CPU:-}")
     assert not any("EVENT_CLIP_EXPORT" in key for key in worker_environment)
     assert "API_FACILITY_ID" not in worker_environment

@@ -298,6 +298,7 @@ services:
       ML_WORKER_FLOW_TRACKER_LIBRARY: /opt/nvidia/deepstream/deepstream/lib/libnvds_nvmultiobjecttracker.so
       ML_WORKER_FLOW_RECORD_DIR: /var/lib/clip-store
       ML_WORKER_FLOW_RECORD_CACHE_SECONDS: "30"
+      ML_WORKER_FLOW_RTSP_RECONNECT_INTERVAL_SEC: "5"
       ML_WORKER_FLOW_FRAME_WIDTH: "640"
       ML_WORKER_FLOW_FRAME_HEIGHT: "360"
       # Enable after the site soak.

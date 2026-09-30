@@ -1,7 +1,8 @@
 """Operator-gated observability load measurement (Gate M/V).
 
 Skipped, never errored, when mediamtx/ffmpeg/pyservicemaker or OBS_STREAM_PATH
-are missing. Asserts document structure only; never a numeric threshold.
+are missing. Asserts document structure and the order of the measurement
+window only; never a numeric threshold.
 """
 
 from __future__ import annotations
@@ -52,3 +53,7 @@ def test_observability_load_measurement_writes_structural_document(
     assert payload["streams"] == streams
     assert payload["offered_fps"] == camera_fps
     assert payload.get("exporter_exceptions") == []
+    # The window opens only after the worker published its alive status, so
+    # bootstrap and warmup never count as measured throughput.
+    assert payload["worker_alive_at_unix_sec"] is not None
+    assert payload["measurement_started_at_unix_sec"] >= payload["worker_alive_at_unix_sec"]

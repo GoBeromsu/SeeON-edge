@@ -197,18 +197,44 @@ the clean series under the new digest.
 `pyservicemaker` `Pipeline.stop()` only sends EOS. With `nvurisrcbin` reconnect
 intervals above zero, the plugin answers that EOS as a lost stream ("Resetting
 source", reconnect attempt) and the pipeline EOS never reaches `wait()`, so the
-Flow thread does not exit and `DeepStreamFlowStopTimeout` follows. Production has
-no graceful stop path: it hard-exits with the fatal accelerator exit code, so
-the interaction is a latent defect reachable only through graceful stop, which
-the real-stack observability lane uses.
+Flow thread does not exit within its 10 second join and
+`DeepStreamFlowStopTimeout` follows.
 
-Resolution: the reconnect interval is configurable
+The production Python worker reaches this path on every graceful stop. The
+SIGINT and SIGTERM handler calls `runtime.stop()` (`worker/__main__.py`
+`_handle_signal`). A restart directive ends the `run()` loop through its
+restart check, and the `finally` of `run()` calls `stop()`
+(`worker/runtime/worker.py`). With the default interval of 5 seconds the EOS is
+swallowed as a reconnect, the join times out after 10 seconds,
+`_stop_flow_media_plane` logs "Flow shutdown deadline exceeded" and hard-exits
+with the fatal accelerator exit code 4. The `ml-worker` service in
+`compose.edge.yaml` sets no `stop_grace_period`, so Docker's 10 second default
+races that join, and the container ends either by that hard exit or by the
+engine's SIGKILL. Neither outcome is a graceful stop.
+
+The path has not been observed in production because the container has not
+been stopped since it started. Read-only evidence gathered on 2026-09-30:
+`seeon-edge-main-ml-worker-1` on the production edge host has run since
+2026-09-26T08:26Z with RestartCount 0, and its 109,802 log lines contain no
+"Flow shutdown deadline exceeded", no `DeepStreamFlowStopTimeout` and no hard
+exit.
+
+Resolution in this change: the reconnect interval is configurable
 (`DeepStreamMediaPlaneConfig.rtsp_reconnect_interval_sec`, worker env
-`ML_WORKER_FLOW_RTSP_RECONNECT_INTERVAL_SEC`). The default stays 5 seconds, so
-production behavior is unchanged. The load harness sets 0, where reconnect is
-idle on its stable looping fixture. A runtime toggle was rejected because the
-reconnect properties are only settable in the NULL/READY states and the binding
-exposes no state control.
+`ML_WORKER_FLOW_RTSP_RECONNECT_INTERVAL_SEC`, a non-negative integer that
+refuses to start otherwise). The default stays 5 seconds and `compose.edge.yaml`
+states it explicitly, so production behavior is unchanged, including the stop
+path above. The load harness sets 0, where reconnect is idle on its stable
+looping fixture, and stops the worker through the same restart check the
+directive path uses. A runtime toggle was rejected because the reconnect
+properties are only settable in the NULL/READY states and the binding exposes
+no state control. The Python stop path is intentionally left as is.
+
+Owner: the Rust Worker stop and SIGTERM work in plan stages 3 and 4 of this
+ADR. It must end the Flow within the container grace period while reconnect is
+active, and must not remove sources one by one on the way out, because the SDK's
+per-stream teardown core-dumped the process on a 13-camera shutdown after the
+Flow failed to stop in time.
 
 ## Consequences
 

@@ -13,11 +13,10 @@ import resource
 import shutil
 import socket
 import subprocess
-import sys
 import tempfile
 import threading
 import time
-from collections.abc import Iterator, Mapping, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Final
@@ -37,6 +36,13 @@ from tests_support.postgres_sandbox import ProductSandbox
 _RELAY_TOKEN: Final = "obs-load-relay-token"
 _BUDGET_BYTES: Final = 32 * 1024 * 1024
 _SAMPLE_HZ: Final = 1.0
+# Upper bound for one worker boot (model backend init, Flow warmup, camera
+# activation). A boot failure ends the worker thread and fails fast through
+# the liveness check; this bound only catches a boot that hangs.
+_BOOTSTRAP_TIMEOUT_SEC: Final = 120.0
+# The restart check is polled once per second, and the Flow stop joins its
+# own pipeline within 10 s; a thread still alive after this join failed to stop.
+_WORKER_JOIN_SEC: Final = 30.0
 
 
 def _free_tcp_port() -> int:
@@ -46,20 +52,37 @@ def _free_tcp_port() -> int:
 
 
 class WorkerTerminated(RuntimeError):
-    """The in-process worker stopped or requested a hard exit mid-measurement."""
+    """The in-process worker stopped, requested a hard exit, or did not stop cleanly."""
 
 
 class PublisherFailed(RuntimeError):
     """A fixture RTSP publisher exited or never registered its path on mediamtx."""
 
 
+class _HardExitRequested(BaseException):
+    """Raised in place of ``os._exit`` so no worker code runs after a hard exit.
+
+    It derives from ``BaseException`` so the worker's ``except Exception``
+    handlers cannot swallow it on the way out of the thread.
+    """
+
+    def __init__(self, code: int) -> None:
+        super().__init__(f"hard exit requested with code {code}")
+        self.code = code
+
+
 @dataclass
 class _WorkerObserver:
     """Stands in for ``os._exit`` and records how the worker thread ended.
 
-    A recorded exit code fails the test instead of terminating pytest; a
-    thread error keeps the worker's own failure reason (bootstrap stage,
-    Flow shutdown) visible to the measurement loop.
+    A hard exit records its code and raises ``_HardExitRequested``, so the
+    code after the ``hard_exit`` call does not run, as with ``os._exit``.
+    ``os._exit`` also skips ``finally`` blocks, which an exception cannot
+    mimic. A hard exit from a supervisor or watchdog thread ends that thread
+    the same way, and the recorded code still fails the measurement.
+    ``run`` records the worker thread's own error (bootstrap stage, Flow
+    shutdown) instead of re-raising it, and the harness reports it after
+    the join.
     """
 
     codes: list[int] = field(default_factory=list)
@@ -67,13 +90,13 @@ class _WorkerObserver:
 
     def __call__(self, code: int) -> None:
         self.codes.append(code)
+        raise _HardExitRequested(code)
 
-    def run(self, target: Any) -> None:
+    def run(self, target: Callable[[], object]) -> None:
         try:
             target()
-        except BaseException as exc:  # noqa: BLE001 - recorded, re-raised by the thread
+        except BaseException as exc:  # noqa: BLE001 - reported by the harness after the join
             self.error = exc
-            raise
 
 
 def _worker_failure_reason(observer: _WorkerObserver) -> str:
@@ -410,17 +433,25 @@ def _worker_env(relay_url: str) -> dict[str, str]:
 
 def _start_worker(
     config: Any, env: Mapping[str, str], state_dir: Path, *, observer: _WorkerObserver
-) -> tuple[Any, threading.Thread]:
+) -> tuple[Any, threading.Thread, threading.Event]:
+    """Start ``WorkerRuntime.run`` on a thread; setting the event makes ``run`` return.
+
+    The event is the worker's ``restart_check``: ``run`` leaves its loop and
+    its own ``finally`` stops the Flow once, the production restart-directive
+    path.
+    """
     from worker.adapters.model.in_process import InProcessServingClient
     from worker.adapters.model.registry import flow_registry
     from worker.runtime.lease import GpuLease
     from worker.runtime.worker import WorkerRuntime
 
+    stop_requested = threading.Event()
     runtime = WorkerRuntime(
         config,
         serving_client=InProcessServingClient(flow_registry()),
         env=env,
         hard_exit=observer,
+        restart_check=stop_requested.is_set,
         acquire_lease=lambda: GpuLease.acquire(state_dir),
         state_dir=state_dir,
         clip_store_dir=state_dir / "clips",
@@ -430,7 +461,7 @@ def _start_worker(
         target=observer.run, args=(runtime.run,), daemon=True, name="observability-worker"
     )
     thread.start()
-    return runtime, thread
+    return runtime, thread, stop_requested
 
 
 def _document(
@@ -441,6 +472,8 @@ def _document(
     samples: Sequence[_Sample],
     latencies_sec: Sequence[float],
     exceptions: Sequence[str],
+    worker_alive_at_unix_sec: float | None,
+    measurement_started_at_unix_sec: float,
 ) -> dict[str, Any]:
     first = samples[0] if samples else None
     last = samples[-1] if samples else None
@@ -460,6 +493,8 @@ def _document(
         "streams": streams,
         "duration_sec": duration_sec,
         "offered_fps": camera_fps,
+        "worker_alive_at_unix_sec": worker_alive_at_unix_sec,
+        "measurement_started_at_unix_sec": measurement_started_at_unix_sec,
         "records_per_sec_accepted": accepted_delta / elapsed,
         "gap_rows_per_sec": gap_delta / elapsed,
         "lane_high_water": max((sample.queued for sample in samples), default=0),
@@ -555,11 +590,14 @@ def run_measurement(
             ):
                 env = _worker_env(backend.base_url)
                 config = _worker_config(backend.base_url, streams, rtsp_port, env)
-                runtime, worker_thread = _start_worker(
+                runtime, worker_thread, stop_requested = _start_worker(
                     config, env, tmp_path / "worker", observer=observer
                 )
+                # The worker must stop while its relay backend still answers:
+                # tearing the backend down first turns every in-flight export
+                # into RETRY NETWORK noise and hides the real stop outcome.
                 try:
-                    _measure(
+                    document = _measure(
                         runtime,
                         worker_thread,
                         observer,
@@ -567,21 +605,22 @@ def run_measurement(
                         streams=streams,
                         duration_sec=duration_sec,
                         camera_fps=camera_fps,
-                        document_path=document_path,
                     )
-                finally:
-                    # The worker must stop while its relay backend still answers:
-                    # tearing the backend down first turns every in-flight export
-                    # into RETRY NETWORK noise and hides the real stop outcome.
-                    stop_error = _stop_worker(runtime, worker_thread, observer)
-                    if stop_error is not None:
-                        in_flight = sys.exc_info()[1]
-                        if in_flight is None:
-                            raise stop_error
-                        in_flight.add_note(f"worker stop also failed: {stop_error!r}")
+                except BaseException as measure_error:
+                    try:
+                        _stop_worker(worker_thread, observer, stop_requested)
+                    except WorkerTerminated as stop_error:
+                        measure_error.add_note(f"worker stop also failed: {stop_error}")
+                    raise
+                document["worker_stop"] = _stop_worker(worker_thread, observer, stop_requested)
+                document_path.write_text(
+                    json.dumps(document, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+                )
         finally:
-            _stop_processes(publishers)
-            _stop_processes([mediamtx])
+            try:
+                _stop_processes(publishers)
+            finally:
+                _stop_processes([mediamtx])
     return document_path
 
 
@@ -594,9 +633,14 @@ def _measure(
     streams: int,
     duration_sec: float,
     camera_fps: float,
-    document_path: Path,
-) -> None:
-    """Sample one running worker for ``duration_sec`` and write its document."""
+) -> dict[str, Any]:
+    """Sample one booted, running worker for ``duration_sec`` and return its document.
+
+    The clock starts only once bootstrap completed (the worker published an
+    alive status), so a worker that never boots cannot fill the window with
+    idle samples. Liveness is checked before every sample and once more
+    after the last one.
+    """
 
     def exporter_composed() -> bool:
         _ensure_worker_running(observer, worker_thread)
@@ -611,8 +655,20 @@ def _measure(
     lanes = runtime._execution_record_lanes  # noqa: SLF001
     timed = _TimedClient(exporter._client)  # noqa: SLF001
     exporter._client = timed  # noqa: SLF001
+
+    def bootstrap_complete() -> bool:
+        _ensure_worker_running(observer, worker_thread)
+        worker = runtime.diagnostics.to_payload("facility-obs", None, 0).get("worker")
+        return worker is not None and worker["alive"] is True
+
+    wait_until(
+        bootstrap_complete,
+        timeout=_BOOTSTRAP_TIMEOUT_SEC,
+        what="worker bootstrap complete (worker status alive)",
+    )
     camera_ids = [f"cam-{index + 1}" for index in range(streams)]
     samples: list[_Sample] = []
+    measurement_started_at_unix_sec = time.time()
     started = time.monotonic()
     while time.monotonic() - started < duration_sec:
         _ensure_worker_running(observer, worker_thread)
@@ -637,37 +693,61 @@ def _measure(
         )
         remaining = duration_sec - (time.monotonic() - started)
         time.sleep(min(1.0 / _SAMPLE_HZ, max(0.0, remaining)))
-    document = _document(
+    _ensure_worker_running(observer, worker_thread)
+    # The worker stamps its own alive status; the document carries it so the
+    # real-stack test can check the window opened after bootstrap.
+    worker = runtime.diagnostics.to_payload("facility-obs", None, 0).get("worker")
+    return _document(
         streams=streams,
         duration_sec=duration_sec,
         camera_fps=camera_fps,
         samples=samples,
         latencies_sec=timed.latencies_sec,
         exceptions=timed.exceptions,
-    )
-    document_path.write_text(
-        json.dumps(document, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+        worker_alive_at_unix_sec=None if worker is None else worker["started_at_sec"],
+        measurement_started_at_unix_sec=measurement_started_at_unix_sec,
     )
 
 
 def _stop_worker(
-    runtime: Any, thread: threading.Thread, observer: _WorkerObserver
-) -> Exception | None:
-    """Stop a still-running worker once; never race a worker that is already stopping.
+    thread: threading.Thread,
+    observer: _WorkerObserver,
+    stop_requested: threading.Event,
+    *,
+    join_timeout_sec: float = _WORKER_JOIN_SEC,
+) -> dict[str, Any]:
+    """Ask ``run`` to return, join the thread and fail unless it ended cleanly.
 
-    ``WorkerRuntime.run`` stops the Flow itself when it leaves (bootstrap
-    failure, restart check), and a worker that recorded a hard exit did so
-    from inside that stop. A second concurrent ``stop`` only re-hits the
-    Flow shutdown deadline and replaces the original failure.
+    Setting the restart-check event is the only stop request: ``run``'s own
+    ``finally`` stops the Flow once. The harness never calls ``stop`` itself,
+    because ``stop`` is not safe to run twice concurrently. Raises
+    ``WorkerTerminated`` when the thread outlives the join, recorded a hard
+    exit, or ended with an error; otherwise returns the join outcome.
     """
-    error: Exception | None = None
-    if thread.is_alive() and not observer.codes and observer.error is None:
-        try:
-            runtime.stop()
-        except Exception as exc:  # noqa: BLE001 - reported after teardown finishes
-            error = exc
-    thread.join(timeout=30.0)
-    return error
+    stop_requested.set()
+    started = time.monotonic()
+    thread.join(timeout=join_timeout_sec)
+    join_sec = time.monotonic() - started
+    if thread.is_alive():
+        raise WorkerTerminated(
+            f"worker thread did not exit within the {join_timeout_sec:g} s join "
+            "after the stop request"
+        )
+    if observer.codes:
+        raise WorkerTerminated(
+            f"worker requested hard exit with code {observer.codes[0]}; "
+            f"thread: {_worker_failure_reason(observer)}"
+        )
+    if observer.error is not None:
+        raise WorkerTerminated(
+            f"worker thread ended with an error: {_worker_failure_reason(observer)}"
+        )
+    return {
+        "join_sec": join_sec,
+        "thread_alive_after_join": False,
+        "hard_exit_codes": [],
+        "thread_error": None,
+    }
 
 
 def skip_reason() -> str | None:

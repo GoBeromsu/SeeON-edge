@@ -105,7 +105,11 @@ from worker.runtime.config import (
 from worker.runtime.execution_records import compose_execution_records
 from worker.runtime.faults.handler import FATAL_ACCELERATOR_EXIT_CODE, FaultHandler
 from worker.runtime.faults.record import make_fault_record
-from worker.runtime.flow.cold_start import FlowWarmupTimeout, verify_flow_boot_inputs
+from worker.runtime.flow.cold_start import (
+    EngineIdentityError,
+    FlowWarmupTimeout,
+    verify_flow_boot_inputs,
+)
 from worker.runtime.flow.evidence import FlowEvidenceBinding
 from worker.runtime.flow.lifecycle_supervisor import FlowLifecycleSupervisor
 from worker.runtime.flow.media_plane import (
@@ -171,6 +175,7 @@ HEARTBEAT_TIMEOUT_SEC: Final = 6.0
 # generation, ported wholesale rather than re-derived per worker/AGENTS.md.
 DETECTOR_VERSION: Final = "worker-domain-detectors-v1"
 CLIP_ANALYSIS_CPU_ENV: Final = "ML_WORKER_CLIP_ANALYSIS_CPU"
+FLOW_RTSP_RECONNECT_INTERVAL_ENV: Final = "ML_WORKER_FLOW_RTSP_RECONNECT_INTERVAL_SEC"
 
 
 def _validate_fall_bundle_conformance(
@@ -512,6 +517,26 @@ def _clip_analysis_cpu_index(environ: Mapping[str, str]) -> int | None:
     if cpu_index < 0:
         raise RuntimeError(f"{CLIP_ANALYSIS_CPU_ENV} must be non-negative")
     return cpu_index
+
+
+def _flow_rtsp_reconnect_interval_sec(environ: Mapping[str, str]) -> int:
+    """Read the nvurisrcbin RTSP reconnect interval; 5 s unless the env overrides it.
+
+    A value nvurisrcbin cannot use refuses the Flow profile with the same
+    error as the other Flow wiring keys instead of reaching the pipeline.
+    """
+    raw_value = environ.get(FLOW_RTSP_RECONNECT_INTERVAL_ENV, "5")
+    try:
+        interval_sec = int(raw_value)
+    except ValueError as exc:
+        raise EngineIdentityError(
+            f"{FLOW_RTSP_RECONNECT_INTERVAL_ENV} must be a non-negative integer"
+        ) from exc
+    if interval_sec < 0:
+        raise EngineIdentityError(
+            f"{FLOW_RTSP_RECONNECT_INTERVAL_ENV} must be a non-negative integer"
+        )
+    return interval_sec
 
 
 def _production_cuda_source() -> CudaProbe:
@@ -1129,9 +1154,7 @@ class WorkerRuntime:
                     frame_width=int(self._env["ML_WORKER_FLOW_FRAME_WIDTH"]),
                     frame_height=int(self._env["ML_WORKER_FLOW_FRAME_HEIGHT"]),
                     snapshot_branch_enabled=True,
-                    rtsp_reconnect_interval_sec=int(
-                        self._env.get("ML_WORKER_FLOW_RTSP_RECONNECT_INTERVAL_SEC", "5")
-                    ),
+                    rtsp_reconnect_interval_sec=_flow_rtsp_reconnect_interval_sec(self._env),
                     source_silence_timeout_sec=float(
                         self._env.get(
                             "ML_WORKER_FLOW_SOURCE_SILENCE_TIMEOUT_SEC",
