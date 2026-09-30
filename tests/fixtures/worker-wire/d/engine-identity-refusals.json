@@ -514,6 +514,127 @@
       "verdict": "accepted"
     }
   ],
+  "flow_rtsp_reconnect_interval": [
+    {
+      "case": "unset takes the default",
+      "interval_sec": 5,
+      "message": null,
+      "raw": null,
+      "verdict": "accepted"
+    },
+    {
+      "case": "zero disables reconnect",
+      "interval_sec": 0,
+      "message": null,
+      "raw": "0",
+      "verdict": "accepted"
+    },
+    {
+      "case": "plain five",
+      "interval_sec": 5,
+      "message": null,
+      "raw": "5",
+      "verdict": "accepted"
+    },
+    {
+      "case": "upper bound",
+      "interval_sec": 86400,
+      "message": null,
+      "raw": "86400",
+      "verdict": "accepted"
+    },
+    {
+      "case": "leading zeros are digits",
+      "interval_sec": 7,
+      "message": null,
+      "raw": "007",
+      "verdict": "accepted"
+    },
+    {
+      "case": "empty is refused, not unset",
+      "interval_sec": null,
+      "message": "ML_WORKER_FLOW_RTSP_RECONNECT_INTERVAL_SEC must be a non-negative integer (0-86400, digits only)",
+      "raw": "",
+      "verdict": "refused"
+    },
+    {
+      "case": "negative sign",
+      "interval_sec": null,
+      "message": "ML_WORKER_FLOW_RTSP_RECONNECT_INTERVAL_SEC must be a non-negative integer (0-86400, digits only)",
+      "raw": "-1",
+      "verdict": "refused"
+    },
+    {
+      "case": "plus sign",
+      "interval_sec": null,
+      "message": "ML_WORKER_FLOW_RTSP_RECONNECT_INTERVAL_SEC must be a non-negative integer (0-86400, digits only)",
+      "raw": "+5",
+      "verdict": "refused"
+    },
+    {
+      "case": "leading space",
+      "interval_sec": null,
+      "message": "ML_WORKER_FLOW_RTSP_RECONNECT_INTERVAL_SEC must be a non-negative integer (0-86400, digits only)",
+      "raw": " 5",
+      "verdict": "refused"
+    },
+    {
+      "case": "trailing space",
+      "interval_sec": null,
+      "message": "ML_WORKER_FLOW_RTSP_RECONNECT_INTERVAL_SEC must be a non-negative integer (0-86400, digits only)",
+      "raw": "5 ",
+      "verdict": "refused"
+    },
+    {
+      "case": "decimal point",
+      "interval_sec": null,
+      "message": "ML_WORKER_FLOW_RTSP_RECONNECT_INTERVAL_SEC must be a non-negative integer (0-86400, digits only)",
+      "raw": "1.5",
+      "verdict": "refused"
+    },
+    {
+      "case": "underscore separator",
+      "interval_sec": null,
+      "message": "ML_WORKER_FLOW_RTSP_RECONNECT_INTERVAL_SEC must be a non-negative integer (0-86400, digits only)",
+      "raw": "5_0",
+      "verdict": "refused"
+    },
+    {
+      "case": "letters",
+      "interval_sec": null,
+      "message": "ML_WORKER_FLOW_RTSP_RECONNECT_INTERVAL_SEC must be a non-negative integer (0-86400, digits only)",
+      "raw": "abc",
+      "verdict": "refused"
+    },
+    {
+      "case": "one above the bound",
+      "interval_sec": null,
+      "message": "ML_WORKER_FLOW_RTSP_RECONNECT_INTERVAL_SEC must be a non-negative integer (0-86400, digits only)",
+      "raw": "86401",
+      "verdict": "refused"
+    },
+    {
+      "case": "Arabic-Indic five",
+      "interval_sec": null,
+      "message": "ML_WORKER_FLOW_RTSP_RECONNECT_INTERVAL_SEC must be a non-negative integer (0-86400, digits only)",
+      "raw": "\u0665",
+      "verdict": "refused"
+    },
+    {
+      "case": "fullwidth five",
+      "interval_sec": null,
+      "message": "ML_WORKER_FLOW_RTSP_RECONNECT_INTERVAL_SEC must be a non-negative integer (0-86400, digits only)",
+      "raw": "\uff15",
+      "verdict": "refused"
+    },
+    {
+      "case": "overflows any integer width",
+      "interval_sec": null,
+      "message": "ML_WORKER_FLOW_RTSP_RECONNECT_INTERVAL_SEC must be a non-negative integer (0-86400, digits only)",
+      "raw": "1000000000000000000000000000000",
+      "verdict": "refused"
+    }
+  ],
   "g1_identity": [
     {
       "case": "baseline: identity_for output, every file present",

@@ -41,7 +41,7 @@
     "d/delivery-queue/clip-fb4271979957cd5b20b1078f7c3a2e13eaba5661c34a0a8d37e4387023d111e8.json": "d10387aec43f493abafbac178b19695fb013703e1696bc0d7973147c61c7d8b2",
     "d/delivery-queue/disposition-d6681ffe537c67cb3880ffbf5edaa522cd5bfe992a5f99a034c3471ba257c405.json": "9370f1b2f2d86c7006e71ec89bc5754b7bd8079ab1ff3939a4e4551095f04d3c",
     "d/delivery-queue/event-a5e15ff2-90fd-4764-be74-a7da4f573cc9.json": "fc7a8aa478a9078bb720b66b6bfd817d92492d530a31f7801e678c1081a8b905",
-    "d/engine-identity-refusals.json": "fb3cca78edd5c85760fac4f1435c44fbd3d2f3cee71698f44c1c576894596dda",
+    "d/engine-identity-refusals.json": "fe82f3122bbc97bba5f6575632041d5da84e0834785f582f2c1e4cb8549e71a1",
     "d/engine-identity.json": "d97dffe367deb592f215d04195e143392c785e7d5049b61147f16dc161d71c0c",
     "d/env-refusals.json": "797685e143908c6dfe665d99ead23f06096e5abee6f7a104b2ccf6e22f8227ba",
     "d/event-identities/cases.json": "25325a46d02ae6eb40f36b26d02897b5010ef15ab97533c89a017601b1cd16af",
@@ -864,13 +864,13 @@
         "sha256 values -> '<sha256:ROLE>' (see recipe.digests)"
       ],
       "path": "d/engine-identity-refusals.json",
-      "producer": "worker/runtime/flow/cold_start.py:verify_engine_identity + verify_flow_boot_inputs; worker/runtime/flow/onnx_shape.py:input_dims; worker/tools/edge_engine_build.py:build_engine; worker/runtime/model_composition.py:_verified_identity_field",
+      "producer": "worker/runtime/flow/cold_start.py:verify_engine_identity + verify_flow_boot_inputs; worker/runtime/flow/onnx_shape.py:input_dims; worker/tools/edge_engine_build.py:build_engine; worker/runtime/model_composition.py:_verified_identity_field; worker/runtime/worker.py:_flow_rtsp_reconnect_interval_sec (group flow_rtsp_reconnect_interval)",
       "rows": [
         4,
         21
       ],
-      "sha256": "fb3cca78edd5c85760fac4f1435c44fbd3d2f3cee71698f44c1c576894596dda",
-      "size_bytes": 213810,
+      "sha256": "fe82f3122bbc97bba5f6575632041d5da84e0834785f582f2c1e4cb8549e71a1",
+      "size_bytes": 217475,
       "wire_class": "D"
     },
     {

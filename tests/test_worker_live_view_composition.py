@@ -183,40 +183,43 @@ def _flow_runtime_capturing_plane_configs(
     return runtime, configs
 
 
-@pytest.mark.parametrize(
-    ("extra_env", "expected_interval"),
-    [({}, 5), ({"ML_WORKER_FLOW_RTSP_RECONNECT_INTERVAL_SEC": "0"}, 0)],
+_INTERVAL_ENV = "ML_WORKER_FLOW_RTSP_RECONNECT_INTERVAL_SEC"
+_INTERVAL_FIXTURE = (
+    Path(__file__).parent / "fixtures" / "worker-wire" / "d" / "engine-identity-refusals.json"
 )
+
+
+def _interval_rows(verdict: str) -> list[object]:
+    rows = json.loads(_INTERVAL_FIXTURE.read_text(encoding="utf-8"))["flow_rtsp_reconnect_interval"]
+    return [pytest.param(row, id=row["case"]) for row in rows if row["verdict"] == verdict]
+
+
+def _interval_env(row: dict[str, object]) -> dict[str, str]:
+    return {} if row["raw"] is None else {_INTERVAL_ENV: str(row["raw"])}
+
+
+@pytest.mark.parametrize("row", _interval_rows("accepted"))
 def test_worker_maps_rtsp_reconnect_env_to_media_plane_config(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
-    extra_env: dict[str, str],
-    expected_interval: int,
+    row: dict[str, object],
 ) -> None:
-    runtime, configs = _flow_runtime_capturing_plane_configs(tmp_path, monkeypatch, extra_env)
+    runtime, configs = _flow_runtime_capturing_plane_configs(
+        tmp_path, monkeypatch, _interval_env(row)
+    )
 
     runtime._initialize_flow_media_plane(object())  # noqa: SLF001
 
     (config,) = configs
-    assert config.adapter_config().rtsp_reconnect_interval_sec == expected_interval  # type: ignore[attr-defined]
+    assert config.adapter_config().rtsp_reconnect_interval_sec == row["interval_sec"]  # type: ignore[attr-defined]
 
 
-@pytest.mark.parametrize("raw_interval", ["-1", "1.5"])
-def test_worker_refuses_unusable_rtsp_reconnect_interval_before_building_the_plane(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    raw_interval: str,
-) -> None:
-    runtime, configs = _flow_runtime_capturing_plane_configs(
-        tmp_path,
-        monkeypatch,
-        {"ML_WORKER_FLOW_RTSP_RECONNECT_INTERVAL_SEC": raw_interval},
-    )
+@pytest.mark.parametrize("row", _interval_rows("refused"))
+def test_worker_refuses_unusable_rtsp_reconnect_interval(row: dict[str, object]) -> None:
+    with pytest.raises(EngineIdentityError) as refusal:
+        worker_module._flow_rtsp_reconnect_interval_sec(_interval_env(row))  # noqa: SLF001
 
-    with pytest.raises(EngineIdentityError):
-        runtime._initialize_flow_media_plane(object())  # noqa: SLF001
-
-    assert configs == []
+    assert str(refusal.value) == row["message"]
 
 
 def test_flow_live_view_injects_bed_recognizer_and_recognize_request_reaches_it(

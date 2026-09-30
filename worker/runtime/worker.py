@@ -176,6 +176,7 @@ HEARTBEAT_TIMEOUT_SEC: Final = 6.0
 DETECTOR_VERSION: Final = "worker-domain-detectors-v1"
 CLIP_ANALYSIS_CPU_ENV: Final = "ML_WORKER_CLIP_ANALYSIS_CPU"
 FLOW_RTSP_RECONNECT_INTERVAL_ENV: Final = "ML_WORKER_FLOW_RTSP_RECONNECT_INTERVAL_SEC"
+FLOW_RTSP_RECONNECT_INTERVAL_MAX_SEC: Final = 86400
 
 
 def _validate_fall_bundle_conformance(
@@ -520,23 +521,29 @@ def _clip_analysis_cpu_index(environ: Mapping[str, str]) -> int | None:
 
 
 def _flow_rtsp_reconnect_interval_sec(environ: Mapping[str, str]) -> int:
-    """Read the nvurisrcbin RTSP reconnect interval; 5 s unless the env overrides it.
+    """Read the nvurisrcbin RTSP reconnect interval; 5 s unless the key is unset.
 
-    A value nvurisrcbin cannot use refuses the Flow profile with the same
-    error as the other Flow wiring keys instead of reaching the pipeline.
+    Contract (mirrored by ``rtsp_reconnect_interval_sec`` in
+    ``worker/bin/src/config/model_bundle/flow_boot.rs``): the value is accepted
+    iff it is a non-empty string of ASCII digits only (no sign, no whitespace,
+    no ``_``, no Unicode digits) whose integer value is ``<= 86400`` seconds.
+    Anything else refuses the Flow profile with ``EngineIdentityError``, the
+    same error as the other Flow wiring keys, instead of reaching the pipeline.
+    An unset key takes the default 5; an empty string is not "unset" and is
+    refused, so a blank compose substitution cannot silently pick the default.
     """
     raw_value = environ.get(FLOW_RTSP_RECONNECT_INTERVAL_ENV, "5")
-    try:
-        interval_sec = int(raw_value)
-    except ValueError as exc:
-        raise EngineIdentityError(
-            f"{FLOW_RTSP_RECONNECT_INTERVAL_ENV} must be a non-negative integer"
-        ) from exc
-    if interval_sec < 0:
-        raise EngineIdentityError(
-            f"{FLOW_RTSP_RECONNECT_INTERVAL_ENV} must be a non-negative integer"
-        )
-    return interval_sec
+    if raw_value.isascii() and raw_value.isdigit():
+        # Compare the digit count first so an absurdly long string never reaches
+        # int(), whose 4300-digit limit would raise ValueError instead.
+        significant = raw_value.lstrip("0") or "0"
+        if len(significant) <= len(str(FLOW_RTSP_RECONNECT_INTERVAL_MAX_SEC)):
+            interval_sec = int(significant)
+            if interval_sec <= FLOW_RTSP_RECONNECT_INTERVAL_MAX_SEC:
+                return interval_sec
+    raise EngineIdentityError(
+        f"{FLOW_RTSP_RECONNECT_INTERVAL_ENV} must be a non-negative integer (0-86400, digits only)"
+    )
 
 
 def _production_cuda_source() -> CudaProbe:

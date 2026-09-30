@@ -1,5 +1,6 @@
 //! Flow boot verification, ONNX input dims and identity placeholders against
-//! the `flow_boot`, `onnx_input_dims` and `g1_placeholders` groups of
+//! the `flow_boot`, `flow_rtsp_reconnect_interval`, `onnx_input_dims` and
+//! `g1_placeholders` groups of
 //! `d/engine-identity-refusals.json`, recorded from the Python worker at
 //! 030aaf1. Python exception messages map to Rust variants only through the
 //! reviewed tables in this file, and each ONNX artifact is written by the
@@ -14,7 +15,9 @@ use seeon_ml_worker::config::env::Env;
 use seeon_ml_worker::config::model_bundle::composition::{
     Attr, Attrs, Binding, Compiled, PlaceholderKind, verified_identity_field,
 };
-use seeon_ml_worker::config::model_bundle::flow_boot::{FlowBootKind, verify_flow_boot_inputs};
+use seeon_ml_worker::config::model_bundle::flow_boot::{
+    FlowBootKind, rtsp_reconnect_interval_sec, verify_flow_boot_inputs,
+};
 use seeon_ml_worker::config::model_bundle::identity::{IdentityKind, identity_for};
 use seeon_ml_worker::config::model_bundle::onnx_shape::{
     Dim, OnnxShapeKind, batch_axis_is_dynamic, input_dims,
@@ -428,6 +431,45 @@ fn flow_boot_matches_python() {
                 let onnx = boot.dir.join("models/pose.onnx");
                 let expected =
                     flow_refusal(text(case, "class"), text(case, "message"), &work, &onnx);
+                assert_eq!((error.kind, error.subject), expected, "{description}");
+            }
+            (verdict, outcome) => panic!("{description}: {verdict} vs {outcome:?}"),
+        }
+    }
+}
+
+/// Reviewed map from a reconnect-interval refusal message to its kind; the
+/// subject is the raw value the row carries.
+fn reconnect_refusal(message: &str, raw: &str) -> (FlowBootKind, String) {
+    assert_eq!(
+        message,
+        "ML_WORKER_FLOW_RTSP_RECONNECT_INTERVAL_SEC must be a non-negative integer \
+         (0-86400, digits only)",
+        "unmapped reconnect-interval refusal"
+    );
+    (FlowBootKind::ReconnectInterval, raw.to_owned())
+}
+
+#[test]
+fn rtsp_reconnect_interval_matches_python() {
+    let golden = golden(GOLDEN);
+    for case in cases(&golden, "flow_rtsp_reconnect_interval") {
+        let description = text(case, "case");
+        let mut env = Env::new();
+        if let Some(raw) = case["raw"].as_str() {
+            env.insert(
+                "ML_WORKER_FLOW_RTSP_RECONNECT_INTERVAL_SEC".to_owned(),
+                raw.to_owned(),
+            );
+        }
+        match (text(case, "verdict"), rtsp_reconnect_interval_sec(&env)) {
+            ("accepted", Ok(interval)) => {
+                let expected = case["interval_sec"].as_u64().expect("accepted interval");
+                assert_eq!(u64::from(interval), expected, "{description}");
+            }
+            ("refused", Err(error)) => {
+                let raw = case["raw"].as_str().expect("a refused row sets the key");
+                let expected = reconnect_refusal(text(case, "message"), raw);
                 assert_eq!((error.kind, error.subject), expected, "{description}");
             }
             (verdict, outcome) => panic!("{description}: {verdict} vs {outcome:?}"),

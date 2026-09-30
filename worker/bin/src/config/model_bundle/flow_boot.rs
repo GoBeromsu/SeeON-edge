@@ -30,6 +30,12 @@ const ENGINE_PATH: &str = "ML_WORKER_FLOW_ENGINE_PATH";
 const ENGINE_IDENTITY_PATH: &str = "ML_WORKER_FLOW_ENGINE_IDENTITY_PATH";
 const ONNX_PATH: &str = "ML_WORKER_FLOW_ONNX_PATH";
 const BATCH_SIZE: &str = "ML_WORKER_FLOW_BATCH_SIZE";
+const RTSP_RECONNECT_INTERVAL_SEC: &str = "ML_WORKER_FLOW_RTSP_RECONNECT_INTERVAL_SEC";
+
+/// Reconnect interval used when `RTSP_RECONNECT_INTERVAL_SEC` is unset.
+const DEFAULT_RECONNECT_INTERVAL_SEC: u32 = 5;
+/// Upper bound of the accepted reconnect interval, one day in seconds.
+const MAX_RECONNECT_INTERVAL_SEC: u32 = 86_400;
 
 /// `sys.int_info.default_max_str_digits`: a longer string fails `int()`.
 const MAX_STR_DIGITS: usize = 4300;
@@ -56,6 +62,9 @@ pub enum FlowBootKind {
     /// An `input_dims` refusal, onnxruntime load errors included; the
     /// subject is the ONNX path.
     Shape(OnnxShapeKind),
+    /// `ML_WORKER_FLOW_RTSP_RECONNECT_INTERVAL_SEC must be a non-negative
+    /// integer (0-86400, digits only)`; the subject is the raw value.
+    ReconnectInterval,
 }
 
 /// A refusal and what the Python message names (empty when it names nothing).
@@ -103,6 +112,40 @@ fn positive_int(text: &str) -> Option<String> {
     }
     let canonical = digits.trim_start_matches('0');
     (!negative && !canonical.is_empty()).then(|| canonical.to_owned())
+}
+
+/// ADR: the nvurisrcbin RTSP reconnect interval contract
+/// (`worker/runtime/worker.py:_flow_rtsp_reconnect_interval_sec`).
+///
+/// - Unset key: the default, 5 seconds.
+/// - Set key: accepted iff the value is a non-empty string of ASCII digits
+///   only (no sign, no whitespace, no `_`, no Unicode digits) whose integer
+///   value is `<= 86400`; leading zeros are digits (`"007"` is 7).
+/// - Everything else is refused, the empty string included: an empty value is
+///   a set key with no usable content (a blank compose substitution), not a
+///   missing key, so it must not silently take the default.
+///
+/// Python `int()` is deliberately not mirrored (it accepts `" 5"`, `"+5"`,
+/// `"5_0"` and Unicode digits), and the check compares digit counts first so
+/// a string beyond `int()`'s 4300-digit limit is refused by the bound rather
+/// than by an exception. Boot wiring of this check belongs to the stage that
+/// owns `verify_flow_boot_inputs` integration; it is not called from there.
+pub fn rtsp_reconnect_interval_sec(env: &Env) -> Boot<u32> {
+    let Some(raw) = env.get(RTSP_RECONNECT_INTERVAL_SEC) else {
+        return Ok(DEFAULT_RECONNECT_INTERVAL_SEC);
+    };
+    let significant = raw.trim_start_matches('0');
+    let ascii_digits = !raw.is_empty() && raw.bytes().all(|byte| byte.is_ascii_digit());
+    let within_width = significant.len() <= MAX_RECONNECT_INTERVAL_SEC.to_string().len();
+    let interval = match (ascii_digits && within_width, significant) {
+        (false, _) => None,
+        (true, "") => Some(0),
+        (true, digits) => digits.parse::<u32>().ok(),
+    };
+    match interval {
+        Some(interval) if interval <= MAX_RECONNECT_INTERVAL_SEC => Ok(interval),
+        _ => refuse(FlowBootKind::ReconnectInterval, raw),
+    }
 }
 
 /// Python `str(dims[0])` for the fixed-batch message.
