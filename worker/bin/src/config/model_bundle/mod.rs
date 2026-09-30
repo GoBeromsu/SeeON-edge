@@ -4,9 +4,12 @@
 //! refusal from here to `Exit::RefuseToStart` (3).
 
 pub mod bundle;
+pub mod composition;
+pub mod flow_boot;
 pub mod identity;
 pub mod layout;
 pub mod manifest;
+pub mod onnx_shape;
 mod receipt;
 mod tree;
 
