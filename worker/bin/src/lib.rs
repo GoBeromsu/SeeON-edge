@@ -5,6 +5,7 @@
 pub mod b64;
 pub mod cli;
 pub mod config;
+pub mod delivery;
 pub mod exit;
 pub mod gpu;
 pub mod json;
@@ -12,5 +13,6 @@ pub mod media;
 pub mod msg;
 pub mod policy;
 pub mod poll;
+pub mod relay;
 pub mod seam;
 pub mod shutdown;
