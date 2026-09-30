@@ -6,20 +6,23 @@ code must not invent thresholds from this harness.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import resource
 import shutil
 import socket
 import subprocess
+import sys
 import tempfile
 import threading
 import time
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Final
 
+import httpx
 from observability_stack_fixtures import (
     deepstream_available,
     ffmpeg_available,
@@ -40,6 +43,85 @@ def _free_tcp_port() -> int:
     with socket.socket() as listener:
         listener.bind(("127.0.0.1", 0))
         return int(listener.getsockname()[1])
+
+
+class WorkerTerminated(RuntimeError):
+    """The in-process worker stopped or requested a hard exit mid-measurement."""
+
+
+class PublisherFailed(RuntimeError):
+    """A fixture RTSP publisher exited or never registered its path on mediamtx."""
+
+
+@dataclass
+class _WorkerObserver:
+    """Stands in for ``os._exit`` and records how the worker thread ended.
+
+    A recorded exit code fails the test instead of terminating pytest; a
+    thread error keeps the worker's own failure reason (bootstrap stage,
+    Flow shutdown) visible to the measurement loop.
+    """
+
+    codes: list[int] = field(default_factory=list)
+    error: BaseException | None = None
+
+    def __call__(self, code: int) -> None:
+        self.codes.append(code)
+
+    def run(self, target: Any) -> None:
+        try:
+            target()
+        except BaseException as exc:  # noqa: BLE001 - recorded, re-raised by the thread
+            self.error = exc
+            raise
+
+
+def _worker_failure_reason(observer: _WorkerObserver) -> str:
+    chain: list[str] = []
+    error = observer.error
+    while error is not None and len(chain) < 4:
+        chain.append(f"{type(error).__name__}: {error}")
+        error = error.__context__
+    return " <- ".join(chain) if chain else "no thread error recorded"
+
+
+def _ensure_worker_running(observer: _WorkerObserver, thread: threading.Thread) -> None:
+    if observer.codes:
+        raise WorkerTerminated(
+            f"worker requested hard exit with code {observer.codes[0]}; "
+            f"thread: {_worker_failure_reason(observer)}"
+        )
+    if not thread.is_alive():
+        raise WorkerTerminated(
+            "worker thread stopped before the measurement finished; "
+            f"thread: {_worker_failure_reason(observer)}"
+        )
+
+
+_RTSP_FIXTURE_ALLOWANCE_KEYS: Final = (
+    "ML_RTSP_ALLOW_LOCAL_DESTINATIONS",
+    "ML_RTSP_ALLOW_PRIVATE_DESTINATIONS",
+)
+
+
+@contextlib.contextmanager
+def _rtsp_fixture_allowance() -> Iterator[None]:
+    """Admit the loopback mediamtx fixture cameras for the measurement only.
+
+    ``shared.rtsp_url_policy`` reads the process environment, not the mapping
+    handed to ``WorkerRuntime``; the previous values are restored on exit.
+    """
+    previous = {key: os.environ.get(key) for key in _RTSP_FIXTURE_ALLOWANCE_KEYS}
+    for key in _RTSP_FIXTURE_ALLOWANCE_KEYS:
+        os.environ[key] = "1"
+    try:
+        yield
+    finally:
+        for key, value in previous.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
 
 
 class ObservabilityLoadSkip(RuntimeError):
@@ -179,8 +261,32 @@ def _start_mediamtx(work_dir: Path, rtsp_port: int, api_port: int) -> subprocess
     )
 
 
+def _ready_mediamtx_paths(api_port: int) -> set[str] | None:
+    """Names mediamtx itself reports as ready, or ``None`` while its API is down."""
+    try:
+        response = httpx.get(f"http://127.0.0.1:{api_port}/v3/paths/list", timeout=1.0)
+    except httpx.HTTPError:
+        return None
+    if response.status_code != 200:
+        return None
+    return {str(item["name"]) for item in response.json().get("items", []) if item.get("ready")}
+
+
+def _wait_for_mediamtx(mediamtx: subprocess.Popen[bytes], api_port: int) -> None:
+    def api_answers() -> bool:
+        if mediamtx.poll() is not None:
+            raise PublisherFailed(f"mediamtx exited with code {mediamtx.returncode} during start")
+        return _ready_mediamtx_paths(api_port) is not None
+
+    wait_until(api_answers, timeout=10.0, what="mediamtx API to answer")
+
+
+def _publisher_log(log_dir: Path, index: int) -> Path:
+    return log_dir / f"publisher-cam-{index + 1}.log"
+
+
 def _start_looping_publishers(
-    stream_path: Path, rtsp_port: int, streams: int, camera_fps: float
+    stream_path: Path, rtsp_port: int, streams: int, camera_fps: float, log_dir: Path
 ) -> list[subprocess.Popen[bytes]]:
     ffmpeg = shutil.which("ffmpeg")
     if ffmpeg is None:
@@ -188,31 +294,53 @@ def _start_looping_publishers(
     publishers: list[subprocess.Popen[bytes]] = []
     for index in range(streams):
         url = f"rtsp://127.0.0.1:{rtsp_port}/cam-{index + 1}"
-        process = subprocess.Popen(  # noqa: S603 - local operator binary
-            [
-                ffmpeg,
-                "-hide_banner",
-                "-loglevel",
-                "error",
-                "-re",
-                "-stream_loop",
-                "-1",
-                "-i",
-                str(stream_path),
-                "-c",
-                "copy",
-                "-f",
-                "rtsp",
-                "-rtsp_transport",
-                "tcp",
-                url,
-            ],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-        )
+        with _publisher_log(log_dir, index).open("wb") as stderr:
+            process = subprocess.Popen(  # noqa: S603 - local operator binary
+                [
+                    ffmpeg,
+                    "-hide_banner",
+                    "-loglevel",
+                    "error",
+                    "-re",
+                    "-stream_loop",
+                    "-1",
+                    "-i",
+                    str(stream_path),
+                    "-c",
+                    "copy",
+                    "-f",
+                    "rtsp",
+                    "-rtsp_transport",
+                    "tcp",
+                    url,
+                ],
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=stderr,
+            )
         publishers.append(process)
     del camera_fps
     return publishers
+
+
+def _wait_for_publishers(
+    publishers: Sequence[subprocess.Popen[bytes]], api_port: int, log_dir: Path
+) -> None:
+    """Block until mediamtx reports every ``cam-N`` path ready; fail on a dead publisher."""
+    expected = {f"cam-{index + 1}" for index in range(len(publishers))}
+
+    def all_ready() -> bool:
+        for index, process in enumerate(publishers):
+            if process.poll() is not None:
+                tail = _publisher_log(log_dir, index).read_text(errors="replace")[-2000:]
+                raise PublisherFailed(
+                    f"ffmpeg publisher cam-{index + 1} exited with code "
+                    f"{process.returncode} before its path was ready:\n{tail}"
+                )
+        ready = _ready_mediamtx_paths(api_port)
+        return ready is not None and expected <= ready
+
+    wait_until(all_ready, timeout=20.0, what=f"mediamtx paths {sorted(expected)} ready")
 
 
 def _stop_processes(processes: Sequence[subprocess.Popen[bytes]]) -> None:
@@ -228,8 +356,16 @@ def _stop_processes(processes: Sequence[subprocess.Popen[bytes]]) -> None:
             process.wait(timeout=2.0)
 
 
-def _worker_config(relay_url: str, streams: int, rtsp_port: int) -> Any:
-    from worker.runtime.config import WorkerConfig
+def _worker_config(relay_url: str, streams: int, rtsp_port: int, env: Mapping[str, str]) -> Any:
+    """Build the worker config the way the production boot path settles it.
+
+    ``resolve_startup_config`` merges ``models`` from the process environment
+    before the runtime boots; the runtime itself refuses to boot when
+    ``config.models`` is ``None``. The harness hands its config straight to
+    ``WorkerRuntime``, so it has to resolve ``models`` from ``env`` the same
+    way, or the ``model_backend_init`` stage fails before any stream starts.
+    """
+    from worker.runtime.config import WorkerConfig, worker_models_config_from_environment
 
     cameras = [
         {
@@ -244,7 +380,7 @@ def _worker_config(relay_url: str, streams: int, rtsp_port: int) -> Any:
             "version": 7,
             "relay": {"url": relay_url, "token": _RELAY_TOKEN},
             "cameras": cameras,
-            "clip": {"enabled": False},
+            "models": worker_models_config_from_environment(env),
         }
     )
 
@@ -260,6 +396,11 @@ def _worker_env(relay_url: str) -> dict[str, str]:
             "ML_WORKER_EXECUTION_RECORDS_FLUSH_MS": "50",
             "ML_RTSP_ALLOW_LOCAL_DESTINATIONS": "1",
             "ML_RTSP_ALLOW_PRIVATE_DESTINATIONS": "1",
+            # Graceful stop needs EOS propagation, and nvurisrcbin's reconnect
+            # logic swallows the EOS as a stream loss. The load harness measures
+            # a stable looping fixture where reconnect is idle; production keeps
+            # the default interval.
+            "ML_WORKER_FLOW_RTSP_RECONNECT_INTERVAL_SEC": "0",
         }
     )
     env.setdefault("ML_WORKER_BUILD_REVISION", "obs-load-rev")
@@ -268,7 +409,7 @@ def _worker_env(relay_url: str) -> dict[str, str]:
 
 
 def _start_worker(
-    config: Any, env: Mapping[str, str], state_dir: Path
+    config: Any, env: Mapping[str, str], state_dir: Path, *, observer: _WorkerObserver
 ) -> tuple[Any, threading.Thread]:
     from worker.adapters.model.in_process import InProcessServingClient
     from worker.adapters.model.registry import flow_registry
@@ -279,12 +420,15 @@ def _start_worker(
         config,
         serving_client=InProcessServingClient(flow_registry()),
         env=env,
+        hard_exit=observer,
         acquire_lease=lambda: GpuLease.acquire(state_dir),
         state_dir=state_dir,
         clip_store_dir=state_dir / "clips",
         build_revision=env.get("ML_WORKER_BUILD_REVISION", "obs-load-rev"),
     )
-    thread = threading.Thread(target=runtime.run, daemon=True, name="observability-worker")
+    thread = threading.Thread(
+        target=observer.run, args=(runtime.run,), daemon=True, name="observability-worker"
+    )
     thread.start()
     return runtime, thread
 
@@ -391,84 +535,139 @@ def run_measurement(
         api_port = _free_tcp_port()
         mediamtx = _start_mediamtx(tmp_path, rtsp_port, api_port)
         publishers: list[subprocess.Popen[bytes]] = []
-        runtime = None
-        worker_thread: threading.Thread | None = None
+        observer = _WorkerObserver()
         try:
-            wait_until(
-                lambda: mediamtx.poll() is None,
-                timeout=5.0,
-                what="mediamtx stay alive",
+            _wait_for_mediamtx(mediamtx, api_port)
+            publishers = _start_looping_publishers(
+                stream_path, rtsp_port, streams, camera_fps, tmp_path
             )
-            publishers = _start_looping_publishers(stream_path, rtsp_port, streams, camera_fps)
-            with serve_backend(
-                tmp_path / "backend",
-                budget_bytes=_BUDGET_BYTES,
-                relay_token=_RELAY_TOKEN,
-                sandbox=sandbox,
-                audit_runtime=audit_runtime,
-                diagnostics_schema=diagnostics_schema,
-            ) as backend:
-                config = _worker_config(backend.base_url, streams, rtsp_port)
+            _wait_for_publishers(publishers, api_port, tmp_path)
+            with (
+                _rtsp_fixture_allowance(),
+                serve_backend(
+                    tmp_path / "backend",
+                    budget_bytes=_BUDGET_BYTES,
+                    relay_token=_RELAY_TOKEN,
+                    sandbox=sandbox,
+                    audit_runtime=audit_runtime,
+                    diagnostics_schema=diagnostics_schema,
+                ) as backend,
+            ):
                 env = _worker_env(backend.base_url)
-                runtime, worker_thread = _start_worker(config, env, tmp_path / "worker")
-                wait_until(
-                    lambda: runtime._execution_record_exporter is not None,  # noqa: SLF001
-                    timeout=60.0,
-                    what="worker execution-record exporter composition",
+                config = _worker_config(backend.base_url, streams, rtsp_port, env)
+                runtime, worker_thread = _start_worker(
+                    config, env, tmp_path / "worker", observer=observer
                 )
-                exporter = runtime._execution_record_exporter  # noqa: SLF001
-                lanes = runtime._execution_record_lanes  # noqa: SLF001
-                timed = _TimedClient(exporter._client)  # noqa: SLF001
-                exporter._client = timed  # noqa: SLF001
-                camera_ids = [f"cam-{index + 1}" for index in range(streams)]
-                samples: list[_Sample] = []
-                started = time.monotonic()
-                while time.monotonic() - started < duration_sec:
-                    accepted, gaps, logical, qmin, qmax = _query_stats(backend, camera_ids)
-                    user_sec, system_sec = _cpu_times()
-                    samples.append(
-                        _Sample(
-                            at_sec=time.monotonic() - started,
-                            queued=int(lanes.queued()),
-                            overflow_pending=_overflow_pending(lanes),
-                            receipts=len(exporter.receipts()),
-                            failures=len(exporter.failures()),
-                            cpu_user_sec=user_sec,
-                            cpu_system_sec=system_sec,
-                            accepted_records=accepted,
-                            gap_rows=gaps,
-                            used_bytes=logical,
-                            queryable_min_ns=qmin,
-                            queryable_max_ns=qmax,
-                            exporter_exception=timed.exceptions[-1] if timed.exceptions else None,
-                        )
+                try:
+                    _measure(
+                        runtime,
+                        worker_thread,
+                        observer,
+                        backend,
+                        streams=streams,
+                        duration_sec=duration_sec,
+                        camera_fps=camera_fps,
+                        document_path=document_path,
                     )
-                    remaining = duration_sec - (time.monotonic() - started)
-                    time.sleep(min(1.0 / _SAMPLE_HZ, max(0.0, remaining)))
-                document = _document(
-                    streams=streams,
-                    duration_sec=duration_sec,
-                    camera_fps=camera_fps,
-                    samples=samples,
-                    latencies_sec=timed.latencies_sec,
-                    exceptions=timed.exceptions,
-                )
-                document_path.write_text(
-                    json.dumps(document, indent=2, sort_keys=True) + "\n", encoding="utf-8"
-                )
+                finally:
+                    # The worker must stop while its relay backend still answers:
+                    # tearing the backend down first turns every in-flight export
+                    # into RETRY NETWORK noise and hides the real stop outcome.
+                    stop_error = _stop_worker(runtime, worker_thread, observer)
+                    if stop_error is not None:
+                        in_flight = sys.exc_info()[1]
+                        if in_flight is None:
+                            raise stop_error
+                        in_flight.add_note(f"worker stop also failed: {stop_error!r}")
         finally:
-            if runtime is not None:
-                runtime.stop()
-            if worker_thread is not None:
-                worker_thread.join(timeout=30.0)
             _stop_processes(publishers)
-            mediamtx.terminate()
-            try:
-                mediamtx.wait(timeout=5.0)
-            except subprocess.TimeoutExpired:
-                mediamtx.kill()
-                mediamtx.wait(timeout=2.0)
+            _stop_processes([mediamtx])
     return document_path
+
+
+def _measure(
+    runtime: Any,
+    worker_thread: threading.Thread,
+    observer: _WorkerObserver,
+    backend: Any,
+    *,
+    streams: int,
+    duration_sec: float,
+    camera_fps: float,
+    document_path: Path,
+) -> None:
+    """Sample one running worker for ``duration_sec`` and write its document."""
+
+    def exporter_composed() -> bool:
+        _ensure_worker_running(observer, worker_thread)
+        return runtime._execution_record_exporter is not None  # noqa: SLF001
+
+    wait_until(
+        exporter_composed,
+        timeout=60.0,
+        what="worker execution-record exporter composition",
+    )
+    exporter = runtime._execution_record_exporter  # noqa: SLF001
+    lanes = runtime._execution_record_lanes  # noqa: SLF001
+    timed = _TimedClient(exporter._client)  # noqa: SLF001
+    exporter._client = timed  # noqa: SLF001
+    camera_ids = [f"cam-{index + 1}" for index in range(streams)]
+    samples: list[_Sample] = []
+    started = time.monotonic()
+    while time.monotonic() - started < duration_sec:
+        _ensure_worker_running(observer, worker_thread)
+        accepted, gaps, logical, qmin, qmax = _query_stats(backend, camera_ids)
+        user_sec, system_sec = _cpu_times()
+        samples.append(
+            _Sample(
+                at_sec=time.monotonic() - started,
+                queued=int(lanes.queued()),
+                overflow_pending=_overflow_pending(lanes),
+                receipts=len(exporter.receipts()),
+                failures=len(exporter.failures()),
+                cpu_user_sec=user_sec,
+                cpu_system_sec=system_sec,
+                accepted_records=accepted,
+                gap_rows=gaps,
+                used_bytes=logical,
+                queryable_min_ns=qmin,
+                queryable_max_ns=qmax,
+                exporter_exception=timed.exceptions[-1] if timed.exceptions else None,
+            )
+        )
+        remaining = duration_sec - (time.monotonic() - started)
+        time.sleep(min(1.0 / _SAMPLE_HZ, max(0.0, remaining)))
+    document = _document(
+        streams=streams,
+        duration_sec=duration_sec,
+        camera_fps=camera_fps,
+        samples=samples,
+        latencies_sec=timed.latencies_sec,
+        exceptions=timed.exceptions,
+    )
+    document_path.write_text(
+        json.dumps(document, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+    )
+
+
+def _stop_worker(
+    runtime: Any, thread: threading.Thread, observer: _WorkerObserver
+) -> Exception | None:
+    """Stop a still-running worker once; never race a worker that is already stopping.
+
+    ``WorkerRuntime.run`` stops the Flow itself when it leaves (bootstrap
+    failure, restart check), and a worker that recorded a hard exit did so
+    from inside that stop. A second concurrent ``stop`` only re-hits the
+    Flow shutdown deadline and replaces the original failure.
+    """
+    error: Exception | None = None
+    if thread.is_alive() and not observer.codes and observer.error is None:
+        try:
+            runtime.stop()
+        except Exception as exc:  # noqa: BLE001 - reported after teardown finishes
+            error = exc
+    thread.join(timeout=30.0)
+    return error
 
 
 def skip_reason() -> str | None:
@@ -483,4 +682,10 @@ def skip_reason() -> str | None:
     return None
 
 
-__all__ = ["ObservabilityLoadSkip", "run_measurement", "skip_reason"]
+__all__ = [
+    "ObservabilityLoadSkip",
+    "PublisherFailed",
+    "WorkerTerminated",
+    "run_measurement",
+    "skip_reason",
+]
