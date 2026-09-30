@@ -6,18 +6,22 @@
 //! `config::lkg`. Python's `--config` YAML fallback is not carried, so no
 //! relay and no LKG is a typed refusal.
 
-use std::io::Read;
+use std::fs::{self, File, OpenOptions};
+use std::io::{self, ErrorKind, Read};
+use std::os::unix::fs::OpenOptionsExt;
 use std::path::Path;
 use std::time::Duration;
 
+use rustix::fs::{FlockOperation, flock};
 use ureq::Agent;
 use ureq::http::HeaderValue;
 
-use crate::config::lkg::{LkgStore, StoredConfig};
-use crate::config::restart::{RestartDirective, Roster};
+use crate::config::lkg::{LkgError, LkgStore, StoredConfig};
+use crate::config::restart::RestartDirective;
 use crate::config::{lookup, parse_json};
 use crate::exit::Exit;
 use crate::json::Json;
+use crate::relay::cameras::policies::{PolicyBundle, resolve_detection_policies};
 use crate::relay::cameras::{RuntimeCamera, WorkerConfigPayload};
 use crate::relay::client::TOKEN_HEADER;
 use crate::relay::wire::MAX_RESPONSE_BYTES;
@@ -51,17 +55,13 @@ pub struct PulledConfig {
     pub config: WorkerConfigPayload,
     /// `to_worker_config` cameras; never empty when cameras were declared.
     pub cameras: Vec<RuntimeCamera>,
+    /// `resolved_detection_policies`: the parsed bundle, or the image
+    /// default for every parsed camera when the payload carries none.
+    pub policies: PolicyBundle,
     pub directive: RestartDirective,
     pub source: ConfigSource,
     /// True for an LKG config.
     pub stale: bool,
-}
-
-impl PulledConfig {
-    /// The roster the media sources open with.
-    pub fn roster(&self) -> Roster {
-        Roster::from_cameras(&self.cameras)
-    }
 }
 
 /// Python `WorkerConfigPoll`: one periodic pull.
@@ -75,9 +75,10 @@ pub struct WorkerConfigPoll {
 }
 
 impl WorkerConfigPoll {
-    /// What `RestartCheck::check` observes.
-    pub fn restart_candidate(&self) -> (RestartDirective, Roster) {
-        (self.directive, Roster::from_cameras(&self.cameras))
+    /// What `RestartCheck::check` observes (Python
+    /// `RestartDirective.from_pulled`).
+    pub fn restart_candidate(&self) -> RestartDirective {
+        self.directive
     }
 }
 
@@ -141,31 +142,98 @@ pub fn check_release_identity(relay_url: &str) -> Result<(), PullError> {
 }
 
 /// Python `load_worker_config_from_relay`: a valid fresh pull wins unless a
-/// strictly newer LKG exists and re-validates; with no valid pull the LKG
-/// is used; with neither, `NoConfig`.
+/// strictly newer LKG exists and re-validates; a strictly newer LKG that
+/// fails re-validation is cleared and the fresh pull wins
+/// (`config_pull.py:150-158`); with no valid pull the LKG is used; with
+/// neither, `NoConfig`. Store failures are reported and treated as Python
+/// treats `save` returning `False` and `load` returning `None`.
 pub fn pull_startup_config(
     relay_url: &str,
     relay_token: &str,
     state_dir: &Path,
 ) -> Result<PulledConfig, PullError> {
     let store = LkgStore::new(state_dir);
+    let directory = state_dir.join("config-lkg");
     let fresh = fetch_worker_config(relay_url, relay_token)
         .and_then(|payload| snapshot(payload, ConfigSource::Pulled));
     if let Some(fresh) = fresh {
-        if store.save(&fresh.payload, fresh.directive).unwrap_or(false) {
-            return Ok(fresh);
+        match store.save(&fresh.payload, fresh.directive) {
+            Ok(true) => return Ok(fresh),
+            Ok(false) => {}
+            Err(error) => report_store_error(&directory, &error),
         }
-        return Ok(match store.load() {
-            Ok(Some(stored)) if stored.directive > fresh.directive => {
-                from_stored(stored).unwrap_or(fresh)
+        let stored = match store.load() {
+            Ok(Some(stored)) if stored.directive > fresh.directive => stored,
+            Ok(_) => return Ok(fresh),
+            Err(error) => {
+                report_store_error(&directory, &error);
+                return Ok(fresh);
             }
-            _ => fresh,
-        });
+        };
+        if let Some(pulled) = from_stored(stored) {
+            return Ok(pulled);
+        }
+        eprintln!(
+            "ml-worker: WARNING: worker config LKG at {} failed re-validation; \
+             deleting corrupt LKG and using fresh (race-losing) snapshot instead",
+            directory.display()
+        );
+        clear_lkg(&directory);
+        return Ok(fresh);
     }
     match store.load() {
         Ok(Some(stored)) => from_stored(stored).ok_or(PullError::NoConfig),
-        _ => Err(PullError::NoConfig),
+        Ok(None) => Err(PullError::NoConfig),
+        Err(error) => {
+            report_store_error(&directory, &error);
+            Err(PullError::NoConfig)
+        }
     }
+}
+
+/// Python `_report_unavailable` and the `save` payload message.
+fn report_store_error(directory: &Path, error: &LkgError) {
+    match error {
+        LkgError::Io(error) => eprintln!(
+            "ml-worker: worker config LKG store unavailable at {}: {error}",
+            directory.display()
+        ),
+        LkgError::Payload => {
+            eprintln!("ml-worker: worker config LKG payload unavailable: non-finite float");
+        }
+        LkgError::Record => eprintln!(
+            "ml-worker: worker config LKG store unavailable at {}: malformed record",
+            directory.display()
+        ),
+    }
+}
+
+/// Python `WorkerConfigLkgStore.clear` (`lkg_store.py:89-106`): under the
+/// store's own `.lock` protocol (`_locked`), unlink `current.json` and
+/// fsync the directory; revisions stay. `config::lkg` is outside this
+/// module's ownership, so the protocol is repeated here.
+fn clear_lkg(directory: &Path) {
+    if !fs::metadata(directory).is_ok_and(|info| info.is_dir()) {
+        return;
+    }
+    if let Err(error) = unlink_current(directory) {
+        report_store_error(directory, &LkgError::Io(error));
+    }
+}
+
+fn unlink_current(directory: &Path) -> io::Result<()> {
+    let lock = OpenOptions::new()
+        .read(true)
+        .append(true)
+        .create(true)
+        .mode(0o600)
+        .open(directory.join(".lock"))?;
+    flock(&lock, FlockOperation::LockExclusive)?;
+    match fs::remove_file(directory.join("current.json")) {
+        Err(error) if error.kind() == ErrorKind::NotFound => return Ok(()),
+        removed => removed?,
+    }
+    File::open(directory)?.sync_all()
 }
 
 /// Python `pull_worker_config_poll`: `None` on any pull or payload failure.
@@ -191,15 +259,39 @@ fn from_stored(stored: StoredConfig) -> Option<PulledConfig> {
 }
 
 /// Python `_snapshot_from_payload`: `BackendWorkerConfigPayload` then
-/// `to_worker_config`.
+/// `to_worker_config`, whose `resolved_detection_policies` refuses a
+/// malformed bundle (`pull_models.py:287-295`). A refused bundle is never
+/// saved: a fresh pull falls back to the LKG, an LKG is skipped and a poll
+/// yields no restart candidate. The refusal lines are the ones
+/// `load_worker_config_from_relay` prints (`config_pull.py:135-136`, `167-168`).
 fn snapshot(payload: Json, source: ConfigSource) -> Option<PulledConfig> {
     let config = WorkerConfigPayload::parse(&payload).ok()?;
     let cameras = config.runtime_cameras().ok()?;
+    let camera_ids: Vec<String> = config
+        .cameras()
+        .into_iter()
+        .map(|camera| camera.camera_id)
+        .collect();
+    let policies = match resolve_detection_policies(config.detection_policies(), &camera_ids) {
+        Ok(policies) => policies,
+        Err(error) => {
+            match source {
+                ConfigSource::Pulled => {
+                    eprintln!("ml-worker: detection policy refused: {error}");
+                }
+                ConfigSource::Lkg => {
+                    eprintln!("ml-worker: worker config LKG detection policy refused: {error}");
+                }
+            }
+            return None;
+        }
+    };
     Some(PulledConfig {
         directive: config.directive(),
         payload,
         config,
         cameras,
+        policies,
         source,
         stale: source == ConfigSource::Lkg,
     })

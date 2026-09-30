@@ -43,8 +43,11 @@ pub fn media_body(entry: &Value) -> Result<Vec<u8>, MediaEntryError> {
     serde_json::to_vec(&Value::Object(body)).map_err(|_| MediaEntryError::NotAnObject)
 }
 
-/// Python `_parse_relay_acceptance`: a transport failure passes through, a
-/// non-2xx is classified, and a 2xx must carry `"status": "accepted"`.
+/// Python `_parse_relay_acceptance` (`evidence_export_client.py`
+/// L447-457): a transport failure passes through, a non-2xx is classified
+/// from its status and headers only (Python passes no body, so a failure
+/// `code` in the body is not read), and a 2xx must carry
+/// `"status": "accepted"`.
 pub fn parse_relay_acceptance(
     result: HttpResult,
     clock: &dyn Clock,
@@ -54,7 +57,7 @@ pub fn parse_relay_acceptance(
         return Err(classify_http_failure(
             response.status,
             &response.headers,
-            Some(&response.body),
+            None,
             clock,
         ));
     }

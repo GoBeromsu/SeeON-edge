@@ -77,6 +77,8 @@ impl CameraPayload {
             created_at: text(members, "created_at", 0)?,
             fps: match lookup(members, "fps") {
                 None | Some(Json::Null) => None,
+                // No `f64::from(i128)` exists; `as` rounds to nearest like the
+                // `float(int)` pydantic applies to `fps: float | None`.
                 Some(Json::Int(value)) if *value > 0 => Some(*value as f64),
                 Some(Json::Float(value)) if *value > 0.0 => Some(*value),
                 Some(_) => return None,

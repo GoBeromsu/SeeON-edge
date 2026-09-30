@@ -55,6 +55,11 @@ pub fn drain_pass(
             Ok(entries) => entries,
             Err(error) => break DrainStop::Queue(error),
         };
+        // The queue's own publish always writes a string `entry_id` (files
+        // are named after it). This guards foreign or hand-placed files
+        // without one: Python's `_select` would raise `KeyError` on them,
+        // and sending one here would end in an acknowledgement the queue
+        // refuses, so the same entry would be resent on every pass.
         let addressable: Vec<&Value> = entries
             .iter()
             .filter(|entry| entry.get("entry_id").is_some_and(Value::is_string))

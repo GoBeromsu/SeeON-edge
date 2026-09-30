@@ -24,7 +24,8 @@ use seeon_ml_worker::config::pull::{
     pull_startup_config,
 };
 use seeon_ml_worker::config::restart::{RESTART_POLL_INTERVAL, RestartCheck};
-use seeon_ml_worker::json::Json;
+use seeon_ml_worker::json::{Json, Serialiser};
+use seeon_ml_worker::relay::cameras::policies::parse_policy_bundle;
 use seeon_ml_worker::seam::Clock;
 
 const RELAY_TOKEN: &str = "<relay-token>";
@@ -397,8 +398,9 @@ fn fresh_pull_equals_golden_and_saves_python_lkg() {
     );
 }
 
-/// Serves `config` to one `RestartCheck` booted from the golden and
-/// returns what the check decided and what the poll pulled.
+/// Serves `config` to one `RestartCheck` booted from the golden (directive
+/// `(2, 7, 5)`) and returns what the check decided and what the poll
+/// pulled.
 fn restart_decision(config: &Value) -> (Option<Directive>, Option<Directive>) {
     let golden = read_json(WORKER_CONFIG);
     let state = scratch("restart-boot");
@@ -406,7 +408,7 @@ fn restart_decision(config: &Value) -> (Option<Directive>, Option<Directive>) {
     let boot = pull_startup_config(&base, RELAY_TOKEN, &state).expect("boot pull");
     joined(server);
 
-    let mut check = RestartCheck::new(boot.directive, boot.roster(), RESTART_POLL_INTERVAL);
+    let mut check = RestartCheck::new(boot.directive, RESTART_POLL_INTERVAL);
     let (server, base) = serve_json(config);
     let mut polled = None;
     let decision = check.check(&FixedClock, || {
@@ -433,14 +435,58 @@ fn changed_restart_epoch_gives_restart_directive() {
     assert_eq!(decision, Some(expected));
 }
 
+// Python `RestartDirectiveTracker.observe` (`restart.py:41-46`) restarts on
+// any strict advance of `(generation, version, registry)`.
 #[test]
-fn unchanged_epoch_with_new_config_version_gives_no_directive() {
+fn config_version_bump_alone_gives_restart_directive() {
     let mut config = read_json(WORKER_CONFIG);
     let version = config["config_version"].as_i64().expect("version");
     config["config_version"] = Value::from(version + 1);
     let (decision, polled) = restart_decision(&config);
     assert_eq!(polled, Some(golden_directive(&config)));
-    assert_eq!(decision, None);
+    let expected = Directive {
+        generation: 2,
+        version: 8,
+        registry: 5,
+    };
+    assert_eq!(decision, Some(expected));
+}
+
+#[test]
+fn registry_version_bump_alone_gives_restart_directive() {
+    let mut config = read_json(WORKER_CONFIG);
+    let registry = config["registry_version"].as_i64().expect("registry");
+    config["registry_version"] = Value::from(registry + 1);
+    let (decision, polled) = restart_decision(&config);
+    assert_eq!(polled, Some(golden_directive(&config)));
+    let expected = Directive {
+        generation: 2,
+        version: 7,
+        registry: 6,
+    };
+    assert_eq!(decision, Some(expected));
+}
+
+#[test]
+fn directive_not_above_boot_gives_no_directive() {
+    let golden = read_json(WORKER_CONFIG);
+    let field = |config: &Value, key: &str| config[key].as_i64().expect("directive field");
+    let mut lower_version = golden.clone();
+    lower_version["config_version"] = Value::from(field(&golden, "config_version") - 1);
+    // A lower epoch outranks higher config and registry versions.
+    let mut lower_epoch = golden.clone();
+    lower_epoch["restart_epoch"] = Value::from(field(&golden, "restart_epoch") - 1);
+    lower_epoch["config_version"] = Value::from(field(&golden, "config_version") + 10);
+    lower_epoch["registry_version"] = Value::from(field(&golden, "registry_version") + 10);
+    for (label, config) in [
+        ("equal", golden.clone()),
+        ("lower config_version", lower_version),
+        ("lower restart_epoch", lower_epoch),
+    ] {
+        let (decision, polled) = restart_decision(&config);
+        assert_eq!(polled, Some(golden_directive(&config)), "{label} poll");
+        assert_eq!(decision, None, "{label}");
+    }
 }
 
 #[test]
@@ -462,6 +508,41 @@ fn relay_down_without_lkg_is_a_typed_refusal() {
     let state = scratch("empty");
     let refused = pull_startup_config(&dead_relay(), RELAY_TOKEN, &state);
     assert_eq!(refused, Err(PullError::NoConfig));
+}
+
+// Python `load_worker_config_from_relay` (`config_pull.py:139-158`): the
+// save of an older fresh pull is refused by the newer stored record, the
+// stored payload fails re-validation, so `WorkerConfigLkgStore.clear`
+// (`lkg_store.py:89-106`) unlinks `current.json` only and the fresh pull
+// is used. Revisions stay on disk.
+#[test]
+fn corrupt_newer_lkg_is_cleared_and_fresh_wins() {
+    let golden = read_json(WORKER_CONFIG);
+    let state = scratch("corrupt-newer");
+    let store = state.join("config-lkg");
+    let newer = Directive {
+        generation: 99,
+        version: 99,
+        registry: 99,
+    };
+    let record =
+        br#"{"config_version":99,"generation":99,"payload":{"bogus":true},"registry_version":99}"#;
+    fs::create_dir_all(store.join("revisions")).expect("store dir");
+    fs::write(store.join("current.json"), record).expect("current record");
+    let revision = PathBuf::from("revisions").join(revision_name(newer));
+    fs::write(store.join(&revision), record).expect("revision record");
+
+    let (server, base) = serve_json(&golden);
+    let pulled = pull_startup_config(&base, RELAY_TOKEN, &state).expect("fresh pull");
+    joined(server);
+
+    assert_eq!((pulled.source, pulled.stale), (ConfigSource::Pulled, false));
+    assert_eq!(pulled.payload, Json::from(&golden));
+    assert_eq!(pulled.directive, golden_directive(&golden));
+    assert_eq!(
+        store_files(&store),
+        BTreeMap::from([(revision, record.to_vec())])
+    );
 }
 
 #[test]
@@ -491,4 +572,157 @@ fn other_schema_version_is_refused() {
             schema_version: i128::from(golden_version - 1)
         })
     );
+}
+
+// Row 3: the policy bundle validator. Oracle: `r/policy-bundles.json`,
+// recorded from Python `parse_policy_bundle`
+// (`shared/detection_policies.py:417-449`) by an out-of-repo recorder; its
+// bytes are pinned below so an unreviewed re-record fails here.
+const POLICY_BUNDLES: &str = "r/policy-bundles.json";
+const POLICY_BUNDLES_SHA256_PREFIX: &str = "4991d53789f2";
+
+fn policy_bundle_golden() -> Value {
+    let bytes = fs::read(worker_wire(POLICY_BUNDLES)).expect("policy bundle golden");
+    let digest: String = Sha256::digest(&bytes)
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect();
+    assert!(
+        digest.starts_with(POLICY_BUNDLES_SHA256_PREFIX),
+        "unreviewed policy bundle golden: {digest}"
+    );
+    serde_json::from_slice(&bytes).expect("policy bundle golden JSON")
+}
+
+fn policy_case(golden: &Value, name: &str) -> Value {
+    golden["cases"]
+        .as_array()
+        .expect("cases")
+        .iter()
+        .find(|case| case["name"] == name)
+        .unwrap_or_else(|| panic!("golden case {name}"))
+        .clone()
+}
+
+/// JSON cannot carry NaN or Infinity, so the golden names the value
+/// Python injected at `inject_path` and the test places it the same way.
+fn inject_non_finite(bundle: &mut Json, path: &[Value], value: f64) {
+    let mut target = bundle;
+    for key in path {
+        let key = key.as_str().expect("inject path key");
+        let Json::Object(members) = target else {
+            panic!("inject path {key} is not inside an object");
+        };
+        target = members
+            .iter_mut()
+            .find(|(name, _)| name == key)
+            .map(|(_, member)| member)
+            .unwrap_or_else(|| panic!("inject path key {key}"));
+    }
+    *target = Json::Float(value);
+}
+
+/// The golden worker config with `detection_policies` replaced.
+fn config_with_policies(bundle: &Value) -> Value {
+    let mut config = read_json(WORKER_CONFIG);
+    config["detection_policies"] = bundle.clone();
+    config
+}
+
+#[test]
+fn policy_bundle_verdicts_match_python_oracle() {
+    let golden = policy_bundle_golden();
+    let path = golden["inject_path"].as_array().expect("inject path");
+    let cases = golden["cases"].as_array().expect("cases");
+    assert_eq!(cases.len(), 22);
+    for case in cases {
+        let name = case["name"].as_str().expect("case name");
+        let mut bundle = Json::from(&case["bundle"]);
+        match case["inject"].as_str() {
+            None => {}
+            Some("inf") => inject_non_finite(&mut bundle, path, f64::INFINITY),
+            Some("nan") => inject_non_finite(&mut bundle, path, f64::NAN),
+            Some(other) => panic!("{name}: unknown inject {other}"),
+        }
+        let parsed = parse_policy_bundle(&bundle);
+        let accepted = case["accepted"].as_bool().expect("accepted");
+        assert_eq!(parsed.is_ok(), accepted, "{name}: {parsed:?}");
+        if let Ok(parsed) = parsed {
+            assert_eq!(
+                Serialiser::ExecutionRecords
+                    .canonical(&parsed.as_json())
+                    .expect("canonical"),
+                case["canonical_json"].as_str().expect("canonical_json"),
+                "{name}"
+            );
+            assert_eq!(
+                parsed.content_sha256().expect("content sha256"),
+                case["content_sha256"].as_str().expect("content_sha256"),
+                "{name}"
+            );
+        }
+    }
+}
+
+#[test]
+fn malformed_policy_bundle_on_fresh_pull_keeps_lkg() {
+    let refused = policy_case(&policy_bundle_golden(), "refuse-schema-version-2");
+    assert_eq!(refused["accepted"], Value::Bool(false));
+    let mut config = config_with_policies(&refused["bundle"]);
+    // A newer revision, so a wrongly accepted bundle would also be saved.
+    let version = config["config_version"].as_i64().expect("version");
+    config["config_version"] = Value::from(version + 1);
+    let state = scratch("policy-refused-pull");
+    copy_python_store(&state);
+
+    let (server, base) = serve_json(&config);
+    let pulled = pull_startup_config(&base, RELAY_TOKEN, &state).expect("LKG config");
+    let recorded = joined(server);
+
+    assert_eq!(
+        transport_record(&recorded, CONFIG_PULL_TIMEOUT),
+        manifest_transport(WORKER_CONFIG)
+    );
+    assert_eq!((pulled.source, pulled.stale), (ConfigSource::Lkg, true));
+    assert_eq!(pulled.payload, Json::from(&read_json(WORKER_CONFIG)));
+    assert_eq!(
+        store_files(&state.join("config-lkg")),
+        store_files(&worker_wire(LKG_STORE))
+    );
+}
+
+#[test]
+fn malformed_policy_bundle_on_poll_gives_none() {
+    let refused = policy_case(&policy_bundle_golden(), "refuse-schema-version-2");
+    assert_eq!(refused["accepted"], Value::Bool(false));
+    let (server, base) = serve_json(&config_with_policies(&refused["bundle"]));
+    let polled = poll_worker_config(&base, RELAY_TOKEN).map(|poll| poll.directive);
+    let recorded = joined(server);
+    assert_eq!(
+        transport_record(&recorded, CONFIG_PULL_TIMEOUT),
+        manifest_transport(WORKER_CONFIG)
+    );
+    assert_eq!(polled, None);
+}
+
+#[test]
+fn valid_policy_bundle_is_accepted_on_pull() {
+    let accepted = policy_case(&policy_bundle_golden(), "accept-override-cam-b");
+    assert_eq!(accepted["accepted"], Value::Bool(true));
+    let config = config_with_policies(&accepted["bundle"]);
+    let state = scratch("policy-accepted-pull");
+
+    let (server, base) = serve_json(&config);
+    let pulled = pull_startup_config(&base, RELAY_TOKEN, &state).expect("fresh pull");
+    joined(server);
+    assert_eq!((pulled.source, pulled.stale), (ConfigSource::Pulled, false));
+    assert_eq!(
+        pulled.policies.content_sha256().expect("content sha256"),
+        accepted["content_sha256"].as_str().expect("content_sha256")
+    );
+
+    let (server, base) = serve_json(&config);
+    let polled = poll_worker_config(&base, RELAY_TOKEN).map(|poll| poll.directive);
+    joined(server);
+    assert_eq!(polled, Some(golden_directive(&config)));
 }

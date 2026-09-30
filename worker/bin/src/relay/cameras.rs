@@ -6,6 +6,7 @@
 
 mod camera;
 mod domains;
+pub mod policies;
 mod runtime;
 mod window;
 

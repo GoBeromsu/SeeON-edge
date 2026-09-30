@@ -1,0 +1,1451 @@
+{
+  "cases": [
+    {
+      "accepted": true,
+      "bundle": {
+        "cameras": {
+          "cam-a": {
+            "bed_exit": {
+              "camera_revision_id": null,
+              "effective_policy_id": "cebc0c26c8859e38dc122f73d09787eeae9376a4395cd1fdb1fc6f949806f473",
+              "facility_revision_id": null,
+              "module_id": "bed_exit",
+              "module_version": 1,
+              "schema_id": "bed_exit.policy",
+              "schema_version": 1,
+              "source": "image-default",
+              "values": {
+                "grace_frames": 3,
+                "hold_frames": 2,
+                "min_containment": 0.35
+              }
+            },
+            "fall": {
+              "camera_revision_id": null,
+              "effective_policy_id": "b512b6b0210a450201b525b7cf6a66d86edf58345125ec4d237acf5566b0721a",
+              "facility_revision_id": null,
+              "module_id": "fall",
+              "module_version": 2,
+              "schema_id": "fall.policy",
+              "schema_version": 2,
+              "source": "image-default",
+              "values": {
+                "transition_threshold": 0.5
+              }
+            }
+          }
+        },
+        "defaults": {
+          "bed_exit": {
+            "camera_revision_id": null,
+            "effective_policy_id": "cebc0c26c8859e38dc122f73d09787eeae9376a4395cd1fdb1fc6f949806f473",
+            "facility_revision_id": null,
+            "module_id": "bed_exit",
+            "module_version": 1,
+            "schema_id": "bed_exit.policy",
+            "schema_version": 1,
+            "source": "image-default",
+            "values": {
+              "grace_frames": 3,
+              "hold_frames": 2,
+              "min_containment": 0.35
+            }
+          },
+          "fall": {
+            "camera_revision_id": null,
+            "effective_policy_id": "b512b6b0210a450201b525b7cf6a66d86edf58345125ec4d237acf5566b0721a",
+            "facility_revision_id": null,
+            "module_id": "fall",
+            "module_version": 2,
+            "schema_id": "fall.policy",
+            "schema_version": 2,
+            "source": "image-default",
+            "values": {
+              "transition_threshold": 0.5
+            }
+          }
+        },
+        "schema_version": 1
+      },
+      "canonical_json": "{\"cameras\":{\"cam-a\":{\"bed_exit\":{\"camera_revision_id\":null,\"effective_policy_id\":\"cebc0c26c8859e38dc122f73d09787eeae9376a4395cd1fdb1fc6f949806f473\",\"facility_revision_id\":null,\"module_id\":\"bed_exit\",\"module_version\":1,\"schema_id\":\"bed_exit.policy\",\"schema_version\":1,\"source\":\"image-default\",\"values\":{\"grace_frames\":3,\"hold_frames\":2,\"min_containment\":0.35}},\"fall\":{\"camera_revision_id\":null,\"effective_policy_id\":\"b512b6b0210a450201b525b7cf6a66d86edf58345125ec4d237acf5566b0721a\",\"facility_revision_id\":null,\"module_id\":\"fall\",\"module_version\":2,\"schema_id\":\"fall.policy\",\"schema_version\":2,\"source\":\"image-default\",\"values\":{\"transition_threshold\":0.5}}}},\"defaults\":{\"bed_exit\":{\"camera_revision_id\":null,\"effective_policy_id\":\"cebc0c26c8859e38dc122f73d09787eeae9376a4395cd1fdb1fc6f949806f473\",\"facility_revision_id\":null,\"module_id\":\"bed_exit\",\"module_version\":1,\"schema_id\":\"bed_exit.policy\",\"schema_version\":1,\"source\":\"image-default\",\"values\":{\"grace_frames\":3,\"hold_frames\":2,\"min_containment\":0.35}},\"fall\":{\"camera_revision_id\":null,\"effective_policy_id\":\"b512b6b0210a450201b525b7cf6a66d86edf58345125ec4d237acf5566b0721a\",\"facility_revision_id\":null,\"module_id\":\"fall\",\"module_version\":2,\"schema_id\":\"fall.policy\",\"schema_version\":2,\"source\":\"image-default\",\"values\":{\"transition_threshold\":0.5}}},\"schema_version\":1}",
+      "content_sha256": "92e94614619b1c7fedee580e50311737c247745131e0e02d747df5b95a44e404",
+      "inject": null,
+      "name": "accept-default-cam-a"
+    },
+    {
+      "accepted": true,
+      "bundle": {
+        "cameras": {
+          "cam-a": {
+            "bed_exit": {
+              "camera_revision_id": null,
+              "effective_policy_id": "cebc0c26c8859e38dc122f73d09787eeae9376a4395cd1fdb1fc6f949806f473",
+              "facility_revision_id": null,
+              "module_id": "bed_exit",
+              "module_version": 1,
+              "schema_id": "bed_exit.policy",
+              "schema_version": 1,
+              "source": "image-default",
+              "values": {
+                "grace_frames": 3,
+                "hold_frames": 2,
+                "min_containment": 0.35
+              }
+            },
+            "fall": {
+              "camera_revision_id": null,
+              "effective_policy_id": "b512b6b0210a450201b525b7cf6a66d86edf58345125ec4d237acf5566b0721a",
+              "facility_revision_id": null,
+              "module_id": "fall",
+              "module_version": 2,
+              "schema_id": "fall.policy",
+              "schema_version": 2,
+              "source": "image-default",
+              "values": {
+                "transition_threshold": 0.5
+              }
+            }
+          },
+          "cam-b": {
+            "bed_exit": {
+              "camera_revision_id": null,
+              "effective_policy_id": "a6bf3318ef608cbec2732aa97da8fc45d2771577c4234a3fdcb5b21aa7324c1b",
+              "facility_revision_id": 2,
+              "module_id": "bed_exit",
+              "module_version": 1,
+              "schema_id": "bed_exit.policy",
+              "schema_version": 1,
+              "source": "facility-default",
+              "values": {
+                "grace_frames": 5,
+                "hold_frames": 10,
+                "min_containment": 0.5
+              }
+            },
+            "fall": {
+              "camera_revision_id": 3,
+              "effective_policy_id": "fcb6479494caff889b62c0300cd45c66564266f3ac48cfe313750db5e45d7ada",
+              "facility_revision_id": 2,
+              "module_id": "fall",
+              "module_version": 2,
+              "schema_id": "fall.policy",
+              "schema_version": 2,
+              "source": "camera-override",
+              "values": {
+                "transition_threshold": 0.7
+              }
+            }
+          }
+        },
+        "defaults": {
+          "bed_exit": {
+            "camera_revision_id": null,
+            "effective_policy_id": "cebc0c26c8859e38dc122f73d09787eeae9376a4395cd1fdb1fc6f949806f473",
+            "facility_revision_id": null,
+            "module_id": "bed_exit",
+            "module_version": 1,
+            "schema_id": "bed_exit.policy",
+            "schema_version": 1,
+            "source": "image-default",
+            "values": {
+              "grace_frames": 3,
+              "hold_frames": 2,
+              "min_containment": 0.35
+            }
+          },
+          "fall": {
+            "camera_revision_id": null,
+            "effective_policy_id": "b512b6b0210a450201b525b7cf6a66d86edf58345125ec4d237acf5566b0721a",
+            "facility_revision_id": null,
+            "module_id": "fall",
+            "module_version": 2,
+            "schema_id": "fall.policy",
+            "schema_version": 2,
+            "source": "image-default",
+            "values": {
+              "transition_threshold": 0.5
+            }
+          }
+        },
+        "schema_version": 1
+      },
+      "canonical_json": "{\"cameras\":{\"cam-a\":{\"bed_exit\":{\"camera_revision_id\":null,\"effective_policy_id\":\"cebc0c26c8859e38dc122f73d09787eeae9376a4395cd1fdb1fc6f949806f473\",\"facility_revision_id\":null,\"module_id\":\"bed_exit\",\"module_version\":1,\"schema_id\":\"bed_exit.policy\",\"schema_version\":1,\"source\":\"image-default\",\"values\":{\"grace_frames\":3,\"hold_frames\":2,\"min_containment\":0.35}},\"fall\":{\"camera_revision_id\":null,\"effective_policy_id\":\"b512b6b0210a450201b525b7cf6a66d86edf58345125ec4d237acf5566b0721a\",\"facility_revision_id\":null,\"module_id\":\"fall\",\"module_version\":2,\"schema_id\":\"fall.policy\",\"schema_version\":2,\"source\":\"image-default\",\"values\":{\"transition_threshold\":0.5}}},\"cam-b\":{\"bed_exit\":{\"camera_revision_id\":null,\"effective_policy_id\":\"a6bf3318ef608cbec2732aa97da8fc45d2771577c4234a3fdcb5b21aa7324c1b\",\"facility_revision_id\":2,\"module_id\":\"bed_exit\",\"module_version\":1,\"schema_id\":\"bed_exit.policy\",\"schema_version\":1,\"source\":\"facility-default\",\"values\":{\"grace_frames\":5,\"hold_frames\":10,\"min_containment\":0.5}},\"fall\":{\"camera_revision_id\":3,\"effective_policy_id\":\"fcb6479494caff889b62c0300cd45c66564266f3ac48cfe313750db5e45d7ada\",\"facility_revision_id\":2,\"module_id\":\"fall\",\"module_version\":2,\"schema_id\":\"fall.policy\",\"schema_version\":2,\"source\":\"camera-override\",\"values\":{\"transition_threshold\":0.7}}}},\"defaults\":{\"bed_exit\":{\"camera_revision_id\":null,\"effective_policy_id\":\"cebc0c26c8859e38dc122f73d09787eeae9376a4395cd1fdb1fc6f949806f473\",\"facility_revision_id\":null,\"module_id\":\"bed_exit\",\"module_version\":1,\"schema_id\":\"bed_exit.policy\",\"schema_version\":1,\"source\":\"image-default\",\"values\":{\"grace_frames\":3,\"hold_frames\":2,\"min_containment\":0.35}},\"fall\":{\"camera_revision_id\":null,\"effective_policy_id\":\"b512b6b0210a450201b525b7cf6a66d86edf58345125ec4d237acf5566b0721a\",\"facility_revision_id\":null,\"module_id\":\"fall\",\"module_version\":2,\"schema_id\":\"fall.policy\",\"schema_version\":2,\"source\":\"image-default\",\"values\":{\"transition_threshold\":0.5}}},\"schema_version\":1}",
+      "content_sha256": "7776e68f29ec55541606cb3a3c8c8953db2a2f12e134a71f4a78c84140209902",
+      "inject": null,
+      "name": "accept-override-cam-b"
+    },
+    {
+      "accepted": true,
+      "bundle": {
+        "cameras": {},
+        "defaults": {
+          "bed_exit": {
+            "camera_revision_id": null,
+            "effective_policy_id": "cebc0c26c8859e38dc122f73d09787eeae9376a4395cd1fdb1fc6f949806f473",
+            "facility_revision_id": null,
+            "module_id": "bed_exit",
+            "module_version": 1,
+            "schema_id": "bed_exit.policy",
+            "schema_version": 1,
+            "source": "image-default",
+            "values": {
+              "grace_frames": 3,
+              "hold_frames": 2,
+              "min_containment": 0.35
+            }
+          },
+          "fall": {
+            "camera_revision_id": null,
+            "effective_policy_id": "b512b6b0210a450201b525b7cf6a66d86edf58345125ec4d237acf5566b0721a",
+            "facility_revision_id": null,
+            "module_id": "fall",
+            "module_version": 2,
+            "schema_id": "fall.policy",
+            "schema_version": 2,
+            "source": "image-default",
+            "values": {
+              "transition_threshold": 0.5
+            }
+          }
+        },
+        "schema_version": 1
+      },
+      "canonical_json": "{\"cameras\":{},\"defaults\":{\"bed_exit\":{\"camera_revision_id\":null,\"effective_policy_id\":\"cebc0c26c8859e38dc122f73d09787eeae9376a4395cd1fdb1fc6f949806f473\",\"facility_revision_id\":null,\"module_id\":\"bed_exit\",\"module_version\":1,\"schema_id\":\"bed_exit.policy\",\"schema_version\":1,\"source\":\"image-default\",\"values\":{\"grace_frames\":3,\"hold_frames\":2,\"min_containment\":0.35}},\"fall\":{\"camera_revision_id\":null,\"effective_policy_id\":\"b512b6b0210a450201b525b7cf6a66d86edf58345125ec4d237acf5566b0721a\",\"facility_revision_id\":null,\"module_id\":\"fall\",\"module_version\":2,\"schema_id\":\"fall.policy\",\"schema_version\":2,\"source\":\"image-default\",\"values\":{\"transition_threshold\":0.5}}},\"schema_version\":1}",
+      "content_sha256": "a6bae2746c912cc8b20aa182b780ee6b783d4e87c951b63d466b4a50c18fce99",
+      "inject": null,
+      "name": "accept-no-cameras"
+    },
+    {
+      "accepted": true,
+      "bundle": {
+        "cameras": {
+          "cam-a": {
+            "bed_exit": {
+              "camera_revision_id": null,
+              "effective_policy_id": "cebc0c26c8859e38dc122f73d09787eeae9376a4395cd1fdb1fc6f949806f473",
+              "facility_revision_id": null,
+              "module_id": "bed_exit",
+              "module_version": 1,
+              "schema_id": "bed_exit.policy",
+              "schema_version": 1,
+              "source": "image-default",
+              "values": {
+                "grace_frames": 3,
+                "hold_frames": 2,
+                "min_containment": 0.35
+              }
+            },
+            "fall": {
+              "camera_revision_id": null,
+              "effective_policy_id": "b512b6b0210a450201b525b7cf6a66d86edf58345125ec4d237acf5566b0721a",
+              "facility_revision_id": null,
+              "module_id": "fall",
+              "module_version": 2,
+              "schema_id": "fall.policy",
+              "schema_version": 2,
+              "source": "image-default",
+              "values": {
+                "transition_threshold": 0.5
+              }
+            }
+          }
+        },
+        "defaults": {
+          "bed_exit": {
+            "camera_revision_id": null,
+            "effective_policy_id": "cebc0c26c8859e38dc122f73d09787eeae9376a4395cd1fdb1fc6f949806f473",
+            "facility_revision_id": null,
+            "module_id": "bed_exit",
+            "module_version": 1,
+            "schema_id": "bed_exit.policy",
+            "schema_version": 1,
+            "source": "image-default",
+            "values": {
+              "grace_frames": 3,
+              "hold_frames": 2,
+              "min_containment": 0.35
+            }
+          },
+          "fall": {
+            "camera_revision_id": null,
+            "effective_policy_id": "fe6f52dc09b68e1ef23e9fe0a3411ed78bc21cce3a04d81cdee45eae70afe0ca",
+            "facility_revision_id": null,
+            "module_id": "fall",
+            "module_version": 2,
+            "schema_id": "fall.policy",
+            "schema_version": 2,
+            "source": "image-default",
+            "values": {
+              "transition_threshold": 1
+            }
+          }
+        },
+        "schema_version": 1
+      },
+      "canonical_json": "{\"cameras\":{\"cam-a\":{\"bed_exit\":{\"camera_revision_id\":null,\"effective_policy_id\":\"cebc0c26c8859e38dc122f73d09787eeae9376a4395cd1fdb1fc6f949806f473\",\"facility_revision_id\":null,\"module_id\":\"bed_exit\",\"module_version\":1,\"schema_id\":\"bed_exit.policy\",\"schema_version\":1,\"source\":\"image-default\",\"values\":{\"grace_frames\":3,\"hold_frames\":2,\"min_containment\":0.35}},\"fall\":{\"camera_revision_id\":null,\"effective_policy_id\":\"b512b6b0210a450201b525b7cf6a66d86edf58345125ec4d237acf5566b0721a\",\"facility_revision_id\":null,\"module_id\":\"fall\",\"module_version\":2,\"schema_id\":\"fall.policy\",\"schema_version\":2,\"source\":\"image-default\",\"values\":{\"transition_threshold\":0.5}}}},\"defaults\":{\"bed_exit\":{\"camera_revision_id\":null,\"effective_policy_id\":\"cebc0c26c8859e38dc122f73d09787eeae9376a4395cd1fdb1fc6f949806f473\",\"facility_revision_id\":null,\"module_id\":\"bed_exit\",\"module_version\":1,\"schema_id\":\"bed_exit.policy\",\"schema_version\":1,\"source\":\"image-default\",\"values\":{\"grace_frames\":3,\"hold_frames\":2,\"min_containment\":0.35}},\"fall\":{\"camera_revision_id\":null,\"effective_policy_id\":\"fe6f52dc09b68e1ef23e9fe0a3411ed78bc21cce3a04d81cdee45eae70afe0ca\",\"facility_revision_id\":null,\"module_id\":\"fall\",\"module_version\":2,\"schema_id\":\"fall.policy\",\"schema_version\":2,\"source\":\"image-default\",\"values\":{\"transition_threshold\":1.0}}},\"schema_version\":1}",
+      "content_sha256": "65965733dd2bccaa8c118486cf4862436bf7b0d7cefb996846ad5621f01c6f29",
+      "inject": null,
+      "name": "accept-integer-threshold"
+    },
+    {
+      "accepted": false,
+      "bundle": {
+        "cameras": {
+          "cam-a": {
+            "bed_exit": {
+              "camera_revision_id": null,
+              "effective_policy_id": "cebc0c26c8859e38dc122f73d09787eeae9376a4395cd1fdb1fc6f949806f473",
+              "facility_revision_id": null,
+              "module_id": "bed_exit",
+              "module_version": 1,
+              "schema_id": "bed_exit.policy",
+              "schema_version": 1,
+              "source": "image-default",
+              "values": {
+                "grace_frames": 3,
+                "hold_frames": 2,
+                "min_containment": 0.35
+              }
+            },
+            "fall": {
+              "camera_revision_id": null,
+              "effective_policy_id": "b512b6b0210a450201b525b7cf6a66d86edf58345125ec4d237acf5566b0721a",
+              "facility_revision_id": null,
+              "module_id": "fall",
+              "module_version": 2,
+              "schema_id": "fall.policy",
+              "schema_version": 2,
+              "source": "image-default",
+              "values": {
+                "transition_threshold": 0.5
+              }
+            }
+          }
+        },
+        "defaults": {
+          "bed_exit": {
+            "camera_revision_id": null,
+            "effective_policy_id": "cebc0c26c8859e38dc122f73d09787eeae9376a4395cd1fdb1fc6f949806f473",
+            "facility_revision_id": null,
+            "module_id": "bed_exit",
+            "module_version": 1,
+            "schema_id": "bed_exit.policy",
+            "schema_version": 1,
+            "source": "image-default",
+            "values": {
+              "grace_frames": 3,
+              "hold_frames": 2,
+              "min_containment": 0.35
+            }
+          },
+          "fall": {
+            "camera_revision_id": null,
+            "effective_policy_id": "b512b6b0210a450201b525b7cf6a66d86edf58345125ec4d237acf5566b0721a",
+            "facility_revision_id": null,
+            "module_id": "fall",
+            "module_version": 2,
+            "schema_id": "fall.policy",
+            "schema_version": 2,
+            "source": "image-default",
+            "values": {
+              "transition_threshold": 0.5
+            }
+          }
+        },
+        "schema_version": true
+      },
+      "inject": null,
+      "name": "refuse-schema-version-bool"
+    },
+    {
+      "accepted": false,
+      "bundle": {
+        "cameras": {
+          "cam-a": {
+            "bed_exit": {
+              "camera_revision_id": null,
+              "effective_policy_id": "cebc0c26c8859e38dc122f73d09787eeae9376a4395cd1fdb1fc6f949806f473",
+              "facility_revision_id": null,
+              "module_id": "bed_exit",
+              "module_version": 1,
+              "schema_id": "bed_exit.policy",
+              "schema_version": 1,
+              "source": "image-default",
+              "values": {
+                "grace_frames": 3,
+                "hold_frames": 2,
+                "min_containment": 0.35
+              }
+            },
+            "fall": {
+              "camera_revision_id": null,
+              "effective_policy_id": "b512b6b0210a450201b525b7cf6a66d86edf58345125ec4d237acf5566b0721a",
+              "facility_revision_id": null,
+              "module_id": "fall",
+              "module_version": 2,
+              "schema_id": "fall.policy",
+              "schema_version": 2,
+              "source": "image-default",
+              "values": {
+                "transition_threshold": 0.5
+              }
+            }
+          }
+        },
+        "defaults": {
+          "bed_exit": {
+            "camera_revision_id": null,
+            "effective_policy_id": "cebc0c26c8859e38dc122f73d09787eeae9376a4395cd1fdb1fc6f949806f473",
+            "facility_revision_id": null,
+            "module_id": "bed_exit",
+            "module_version": 1,
+            "schema_id": "bed_exit.policy",
+            "schema_version": 1,
+            "source": "image-default",
+            "values": {
+              "grace_frames": 3,
+              "hold_frames": 2,
+              "min_containment": 0.35
+            }
+          },
+          "fall": {
+            "camera_revision_id": null,
+            "effective_policy_id": "b512b6b0210a450201b525b7cf6a66d86edf58345125ec4d237acf5566b0721a",
+            "facility_revision_id": null,
+            "module_id": "fall",
+            "module_version": 2,
+            "schema_id": "fall.policy",
+            "schema_version": 2,
+            "source": "image-default",
+            "values": {
+              "transition_threshold": 0.5
+            }
+          }
+        },
+        "schema_version": 2
+      },
+      "inject": null,
+      "name": "refuse-schema-version-2"
+    },
+    {
+      "accepted": false,
+      "bundle": {
+        "cameras": {
+          "cam-a": {
+            "bed_exit": {
+              "camera_revision_id": null,
+              "effective_policy_id": "cebc0c26c8859e38dc122f73d09787eeae9376a4395cd1fdb1fc6f949806f473",
+              "facility_revision_id": null,
+              "module_id": "bed_exit",
+              "module_version": 1,
+              "schema_id": "bed_exit.policy",
+              "schema_version": 1,
+              "source": "image-default",
+              "values": {
+                "grace_frames": 3,
+                "hold_frames": 2,
+                "min_containment": 0.35
+              }
+            },
+            "fall": {
+              "camera_revision_id": null,
+              "effective_policy_id": "b512b6b0210a450201b525b7cf6a66d86edf58345125ec4d237acf5566b0721a",
+              "facility_revision_id": null,
+              "module_id": "fall",
+              "module_version": 2,
+              "schema_id": "fall.policy",
+              "schema_version": 2,
+              "source": "image-default",
+              "values": {
+                "transition_threshold": 0.5
+              }
+            }
+          }
+        },
+        "defaults": {
+          "fall": {
+            "camera_revision_id": null,
+            "effective_policy_id": "b512b6b0210a450201b525b7cf6a66d86edf58345125ec4d237acf5566b0721a",
+            "facility_revision_id": null,
+            "module_id": "fall",
+            "module_version": 2,
+            "schema_id": "fall.policy",
+            "schema_version": 2,
+            "source": "image-default",
+            "values": {
+              "transition_threshold": 0.5
+            }
+          }
+        },
+        "schema_version": 1
+      },
+      "inject": null,
+      "name": "refuse-defaults-missing-module"
+    },
+    {
+      "accepted": false,
+      "bundle": {
+        "cameras": {
+          "cam-a": {
+            "bed_exit": {
+              "camera_revision_id": null,
+              "effective_policy_id": "cebc0c26c8859e38dc122f73d09787eeae9376a4395cd1fdb1fc6f949806f473",
+              "facility_revision_id": null,
+              "module_id": "bed_exit",
+              "module_version": 1,
+              "schema_id": "bed_exit.policy",
+              "schema_version": 1,
+              "source": "image-default",
+              "values": {
+                "grace_frames": 3,
+                "hold_frames": 2,
+                "min_containment": 0.35
+              }
+            },
+            "fall": {
+              "camera_revision_id": null,
+              "effective_policy_id": "b512b6b0210a450201b525b7cf6a66d86edf58345125ec4d237acf5566b0721a",
+              "facility_revision_id": null,
+              "module_id": "fall",
+              "module_version": 2,
+              "schema_id": "fall.policy",
+              "schema_version": 2,
+              "source": "image-default",
+              "values": {
+                "transition_threshold": 0.5
+              }
+            }
+          }
+        },
+        "defaults": {
+          "bed_exit": {
+            "camera_revision_id": null,
+            "effective_policy_id": "cebc0c26c8859e38dc122f73d09787eeae9376a4395cd1fdb1fc6f949806f473",
+            "facility_revision_id": null,
+            "module_id": "bed_exit",
+            "module_version": 1,
+            "schema_id": "bed_exit.policy",
+            "schema_version": 1,
+            "source": "image-default",
+            "values": {
+              "grace_frames": 3,
+              "hold_frames": 2,
+              "min_containment": 0.35
+            }
+          },
+          "fall": {
+            "camera_revision_id": null,
+            "effective_policy_id": "b512b6b0210a450201b525b7cf6a66d86edf58345125ec4d237acf5566b0721a",
+            "facility_revision_id": null,
+            "module_id": "fall",
+            "module_version": 2,
+            "schema_id": "fall.policy",
+            "schema_version": 2,
+            "source": "image-default",
+            "values": {
+              "transition_threshold": 0.5
+            }
+          }
+        },
+        "extra": 1,
+        "schema_version": 1
+      },
+      "inject": null,
+      "name": "refuse-unknown-top-level-key"
+    },
+    {
+      "accepted": false,
+      "bundle": {
+        "cameras": [],
+        "defaults": {
+          "bed_exit": {
+            "camera_revision_id": null,
+            "effective_policy_id": "cebc0c26c8859e38dc122f73d09787eeae9376a4395cd1fdb1fc6f949806f473",
+            "facility_revision_id": null,
+            "module_id": "bed_exit",
+            "module_version": 1,
+            "schema_id": "bed_exit.policy",
+            "schema_version": 1,
+            "source": "image-default",
+            "values": {
+              "grace_frames": 3,
+              "hold_frames": 2,
+              "min_containment": 0.35
+            }
+          },
+          "fall": {
+            "camera_revision_id": null,
+            "effective_policy_id": "b512b6b0210a450201b525b7cf6a66d86edf58345125ec4d237acf5566b0721a",
+            "facility_revision_id": null,
+            "module_id": "fall",
+            "module_version": 2,
+            "schema_id": "fall.policy",
+            "schema_version": 2,
+            "source": "image-default",
+            "values": {
+              "transition_threshold": 0.5
+            }
+          }
+        },
+        "schema_version": 1
+      },
+      "inject": null,
+      "name": "refuse-cameras-not-object"
+    },
+    {
+      "accepted": false,
+      "bundle": {
+        "cameras": {
+          "": {
+            "bed_exit": {
+              "camera_revision_id": null,
+              "effective_policy_id": "cebc0c26c8859e38dc122f73d09787eeae9376a4395cd1fdb1fc6f949806f473",
+              "facility_revision_id": null,
+              "module_id": "bed_exit",
+              "module_version": 1,
+              "schema_id": "bed_exit.policy",
+              "schema_version": 1,
+              "source": "image-default",
+              "values": {
+                "grace_frames": 3,
+                "hold_frames": 2,
+                "min_containment": 0.35
+              }
+            },
+            "fall": {
+              "camera_revision_id": null,
+              "effective_policy_id": "b512b6b0210a450201b525b7cf6a66d86edf58345125ec4d237acf5566b0721a",
+              "facility_revision_id": null,
+              "module_id": "fall",
+              "module_version": 2,
+              "schema_id": "fall.policy",
+              "schema_version": 2,
+              "source": "image-default",
+              "values": {
+                "transition_threshold": 0.5
+              }
+            }
+          }
+        },
+        "defaults": {
+          "bed_exit": {
+            "camera_revision_id": null,
+            "effective_policy_id": "cebc0c26c8859e38dc122f73d09787eeae9376a4395cd1fdb1fc6f949806f473",
+            "facility_revision_id": null,
+            "module_id": "bed_exit",
+            "module_version": 1,
+            "schema_id": "bed_exit.policy",
+            "schema_version": 1,
+            "source": "image-default",
+            "values": {
+              "grace_frames": 3,
+              "hold_frames": 2,
+              "min_containment": 0.35
+            }
+          },
+          "fall": {
+            "camera_revision_id": null,
+            "effective_policy_id": "b512b6b0210a450201b525b7cf6a66d86edf58345125ec4d237acf5566b0721a",
+            "facility_revision_id": null,
+            "module_id": "fall",
+            "module_version": 2,
+            "schema_id": "fall.policy",
+            "schema_version": 2,
+            "source": "image-default",
+            "values": {
+              "transition_threshold": 0.5
+            }
+          }
+        },
+        "schema_version": 1
+      },
+      "inject": null,
+      "name": "refuse-empty-camera-id"
+    },
+    {
+      "accepted": false,
+      "bundle": {
+        "cameras": {
+          "cam-a": {
+            "bed_exit": {
+              "camera_revision_id": null,
+              "effective_policy_id": "cebc0c26c8859e38dc122f73d09787eeae9376a4395cd1fdb1fc6f949806f473",
+              "facility_revision_id": null,
+              "module_id": "bed_exit",
+              "module_version": 1,
+              "schema_id": "bed_exit.policy",
+              "schema_version": 1,
+              "source": "image-default",
+              "values": {
+                "grace_frames": 3,
+                "hold_frames": 2,
+                "min_containment": 0.35
+              }
+            }
+          }
+        },
+        "defaults": {
+          "bed_exit": {
+            "camera_revision_id": null,
+            "effective_policy_id": "cebc0c26c8859e38dc122f73d09787eeae9376a4395cd1fdb1fc6f949806f473",
+            "facility_revision_id": null,
+            "module_id": "bed_exit",
+            "module_version": 1,
+            "schema_id": "bed_exit.policy",
+            "schema_version": 1,
+            "source": "image-default",
+            "values": {
+              "grace_frames": 3,
+              "hold_frames": 2,
+              "min_containment": 0.35
+            }
+          },
+          "fall": {
+            "camera_revision_id": null,
+            "effective_policy_id": "b512b6b0210a450201b525b7cf6a66d86edf58345125ec4d237acf5566b0721a",
+            "facility_revision_id": null,
+            "module_id": "fall",
+            "module_version": 2,
+            "schema_id": "fall.policy",
+            "schema_version": 2,
+            "source": "image-default",
+            "values": {
+              "transition_threshold": 0.5
+            }
+          }
+        },
+        "schema_version": 1
+      },
+      "inject": null,
+      "name": "refuse-camera-missing-module"
+    },
+    {
+      "accepted": false,
+      "bundle": {
+        "cameras": {
+          "cam-a": {
+            "bed_exit": {
+              "camera_revision_id": null,
+              "effective_policy_id": "cebc0c26c8859e38dc122f73d09787eeae9376a4395cd1fdb1fc6f949806f473",
+              "facility_revision_id": null,
+              "module_id": "bed_exit",
+              "module_version": 1,
+              "schema_id": "bed_exit.policy",
+              "schema_version": 1,
+              "source": "image-default",
+              "values": {
+                "grace_frames": 3,
+                "hold_frames": 2,
+                "min_containment": 0.35
+              }
+            },
+            "fall": {
+              "camera_revision_id": null,
+              "effective_policy_id": "b512b6b0210a450201b525b7cf6a66d86edf58345125ec4d237acf5566b0721a",
+              "facility_revision_id": null,
+              "module_id": "fall",
+              "module_version": 2,
+              "schema_id": "fall.policy",
+              "schema_version": 2,
+              "source": "image-default",
+              "values": {
+                "transition_threshold": 0.5
+              }
+            }
+          }
+        },
+        "defaults": {
+          "bed_exit": {
+            "camera_revision_id": null,
+            "effective_policy_id": "cebc0c26c8859e38dc122f73d09787eeae9376a4395cd1fdb1fc6f949806f473",
+            "facility_revision_id": null,
+            "module_id": "bed_exit",
+            "module_version": 1,
+            "schema_id": "bed_exit.policy",
+            "schema_version": 1,
+            "source": "image-default",
+            "values": {
+              "grace_frames": 3,
+              "hold_frames": 2,
+              "min_containment": 0.35
+            }
+          },
+          "fall": {
+            "camera_revision_id": null,
+            "effective_policy_id": "b512b6b0210a450201b525b7cf6a66d86edf58345125ec4d237acf5566b0721a",
+            "facility_revision_id": null,
+            "module_id": "fall",
+            "module_version": 2,
+            "schema_id": "fall.policy",
+            "schema_version": 2,
+            "source": "image-default",
+            "values": {
+              "transition_threshold": 0.5
+            }
+          }
+        },
+        "schema_version": 1
+      },
+      "inject": "inf",
+      "name": "refuse-non-finite-inf"
+    },
+    {
+      "accepted": false,
+      "bundle": {
+        "cameras": {
+          "cam-a": {
+            "bed_exit": {
+              "camera_revision_id": null,
+              "effective_policy_id": "cebc0c26c8859e38dc122f73d09787eeae9376a4395cd1fdb1fc6f949806f473",
+              "facility_revision_id": null,
+              "module_id": "bed_exit",
+              "module_version": 1,
+              "schema_id": "bed_exit.policy",
+              "schema_version": 1,
+              "source": "image-default",
+              "values": {
+                "grace_frames": 3,
+                "hold_frames": 2,
+                "min_containment": 0.35
+              }
+            },
+            "fall": {
+              "camera_revision_id": null,
+              "effective_policy_id": "b512b6b0210a450201b525b7cf6a66d86edf58345125ec4d237acf5566b0721a",
+              "facility_revision_id": null,
+              "module_id": "fall",
+              "module_version": 2,
+              "schema_id": "fall.policy",
+              "schema_version": 2,
+              "source": "image-default",
+              "values": {
+                "transition_threshold": 0.5
+              }
+            }
+          }
+        },
+        "defaults": {
+          "bed_exit": {
+            "camera_revision_id": null,
+            "effective_policy_id": "cebc0c26c8859e38dc122f73d09787eeae9376a4395cd1fdb1fc6f949806f473",
+            "facility_revision_id": null,
+            "module_id": "bed_exit",
+            "module_version": 1,
+            "schema_id": "bed_exit.policy",
+            "schema_version": 1,
+            "source": "image-default",
+            "values": {
+              "grace_frames": 3,
+              "hold_frames": 2,
+              "min_containment": 0.35
+            }
+          },
+          "fall": {
+            "camera_revision_id": null,
+            "effective_policy_id": "b512b6b0210a450201b525b7cf6a66d86edf58345125ec4d237acf5566b0721a",
+            "facility_revision_id": null,
+            "module_id": "fall",
+            "module_version": 2,
+            "schema_id": "fall.policy",
+            "schema_version": 2,
+            "source": "image-default",
+            "values": {
+              "transition_threshold": 0.5
+            }
+          }
+        },
+        "schema_version": 1
+      },
+      "inject": "nan",
+      "name": "refuse-non-finite-nan"
+    },
+    {
+      "accepted": false,
+      "bundle": {
+        "cameras": {
+          "cam-a": {
+            "bed_exit": {
+              "camera_revision_id": null,
+              "effective_policy_id": "cebc0c26c8859e38dc122f73d09787eeae9376a4395cd1fdb1fc6f949806f473",
+              "facility_revision_id": null,
+              "module_id": "bed_exit",
+              "module_version": 1,
+              "schema_id": "bed_exit.policy",
+              "schema_version": 1,
+              "source": "image-default",
+              "values": {
+                "grace_frames": 3,
+                "hold_frames": 2,
+                "min_containment": 0.35
+              }
+            },
+            "fall": {
+              "camera_revision_id": null,
+              "effective_policy_id": "b512b6b0210a450201b525b7cf6a66d86edf58345125ec4d237acf5566b0721a",
+              "facility_revision_id": null,
+              "module_id": "fall",
+              "module_version": 2,
+              "schema_id": "fall.policy",
+              "schema_version": 2,
+              "source": "image-default",
+              "values": {
+                "transition_threshold": 0.5
+              }
+            }
+          }
+        },
+        "defaults": {
+          "bed_exit": {
+            "camera_revision_id": null,
+            "effective_policy_id": "cebc0c26c8859e38dc122f73d09787eeae9376a4395cd1fdb1fc6f949806f473",
+            "facility_revision_id": null,
+            "module_id": "bed_exit",
+            "module_version": 1,
+            "schema_id": "bed_exit.policy",
+            "schema_version": 1,
+            "source": "image-default",
+            "values": {
+              "grace_frames": 3,
+              "hold_frames": 2,
+              "min_containment": 0.35
+            }
+          },
+          "fall": {
+            "camera_revision_id": null,
+            "effective_policy_id": "b512b6b0210a450201b525b7cf6a66d86edf58345125ec4d237acf5566b0721a",
+            "facility_revision_id": null,
+            "module_id": "fall",
+            "module_version": 2,
+            "schema_id": "fall.policy",
+            "schema_version": 2,
+            "source": "image-default",
+            "values": {
+              "transition_threshold": true
+            }
+          }
+        },
+        "schema_version": 1
+      },
+      "inject": null,
+      "name": "refuse-bool-threshold"
+    },
+    {
+      "accepted": false,
+      "bundle": {
+        "cameras": {
+          "cam-a": {
+            "bed_exit": {
+              "camera_revision_id": null,
+              "effective_policy_id": "cebc0c26c8859e38dc122f73d09787eeae9376a4395cd1fdb1fc6f949806f473",
+              "facility_revision_id": null,
+              "module_id": "bed_exit",
+              "module_version": 1,
+              "schema_id": "bed_exit.policy",
+              "schema_version": 1,
+              "source": "image-default",
+              "values": {
+                "grace_frames": 3,
+                "hold_frames": 2,
+                "min_containment": 0.35
+              }
+            },
+            "fall": {
+              "camera_revision_id": null,
+              "effective_policy_id": "b512b6b0210a450201b525b7cf6a66d86edf58345125ec4d237acf5566b0721a",
+              "facility_revision_id": null,
+              "module_id": "fall",
+              "module_version": 2,
+              "schema_id": "fall.policy",
+              "schema_version": 2,
+              "source": "image-default",
+              "values": {
+                "transition_threshold": 0.5
+              }
+            }
+          }
+        },
+        "defaults": {
+          "bed_exit": {
+            "camera_revision_id": null,
+            "effective_policy_id": "cebc0c26c8859e38dc122f73d09787eeae9376a4395cd1fdb1fc6f949806f473",
+            "facility_revision_id": null,
+            "module_id": "bed_exit",
+            "module_version": 1,
+            "schema_id": "bed_exit.policy",
+            "schema_version": 1,
+            "source": "image-default",
+            "values": {
+              "grace_frames": 3,
+              "hold_frames": 5.0,
+              "min_containment": 0.35
+            }
+          },
+          "fall": {
+            "camera_revision_id": null,
+            "effective_policy_id": "b512b6b0210a450201b525b7cf6a66d86edf58345125ec4d237acf5566b0721a",
+            "facility_revision_id": null,
+            "module_id": "fall",
+            "module_version": 2,
+            "schema_id": "fall.policy",
+            "schema_version": 2,
+            "source": "image-default",
+            "values": {
+              "transition_threshold": 0.5
+            }
+          }
+        },
+        "schema_version": 1
+      },
+      "inject": null,
+      "name": "refuse-float-hold-frames"
+    },
+    {
+      "accepted": false,
+      "bundle": {
+        "cameras": {
+          "cam-a": {
+            "bed_exit": {
+              "camera_revision_id": null,
+              "effective_policy_id": "cebc0c26c8859e38dc122f73d09787eeae9376a4395cd1fdb1fc6f949806f473",
+              "facility_revision_id": null,
+              "module_id": "bed_exit",
+              "module_version": 1,
+              "schema_id": "bed_exit.policy",
+              "schema_version": 1,
+              "source": "image-default",
+              "values": {
+                "grace_frames": 3,
+                "hold_frames": 2,
+                "min_containment": 0.35
+              }
+            },
+            "fall": {
+              "camera_revision_id": null,
+              "effective_policy_id": "b512b6b0210a450201b525b7cf6a66d86edf58345125ec4d237acf5566b0721a",
+              "facility_revision_id": null,
+              "module_id": "fall",
+              "module_version": 2,
+              "schema_id": "fall.policy",
+              "schema_version": 2,
+              "source": "image-default",
+              "values": {
+                "transition_threshold": 0.5
+              }
+            }
+          }
+        },
+        "defaults": {
+          "bed_exit": {
+            "camera_revision_id": null,
+            "effective_policy_id": "cebc0c26c8859e38dc122f73d09787eeae9376a4395cd1fdb1fc6f949806f473",
+            "facility_revision_id": null,
+            "module_id": "bed_exit",
+            "module_version": 1,
+            "schema_id": "bed_exit.policy",
+            "schema_version": 1,
+            "source": "image-default",
+            "values": {
+              "grace_frames": 3,
+              "hold_frames": 2,
+              "min_containment": 0.35
+            }
+          },
+          "fall": {
+            "camera_revision_id": null,
+            "effective_policy_id": "b512b6b0210a450201b525b7cf6a66d86edf58345125ec4d237acf5566b0721a",
+            "facility_revision_id": null,
+            "module_id": "fall",
+            "module_version": 2,
+            "schema_id": "fall.policy",
+            "schema_version": 2,
+            "source": "image-default",
+            "values": {
+              "transition_threshold": 1.5
+            }
+          }
+        },
+        "schema_version": 1
+      },
+      "inject": null,
+      "name": "refuse-threshold-out-of-range"
+    },
+    {
+      "accepted": false,
+      "bundle": {
+        "cameras": {
+          "cam-a": {
+            "bed_exit": {
+              "camera_revision_id": null,
+              "effective_policy_id": "cebc0c26c8859e38dc122f73d09787eeae9376a4395cd1fdb1fc6f949806f473",
+              "facility_revision_id": null,
+              "module_id": "bed_exit",
+              "module_version": 1,
+              "schema_id": "bed_exit.policy",
+              "schema_version": 1,
+              "source": "image-default",
+              "values": {
+                "grace_frames": 3,
+                "hold_frames": 2,
+                "min_containment": 0.35
+              }
+            },
+            "fall": {
+              "camera_revision_id": null,
+              "effective_policy_id": "b512b6b0210a450201b525b7cf6a66d86edf58345125ec4d237acf5566b0721a",
+              "facility_revision_id": null,
+              "module_id": "fall",
+              "module_version": 2,
+              "schema_id": "fall.policy",
+              "schema_version": 2,
+              "source": "image-default",
+              "values": {
+                "transition_threshold": 0.5
+              }
+            }
+          }
+        },
+        "defaults": {
+          "bed_exit": {
+            "camera_revision_id": null,
+            "effective_policy_id": "cebc0c26c8859e38dc122f73d09787eeae9376a4395cd1fdb1fc6f949806f473",
+            "facility_revision_id": null,
+            "module_id": "bed_exit",
+            "module_version": 1,
+            "schema_id": "bed_exit.policy",
+            "schema_version": 1,
+            "source": "image-default",
+            "values": {
+              "grace_frames": 3,
+              "hold_frames": 2,
+              "min_containment": 0.35
+            }
+          },
+          "fall": {
+            "camera_revision_id": null,
+            "effective_policy_id": "0000000000000000000000000000000000000000000000000000000000000000",
+            "facility_revision_id": null,
+            "module_id": "fall",
+            "module_version": 2,
+            "schema_id": "fall.policy",
+            "schema_version": 2,
+            "source": "image-default",
+            "values": {
+              "transition_threshold": 0.5
+            }
+          }
+        },
+        "schema_version": 1
+      },
+      "inject": null,
+      "name": "refuse-identity-mismatch"
+    },
+    {
+      "accepted": false,
+      "bundle": {
+        "cameras": {
+          "cam-a": {
+            "bed_exit": {
+              "camera_revision_id": null,
+              "effective_policy_id": "cebc0c26c8859e38dc122f73d09787eeae9376a4395cd1fdb1fc6f949806f473",
+              "facility_revision_id": null,
+              "module_id": "bed_exit",
+              "module_version": 1,
+              "schema_id": "bed_exit.policy",
+              "schema_version": 1,
+              "source": "image-default",
+              "values": {
+                "grace_frames": 3,
+                "hold_frames": 2,
+                "min_containment": 0.35
+              }
+            },
+            "fall": {
+              "camera_revision_id": null,
+              "effective_policy_id": "b512b6b0210a450201b525b7cf6a66d86edf58345125ec4d237acf5566b0721a",
+              "facility_revision_id": null,
+              "module_id": "fall",
+              "module_version": 2,
+              "schema_id": "fall.policy",
+              "schema_version": 2,
+              "source": "image-default",
+              "values": {
+                "transition_threshold": 0.5
+              }
+            }
+          }
+        },
+        "defaults": {
+          "bed_exit": {
+            "camera_revision_id": null,
+            "effective_policy_id": "cebc0c26c8859e38dc122f73d09787eeae9376a4395cd1fdb1fc6f949806f473",
+            "facility_revision_id": null,
+            "module_id": "bed_exit",
+            "module_version": 1,
+            "schema_id": "bed_exit.policy",
+            "schema_version": 1,
+            "source": "image-default",
+            "values": {
+              "grace_frames": 3,
+              "hold_frames": 2,
+              "min_containment": 0.35
+            }
+          },
+          "fall": {
+            "camera_revision_id": null,
+            "effective_policy_id": "b512b6b0210a450201b525b7cf6a66d86edf58345125ec4d237acf5566b0721a",
+            "facility_revision_id": null,
+            "module_id": "fall",
+            "module_version": 1,
+            "schema_id": "fall.policy",
+            "schema_version": 2,
+            "source": "image-default",
+            "values": {
+              "transition_threshold": 0.5
+            }
+          }
+        },
+        "schema_version": 1
+      },
+      "inject": null,
+      "name": "refuse-module-version-drift"
+    },
+    {
+      "accepted": false,
+      "bundle": {
+        "cameras": {
+          "cam-a": {
+            "bed_exit": {
+              "camera_revision_id": null,
+              "effective_policy_id": "cebc0c26c8859e38dc122f73d09787eeae9376a4395cd1fdb1fc6f949806f473",
+              "facility_revision_id": null,
+              "module_id": "bed_exit",
+              "module_version": 1,
+              "schema_id": "bed_exit.policy",
+              "schema_version": 1,
+              "source": "image-default",
+              "values": {
+                "grace_frames": 3,
+                "hold_frames": 2,
+                "min_containment": 0.35
+              }
+            },
+            "fall": {
+              "camera_revision_id": null,
+              "effective_policy_id": "b512b6b0210a450201b525b7cf6a66d86edf58345125ec4d237acf5566b0721a",
+              "facility_revision_id": null,
+              "module_id": "fall",
+              "module_version": 2,
+              "schema_id": "fall.policy",
+              "schema_version": 2,
+              "source": "image-default",
+              "values": {
+                "transition_threshold": 0.5
+              }
+            }
+          }
+        },
+        "defaults": {
+          "bed_exit": {
+            "camera_revision_id": null,
+            "effective_policy_id": "cebc0c26c8859e38dc122f73d09787eeae9376a4395cd1fdb1fc6f949806f473",
+            "facility_revision_id": null,
+            "module_id": "bed_exit",
+            "module_version": 1,
+            "schema_id": "bed_exit.policy",
+            "schema_version": 1,
+            "source": "image-default",
+            "values": {
+              "grace_frames": 3,
+              "hold_frames": 2,
+              "min_containment": 0.35
+            }
+          },
+          "fall": {
+            "camera_revision_id": null,
+            "effective_policy_id": "b512b6b0210a450201b525b7cf6a66d86edf58345125ec4d237acf5566b0721a",
+            "facility_revision_id": null,
+            "module_id": "fall",
+            "module_version": 2,
+            "schema_id": "fall.policy",
+            "schema_version": 2,
+            "source": "manual",
+            "values": {
+              "transition_threshold": 0.5
+            }
+          }
+        },
+        "schema_version": 1
+      },
+      "inject": null,
+      "name": "refuse-unknown-source"
+    },
+    {
+      "accepted": false,
+      "bundle": {
+        "cameras": {
+          "cam-a": {
+            "bed_exit": {
+              "camera_revision_id": null,
+              "effective_policy_id": "cebc0c26c8859e38dc122f73d09787eeae9376a4395cd1fdb1fc6f949806f473",
+              "facility_revision_id": null,
+              "module_id": "bed_exit",
+              "module_version": 1,
+              "schema_id": "bed_exit.policy",
+              "schema_version": 1,
+              "source": "image-default",
+              "values": {
+                "grace_frames": 3,
+                "hold_frames": 2,
+                "min_containment": 0.35
+              }
+            },
+            "fall": {
+              "camera_revision_id": null,
+              "effective_policy_id": "b512b6b0210a450201b525b7cf6a66d86edf58345125ec4d237acf5566b0721a",
+              "facility_revision_id": null,
+              "module_id": "fall",
+              "module_version": 2,
+              "schema_id": "fall.policy",
+              "schema_version": 2,
+              "source": "image-default",
+              "values": {
+                "transition_threshold": 0.5
+              }
+            }
+          }
+        },
+        "defaults": {
+          "bed_exit": {
+            "camera_revision_id": null,
+            "effective_policy_id": "cebc0c26c8859e38dc122f73d09787eeae9376a4395cd1fdb1fc6f949806f473",
+            "facility_revision_id": null,
+            "module_id": "bed_exit",
+            "module_version": 1,
+            "schema_id": "bed_exit.policy",
+            "schema_version": 1,
+            "source": "image-default",
+            "values": {
+              "grace_frames": 3,
+              "hold_frames": 2,
+              "min_containment": 0.35
+            }
+          },
+          "fall": {
+            "camera_revision_id": null,
+            "effective_policy_id": "b512b6b0210a450201b525b7cf6a66d86edf58345125ec4d237acf5566b0721a",
+            "facility_revision_id": 1,
+            "module_id": "fall",
+            "module_version": 2,
+            "schema_id": "fall.policy",
+            "schema_version": 2,
+            "source": "image-default",
+            "values": {
+              "transition_threshold": 0.5
+            }
+          }
+        },
+        "schema_version": 1
+      },
+      "inject": null,
+      "name": "refuse-image-default-with-revision"
+    },
+    {
+      "accepted": false,
+      "bundle": {
+        "cameras": {
+          "cam-a": {
+            "bed_exit": {
+              "camera_revision_id": null,
+              "effective_policy_id": "cebc0c26c8859e38dc122f73d09787eeae9376a4395cd1fdb1fc6f949806f473",
+              "facility_revision_id": null,
+              "module_id": "bed_exit",
+              "module_version": 1,
+              "schema_id": "bed_exit.policy",
+              "schema_version": 1,
+              "source": "image-default",
+              "values": {
+                "grace_frames": 3,
+                "hold_frames": 2,
+                "min_containment": 0.35
+              }
+            },
+            "fall": {
+              "camera_revision_id": 0,
+              "effective_policy_id": "b512b6b0210a450201b525b7cf6a66d86edf58345125ec4d237acf5566b0721a",
+              "facility_revision_id": null,
+              "module_id": "fall",
+              "module_version": 2,
+              "schema_id": "fall.policy",
+              "schema_version": 2,
+              "source": "image-default",
+              "values": {
+                "transition_threshold": 0.5
+              }
+            }
+          }
+        },
+        "defaults": {
+          "bed_exit": {
+            "camera_revision_id": null,
+            "effective_policy_id": "cebc0c26c8859e38dc122f73d09787eeae9376a4395cd1fdb1fc6f949806f473",
+            "facility_revision_id": null,
+            "module_id": "bed_exit",
+            "module_version": 1,
+            "schema_id": "bed_exit.policy",
+            "schema_version": 1,
+            "source": "image-default",
+            "values": {
+              "grace_frames": 3,
+              "hold_frames": 2,
+              "min_containment": 0.35
+            }
+          },
+          "fall": {
+            "camera_revision_id": null,
+            "effective_policy_id": "b512b6b0210a450201b525b7cf6a66d86edf58345125ec4d237acf5566b0721a",
+            "facility_revision_id": null,
+            "module_id": "fall",
+            "module_version": 2,
+            "schema_id": "fall.policy",
+            "schema_version": 2,
+            "source": "image-default",
+            "values": {
+              "transition_threshold": 0.5
+            }
+          }
+        },
+        "schema_version": 1
+      },
+      "inject": null,
+      "name": "refuse-revision-zero"
+    },
+    {
+      "accepted": false,
+      "bundle": [],
+      "inject": null,
+      "name": "refuse-bundle-not-object"
+    }
+  ],
+  "inject_path": [
+    "defaults",
+    "fall",
+    "values",
+    "transition_threshold"
+  ],
+  "provenance": "synthetic-only",
+  "recipe": {
+    "accepted": "base; cam-b via with_camera(camera-override fall 0.7 rev 2/3, facility-default bed_exit 0.5/10/5 rev 2); no cameras; fall threshold sent as integer 1 with the oracle identity over 1.0",
+    "base": "default_policy_bundle(['cam-a']).as_dict()",
+    "refused": "one mutation of a deep copy of base per case, named by the case"
+  },
+  "recorder_sha256": "05721277afec968dceb8cb97b6b17661ad9c19f18a75b6c6972aea5760719f53",
+  "repo_head": "0d280d5235a4b933270e846d6b4c8fbfe8e2780b",
+  "review": {
+    "independent_oracle": [
+      "shared/detection_policies.py @030aaf1",
+      "worker/runtime/config/pull_models.py @030aaf1"
+    ],
+    "note": "Each case is one detection_policies value of a worker-config response. accepted is parse_policy_bundle's verdict (refused means PolicyDocumentError, so pull_models raises WorkerConfigError, keeps the LKG and the poll yields nothing). canonical_json is _canonical_json(parsed.as_dict()) and content_sha256 its sha256. inject names a non-finite float ('inf' or 'nan') placed at inject_path in memory before the oracle runs: JSON text cannot carry it with allow_nan=False, and the Rust parse_json refuses NaN/Infinity text earlier."
+  },
+  "schema": "seeon-worker-wire/policy-bundles/v1"
+}

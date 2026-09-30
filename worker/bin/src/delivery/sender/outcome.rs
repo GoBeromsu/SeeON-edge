@@ -31,8 +31,6 @@ impl From<MediaEntryError> for InvalidEntry {
 pub enum EntryOutcome {
     /// The relay acknowledged (2xx, or 409 with a matching receipt); removed.
     Acknowledged,
-    /// A snapshot entry of an accepted_local event: removed with no request.
-    SkippedAcceptedLocal,
     /// Moved to the dead-letter directory under `status`.
     DeadLettered { status: u16 },
     /// Dead-lettering failed or retention is full; the entry stays.
@@ -54,7 +52,7 @@ pub enum EntryOutcome {
 
 impl EntryOutcome {
     pub fn is_acknowledged(&self) -> bool {
-        matches!(self, Self::Acknowledged | Self::SkippedAcceptedLocal)
+        matches!(self, Self::Acknowledged)
     }
 }
 

@@ -1,5 +1,5 @@
 {
-  "accepted_local_rule": "status=accepted_local yields event_id=\"\"; shared/events/edge_ingest_client.py skips the snapshot PUT when event_id is empty (d3)",
+  "accepted_local_rule": "relay-to-Hub hop only: when the Hub answers status=accepted_local (event_id=\"\"), shared/events/edge_ingest_client.py:137-142 skips the Hub snapshot PUT. The worker-to-relay hop has no such rule: shared/events/evidence_export_client.py:282-316 POSTs both snapshot kinds (snapshot-attachments, snapshot-dispositions) to the relay whatever the event status (d3)",
   "authored": "hand-authored rows; every result computed by the real Python parser",
   "clock_injection": "shared.events.evidence_http_transport.datetime patched so datetime.now(UTC) returns injected_now_utc",
   "injected_now_utc": "2026-09-29T12:00:00+00:00",

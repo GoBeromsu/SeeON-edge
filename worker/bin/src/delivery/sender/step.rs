@@ -12,7 +12,7 @@ use crate::delivery::snapshot;
 use crate::delivery::{DeliveryQueue, EntryKind};
 use crate::relay::RelayClient;
 use crate::relay::wire::{
-    DeliveryDisposition, DeliveryFailure, DeliveryFailureCode, EventStatus, parse_clip_result,
+    DeliveryDisposition, DeliveryFailure, DeliveryFailureCode, parse_clip_result,
     parse_event_result,
 };
 use crate::seam::Clock;
@@ -24,8 +24,8 @@ pub(super) struct Pass<'a> {
     pub(super) clip_export_enabled: bool,
 }
 
-/// A relay acknowledgement; `Some(edge_event_id)` when it was accepted_local.
-type Sent = Result<Option<String>, DeliveryFailure>;
+/// A relay acknowledgement, or the failure that replaced it.
+type Sent = Result<(), DeliveryFailure>;
 
 impl Pass<'_> {
     pub(super) fn step(&self, state: &mut SenderState, entry: &Value, id: &str) -> EntryOutcome {
@@ -43,24 +43,15 @@ impl Pass<'_> {
         let Some(kind) = kind else {
             return invalid(state, id, InvalidEntry::UnknownKind);
         };
-        let snapshot = matches!(
-            kind,
-            EntryKind::SnapshotAttachment | EntryKind::SnapshotDisposition
-        );
-        let event = entry.get("edge_event_id").and_then(Value::as_str);
-        if snapshot && event.is_some_and(|event| state.is_accepted_local(event)) {
-            state.forget_attempts(id);
-            return self.acknowledge(state, id, EntryOutcome::SkippedAcceptedLocal);
-        }
+        // Snapshot entries are sent whatever the relay answered for their
+        // event (accepted or accepted_local), as Python `_send` does
+        // (`evidence_export_client.py` L282-316).
         match self.send(kind, entry) {
             Err(reason) => invalid(state, id, reason),
             Ok(Err(failure)) => self.fail(state, id, kind, failure),
-            Ok(Ok(accepted_local)) => {
-                if let Some(edge_event_id) = accepted_local {
-                    state.record_accepted_local(&edge_event_id);
-                }
+            Ok(Ok(())) => {
                 state.forget_attempts(id);
-                self.acknowledge(state, id, EntryOutcome::Acknowledged)
+                self.acknowledge(state, id)
             }
         }
     }
@@ -77,10 +68,7 @@ impl Pass<'_> {
                         .ok_or(BodyError::WrongType("edge_event_id"))?,
                 };
                 let result = self.client.post_alert(&body).map_err(DeliveryFailure::from);
-                let receipt = parse_event_result(result, edge_event_id, self.clock);
-                Ok(receipt.map(|receipt| {
-                    (receipt.status == EventStatus::AcceptedLocal).then_some(receipt.edge_event_id)
-                }))
+                Ok(parse_event_result(result, edge_event_id, self.clock).map(|_| ()))
             }
             EntryKind::Clip => {
                 let request = match clip_request(entry) {
@@ -96,10 +84,10 @@ impl Pass<'_> {
                     .map_err(DeliveryFailure::from);
                 let receipt =
                     parse_clip_result(result, &request.clip_id, request.state_version, self.clock);
-                Ok(receipt.map(|_| None))
+                Ok(receipt.map(|_| ()))
             }
             EntryKind::SnapshotAttachment | EntryKind::SnapshotDisposition => {
-                Ok(snapshot::send_media(self.client, kind, entry, self.clock)?.map(|()| None))
+                Ok(snapshot::send_media(self.client, kind, entry, self.clock)?)
             }
         }
     }
@@ -150,26 +138,37 @@ impl Pass<'_> {
                 state.undefer(id);
                 EntryOutcome::DeadLettered { status }
             }
-            Ok(false) | Err(_) => {
+            Ok(false) => {
+                eprintln!(
+                    "ml-worker: queue entry {id} was not dead-lettered under status {status}: \
+                     it is missing or the retention area is full; it stays queued"
+                );
+                state.defer(id);
+                EntryOutcome::RetentionFull { status }
+            }
+            Err(error) => {
+                eprintln!(
+                    "ml-worker: queue entry {id} could not be dead-lettered under status \
+                     {status}: {error}; it stays queued"
+                );
                 state.defer(id);
                 EntryOutcome::RetentionFull { status }
             }
         }
     }
 
-    fn acknowledge(
-        &self,
-        state: &mut SenderState,
-        id: &str,
-        outcome: EntryOutcome,
-    ) -> EntryOutcome {
+    fn acknowledge(&self, state: &mut SenderState, id: &str) -> EntryOutcome {
         match self.queue.acknowledge(id) {
             Ok(_) => {
                 state.undefer(id);
                 state.unblock(id);
-                outcome
+                EntryOutcome::Acknowledged
             }
-            Err(_) => {
+            Err(error) => {
+                eprintln!(
+                    "ml-worker: queue entry {id} was acknowledged by the relay but could not \
+                     be removed: {error}; it stays queued"
+                );
                 state.defer(id);
                 EntryOutcome::AckRemovalFailed
             }

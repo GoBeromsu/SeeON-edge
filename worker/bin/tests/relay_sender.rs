@@ -1,7 +1,7 @@
 //! T9 and T16: one drain of the Python-written queue against a loopback
-//! relay, the capabilities probe, the 422 dead-letter, the accepted_local
-//! snapshot skip and the mapping of the Python sender's per-entry
-//! exceptions to typed refusals.
+//! relay, the capabilities probe, the 422 dead-letter, the snapshot requests
+//! that still follow an accepted_local alert and the mapping of the Python
+//! sender's per-entry exceptions to typed refusals.
 //!
 //! Oracles: the Python-recorded goldens under `r/`, their manifest
 //! `transport` entries, the reviewed rows of `r/relay-dispositions.json`,
@@ -425,6 +425,10 @@ fn golden_path(golden: &str) -> String {
 }
 
 /// The reviewed relay answer `name` of `r/relay-dispositions.json`.
+///
+/// Only the relay's HTTP answer is used. A row's `follow_up_requests`
+/// describe the relay-to-Hub hop (`shared/events/edge_ingest_client.py`),
+/// not the worker-to-relay hop under test, and are not asserted.
 fn disposition_reply(name: &str) -> (u16, Vec<u8>) {
     let dispositions = read_json(DISPOSITIONS);
     let row = dispositions["rows"]
@@ -665,48 +669,89 @@ fn status_422_dead_letters_python_file() {
 }
 
 #[test]
-fn accepted_local_skips_snapshot_requests() {
-    let files = [EVENT_FILE, ATTACHMENT_FILE, DISPOSITION_FILE];
-    let staged: Vec<(&str, Vec<u8>)> = files
-        .iter()
-        .map(|file| (*file, fixture_bytes(file)))
-        .collect();
-    let ids: Vec<String> = staged
-        .iter()
-        .map(|(_, bytes)| entry_id(&serde_json::from_slice(bytes).expect("entry JSON")))
-        .collect();
-    let (_root, queue) = staged_queue("accepted-local", &staged);
-    let relay = Relay::start(relay_route(disposition_reply("accepted-local-no-put")));
+fn snapshot_422_with_mapping_code_dead_letters() {
+    // Python `_parse_relay_acceptance` (`evidence_export_client.py` L447-457)
+    // classifies a refused snapshot POST from its status and headers only, so
+    // a `CAMERA_MAPPING_MISSING` body does not make a 422 retryable. The sender
+    // (`evidence_sender.py` L331-340) then retains the entry as
+    // `<status>.<ordinal>.<original>` (`delivery_queue.py` L417-424).
+    let attachment = fixture_bytes(ATTACHMENT_FILE);
+    let id = entry_id(&serde_json::from_slice(&attachment).expect("attachment JSON"));
+    let (root, queue) = staged_queue("snapshot-422", &[(ATTACHMENT_FILE, attachment.clone())]);
+    let snapshot = golden_path(SNAPSHOT_ATTACHMENT);
+    let relay = Relay::start(Box::new(move |request: &Recorded| {
+        if request_path(request) == snapshot {
+            return (
+                422,
+                br#"{"detail":{"code":"CAMERA_MAPPING_MISSING"}}"#.to_vec(),
+            );
+        }
+        (404, b"{}".to_vec())
+    }));
     let mut state = SenderState::new();
 
     let summary = drain_pass(&queue, &relay.client(), &mut state, &FixedClock, true);
     let requests = relay.stop();
 
-    let snapshot_paths = [
-        golden_path(SNAPSHOT_ATTACHMENT),
-        golden_path(SNAPSHOT_DISPOSITION),
-    ];
-    let snapshot_requests = requests
+    assert_eq!(requests.len(), 1, "one snapshot attachment POST");
+    assert_eq!(
+        summary.outcomes,
+        vec![(id, EntryOutcome::DeadLettered { status: 422 })]
+    );
+    assert_eq!(queue.entries().expect("queue listing"), Vec::<Value>::new());
+    assert_eq!(
+        files_by_name(&root.join("queue-dead-letter")),
+        BTreeMap::from([(format!("422.0.{ATTACHMENT_FILE}"), attachment)])
+    );
+}
+
+#[test]
+fn accepted_local_alert_still_posts_both_snapshots() {
+    // Python `evidence_export_client.py` L282-316 sends every snapshot
+    // entry whatever the relay answered for its alert.
+    let files = [EVENT_FILE, ATTACHMENT_FILE, DISPOSITION_FILE];
+    let staged: Vec<(&str, Vec<u8>)> = files
         .iter()
-        .filter(|request| {
-            snapshot_paths
-                .iter()
-                .any(|path| path == request_path(request))
-        })
-        .count();
-    assert_eq!(snapshot_requests, 0, "no snapshot request is sent");
-    let sent: Vec<(&str, &str)> = requests
-        .iter()
-        .map(|request| (request.method.as_str(), request_path(request)))
+        .map(|file| (*file, fixture_bytes(file)))
         .collect();
-    assert_eq!(sent, vec![("POST", golden_path(ALERT).as_str())]);
+    let entries: Vec<Value> = staged
+        .iter()
+        .map(|(_, bytes)| serde_json::from_slice(bytes).expect("entry JSON"))
+        .collect();
+    let (_root, queue) = staged_queue("accepted-local", &staged);
+    let relay = Relay::start(relay_route(disposition_reply("accepted-local-no-put")));
+    let client = relay.client();
+    let mut state = SenderState::new();
+
+    let summary = drain_pass(&queue, &client, &mut state, &FixedClock, true);
+    let requests = relay.stop();
+
+    assert_eq!(requests.len(), 3, "the alert and both snapshot requests");
+    for golden in [ALERT, SNAPSHOT_ATTACHMENT, SNAPSHOT_DISPOSITION] {
+        let expected = manifest_transport(golden);
+        let matching: Vec<&Recorded> = requests
+            .iter()
+            .filter(|request| {
+                expected["method"] == request.method.as_str()
+                    && expected["path"] == request_path(request)
+            })
+            .collect();
+        assert_eq!(matching.len(), 1, "{golden} is requested once");
+        let request = matching[0];
+        assert_eq!(request_body(request), read_json(golden), "{golden} body");
+        assert_eq!(
+            without_body_sha(transport_record(request, client.timeout())),
+            without_body_sha(expected),
+            "{golden} transport"
+        );
+    }
     let outcomes: BTreeMap<String, EntryOutcome> = summary.outcomes.into_iter().collect();
-    let expected = BTreeMap::from([
-        (ids[0].clone(), EntryOutcome::Acknowledged),
-        (ids[1].clone(), EntryOutcome::SkippedAcceptedLocal),
-        (ids[2].clone(), EntryOutcome::SkippedAcceptedLocal),
-    ]);
-    assert_eq!(outcomes, expected);
+    let acknowledged: BTreeMap<String, EntryOutcome> = entries
+        .iter()
+        .map(|entry| (entry_id(entry), EntryOutcome::Acknowledged))
+        .collect();
+    assert_eq!(outcomes, acknowledged);
+    assert!(matches!(summary.stop, DrainStop::Idle));
     assert_eq!(queue.entries().expect("queue listing"), Vec::<Value>::new());
 }
 

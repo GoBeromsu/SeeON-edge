@@ -106,7 +106,8 @@
     "r/execution-records.model-evidence.response.json": "d917a674f303916906e5af92c6677b83dfd5510baff066d9f57bc10d02108c88",
     "r/execution-records.response.json": "93ae1c96fcf8122f153cbbbc7075c232900b6ee882ba1f6cfc9e1b7352c4137c",
     "r/heartbeat.json": "6eaed7e2ca16b70cfa79018918bb2e2f1fc4c670ebd318f1bc0218381104acdc",
-    "r/relay-dispositions.json": "1cee08a4b2821fe7200352f69aa4d5054bdb0ab66f34648acf3c16a67acf3833",
+    "r/policy-bundles.json": "4991d53789f299ceebb12651603693b8fa255bf9d98c57ccda521e923749b16f",
+    "r/relay-dispositions.json": "e8e1d6c43f5a3dbaa1b9fdf30ce90aafa315f417440436a711c47d1f190681ed",
     "r/release-identity.response.json": "d53ca3a3091ad0aaf95da0272fd7915a365cbaf2af793146403b5bb6898392b3",
     "r/runtime-status-boot-failure.json": "2f91f86b6ca49256ac2959ccca21111a2fc689e9eaacc9d87f02151ac56b1925",
     "r/runtime-status-steady.json": "d34d6bd972437cca37e0cb41a3f1548425573029c47500e80d587f7323930580",
@@ -1972,6 +1973,23 @@
       "wire_class": "R"
     },
     {
+      "authored": "synthetic-oracle-cases",
+      "authored_reason": "the Hub sends detection_policies only when a facility or camera policy exists; no in-repo producer emits malformed bundles, so the cases are built from the oracle's default bundle and each verdict is the oracle's",
+      "compare": "json-value",
+      "consumer": "worker/runtime/config/pull_models.py:resolved_detection_policies",
+      "input": "22 synthetic bundles, camera ids cam-a and cam-b only",
+      "lane": "s3a1fix",
+      "normalised": [],
+      "parsed_by_worker": "relay::cameras::policies::parse_policy_bundle",
+      "path": "r/policy-bundles.json",
+      "producer": "shared/detection_policies.py:parse_policy_bundle (verdict); shared/detection_policies.py:_canonical_json (canonical_json)",
+      "rows": [
+        3
+      ],
+      "sha256": "4991d53789f299ceebb12651603693b8fa255bf9d98c57ccda521e923749b16f",
+      "size_bytes": 55202
+    },
+    {
       "authored": "hand-authored-rows",
       "backend_parser": "n/a (worker-side response classification)",
       "compare": "json-value",
@@ -1984,8 +2002,8 @@
         10,
         23
       ],
-      "sha256": "1cee08a4b2821fe7200352f69aa4d5054bdb0ab66f34648acf3c16a67acf3833",
-      "size_bytes": 11734,
+      "sha256": "e8e1d6c43f5a3dbaa1b9fdf30ce90aafa315f417440436a711c47d1f190681ed",
+      "size_bytes": 11964,
       "wire_class": "R"
     },
     {
@@ -2369,6 +2387,34 @@
       "recorder_sha256": "72cc0255a9304790febcdd6ca86c133938781d76a9c18360117e010a83cb1f50",
       "repo_head": "145637c",
       "schema": "seeon-worker-wire-goldens/v1 fragment (stage 2 B fix, lane s2bfix)"
+    },
+    "s3a1fix": {
+      "fixed_inputs": {
+        "camera_ids": [
+          "cam-a",
+          "cam-b"
+        ],
+        "inject_path": [
+          "defaults",
+          "fall",
+          "values",
+          "transition_threshold"
+        ],
+        "revisions": {
+          "camera_revision_id": 3,
+          "facility_revision_id": 2
+        }
+      },
+      "oracle_sources_sha256": {
+        "shared/detection_policies.py": "6fa6a49832e0aa63da7905bd6d4ebe512ff152999335af32433403649470389c",
+        "worker/runtime/config/pull_models.py": "0cb784825ee78b286c4c7f902a24de9f133b1762304dab545c779f55c1989653"
+      },
+      "packages": {},
+      "python": "3.12.3",
+      "recorder": "record_policy_bundles.py (kept outside the repo; see recorder_sha256)",
+      "recorder_sha256": "05721277afec968dceb8cb97b6b17661ad9c19f18a75b6c6972aea5760719f53",
+      "repo_head": "0d280d5235a4b933270e846d6b4c8fbfe8e2780b",
+      "schema": "seeon-worker-wire-goldens/v1 fragment (stage 3 A1 fix, lane s3a1fix)"
     }
   },
   "lock_files_excluded": [],
@@ -2658,6 +2704,7 @@
       "goldens": [
         "d/config-lkg/current.json",
         "d/config-lkg/revisions/00000000000000000002-00000000000000000007-00000000000000000005.json",
+        "r/policy-bundles.json",
         "r/release-identity.response.json",
         "r/worker-config.response.json"
       ]

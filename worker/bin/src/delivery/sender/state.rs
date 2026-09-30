@@ -1,13 +1,10 @@
 //! In-memory sender bookkeeping: Python `EvidenceSender`'s `_attempts`,
-//! `_deferred`, `_blocked_until` and `_select`, plus the accepted_local
-//! event ids whose snapshot requests are skipped.
+//! `_deferred`, `_blocked_until` and `_select`.
 
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{HashMap, HashSet};
 use std::time::Duration;
 
 use serde_json::Value;
-
-use crate::delivery::MAX_ACCEPTED_ENTRIES;
 
 /// Python `MAX_ENTRY_ATTEMPTS`: counted attempts before an entry is retired.
 pub const MAX_ENTRY_ATTEMPTS: u32 = 10;
@@ -18,8 +15,6 @@ pub struct SenderState {
     attempts: HashMap<String, u32>,
     deferred: HashSet<String>,
     blocked_until: HashMap<String, Duration>,
-    accepted_local: HashSet<String>,
-    accepted_local_order: VecDeque<String>,
 }
 
 impl SenderState {
@@ -39,11 +34,6 @@ impl SenderState {
     /// Monotonic instant before which `entry_id` is not selected.
     pub fn blocked_until(&self, entry_id: &str) -> Option<Duration> {
         self.blocked_until.get(entry_id).copied()
-    }
-
-    /// True when the relay answered `accepted_local` for this edge event.
-    pub fn is_accepted_local(&self, edge_event_id: &str) -> bool {
-        self.accepted_local.contains(edge_event_id)
     }
 
     /// Python `_select`: prefer live entries (fewer than
@@ -109,21 +99,6 @@ impl SenderState {
 
     pub(super) fn unblock(&mut self, entry_id: &str) {
         self.blocked_until.remove(entry_id);
-    }
-
-    /// Remember an accepted_local edge event, oldest forgotten first once
-    /// the queue's own entry bound is exceeded.
-    pub(super) fn record_accepted_local(&mut self, edge_event_id: &str) {
-        if !self.accepted_local.insert(edge_event_id.to_owned()) {
-            return;
-        }
-        self.accepted_local_order
-            .push_back(edge_event_id.to_owned());
-        while self.accepted_local_order.len() > MAX_ACCEPTED_ENTRIES {
-            if let Some(oldest) = self.accepted_local_order.pop_front() {
-                self.accepted_local.remove(&oldest);
-            }
-        }
     }
 }
 
