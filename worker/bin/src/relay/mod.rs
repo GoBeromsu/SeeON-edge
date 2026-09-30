@@ -2,6 +2,8 @@
 //! `evidence_export_client.py`): `client` sends requests, `wire` turns their
 //! results into receipts or `DeliveryFailure`s.
 
+pub mod cameras;
+pub mod capabilities;
 pub mod client;
 pub mod wire;
 
