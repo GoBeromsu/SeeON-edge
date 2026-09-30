@@ -2,6 +2,9 @@ from __future__ import annotations
 
 import hashlib
 import os
+import shutil
+import subprocess
+import sys
 from pathlib import Path
 
 import onnx
@@ -99,10 +102,38 @@ def test_export_strips_date_and_is_reproducible(tmp_path: Path) -> None:
     assert len(written.graph.value_info) == 0
 
 
-def test_real_export_is_opt_in() -> None:
+def _real_export(weights: Path) -> str:
+    """Export in a child process so CUDA never initialises in the pytest process."""
+    completed = subprocess.run(
+        [sys.executable, "-m", "worker.tools.export_pose_onnx", str(weights)],
+        cwd=Path(__file__).resolve().parents[1],
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=900,
+    )
+    assert completed.returncode == 0, completed.stderr[-2000:]
+    return completed.stdout.strip().splitlines()[-1]
+
+
+def test_real_export_is_opt_in(tmp_path: Path) -> None:
     if os.environ.get("SEEON_REAL_EXPORT") != "1":
         pytest.skip("set SEEON_REAL_EXPORT=1 to run the real pose export")
     source = Path("models/pose/yolo26n-pose.pt")
     if not source.is_file():
         pytest.skip("pose weights are absent")
-    assert export_pose_onnx(source)
+    runs = []
+    for name in ("first", "second"):
+        weights = tmp_path / name / source.name
+        weights.parent.mkdir()
+        shutil.copy2(source, weights)
+        runs.append((weights.with_suffix(".onnx"), _real_export(weights)))
+
+    (artifact, digest), (_, repeated) = runs
+    payload = artifact.read_bytes()
+    assert hashlib.sha256(payload).hexdigest() == digest
+    assert artifact.with_suffix(".onnx.sha256").read_text(encoding="ascii") == f"{digest}\n"
+    assert repeated == digest
+    model = onnx.load_from_string(payload)
+    onnx.checker.check_model(model)
+    assert model.graph.input[0].type.tensor_type.shape.dim[0].dim_param
