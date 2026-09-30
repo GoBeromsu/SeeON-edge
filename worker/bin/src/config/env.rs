@@ -7,8 +7,8 @@ use std::path::{Path, PathBuf};
 /// `_RETIRED_WORKER_ENV`, sorted. Presence alone refuses, even when empty.
 pub const RETIRED_KEYS: [&str; 18] = [
     "CLIP_STORE_DIR",
-    "EDGE_CAMERA_CONFIG",
-    "EDGE_CAMERA_CONFIG_FILE",
+    "EDGE_CAMERA_CONFIG",      // scope-fidelity: name-only
+    "EDGE_CAMERA_CONFIG_FILE", // scope-fidelity: name-only
     "ML_WORKER_CLIP_RECORDING_ENABLED",
     "ML_WORKER_DEV_MJPEG",
     "ML_WORKER_DEV_MJPEG_HOST",
