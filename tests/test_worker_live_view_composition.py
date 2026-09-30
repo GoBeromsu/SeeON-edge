@@ -136,6 +136,61 @@ def test_worker_composes_fall_preview_provider_into_flow_media_plane(
     assert captured["renderer"] is renderer
 
 
+@pytest.mark.parametrize(
+    ("extra_env", "expected_interval"),
+    [({}, 5), ({"ML_WORKER_FLOW_RTSP_RECONNECT_INTERVAL_SEC": "0"}, 0)],
+)
+def test_worker_maps_rtsp_reconnect_env_to_media_plane_config(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    extra_env: dict[str, str],
+    expected_interval: int,
+) -> None:
+    configs: list[object] = []
+
+    class _ConfigCapturingPlane:
+        def __init__(self, config: object, **_kwargs: object) -> None:
+            configs.append(config)
+
+        def bind_live_frames(self, _frames: object) -> None:
+            return None
+
+    monkeypatch.setattr(worker_module, "FlowMediaPlane", _ConfigCapturingPlane)
+    monkeypatch.setattr(worker_module, "PreviewRenderer", object)
+    monkeypatch.setattr(
+        worker_module,
+        "verify_flow_boot_inputs",
+        lambda _env, *, deployed_batch: {"engine": deployed_batch},
+    )
+    monkeypatch.setattr(
+        WorkerRuntime,
+        "_initialize_flow_policy_graph",
+        lambda _self, _boot: object(),
+    )
+    runtime = WorkerRuntime(
+        _config(),
+        env={
+            "ML_WORKER_PROFILE": "flow",
+            "ML_WORKER_FLOW_INFER_CONFIG": "infer.txt",
+            "ML_WORKER_FLOW_TRACKER_CONFIG": "tracker.yml",
+            "ML_WORKER_FLOW_TRACKER_LIBRARY": "libtracker.so",
+            "ML_WORKER_FLOW_RECORD_DIR": str(tmp_path / "record"),
+            "ML_WORKER_FLOW_RECORD_CACHE_SECONDS": "5",
+            "ML_WORKER_FLOW_FRAME_WIDTH": "640",
+            "ML_WORKER_FLOW_FRAME_HEIGHT": "360",
+            **extra_env,
+        },
+        serving_client=_ServingClient(),
+        acquire_lease=lambda: GpuLease.acquire(tmp_path),
+        state_dir=tmp_path,
+    )
+
+    runtime._initialize_flow_media_plane(object())  # noqa: SLF001
+
+    (config,) = configs
+    assert config.adapter_config().rtsp_reconnect_interval_sec == expected_interval  # type: ignore[attr-defined]
+
+
 def test_flow_live_view_injects_bed_recognizer_and_recognize_request_reaches_it(
     tmp_path: Path, monkeypatch: object
 ) -> None:

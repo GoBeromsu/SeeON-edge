@@ -1129,6 +1129,9 @@ class WorkerRuntime:
                     frame_width=int(self._env["ML_WORKER_FLOW_FRAME_WIDTH"]),
                     frame_height=int(self._env["ML_WORKER_FLOW_FRAME_HEIGHT"]),
                     snapshot_branch_enabled=True,
+                    rtsp_reconnect_interval_sec=int(
+                        self._env.get("ML_WORKER_FLOW_RTSP_RECONNECT_INTERVAL_SEC", "5")
+                    ),
                     source_silence_timeout_sec=float(
                         self._env.get(
                             "ML_WORKER_FLOW_SOURCE_SILENCE_TIMEOUT_SEC",

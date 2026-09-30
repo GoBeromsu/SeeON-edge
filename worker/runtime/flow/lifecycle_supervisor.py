@@ -49,7 +49,7 @@ class _CameraState:
 class FlowLifecycleSupervisor:
     """Rotate stalled Flow sources from the same accepted-frame slot as pumps.
 
-    Thirty seconds permits six ``nvurisrcbin`` five-second reconnect attempts
+    Thirty seconds permits six ``nvurisrcbin`` default five-second reconnect attempts
     before declaring an outage, while keeping the old stream epoch from
     surviving an extended reconnect.
     """

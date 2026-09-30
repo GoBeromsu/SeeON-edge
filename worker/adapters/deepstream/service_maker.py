@@ -61,6 +61,11 @@ class DeepStreamMediaPlaneConfig:
     transform_id: str = "deepstream-flow.v1"
     pipeline_name: str = "deepstream-media-plane"
     snapshot_branch_enabled: bool = True
+    #: ``nvurisrcbin`` RTSP reconnect interval in seconds, applied to both
+    #: ``init-rtsp-reconnect-interval`` and ``rtsp-reconnect-interval``. ``0``
+    #: disables the plugin's reconnect, which lets a graceful ``stop()`` EOS
+    #: reach the pipeline; production keeps the default.
+    rtsp_reconnect_interval_sec: int = 5
 
 
 @dataclass(slots=True)
@@ -312,7 +317,8 @@ class DeepStreamMediaPlane(MediaPlane):
         arriving after the outage are never mistaken for the old stream, and a
         cleared live/preview state so nothing stale is served. Media recovery
         is ``nvurisrcbin``'s own RTSP reconnect, configured on every source
-        (measured in the spike: a stalled source recovers within one interval).
+        (five seconds by default; measured in the spike: a stalled source
+        recovers within one interval).
         The canonical camera id never changes across this.
         """
         del category
@@ -500,8 +506,8 @@ class DeepStreamMediaPlane(MediaPlane):
                 {
                     "select-rtp-protocol": 4,
                     "latency": 200,
-                    "init-rtsp-reconnect-interval": 5,
-                    "rtsp-reconnect-interval": 5,
+                    "init-rtsp-reconnect-interval": self._config.rtsp_reconnect_interval_sec,
+                    "rtsp-reconnect-interval": self._config.rtsp_reconnect_interval_sec,
                 }
             )
 

@@ -40,6 +40,7 @@ class FlowMediaPlaneConfig:
     frame_height: int
     source_silence_timeout_sec: float = 30.0
     snapshot_branch_enabled: bool = True
+    rtsp_reconnect_interval_sec: int = 5
 
     def adapter_config(self) -> DeepStreamMediaPlaneConfig:
         return DeepStreamMediaPlaneConfig(
@@ -51,6 +52,7 @@ class FlowMediaPlaneConfig:
             frame_width=self.frame_width,
             frame_height=self.frame_height,
             snapshot_branch_enabled=self.snapshot_branch_enabled,
+            rtsp_reconnect_interval_sec=self.rtsp_reconnect_interval_sec,
         )
 
 

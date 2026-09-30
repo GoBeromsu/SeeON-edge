@@ -127,6 +127,7 @@ def _plane(
     pipeline: _Pipeline | None = None,
     *,
     snapshot_branch_enabled: bool = False,
+    rtsp_reconnect_interval_sec: int | None = None,
     native_frame_grabber: Callable[[str], bytes] | None = None,
     clock: Callable[[], float] | None = None,
     metadata_slot: LatestMetadataSlot | None = None,
@@ -141,6 +142,11 @@ def _plane(
         640,
         360,
         snapshot_branch_enabled=snapshot_branch_enabled,
+        **(
+            {}
+            if rtsp_reconnect_interval_sec is None
+            else {"rtsp_reconnect_interval_sec": rtsp_reconnect_interval_sec}
+        ),
     )
     kwargs: dict[str, object] = {}
     if native_frame_grabber is not None:
@@ -358,6 +364,16 @@ def test_source_properties_follow_the_measured_rtsp_shape() -> None:
     assert props["select-rtp-protocol"] == 4
     assert props["init-rtsp-reconnect-interval"] == 5
     assert props["rtsp-reconnect-interval"] == 5
+    plane.stop()
+
+
+def test_rtsp_reconnect_interval_config_reaches_both_nvurisrcbin_properties() -> None:
+    plane, pipeline = _plane(rtsp_reconnect_interval_sec=0)
+    plane.add_source("camera", "rtsp://one")
+    plane.start()
+    props = pipeline["batch_capture-source-0_0"].properties
+    assert props["init-rtsp-reconnect-interval"] == 0
+    assert props["rtsp-reconnect-interval"] == 0
     plane.stop()
 
 

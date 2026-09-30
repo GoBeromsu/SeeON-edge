@@ -192,6 +192,24 @@ changed. The change is `analyze.py` `57f2edb7…` → `03e174c9…` (harness dig
 validation only, and `R_m` is frozen from the first five uncontaminated runs of
 the clean series under the new digest.
 
+## DeepStream graceful stop and RTSP reconnect
+
+`pyservicemaker` `Pipeline.stop()` only sends EOS. With `nvurisrcbin` reconnect
+intervals above zero, the plugin answers that EOS as a lost stream ("Resetting
+source", reconnect attempt) and the pipeline EOS never reaches `wait()`, so the
+Flow thread does not exit and `DeepStreamFlowStopTimeout` follows. Production has
+no graceful stop path: it hard-exits with the fatal accelerator exit code, so
+the interaction is a latent defect reachable only through graceful stop, which
+the real-stack observability lane uses.
+
+Resolution: the reconnect interval is configurable
+(`DeepStreamMediaPlaneConfig.rtsp_reconnect_interval_sec`, worker env
+`ML_WORKER_FLOW_RTSP_RECONNECT_INTERVAL_SEC`). The default stays 5 seconds, so
+production behavior is unchanged. The load harness sets 0, where reconnect is
+idle on its stable looping fixture. A runtime toggle was rejected because the
+reconnect properties are only settable in the NULL/READY states and the binding
+exposes no state control.
+
 ## Consequences
 
 This is a coupled implementation, behavior-preservation, migration and deployment
