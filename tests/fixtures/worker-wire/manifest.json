@@ -74,6 +74,7 @@
     "d/models-bundle-layout.json": "099dcee5335d6e3d6c68c8d2b45ed39be402b42e133821979f63ced33ea3b963",
     "d/models-layout.json": "1a8fb4ed580ba875ec1b90c94fd11c71ac9ae75618a9ce9e87876b95b032cf93",
     "d/observation-coverage.json": "a8295753967a6e0789c73825510e112600cee44f59aad963852178c6412c5a2f",
+    "d/policy-parity.json": "28cea98e4e7813990dc55ef0b9f36a05ddbf9c5e79dc02013320bde959e46e4e",
     "d/replay-engine/bed-exit-v1.input.json": "2df388136c0d8fcc74b7d7c5e9cad3baac187d32dafb27a9dcb1cb347163242e",
     "d/replay-engine/bed-exit-v1.json": "8168fcf787a5c567642aa7470aea0389437de96255dda9f365ebb159b23f5586",
     "d/replay-engine/fall-v2.input.json": "484eacd5a3ead0df2c76b5889830ed7f8396e2e9b0b2191e44dea47b956cc873",
@@ -1379,6 +1380,22 @@
       "wire_class": "D"
     },
     {
+      "backend_parser": "none: worker-internal parity (association, fall glue, bed submit/receive)",
+      "compare": "json-value",
+      "input": "synthetic pose rows, tracker boxes, pts cadence and scripted fall logits; fake GPU runtime and fake bed serving client (see golden recipe)",
+      "lane": "s2bfix",
+      "normalised": [],
+      "path": "d/policy-parity.json",
+      "producer": "worker/adapters/deepstream/metadata.py worker/runtime/flow/policy_pump.py worker/domains/fall/policy.py worker/domains/fall/classifier.py worker/domains/fall/pose_bbox56.py worker/adapters/model/ort_pose_bbox56.py worker/pipeline/perception/pts_resample.py worker/runtime/nvidia_bed_zone_recognizer.py tests_support/native_yolo_parity.py",
+      "rows": [
+        7,
+        8
+      ],
+      "sha256": "28cea98e4e7813990dc55ef0b9f36a05ddbf9c5e79dc02013320bde959e46e4e",
+      "size_bytes": 411758,
+      "wire_class": "D"
+    },
+    {
       "backend_parser": "contracts/replay_trace.py:decode_document (round-trip equal)",
       "compare": "bytes",
       "input": "tests/fixtures/replay/reconnect-control-v2.json row 0: 48 frames with its track at bbox (0.25,0,0.75,0.5,0.9), then 32 frames with row 2's out-of-bed track; 66_666_667 ns steps, seq 0..79; camera_id camera-replay",
@@ -2322,6 +2339,36 @@
       "recorder_sha256": "685b4b585916d96ada08ef94edec4266005c60aa992eccf4540209ed43a73e35",
       "repo_head": "030aaf1dc2c4a114b5d1f83ae391757ddbc3da2c",
       "schema": "seeon-worker-wire-goldens/v1 fragment (P0.4 lane D, items 9-12)"
+    },
+    "s2bfix": {
+      "fixed_inputs": {
+        "camera_id": "cmsnw6rjc01vhlh01oswn99yq",
+        "facility_id": "facility-1",
+        "monotonic_sec": 5000.0,
+        "temperature": 1.3,
+        "uuid4": "uuid.uuid4 patched to UUID(int=n, version=4), n=1,2,...",
+        "wall_clock_sec": 1787000000.0
+      },
+      "oracle_sources_sha256": {
+        "tests_support/native_yolo_parity.py": "953cc33b5006f09727465e0363149e6da7cef8afb5e8af936c2941e0c0624a73",
+        "worker/adapters/deepstream/metadata.py": "a2e2dd0e99fa3adff46ce4abbae2f6e096b53ec83a268750b43aa5eb15619418",
+        "worker/adapters/model/ort_pose_bbox56.py": "feb883ce9fc5689e36b51ce922c65515e7a11d7740ea02922e3d03b98d3cb820",
+        "worker/domains/fall/classifier.py": "026a2a6bf0244f0da2e847d1d40999dfbf30a5927d1ac833b1da07e088c7e314",
+        "worker/domains/fall/policy.py": "4c59f13d64bf540639c49794abcc0c74107d0642a82805e4aae74f854e8b1522",
+        "worker/domains/fall/pose_bbox56.py": "b46648d434910548442b1b970fa65450fefcb66a13ed469e896a48a9196e79ff",
+        "worker/pipeline/perception/pts_resample.py": "b9a0a9f7338b869c973966a56b255bfb4402c2ee6dda7e6834b21b4d1fdcbccd",
+        "worker/runtime/flow/policy_pump.py": "4f309a6f64cb35d9312fddb17fb4db18922c4e6a5e5ee05f53364de1f51d096d",
+        "worker/runtime/nvidia_bed_zone_recognizer.py": "839dfc22db231a304cb7efee65665a163ba66042966801251c404cbc450caf8f"
+      },
+      "packages": {
+        "numpy": "2.4.6",
+        "onnxruntime": "1.29.0"
+      },
+      "python": "3.12.3",
+      "recorder": "record_policy_parity.py (kept outside the repo; see recorder_sha256)",
+      "recorder_sha256": "72cc0255a9304790febcdd6ca86c133938781d76a9c18360117e010a83cb1f50",
+      "repo_head": "145637c",
+      "schema": "seeon-worker-wire-goldens/v1 fragment (stage 2 B fix, lane s2bfix)"
     }
   },
   "lock_files_excluded": [],
@@ -2342,8 +2389,12 @@
     "shared/events/evidence_http_transport.py": "7029889c9bc76efb6cfd8a170961b61b05746def9e7be196e93cf6134584abd7",
     "shared/events/execution_records_client.py": "22404e7db39aad2e9617635302b50428978d4be45faba531fc1ceaa47d97b168",
     "shared/events/replay_wire.py": "02805cffeddbf32a5b2daa786a6cd42bc45a19ef8a3d78fb9a4554579e3f13d7",
+    "tests_support/native_yolo_parity.py": "953cc33b5006f09727465e0363149e6da7cef8afb5e8af936c2941e0c0624a73",
+    "worker/adapters/deepstream/metadata.py": "a2e2dd0e99fa3adff46ce4abbae2f6e096b53ec83a268750b43aa5eb15619418",
     "worker/adapters/model/ort_pose_bbox56.py": "feb883ce9fc5689e36b51ce922c65515e7a11d7740ea02922e3d03b98d3cb820",
     "worker/domains/fall/classifier.py": "026a2a6bf0244f0da2e847d1d40999dfbf30a5927d1ac833b1da07e088c7e314",
+    "worker/domains/fall/policy.py": "4c59f13d64bf540639c49794abcc0c74107d0642a82805e4aae74f854e8b1522",
+    "worker/domains/fall/pose_bbox56.py": "b46648d434910548442b1b970fa65450fefcb66a13ed469e896a48a9196e79ff",
     "worker/pipeline/diagnostics/emit_policy.py": "5dd1b808d4b4c3d8894aea0ee2adc3682eb7251a8d3dd55fbb94946db99df880",
     "worker/pipeline/diagnostics/exporter.py": "b5fe553747dd07ef15781c68323f8a93ef70f90de4a29541b75261b68f20bb02",
     "worker/pipeline/diagnostics/provenance.py": "082918d091c6adacb63d5f91a2b70a3665d639b7b66a8eb445825eacbab2112e",
@@ -2354,12 +2405,15 @@
     "worker/pipeline/output/evidence/playback_rendition_publish.py": "28f634917292e417ab2f9393331f0e6885c773b546a303ad34aebe404b62c757",
     "worker/pipeline/output/mjpeg_server.py": "23f891284a16333a949d6f5f2eb2259fab16b2f3fdd360ab8b29f1a7c6f5b9c2",
     "worker/pipeline/output/preview_renderer.py": "007956562019d24ecffefb157b740a780105d4a24b7c6ae5c062b48f468572e7",
+    "worker/pipeline/perception/pts_resample.py": "b9a0a9f7338b869c973966a56b255bfb4402c2ee6dda7e6834b21b4d1fdcbccd",
     "worker/pipeline/trace/replay_trace_writer.py": "12b1099f5fc7119452cb3a0ce102ec56b471765c962021139ddafdaed7ff3276",
     "worker/replay/engine.py": "713b2ec29fdd1117c0d4624777bc4238a8f5ef47fbe40c92fe04e7b73eae2df0",
     "worker/runtime/config/config_pull.py": "ad49d2791d025dffa9f2ea2007f298b9f011356f894cd86f7513544001c17180",
     "worker/runtime/config/lkg_store.py": "03452f78e26dccaff5f201b4db0a93eaa5ccd5931ff2edfd0f569435ff6031b8",
     "worker/runtime/config/release_pair.py": "7b349655b50731ad70156450e054ff55a8960e92fd5d0818426fa83b74d93ce6",
     "worker/runtime/flow/cold_start.py": "3a35e253b9f0bdeed3c676321ca9eaabca1147bbd83017b29ac86bb1bbb40d74",
+    "worker/runtime/flow/policy_pump.py": "4f309a6f64cb35d9312fddb17fb4db18922c4e6a5e5ee05f53364de1f51d096d",
+    "worker/runtime/nvidia_bed_zone_recognizer.py": "839dfc22db231a304cb7efee65665a163ba66042966801251c404cbc450caf8f",
     "worker/runtime/provenance/model_bundle.py": "d4bf1c368d680051b346d0a8ea999c58d98342041ada5dc24307b0c51378f39f",
     "worker/runtime/telemetry/runtime_status_sender.py": "47bb568c70e8c4c4e6d10a66f92666630d020e5744614b61f81124256522031c",
     "worker/runtime/worker.py": "f6391cca2501d220e9595dfc06f00a8b8977bbbc28e0f969dbebbd28237831f7",
@@ -2638,13 +2692,15 @@
     "7": {
       "gaps": [],
       "goldens": [
-        "d/observation-coverage.json"
+        "d/observation-coverage.json",
+        "d/policy-parity.json"
       ]
     },
     "8": {
       "gaps": [],
       "goldens": [
-        "d/bed-containment.json"
+        "d/bed-containment.json",
+        "d/policy-parity.json"
       ]
     },
     "9": {

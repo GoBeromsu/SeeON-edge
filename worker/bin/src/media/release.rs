@@ -28,33 +28,33 @@ pub(super) fn drain_records(
 }
 
 /// Every path out of the media thread after a successful open comes here.
-/// Reaping continues until a status read shows no slot reserved or the
-/// shutdown budget passes; that last read, not an inference, gates close.
+/// One deadline, taken before stop, bounds the whole release: the native stop
+/// and the reaping after it share `shutdown_budget_ms`, so release never
+/// takes two budgets. Reaping continues until a status read shows no slot
+/// reserved or that deadline passes; that last read, not an inference, gates
+/// close.
 pub(super) fn release(mut owner: MediaOwner, params: &MediaParams) {
+    let clock = params.clock.as_ref();
+    let budget = Duration::from_millis(u64::from(params.shutdown_budget_ms));
+    let deadline = clock.monotonic() + budget;
     let stopped = owner
         .stop(params.shutdown_budget_ms)
         .is_ok_and(|status| status.result == MediaResult::Ok);
-    let clock = params.clock.as_ref();
-    let budget = Duration::from_millis(u64::from(params.shutdown_budget_ms));
     let mut reserved = None;
     // A timeout leaves the last reserved count in `reserved` and in the
-    // diagnostics, which is where the outcome is observed.
-    let _ = poll_until(
-        clock,
-        clock.monotonic() + budget,
-        "media record release",
-        || {
-            drain_records(&mut owner, params).is_err()
-                || match owner.read_status() {
-                    Ok(status) => {
-                        params.diagnostics.record_status(&status);
-                        reserved = Some(status.records_reserved);
-                        status.records_reserved == 0
-                    }
-                    Err(_) => true,
+    // diagnostics, which is where the outcome is observed. `poll_until`
+    // evaluates the condition once even when stop used the whole budget.
+    let _ = poll_until(clock, deadline, "media record release", || {
+        drain_records(&mut owner, params).is_err()
+            || match owner.read_status() {
+                Ok(status) => {
+                    params.diagnostics.record_status(&status);
+                    reserved = Some(status.records_reserved);
+                    status.records_reserved == 0
                 }
-        },
-    );
+                Err(_) => true,
+            }
+    });
     let closable = stopped && reserved == Some(0);
     let closed = closable
         && owner

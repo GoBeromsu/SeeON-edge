@@ -87,6 +87,12 @@ impl Diagnostics {
 
     /// Copies the native counters of one status read. A roster shorter than
     /// the status grows; handoff drops are this side's own and are kept.
+    ///
+    /// Order contract: `status.sources[i]` is camera `i`. Native status lists
+    /// sources in `MediaConfig::sources` order, which is the order `owner.rs`
+    /// `run` enumerates, and `MediaOwner::open` refuses a configuration whose
+    /// `source_id` differs from its position. `SourceStatus` carries no source
+    /// id, so the position is the only link and is not re-checked here.
     pub(crate) fn record_status(&self, status: &MediaStatus) {
         let mut snapshot = self.lock();
         snapshot.state = Some(status.state);

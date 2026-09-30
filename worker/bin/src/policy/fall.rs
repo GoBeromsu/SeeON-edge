@@ -6,6 +6,7 @@
 //! take, or a score that fails, is a counted missing observation with reason
 //! `AdapterReturnedNoData`, never a low score.
 
+pub mod score;
 pub mod window;
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -20,6 +21,7 @@ use seeon_worker::trace::DecisionTraceMissingReason as Reason;
 
 use super::ingest::Frame;
 use crate::msg::{FallRequest, FallResponse};
+use score::probabilities;
 use window::Windows;
 
 #[derive(Clone, Debug, PartialEq)]
@@ -223,6 +225,12 @@ impl FallStage {
         self.counters
     }
 
+    /// The wrapped decider, for the Python `FallDomainDecider` read-outs
+    /// (`last_trace_snapshots`, `last_update_evaluated`, the switch total).
+    pub fn decider(&self) -> &FallPolicyDecider {
+        &self.decider
+    }
+
     fn decide(&mut self, pending: Pending) -> Result<Vec<BusinessEvent>, FallStageError> {
         let events = self.decider.update(
             pending.frame_index,
@@ -233,14 +241,4 @@ impl FallStage {
         )?;
         Ok(events)
     }
-}
-
-/// `float(1.0 / (1.0 + np.exp(-logit / temperature)))` over float32, then
-/// `FallProbabilities(1 - p, p, 0.0)`; `None` for a non-finite logit.
-fn probabilities(logit: f32, temperature: f32) -> Option<FallProbabilities> {
-    if !logit.is_finite() {
-        return None;
-    }
-    let transition = f64::from(1.0_f32 / (1.0_f32 + (-logit / temperature).exp()));
-    FallProbabilities::new(1.0 - transition, transition, 0.0).ok()
 }

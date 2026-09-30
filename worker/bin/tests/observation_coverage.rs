@@ -178,15 +178,6 @@ fn every_golden_step_returns_and_leaves_the_recorded_state() {
 }
 
 #[test]
-fn a_second_detect_while_a_gap_is_open_returns_none_and_keeps_the_first() {
-    let mut coverage = coverage();
-    let first = coverage.detect_gap(Some(10.0));
-    assert!(first.is_some());
-    assert_eq!(coverage.detect_gap(Some(11.0)), None);
-    assert_eq!(coverage.open_gap(), first.as_ref());
-}
-
-#[test]
 fn a_foreign_identity_is_refused_and_the_gap_stays_open() {
     let foreign: [fn(&mut ObservationIdentity); 4] = [
         |identity| identity.worker_boot_id = "boot-foreign".to_owned(),

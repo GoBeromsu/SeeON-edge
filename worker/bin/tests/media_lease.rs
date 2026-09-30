@@ -11,8 +11,10 @@
 //! queue is a stalled `pose_rx` consumer. (c) SIGTERM is the stop flag
 //! in-process, with a recording still open. (d) is that stop followed by a
 //! second owner in the same process: close over a reserved record slot
-//! corrupts the heap, which that owner would meet as an abort, so release
-//! withholds close while a slot is reserved and says so.
+//! corrupts the heap, which that owner would meet as an abort. Stop cancels
+//! the open recording and release reads its completion before close, so the
+//! first owner closes with no slot reserved. The withheld arm of the close
+//! gate is not reachable after a successful stop, and no test here forces it.
 //!
 //! The publisher reports its output time with `-progress` into
 //! `SEEON_TEST_RELAY_DIR`, which is where the relay-side frame count comes
@@ -379,7 +381,7 @@ impl Drop for Session {
 }
 
 #[test]
-#[ignore = "requires an actual GPU, SEEON_TEST_MEDIA_INFER, SEEON_TEST_MEDIA_TRACKER and SEEON_TEST_RTSP_URI"]
+#[ignore = "requires an actual GPU, SEEON_TEST_MEDIA_INFER, SEEON_TEST_MEDIA_TRACKER, SEEON_TEST_RTSP_URI and SEEON_TEST_RELAY_DIR"]
 fn a_corrupt_stream_burst_releases_every_lease_while_the_source_reconnects() {
     let _gpu = gpu_lock();
     let relay = Relay::from_env();
@@ -411,7 +413,7 @@ fn a_corrupt_stream_burst_releases_every_lease_while_the_source_reconnects() {
 }
 
 #[test]
-#[ignore = "requires an actual GPU, SEEON_TEST_MEDIA_INFER, SEEON_TEST_MEDIA_TRACKER and SEEON_TEST_RTSP_URI"]
+#[ignore = "requires an actual GPU, SEEON_TEST_MEDIA_INFER, SEEON_TEST_MEDIA_TRACKER, SEEON_TEST_RTSP_URI and SEEON_TEST_RELAY_DIR"]
 fn a_stalled_pose_consumer_drops_packets_while_every_lease_is_released() {
     let _gpu = gpu_lock();
     let relay = Relay::from_env();
@@ -464,7 +466,7 @@ fn a_stalled_pose_consumer_drops_packets_while_every_lease_is_released() {
 }
 
 #[test]
-#[ignore = "requires an actual GPU, SEEON_TEST_MEDIA_INFER, SEEON_TEST_MEDIA_TRACKER and SEEON_TEST_RTSP_URI"]
+#[ignore = "requires an actual GPU, SEEON_TEST_MEDIA_INFER, SEEON_TEST_MEDIA_TRACKER, SEEON_TEST_RTSP_URI and SEEON_TEST_RELAY_DIR"]
 fn the_stop_flag_releases_an_open_recording() {
     let _gpu = gpu_lock();
     let relay = Relay::from_env();
@@ -477,21 +479,42 @@ fn the_stop_flag_releases_an_open_recording() {
 }
 
 #[test]
-#[ignore = "requires an actual GPU, SEEON_TEST_MEDIA_INFER, SEEON_TEST_MEDIA_TRACKER and SEEON_TEST_RTSP_URI"]
+#[ignore = "requires an actual GPU, SEEON_TEST_MEDIA_INFER, SEEON_TEST_MEDIA_TRACKER, SEEON_TEST_RTSP_URI and SEEON_TEST_RELAY_DIR"]
 fn release_closes_only_with_no_record_reserved_and_the_next_owner_starts() {
     let _gpu = gpu_lock();
+    let relay = Relay::from_env();
     let mut first = Session::start("close-gate");
-    first.start_record(20);
+    first.frames_keep_rising(&relay);
+    let ticket = first.start_record(20);
+    let completed = |session: &Session| {
+        session
+            .receipts
+            .iter()
+            .any(|receipt| receipt.ticket.request_id == ticket.request_id)
+    };
+    // A 20 s recording cannot complete on its own before the stop below.
+    assert!(!completed(&first), "{:?}", first.diagnostics.snapshot());
     first.stop_and_join();
+    first.drain();
     let released = first.diagnostics.snapshot();
-    assert!(released.stopped, "{released:?}");
-    let reserved = released.records_reserved > 0;
+    // The completion arrives only through release's drain, which retires the slot.
+    assert!(completed(&first), "{released:?}");
     assert_eq!(
-        (released.closed, released.close_withheld),
-        (!reserved, reserved),
+        (
+            released.stopped,
+            released.records_reserved,
+            released.closed,
+            released.close_withheld
+        ),
+        (true, 0, true, false),
         "{released:?}"
     );
+    // A leaked owner must not be followed by a second open in this process;
+    // the assertion above guarantees the first owner closed.
     drop(first);
     let mut next = Session::start("close-gate-next");
+    next.frames_keep_rising(&relay);
     next.stop_and_join();
+    next.assert_released("the next owner's stop");
+    next.assert_shut_down();
 }

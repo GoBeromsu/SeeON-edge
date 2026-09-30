@@ -3,6 +3,8 @@
 //! clock and a patched `uuid4`; `FakeClock` and `FakeIds` are that recipe.
 //! Every journal is compared byte for byte with its `.lines.json` rebuild,
 //! and a refusal by its typed variant, mapped from the golden's detail.
+//! The ignored xlang test runs `$SEEON_TEST_PYTHON` with `PYTHONPATH` set to
+//! the repository root, since its script imports `worker.pipeline.decision`.
 
 use std::fs;
 use std::io;
