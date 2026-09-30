@@ -26,7 +26,7 @@ httparse = "=1.10.1"
 # D3: SIGTERM and SIGINT flag registration (design §2.4).
 signal-hook = { version = "=0.4.4", default-features = false }
 # D3: flock, fallocate and kernel random bytes for uuid4 ids.
-rustix = { version = "=1.1.5", features = ["std", "rand"] }
+rustix = { version = "=1.1.5", features = ["std", "rand", "fs"] }
 
 [dev-dependencies]
 # D3: order-preserving parse of the codec-edges key-order input text.

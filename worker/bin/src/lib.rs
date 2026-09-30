@@ -3,7 +3,10 @@
 #![forbid(unsafe_code)]
 
 pub mod b64;
+pub mod cli;
+pub mod config;
 pub mod exit;
+pub mod gpu;
 pub mod json;
 pub mod msg;
 pub mod poll;
