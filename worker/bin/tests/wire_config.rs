@@ -10,12 +10,12 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use seeon_ml_worker::config::lkg::{Directive, LkgStore};
-use seeon_ml_worker::config::models::AdmissionKind;
-use seeon_ml_worker::config::models::bundle::admit_model_bundle;
-use seeon_ml_worker::config::models::identity::{
+use seeon_ml_worker::config::model_bundle::AdmissionKind;
+use seeon_ml_worker::config::model_bundle::bundle::admit_model_bundle;
+use seeon_ml_worker::config::model_bundle::identity::{
     IdentityKind, identity_for, verify_engine_identity,
 };
-use seeon_ml_worker::config::models::layout::{LayoutError, parse_manifest, verify_layout};
+use seeon_ml_worker::config::model_bundle::layout::{LayoutError, parse_manifest, verify_layout};
 use seeon_ml_worker::config::selection::{SelectionKind, parse_model_selection};
 use seeon_ml_worker::json::{Json, Serialiser};
 use serde_json::Value;

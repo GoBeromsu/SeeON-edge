@@ -1,12 +1,12 @@
 //! What `ml-worker check-config` proves before any GPU, camera or relay is
 //! touched: the env (`env`), the model selection (`selection`), the admitted
-//! bundle and engine identity (`models`) and the last-known-good worker
+//! bundle and engine identity (`model_bundle`) and the last-known-good worker
 //! config (`lkg`). Everything here reads files only; the process env arrives
 //! as a map.
 
 pub mod env;
 pub mod lkg;
-pub mod models;
+pub mod model_bundle;
 pub mod selection;
 
 use std::collections::BTreeMap;
@@ -20,9 +20,9 @@ use crate::exit::Exit;
 use crate::json::{Json, Serialiser};
 use env::{EnvError, ExecutionRecordsSettings};
 use lkg::{LkgError, LkgStore, StoredConfig};
-use models::AdmissionError;
-use models::bundle::{BundleProof, admit_model_bundle};
-use models::identity::{FLOW_IDENTITY_FILES, IdentityError, verify_engine_identity};
+use model_bundle::AdmissionError;
+use model_bundle::bundle::{BundleProof, admit_model_bundle};
+use model_bundle::identity::{FLOW_IDENTITY_FILES, IdentityError, verify_engine_identity};
 use selection::{ModelSelection, SelectionError, parse_model_selection};
 
 /// Moves the fall selection document (Python fixes `FALL_SELECTION_PATH`).
