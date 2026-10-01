@@ -1,15 +1,24 @@
 //! Public completion receipts must not lose, duplicate or rebind policy updates.
 
 use std::collections::BTreeMap;
+use std::io::Write;
+use std::path::PathBuf;
+use std::process::{Command, Stdio};
+
 use std::sync::mpsc::{self, Receiver, SyncSender};
 
 use seeon_deepstream_native::FrameIdentity;
 use seeon_ml_worker::msg::{FALL_REQUEST_CAPACITY, FallRequest, FallResponse};
 use seeon_ml_worker::policy::fall::{DecisionUpdate, FallStage, FallStageError};
 use seeon_ml_worker::policy::ingest::Frame;
+use seeon_ml_worker::run::decision::trace_id;
 use seeon_worker::episode::BusinessEvent;
 use seeon_worker::fall::{FallCapacities, FallPolicy, FallPolicyDecider, FallProbabilities};
-use seeon_worker::trace::DecisionTraceSnapshot;
+use seeon_worker::trace::{
+    DecisionTraceMissingReason, DecisionTraceReason, DecisionTraceSnapshot, DecisionTraceState,
+    DecisionTraceValueName, NumericTraceValue, TraceFloat,
+};
+
 use seeon_worker_runtime::fall_gpu::FallGpuError;
 
 #[derive(Debug)]
@@ -303,4 +312,108 @@ fn empty_success_is_observed_without_fabricating_snapshots_or_replaying_flush() 
         .flush(&mut collect(&mut receipts))
         .expect("repeated empty flush");
     assert_eq!(receipts.len(), 1);
+}
+const TRACE_ORACLE: &str = r#"
+import json, sys
+from worker.types.trace import (
+    DecisionTraceMissingReason, DecisionTraceReason, DecisionTraceSnapshot,
+    DecisionTraceState, DecisionTraceValueName, decision_trace_id,
+)
+case = json.load(sys.stdin)
+values = {}
+for name, value in case["values"]:
+    values[DecisionTraceValueName(name)] = int(value) if isinstance(value, str) else value
+missing = {
+    DecisionTraceValueName(name): DecisionTraceMissingReason(reason)
+    for name, reason in case["missing"]
+}
+snapshot = DecisionTraceSnapshot(
+    reason=DecisionTraceReason(case["reason"]),
+    previous_state=DecisionTraceState(case["previous"]),
+    current_state=DecisionTraceState(case["current"]),
+    triggered=case["triggered"],
+    track_id=case["track_id"],
+    bed_id=case["bed_id"],
+    values=values,
+    missing_values=missing,
+)
+print(decision_trace_id(
+    snapshot,
+    module_qualified_id=case["module"],
+    effective_policy_id=case["policy"],
+))
+"#;
+
+#[test]
+#[ignore = "requires SEEON_TEST_PYTHON with worker.types.trace.decision_trace_id"]
+fn trace_id_matches_python_decision_trace_id() {
+    let snapshot = DecisionTraceSnapshot::new(
+        DecisionTraceReason::FallActive,
+        (DecisionTraceState::Clear, DecisionTraceState::Fallen),
+        true,
+        None,
+        Some(0),
+        [
+            (
+                DecisionTraceValueName::TransitionVotes,
+                NumericTraceValue::Integer(usize::MAX),
+            ),
+            (
+                DecisionTraceValueName::FallTransitionProbability,
+                NumericTraceValue::Float(TraceFloat::new(0.0).expect("zero float")),
+            ),
+        ]
+        .into(),
+        [(
+            DecisionTraceValueName::FallenProbability,
+            DecisionTraceMissingReason::ClassifierStrideNotDue,
+        )]
+        .into(),
+    )
+    .expect("disjoint values");
+    let module = "fall.v2";
+    let policy = format!("정책-{}", "c".repeat(61));
+    let actual = trace_id(&snapshot, module, &policy).expect("canonical trace id");
+    let case = serde_json::json!({
+        "reason": snapshot.reason.as_str(),
+        "previous": snapshot.previous_state.as_str(),
+        "current": snapshot.current_state.as_str(),
+        "triggered": snapshot.triggered,
+        "track_id": snapshot.track_id,
+        "bed_id": snapshot.bed_id,
+        "values": [
+            ["transition_votes", usize::MAX.to_string()],
+            ["fall_transition_probability", 0.0],
+        ],
+        "missing": [["fallen_probability", "classifier-stride-not-due"]],
+        "module": module,
+        "policy": policy,
+    });
+    let repo = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let mut child =
+        Command::new(std::env::var_os("SEEON_TEST_PYTHON").expect("SEEON_TEST_PYTHON is required"))
+            .arg("-c")
+            .arg(TRACE_ORACLE)
+            .current_dir(&repo)
+            .env("PYTHONPATH", &repo)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::inherit())
+            .spawn()
+            .expect("python oracle starts");
+    child
+        .stdin
+        .take()
+        .expect("python stdin")
+        .write_all(serde_json::to_vec(&case).expect("case encodes").as_slice())
+        .expect("oracle accepts case");
+    let output = child.wait_with_output().expect("oracle finishes");
+    assert!(
+        output.status.success(),
+        "python decision_trace_id refused the case"
+    );
+    assert_eq!(
+        String::from_utf8(output.stdout).expect("utf-8").trim(),
+        actual
+    );
 }

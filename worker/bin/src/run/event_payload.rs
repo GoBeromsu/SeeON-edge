@@ -43,9 +43,30 @@ pub(super) fn is_uuid(identity: &str) -> bool {
         })
 }
 
-pub(super) fn payload(event: &BusinessEvent, detected_at: &str) -> Payload {
+/// `worker/pipeline/output/event_sink.py:emit_for_frame` payload.
+///
+/// `audit` is the already-resolved scalar mapping. `None` omits the key; this
+/// function never fabricates config, manifest, or model fields. Only an object
+/// or array is refused, before any durable side effect. Python accepts
+/// `str | int | float | bool | None`.
+pub(super) fn payload(
+    event: &BusinessEvent,
+    detected_at: &str,
+    audit: Option<&Payload>,
+) -> Result<Payload, EventDeliveryError> {
     let text = |key: &str, value: &str| (key.to_owned(), Json::Str(value.to_owned()));
-    vec![
+    let mut evidence = vec![
+        text("domain", &event.domain),
+        text("identity", &event.identity),
+        ("time_sec".to_owned(), Json::Float(event.time_sec)),
+    ];
+    if let Some(person_id) = event.person_id {
+        evidence.push(("person_id".to_owned(), Json::Int(i128::from(person_id))));
+    }
+    if let Some(bed_id) = event.bed_id {
+        evidence.push(("bed_id".to_owned(), Json::Int(i128::from(bed_id))));
+    }
+    let mut body = vec![
         text("edge_event_id", &event.identity),
         text("event_type", &event.event_type),
         (
@@ -55,13 +76,28 @@ pub(super) fn payload(event: &BusinessEvent, detected_at: &str) -> Payload {
         text("detected_at", detected_at),
         text("camera_id", &event.camera_id),
         text("facility_id", &event.facility_id),
-        (
-            "evidence".to_owned(),
-            Json::Object(vec![
-                text("domain", &event.domain),
-                text("identity", &event.identity),
-                ("time_sec".to_owned(), Json::Float(event.time_sec)),
-            ]),
-        ),
-    ]
+        ("evidence".to_owned(), Json::Object(evidence)),
+    ];
+    if let Some(audit) = audit {
+        reject_non_scalar_audit(Some(audit))?;
+        body.push(("audit".to_owned(), Json::Object(audit.clone())));
+    }
+    Ok(body)
+}
+
+pub(super) fn reject_non_scalar_audit(audit: Option<&Payload>) -> Result<(), EventDeliveryError> {
+    let Some(audit) = audit else {
+        return Ok(());
+    };
+    if audit.iter().any(|(_, value)| !is_event_scalar(value)) {
+        return Err(EventDeliveryError::Audit);
+    }
+    Ok(())
+}
+
+fn is_event_scalar(value: &Json) -> bool {
+    matches!(
+        value,
+        Json::Null | Json::Bool(_) | Json::Int(_) | Json::Float(_) | Json::Str(_)
+    )
 }

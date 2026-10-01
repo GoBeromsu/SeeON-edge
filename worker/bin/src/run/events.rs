@@ -5,9 +5,10 @@ use std::fmt;
 
 use seeon_worker::episode::BusinessEvent;
 
-use super::event_payload::{captured_at, is_uuid, observed_at, payload};
+use super::event_payload::{captured_at, is_uuid, observed_at, payload, reject_non_scalar_audit};
+
 use crate::delivery::{AdmissionResult, DeliveryQueue, QueueError};
-use crate::policy::emit::{EmitError, Stager};
+use crate::policy::emit::{EmitError, Payload, Stager};
 use crate::records::Record;
 use crate::records::builder::{Admission, Frame, Stream, event_delivery_record};
 use crate::records::id::ContractError;
@@ -23,6 +24,8 @@ pub enum EventDeliveryError {
     CameraMismatch,
     /// A stager configured for another camera/facility must not relabel an event.
     StagerIdentity,
+    /// `event_sink._event_audit`: an object or array audit value.
+    Audit,
     Stage(EmitError),
     Queue(QueueError),
     Refused(AdmissionResult),
@@ -36,6 +39,7 @@ impl fmt::Display for EventDeliveryError {
             Self::Record(error) => write!(f, "event delivery record: {error}"),
             Self::CameraMismatch => f.write_str("event camera does not match trigger stream"),
             Self::StagerIdentity => f.write_str("stager identity does not match admitted event"),
+            Self::Audit => f.write_str("event audit must be scalar"),
             Self::Stage(error) => write!(f, "event staging: {error}"),
             // Do not interpolate raw filesystem errors or configured paths.
             Self::Queue(_) => f.write_str("event delivery queue operation failed"),
@@ -83,6 +87,9 @@ impl<'a> EventDelivery<'a> {
 
     /// `event` already has its admitted UUID; `stream` and `frame` are the
     /// original trigger, not the frame current when an async score completes.
+    /// `audit` is the resolved scalar mapping from the root, positioned after
+    /// `frame` and before the receipt observer. `None` omits it. This boundary
+    /// does not invent config, manifest, or model settings.
     /// The mandatory observer is synchronous, non-reentrant and receipt-only.
     /// Route it to the execution lanes; it must not decide admission or panic.
     /// On error the root owns recovery: never regenerate this immutable entry
@@ -92,6 +99,7 @@ impl<'a> EventDelivery<'a> {
         event: &'event BusinessEvent,
         stream: &Stream,
         frame: Frame,
+        audit: Option<&Payload>,
         observer: &mut dyn FnMut(Record),
     ) -> Result<StagedEvent<'event>, EventDeliveryError> {
         if event.camera_id != stream.camera_id {
@@ -100,7 +108,9 @@ impl<'a> EventDelivery<'a> {
         if !is_uuid(&event.identity) {
             return Err(EventDeliveryError::Identity);
         }
+        reject_non_scalar_audit(audit)?;
         let (observed_at_ns, detected_at) = captured_at(self.clock)?;
+        let staged = payload(event, &detected_at, audit)?;
         let mut admission = Admission {
             edge_event_id: event.identity.clone(),
             event_type: event.event_type.clone(),
@@ -111,7 +121,7 @@ impl<'a> EventDelivery<'a> {
         // Validate a not-yet-admitted record before queue side effects. It is
         // not an observed refusal; only the actual result is sent below.
         event_delivery_record(stream, frame, observed_at_ns, &admission)?;
-        let result = self.admit(event, &detected_at);
+        let result = self.admit(event, &staged);
         // The delivery receipt observes the outcome, not the earlier detection.
         let observed_at_ns = observed_at(self.clock)?;
         match result {
@@ -151,11 +161,11 @@ impl<'a> EventDelivery<'a> {
     fn admit(
         &self,
         event: &BusinessEvent,
-        detected_at: &str,
+        staged: &Payload,
     ) -> Result<AdmissionResult, EventDeliveryError> {
         let entry = self
             .stager
-            .event_entry(&payload(event, detected_at))
+            .event_entry(staged)
             .map_err(EventDeliveryError::Stage)?;
         if entry.fields().camera_id != event.camera_id
             || entry.fields().facility_id != event.facility_id
