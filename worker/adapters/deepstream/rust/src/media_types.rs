@@ -1,7 +1,7 @@
 //! Owned media values. Configuration and recording paths deliberately have no Debug output.
 use std::{ffi::OsString, path::PathBuf};
 
-pub const MEDIA_ABI_VERSION: u32 = 1;
+pub const MEDIA_ABI_VERSION: u32 = 2;
 pub const MEDIA_MAX_SOURCES: usize = 16;
 pub const MEDIA_POSE_ROWS: usize = 300;
 pub const MEDIA_POSE_COLUMNS: usize = 57;
@@ -53,6 +53,10 @@ pub struct MediaConfig {
     pub preview_enabled: bool,
     pub max_preview_bytes: u32,
     pub allow_file_uris: bool,
+    /// Required explicit nvurisrcbin interval in seconds, applied to both
+    /// init-rtsp-reconnect-interval and rtsp-reconnect-interval. 0 disables
+    /// reconnect; values above 86400 are refused. There is no implicit 5.
+    pub rtsp_reconnect_interval_sec: u32,
 }
 
 /// Integer-only ABI value: pts_valid is 0 or 1. sequence is zero for previews;
@@ -268,6 +272,7 @@ pub enum MediaArgument {
     RequestId,
     RecordingWindow,
     RecordSession,
+    ReconnectInterval,
 }
 
 /// Errors contain field identifiers and numeric native diagnostics, never input text.

@@ -39,6 +39,7 @@ pub(super) struct Config {
     pub preview_enabled: u32,
     pub max_preview_bytes: u32,
     pub allow_file_uris: u32,
+    pub rtsp_reconnect_interval_sec: u32,
 }
 #[repr(C)]
 pub(super) struct Pose {
@@ -245,6 +246,10 @@ impl OpenConfig {
             A::RecordCapacity,
         )?;
         require(
+            config.rtsp_reconnect_interval_sec <= 86400,
+            A::ReconnectInterval,
+        )?;
+        require(
             (1..=64).contains(&config.queue_max_buffers),
             A::QueueCapacity,
         )?;
@@ -346,6 +351,7 @@ impl OpenConfig {
             preview_enabled: u32::from(config.preview_enabled),
             max_preview_bytes: config.max_preview_bytes,
             allow_file_uris: u32::from(config.allow_file_uris),
+            rtsp_reconnect_interval_sec: config.rtsp_reconnect_interval_sec,
         };
         Ok(Self {
             raw,

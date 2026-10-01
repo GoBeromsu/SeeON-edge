@@ -76,6 +76,7 @@ void copy_config(SeeonMedia &m, const SeeonMediaConfig &c) {
           c.record_cache_seconds > 0 && c.record_capacity > 0 &&
           c.record_capacity <= SEEON_MEDIA_MAX_RECORDS && c.queue_max_buffers > 0 &&
           c.queue_max_buffers <= 64 && c.preview_enabled <= 1 && c.allow_file_uris <= 1 &&
+          c.rtsp_reconnect_interval_sec <= 86400 &&
           (c.preview_enabled ? c.max_preview_bytes >= 4 &&
              c.max_preview_bytes <= SEEON_MEDIA_MAX_PREVIEW_BYTES : c.max_preview_bytes == 0),
           SEEON_MEDIA_ERROR_CONFIG);
@@ -263,13 +264,16 @@ void build_source(SeeonMedia &m, Source &source) {
     signal_contract(s, "start-sr", {G_TYPE_POINTER, G_TYPE_UINT, G_TYPE_UINT, G_TYPE_POINTER});
     signal_contract(s, "stop-sr", {G_TYPE_UINT});
     g_object_set(s, "select-rtp-protocol", 4, "latency", 200u,
-        "init-rtsp-reconnect-interval", 5u, "rtsp-reconnect-interval", 5u,
+        "init-rtsp-reconnect-interval", m.config.rtsp_reconnect_interval_sec,
+        "rtsp-reconnect-interval", m.config.rtsp_reconnect_interval_sec,
         "smart-record", 2, "smart-rec-cache", m.config.record_cache_seconds,
         "smart-rec-container", 0, "smart-rec-mode", 1,
         "smart-rec-dir-path", m.record_directory.c_str(), "smart-rec-file-prefix", source.prefix.c_str(),
         "smart-rec-default-duration", 20u, nullptr);
     exact_numbers(s, {{"smart-record", 2}, {"smart-rec-cache", m.config.record_cache_seconds},
-                     {"smart-rec-container", 0}, {"smart-rec-mode", 1}});
+                     {"smart-rec-container", 0}, {"smart-rec-mode", 1},
+                     {"init-rtsp-reconnect-interval", m.config.rtsp_reconnect_interval_sec},
+                     {"rtsp-reconnect-interval", m.config.rtsp_reconnect_interval_sec}});
     source.record_signal = connect_callback(m, s, "sr-done", G_CALLBACK(record_done), source.index);
     require(source.record_signal != 0, SEEON_MEDIA_ERROR_PLUGIN);
   } else {

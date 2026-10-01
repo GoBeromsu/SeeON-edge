@@ -9,7 +9,7 @@ extern "C" {
 #endif
 
 typedef struct SeeonMedia SeeonMedia;
-#define SEEON_MEDIA_ABI_VERSION 1u
+#define SEEON_MEDIA_ABI_VERSION 2u
 #define SEEON_MEDIA_MAX_SOURCES 16u
 #define SEEON_MEDIA_POSE_ROWS 300u
 #define SEEON_MEDIA_POSE_COLUMNS 57u
@@ -62,6 +62,8 @@ typedef struct SeeonMediaSource {
  * this owner never allows nvinfer to build an engine as a runtime fallback.
  * Config/artifact immutability and preprocessing admission belong to the caller.
  * file:// is accepted only with allow_file_uris=1, and never records.
+ * rtsp_reconnect_interval_sec is required and explicit: 0 disables nvurisrcbin
+ * reconnect, and values above 86400 are refused. There is no default of 5.
  * record_capacity bounds currently occupied reservations (1..256), not lifetime
  * requests. Reuse requires consumed delivery, a retired SDK operation, and
  * drained callback writers. Unread completions and unresolved failed operations
@@ -77,6 +79,7 @@ typedef struct SeeonMediaConfig {
   uint32_t tracker_width, tracker_height;
   uint32_t queue_max_buffers; /* 1..64; bytes/time queue limits are disabled. */
   uint32_t preview_enabled, max_preview_bytes, allow_file_uris;
+  uint32_t rtsp_reconnect_interval_sec; /* 0..86400; 0 disables reconnect. */
 } SeeonMediaConfig;
 
 typedef struct SeeonMediaFrameIdentity {

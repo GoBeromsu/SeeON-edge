@@ -119,6 +119,7 @@ fn config(record_directory: PathBuf) -> MediaConfig {
         preview_enabled: true,
         max_preview_bytes: 1024 * 1024,
         allow_file_uris: false,
+        rtsp_reconnect_interval_sec: 7,
     }
 }
 

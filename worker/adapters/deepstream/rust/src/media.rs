@@ -525,6 +525,7 @@ mod tests {
             preview_enabled: true,
             max_preview_bytes: 1024 * 1024,
             allow_file_uris: true,
+            rtsp_reconnect_interval_sec: 5,
         }
     }
 
@@ -548,7 +549,7 @@ mod tests {
                 size_of::<SourceStatus>(),
                 size_of::<ffi::Status>()
             ],
-            [24, 48, 104, 80, 32, 73296, 112, 48, 8272, 16, 128, 2136]
+            [24, 48, 112, 80, 32, 73296, 112, 48, 8272, 16, 128, 2136]
         );
         assert_eq!(
             [
@@ -578,10 +579,11 @@ mod tests {
                 offset_of!(ffi::Config, queue_max_buffers),
                 offset_of!(ffi::Config, preview_enabled),
                 offset_of!(ffi::Config, max_preview_bytes),
-                offset_of!(ffi::Config, allow_file_uris)
+                offset_of!(ffi::Config, allow_file_uris),
+                offset_of!(ffi::Config, rtsp_reconnect_interval_sec)
             ],
             [
-                8, 16, 24, 32, 40, 48, 56, 60, 64, 68, 72, 76, 80, 84, 88, 92, 96, 100
+                8, 16, 24, 32, 40, 48, 56, 60, 64, 68, 72, 76, 80, 84, 88, 92, 96, 100, 104
             ]
         );
         assert_eq!(
@@ -788,6 +790,14 @@ mod tests {
                 |c| c.preview_enabled = false,
                 MediaArgument::PreviewCapacity,
             ),
+            (
+                |c| c.rtsp_reconnect_interval_sec = 86401,
+                MediaArgument::ReconnectInterval,
+            ),
+            (
+                |c| c.rtsp_reconnect_interval_sec = u32::MAX,
+                MediaArgument::ReconnectInterval,
+            ),
         ];
         let record_directory = RecordDirectory::new("numeric_bounds");
         for (change, argument) in cases {
@@ -809,6 +819,16 @@ mod tests {
         assert_eq!(prepared.raw.record_capacity, 256);
         assert_eq!(prepared.raw.queue_max_buffers, 64);
         assert_eq!(prepared.raw.mux_batch_timeout_us, i32::MAX as u32);
+        for interval in [0, 7, 86400] {
+            config.rtsp_reconnect_interval_sec = interval;
+            assert_eq!(
+                ffi::OpenConfig::new(&config)
+                    .unwrap()
+                    .raw
+                    .rtsp_reconnect_interval_sec,
+                interval
+            );
+        }
     }
 
     #[test]
