@@ -1,7 +1,8 @@
-//! One consuming runtime-status attempt with the existing wire and a 2s deadline.
+//! One consuming boot-report outcome; assigned facilities use a 2s status POST.
 
 use std::time::Duration;
 
+use crate::config::pull::PulledConfig;
 use crate::exit::Exit;
 use crate::relay::RelayClient;
 use crate::telemetry::gpu::GpuStatus;
@@ -65,18 +66,23 @@ impl ReportContextError {
 /// Path-free, token-free outcome; failure never changes the boot exit reason.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ReportOutcome {
-    Accepted { generation: u64 },
+    Accepted {
+        generation: u64,
+    },
     Transport,
     Status(u16),
     Malformed,
     Payload,
+    /// An admitted empty roster supplies no facility for a valid wire body.
+    NoFacility,
 }
 
 /// Construct before acquiring the lease. No Debug/Clone and no exposed client:
-/// consuming `send` permits exactly one attempt, with no periodic sender/retry.
+/// consuming `send` permits one attempt, or `NoFacility` for an empty admitted
+/// roster whose valid wire body cannot be constructed. No periodic sender/retry.
 pub struct BootStatusContext {
     client: RelayClient,
-    identity: ReportIdentity,
+    identity: Option<ReportIdentity>,
 }
 
 impl BootStatusContext {
@@ -96,24 +102,72 @@ impl BootStatusContext {
         }
         let client = RelayClient::new(base_url, token, BOOT_REPORT_TIMEOUT)
             .map_err(|_| ReportContextError::Relay)?;
-        Ok(Self { client, identity })
+        Ok(Self {
+            client,
+            identity: Some(identity),
+        })
+    }
+
+    /// Fresh/LKG config is resolved before the lease, as in the Python CLI.
+    /// A single failure report uses the first facility in canonical sorted
+    /// order. Only an empty roster has no facility; it still runs boot gates.
+    pub fn for_config(
+        base_url: &str,
+        token: &str,
+        config: &PulledConfig,
+        started_at_sec: f64,
+    ) -> Result<Self, ReportContextError> {
+        if !started_at_sec.is_finite() || started_at_sec < 0.0 {
+            return Err(ReportContextError::StartedAt);
+        }
+        let clip_export = ClipExportStatus {
+            enabled: config.config.clip_export_enabled(),
+            version: i64::try_from(config.config.clip_export_version())
+                .map_err(|_| ReportContextError::ExportVersion)?,
+        };
+        match config
+            .cameras
+            .iter()
+            .map(|camera| &camera.facility_id)
+            .min()
+        {
+            Some(facility_id) => Self::new(
+                base_url,
+                token,
+                ReportIdentity {
+                    facility_id: facility_id.clone(),
+                    seq: 1,
+                    generation: None,
+                    clip_export,
+                    started_at_sec,
+                },
+            ),
+            None => Ok(Self {
+                client: RelayClient::new(base_url, token, BOOT_REPORT_TIMEOUT)
+                    .map_err(|_| ReportContextError::Relay)?,
+                identity: None,
+            }),
+        }
     }
 
     pub fn send(self, reason: BootReason, gpu: &GpuStatus) -> ReportOutcome {
+        let Some(identity) = self.identity else {
+            return ReportOutcome::NoFacility;
+        };
         let status = FacilityStatus {
-            facility_id: self.identity.facility_id,
+            facility_id: identity.facility_id,
             cameras: Vec::new(),
             clip_recorder: ClipRecorderStatus::unavailable(),
-            clip_export: self.identity.clip_export,
+            clip_export: identity.clip_export,
             gpu: Some(gpu.clone()),
             worker: Some(WorkerStatus::current(
                 false,
-                self.identity.started_at_sec,
+                identity.started_at_sec,
                 Some(reason.wire().to_owned()),
             )),
             delivery_queue: None,
         };
-        let body = match status.body(self.identity.seq, self.identity.generation) {
+        let body = match status.body(identity.seq, identity.generation) {
             Ok(body) => body,
             Err(_) => return ReportOutcome::Payload,
         };
