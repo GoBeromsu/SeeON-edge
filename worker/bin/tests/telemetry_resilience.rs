@@ -29,7 +29,7 @@ use seeon_ml_worker::telemetry::status::{
     CameraStatus, ClipExportStatus, ClipRecorderStatus, DecodeStatus, DetectionStatus,
     FacilityStatus, StatusSender, WorkerStatus,
 };
-use seeon_ml_worker::telemetry::{LoopHandle, Publish, Schedule, spawn};
+use seeon_ml_worker::telemetry::{JoinError, LoopHandle, Publish, Schedule, spawn};
 
 const RELAY_TOKEN: &str = "relay-token";
 const SAFETY_TIMEOUT: Duration = Duration::from_secs(30);
@@ -196,7 +196,7 @@ struct Outage {
     alive_after_outage: bool,
     alive_after_recovery: bool,
     successes_after_recovery: u64,
-    clean_stop: bool,
+    clean_stop: Result<(), JoinError>,
 }
 
 fn run_outage<P: Publish>(name: &str, publisher: impl FnOnce(RelayClient) -> P) -> Outage {
@@ -233,7 +233,9 @@ fn run_outage<P: Publish>(name: &str, publisher: impl FnOnce(RelayClient) -> P) 
         .expect("the loop keeps publishing after recovery");
     let alive_after_recovery = handle.is_alive();
     let successes_after_recovery = handle.successes();
-    let clean_stop = handle.stop();
+    let mut handle = handle;
+    handle.request_stop();
+    let clean_stop = handle.join(&clock, clock.monotonic() + SAFETY_TIMEOUT);
     drop(TcpStream::connect(address).expect("stop connection"));
     recovery
         .join()
@@ -335,7 +337,11 @@ fn status_loop_survives_outage_and_reports_missed_attempts_in_seq() {
     assert_eq!(second["generation"], accepted["generation"]);
     assert!(outage.alive_after_recovery);
     assert!(outage.successes_after_recovery >= 1);
-    assert!(outage.clean_stop, "the loop thread ends without a panic");
+    assert_eq!(
+        outage.clean_stop,
+        Ok(()),
+        "the loop thread ends without a panic"
+    );
 }
 
 #[test]
@@ -370,5 +376,9 @@ fn heartbeat_loop_survives_outage_and_resumes_the_golden_body() {
     );
     assert!(outage.alive_after_recovery);
     assert!(outage.successes_after_recovery >= 1);
-    assert!(outage.clean_stop, "the loop thread ends without a panic");
+    assert_eq!(
+        outage.clean_stop,
+        Ok(()),
+        "the loop thread ends without a panic"
+    );
 }
