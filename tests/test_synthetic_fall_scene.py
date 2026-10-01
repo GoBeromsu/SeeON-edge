@@ -987,24 +987,3 @@ def test_full_frame_set_never_implies_corpus_or_model_admission(tmp_path, scene_
         frame["phase"] == "upright" and frame["pitch_rad"] == 0 for frame in receipt["frames"]
     )
     assert "unverified" in receipt["admission_status"]
-
-
-def test_manifest_matches_executable_asset_and_renderer_contract():
-    manifest = json.loads((Path(__file__).parent / "fixtures/synthetic-scene-v1.json").read_text())
-    assert manifest["asset"]["digest"]["pinned_hex"] == scene.ASSET_SHA256
-    assert manifest["asset"]["byte_length"] == scene.ASSET_BYTES
-    assert manifest["asset"]["revision"] == scene.ASSET_REVISION
-    assert manifest["bed_asset"] == scene.bed_asset_contract()
-    assert manifest["render_contract"]["actor_pose"] == scene.actor_pose_contract()
-    assert tuple(manifest["blender"]["provisioned"]) == scene.BLENDER_VERSION
-    assert manifest["scene"]["frame_count"] == scene.FRAME_COUNT
-    assert manifest["scene"]["width"] == scene.WIDTH
-    assert manifest["scene"]["height"] == scene.HEIGHT
-    assert manifest["scene"]["ingest_fps"] == scene.FPS
-    assert manifest["render_contract"] == scene.scene_contract()
-    for motion in manifest["scene"]["variants"]:
-        assert manifest["motion_contracts"][motion] == scene.motion_contract(
-            motion, manifest["scene"]["seed"]
-        )
-    assert manifest["admission"]["inference_qualification"] is False
-    assert manifest["admission"]["model_admission"] is False

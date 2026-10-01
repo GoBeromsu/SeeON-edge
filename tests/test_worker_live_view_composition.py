@@ -184,42 +184,60 @@ def _flow_runtime_capturing_plane_configs(
 
 
 _INTERVAL_ENV = "ML_WORKER_FLOW_RTSP_RECONNECT_INTERVAL_SEC"
-_INTERVAL_FIXTURE = (
-    Path(__file__).parent / "fixtures" / "worker-wire" / "d" / "engine-identity-refusals.json"
+
+
+@pytest.mark.parametrize(
+    ("raw", "interval_sec"),
+    [
+        (None, 5),
+        ("0", 0),
+        ("5", 5),
+        ("86400", 86400),
+        ("007", 7),
+        pytest.param("0" * 5000 + "5", 5, id="long-leading-zeros"),
+    ],
 )
-
-
-def _interval_rows(verdict: str) -> list[object]:
-    rows = json.loads(_INTERVAL_FIXTURE.read_text(encoding="utf-8"))["flow_rtsp_reconnect_interval"]
-    return [pytest.param(row, id=row["case"]) for row in rows if row["verdict"] == verdict]
-
-
-def _interval_env(row: dict[str, object]) -> dict[str, str]:
-    return {} if row["raw"] is None else {_INTERVAL_ENV: str(row["raw"])}
-
-
-@pytest.mark.parametrize("row", _interval_rows("accepted"))
 def test_worker_maps_rtsp_reconnect_env_to_media_plane_config(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
-    row: dict[str, object],
+    raw: str | None,
+    interval_sec: int,
 ) -> None:
-    runtime, configs = _flow_runtime_capturing_plane_configs(
-        tmp_path, monkeypatch, _interval_env(row)
-    )
+    env = {} if raw is None else {_INTERVAL_ENV: raw}
+    runtime, configs = _flow_runtime_capturing_plane_configs(tmp_path, monkeypatch, env)
 
     runtime._initialize_flow_media_plane(object())  # noqa: SLF001
 
     (config,) = configs
-    assert config.adapter_config().rtsp_reconnect_interval_sec == row["interval_sec"]  # type: ignore[attr-defined]
+    assert config.adapter_config().rtsp_reconnect_interval_sec == interval_sec  # type: ignore[attr-defined]
 
 
-@pytest.mark.parametrize("row", _interval_rows("refused"))
-def test_worker_refuses_unusable_rtsp_reconnect_interval(row: dict[str, object]) -> None:
+@pytest.mark.parametrize(
+    "raw",
+    [
+        "",
+        " ",
+        "-1",
+        "+5",
+        " 5",
+        "5 ",
+        "1.5",
+        "5_0",
+        "abc",
+        "86401",
+        pytest.param(chr(0x0665), id="arabic-indic-digit"),
+        pytest.param(chr(0xFF15), id="fullwidth-digit"),
+        pytest.param("1" + "0" * 30, id="integer-overflow"),
+        pytest.param("9" * 5000, id="integer-conversion-limit"),
+    ],
+)
+def test_worker_refuses_unusable_rtsp_reconnect_interval(raw: str) -> None:
     with pytest.raises(EngineIdentityError) as refusal:
-        worker_module._flow_rtsp_reconnect_interval_sec(_interval_env(row))  # noqa: SLF001
+        worker_module._flow_rtsp_reconnect_interval_sec({_INTERVAL_ENV: raw})  # noqa: SLF001
 
-    assert str(refusal.value) == row["message"]
+    assert str(refusal.value) == (
+        f"{_INTERVAL_ENV} must be a non-negative integer (0-86400, digits only)"
+    )
 
 
 def test_flow_live_view_injects_bed_recognizer_and_recognize_request_reaches_it(

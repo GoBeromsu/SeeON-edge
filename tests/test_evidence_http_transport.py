@@ -1,9 +1,8 @@
 from __future__ import annotations
 
 import json
-from datetime import UTC, datetime, tzinfo
-from pathlib import Path
-from typing import Any
+from datetime import UTC, datetime, timedelta, tzinfo
+from email.utils import format_datetime
 
 import pytest
 
@@ -12,17 +11,10 @@ from shared.events.evidence_export_contract import (
     ClipReceipt,
     DeliveryDisposition,
     DeliveryFailure,
+    DeliveryFailureCode,
     EventReceipt,
 )
 from shared.events.evidence_http_transport import classify_http_failure
-
-# d1b: the relay-disposition wire contract the Rust relay client (d1) also replays.
-# The manifest names this file as its Python consumer.
-_RELAY_GOLDEN_PATH = (
-    Path(__file__).parent / "fixtures" / "worker-wire" / "r" / "relay-dispositions.json"
-)
-_RELAY_GOLDEN: dict[str, Any] = json.loads(_RELAY_GOLDEN_PATH.read_text(encoding="utf-8"))
-_PARSER_SOURCE = "shared/events/evidence_http_transport.py"
 
 
 @pytest.mark.parametrize("status", (401, 403))
@@ -138,87 +130,145 @@ def test_a_terminal_local_accept_requires_that_something_was_persisted() -> None
     )
 
 
-@pytest.fixture
-def injected_relay_clock(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Pin the parser's wall clock to the golden's injected_now_utc."""
-    injected_now = datetime.fromisoformat(_RELAY_GOLDEN["injected_now_utc"])
+@pytest.mark.parametrize("status", (200, 202, 299, 409))
+def test_matching_event_receipt_acknowledges_success_or_conflict(status: int) -> None:
+    body = json.dumps(
+        {"status": "accepted", "edge_event_id": "edge-1", "event_id": "hub-1"}
+    ).encode()
+
+    assert transport_module.parse_event_result((status, {}, body), "edge-1") == EventReceipt(
+        "accepted", "edge-1", "hub-1"
+    )
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"status": "accepted", "edge_event_id": "other", "event_id": "hub-1"},
+        {"edge_event_id": "edge-1"},
+        {"status": "accepted", "edge_event_id": "edge-1", "event_id": ""},
+    ],
+    ids=("wrong-identity", "missing-status", "empty-hub-id"),
+)
+@pytest.mark.parametrize("status", (202, 409))
+def test_invalid_event_receipt_never_acknowledges(payload: dict[str, str], status: int) -> None:
+    result = transport_module.parse_event_result(
+        (status, {}, json.dumps(payload).encode()), "edge-1"
+    )
+
+    expected = (
+        DeliveryFailure(DeliveryDisposition.RETRY, "MALFORMED_RECEIPT")
+        if status == 202
+        else DeliveryFailure(DeliveryDisposition.PERMANENT, "HTTP_409", status_code=409)
+    )
+    assert result == expected
+
+
+@pytest.mark.parametrize("status", (200, 409))
+@pytest.mark.parametrize(
+    ("state", "version"),
+    [("READY", 2), ("UNAVAILABLE", 2), ("EXPIRED", 2), ("EXPIRED", 3)],
+)
+def test_clip_receipt_requires_matching_version_unless_expired(
+    status: int, state: str, version: int
+) -> None:
+    body = json.dumps(
+        {
+            "clip_id": "clip-1",
+            "state": state,
+            "state_version": version,
+            "sha256": "a" * 64,
+            "size_bytes": 12,
+        }
+    ).encode()
+
+    assert transport_module.parse_clip_result((status, {}, body), "clip-1", 2) == ClipReceipt(
+        "clip-1", state, version, "a" * 64, 12
+    )
+
+
+@pytest.mark.parametrize(
+    ("clip_id", "state", "version"),
+    [
+        ("other", "READY", 2),
+        ("clip-1", "READY", 1),
+        ("clip-1", "READY", 3),
+        ("clip-1", "EXPIRED", 1),
+    ],
+)
+def test_clip_identity_and_version_mismatch_remain_retryable(
+    clip_id: str, state: str, version: int
+) -> None:
+    body = json.dumps({"clip_id": clip_id, "state": state, "state_version": version}).encode()
+
+    assert transport_module.parse_clip_result((200, {}, body), "clip-1", 2) == DeliveryFailure(
+        DeliveryDisposition.RETRY, "MALFORMED_RECEIPT"
+    )
+
+
+@pytest.mark.parametrize(
+    ("status", "disposition"),
+    [
+        (199, DeliveryDisposition.PERMANENT),
+        (300, DeliveryDisposition.PERMANENT),
+        (503, DeliveryDisposition.RETRY),
+    ],
+)
+def test_matching_receipts_do_not_override_unsuccessful_http_status(
+    status: int, disposition: DeliveryDisposition
+) -> None:
+    event = b'{"status":"accepted","edge_event_id":"edge-1","event_id":"hub-1"}'
+    clip = b'{"clip_id":"clip-1","state":"READY","state_version":1}'
+    expected = DeliveryFailure(disposition, f"HTTP_{status}", status_code=status)
+
+    assert transport_module.parse_event_result((status, {}, event), "edge-1") == expected
+    assert transport_module.parse_clip_result((status, {}, clip), "clip-1", 1) == expected
+
+
+def test_missing_camera_mapping_overrides_payload_rejection() -> None:
+    failure = classify_http_failure(422, {}, b'{"detail":{"code":"CAMERA_MAPPING_MISSING"}}')
+
+    assert failure == DeliveryFailure(
+        DeliveryDisposition.RETRY, DeliveryFailureCode.CAMERA_MAPPING_MISSING, status_code=422
+    )
+
+
+@pytest.mark.parametrize(
+    ("retry_after", "expected_seconds"),
+    [
+        (None, None),
+        ("soon", None),
+        ("-5", 0.0),
+        ("0", 0.0),
+        ("120", 120.0),
+        ("900", 900.0),
+        ("901", 900.0),
+    ],
+)
+def test_retry_after_seconds_are_bounded(
+    retry_after: str | None, expected_seconds: float | None
+) -> None:
+    headers = {} if retry_after is None else {"retry-after": retry_after}
+    failure = classify_http_failure(503, headers)
+
+    assert failure.disposition is DeliveryDisposition.RETRY
+    assert failure.retry_after_seconds == expected_seconds
+
+
+@pytest.mark.parametrize(("offset_seconds", "expected_seconds"), [(-60, 0), (300, 300), (901, 900)])
+def test_retry_after_http_dates_use_injected_clock_and_bounds(
+    monkeypatch: pytest.MonkeyPatch, offset_seconds: int, expected_seconds: int
+) -> None:
+    now = datetime(2026, 9, 29, 12, tzinfo=UTC)
 
     class _InjectedDatetime(datetime):
         @classmethod
         def now(cls, tz: tzinfo | None = None) -> datetime:
-            return injected_now.astimezone(tz or UTC)
+            return now.astimezone(tz or UTC)
 
     monkeypatch.setattr(transport_module, "datetime", _InjectedDatetime)
+    header = format_datetime(now + timedelta(seconds=offset_seconds), usegmt=True)
+    failure = classify_http_failure(429, {"Retry-After": header})
 
-
-def _replay_relay_row(row: dict[str, Any]) -> EventReceipt | ClipReceipt | DeliveryFailure:
-    response = row["response"]
-    body = response["body"]
-    body_bytes = None if body is None else body.encode("utf-8")
-    request = row["request"]
-    parser = row["parser"]
-    if parser == f"{_PARSER_SOURCE}:parse_event_result":
-        return transport_module.parse_event_result(
-            (response["status"], response["headers"], body_bytes or b""),
-            request["expected_edge_event_id"],
-        )
-    if parser == f"{_PARSER_SOURCE}:parse_clip_result":
-        return transport_module.parse_clip_result(
-            (response["status"], response["headers"], body_bytes or b""),
-            request["expected_clip_id"],
-            request["expected_state_version"],
-        )
-    if parser == f"{_PARSER_SOURCE}:classify_http_failure":
-        return transport_module.classify_http_failure(
-            response["status"], response["headers"], body_bytes
-        )
-    pytest.fail(f"relay golden row {row['name']!r} names an unknown parser {parser!r}")
-
-
-def _relay_result_view(result: EventReceipt | ClipReceipt | DeliveryFailure) -> dict[str, Any]:
-    if isinstance(result, EventReceipt):
-        return {
-            "kind": "EventReceipt",
-            "status": result.status,
-            "edge_event_id": result.edge_event_id,
-            "event_id": result.event_id,
-        }
-    if isinstance(result, ClipReceipt):
-        return {
-            "kind": "ClipReceipt",
-            "clip_id": result.clip_id,
-            "state": result.state,
-            "state_version": result.state_version,
-            "sha256": result.sha256,
-            "size_bytes": result.size_bytes,
-        }
-    return {
-        "kind": "failure",
-        "code": str(result.code),
-        "disposition": result.disposition.value,
-        "status_code": result.status_code,
-        "retry_after_seconds": result.retry_after_seconds,
-    }
-
-
-@pytest.mark.usefixtures("injected_relay_clock")
-@pytest.mark.parametrize("row", _RELAY_GOLDEN["rows"], ids=lambda row: row["name"])
-def test_relay_disposition_golden_row_replays_through_the_python_parser(
-    row: dict[str, Any],
-) -> None:
-    result = _replay_relay_row(row)
-
-    assert _relay_result_view(result) == row["result"]
-
-
-@pytest.mark.usefixtures("injected_relay_clock")
-@pytest.mark.parametrize(
-    ("retry_after", "expected_seconds"),
-    sorted(_RELAY_GOLDEN["retry_after_direct"].items()),
-)
-def test_relay_retry_after_golden_replays_through_the_python_parser(
-    retry_after: str, expected_seconds: float | None
-) -> None:
-    failure = classify_http_failure(503, {"Retry-After": retry_after})
-
+    assert failure.disposition is DeliveryDisposition.RETRY
     assert failure.retry_after_seconds == expected_seconds

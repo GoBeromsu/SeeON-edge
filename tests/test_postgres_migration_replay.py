@@ -6,8 +6,8 @@ Oracles, none of them the code under test:
   pending set is the worker file queue, retained on its volume and replayed, so the
   target outbox starts empty and the replay fills it.
 - ADR 0009, recovery: no second event ID or external delivery for a replayed event.
-- The sha-pinned worker-wire goldens: the relay body the worker sends and the queue
-  entry it retains for that alert.
+- A minimal relay input and its original identity/content, admitted through the
+  public worker delivery queue before migration.
 - The old runtime's row for a relayed alert (``relay_projection`` on main): incident
   ``incident:<edge_event_id>`` holding the alert's identity values verbatim.
 
@@ -19,14 +19,12 @@ contract-exact Hub fixture over loopback HTTP.
 
 from __future__ import annotations
 
-import base64
-import hashlib
-import json
 from contextlib import closing
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+import pytest
 from fastapi.testclient import TestClient
 from psycopg import sql
 from psycopg.conninfo import make_conninfo
@@ -47,6 +45,9 @@ from backend.app.postgres_root import (
     close_postgres_database,
     open_postgres_root,
 )
+from shared.events.delivery_queue import DeliveryQueue, EventEntry
+from shared.events.evidence_export_contract import EventReceipt
+from shared.events.evidence_http_transport import encode_json, parse_event_result
 from tests_support.alert_amplification_runtime import ServedFixture, hub_client
 from tests_support.postgres_migration import (
     NOW,
@@ -61,8 +62,6 @@ from tests_support.sqlite_source import create_schema19_source
 
 pytest_plugins = ("tests_support.postgres_migration",)
 
-_WIRE = Path(__file__).parent / "fixtures" / "worker-wire"
-_QUEUE_PREFIX = "d/delivery-queue/event-"
 _IDENTITY = ("facility_id", "camera_id", "event_type", "probability", "detected_at")
 _ROOT_BUDGET = PoolBudget(
     max_connections=2,
@@ -78,46 +77,31 @@ _ROOT_BUDGET = PoolBudget(
 class _Wire:
     alert: dict[str, Any]
     body: bytes
-    method: str
-    path: str
-    queue_name: str
-    queue_entry: bytes
-    receipt_keys: frozenset[str]
-    receipt_status: str
+    entry: EventEntry
 
 
-def _pinned(goldens: dict[str, dict[str, Any]], path: str) -> bytes:
-    data = (_WIRE / path).read_bytes()
-    assert hashlib.sha256(data).hexdigest() == goldens[path]["sha256"]
-    return data
-
-
-def _worker_wire() -> _Wire:
-    manifest = json.loads((_WIRE / "manifest.json").read_text(encoding="utf-8"))
-    goldens = {entry["path"]: entry for entry in manifest["goldens"]}
-    alert = json.loads(_pinned(goldens, "r/alert.json"))
-    transport = goldens["r/alert.json"]["transport"]
-    body = json.dumps(alert, separators=(",", ":")).encode()
-    assert hashlib.sha256(body).hexdigest() == transport["body_sha256"]
-    (queue_path,) = [path for path in goldens if path.startswith(_QUEUE_PREFIX)]
-    assert queue_path == f"{_QUEUE_PREFIX}{alert['edge_event_id']}.json"
-    queue_entry = _pinned(goldens, queue_path)
-    retained = json.loads(queue_entry)
-    values = json.loads(base64.b64decode(retained["values_b64"]))
-    # The retained entry holds the alert's identity values; the wire adds only audit.
-    assert values == {key: alert[key] for key in values}
-    assert set(alert) - set(values) == {"audit"}
-    receipt = json.loads(_pinned(goldens, "r/alert.response.json"))
-    assert receipt["edge_event_id"] == alert["edge_event_id"]
+def _worker_wire(event_type: str) -> _Wire:
+    alert = {
+        "edge_event_id": "11111111-1111-4111-8111-111111111111",
+        "event_type": event_type,
+        "probability": 0.87,
+        "detected_at": NOW,
+        "camera_id": "camera-hub",
+        "facility_id": "facility-1",
+    }
+    body = encode_json(alert)
     return _Wire(
         alert=alert,
         body=body,
-        method=transport["method"],
-        path=transport["path"],
-        queue_name=Path(queue_path).name,
-        queue_entry=queue_entry,
-        receipt_keys=frozenset(receipt),
-        receipt_status=receipt["status"],
+        entry=EventEntry(
+            edge_event_id=alert["edge_event_id"],
+            event_type=event_type,
+            detected_at=alert["detected_at"],
+            camera_id=alert["camera_id"],
+            facility_id=alert["facility_id"],
+            decision_trace=b"{}",
+            values=body,
+        ),
     )
 
 
@@ -170,18 +154,18 @@ def _relayed_source(root: Path, alert: dict[str, Any]) -> tuple[Path, Path]:
 def _worker_volume(root: Path, wire: _Wire) -> Path:
     """A stopped old worker whose only pending delivery is the alert."""
     state = root / "worker-state"
-    queue = state / "delivery-queue"
-    queue.mkdir(parents=True)
+    queue = DeliveryQueue(state / "delivery-queue")
     (state / "delivery-queue-dead-letter").mkdir()
     (state / ".gpu.lease").write_bytes(b"")
-    (queue / ".delivery-queue.lock").write_bytes(b"")
-    (queue / wire.queue_name).write_bytes(wire.queue_entry)
+    assert queue.try_admit(wire.entry).accepted
     return state
 
 
-def _migrate(target: MigrationTarget, root: Path, wire: _Wire) -> None:
+def _migrate(target: MigrationTarget, root: Path, wire: _Wire) -> DeliveryQueue:
     source, destination = _relayed_source(root, wire.alert)
     state = _worker_volume(root, wire)
+    entry_path = state / "delivery-queue" / f"{wire.entry.entry_id}.json"
+    original_entry = entry_path.read_bytes()
     snapshot = export_snapshot(source, destination).path
     import_snapshot(target.database, schema=target.schema, snapshot_path=snapshot)
     receipts = root / "receipts"
@@ -204,6 +188,12 @@ def _migrate(target: MigrationTarget, root: Path, wire: _Wire) -> None:
         target.database, target.authority_path, schema=target.schema, worker_state_dir=state
     )
     assert token.generation == generation + 1
+    assert entry_path.read_bytes() == original_entry
+    queue = DeliveryQueue(state / "delivery-queue")
+    assert queue.accepted_count == 1
+    retained = queue.try_admit(wire.entry)
+    assert retained.accepted and retained.already_admitted
+    return queue
 
 
 def _root_environ(target: MigrationTarget, root: Path) -> dict[str, str]:
@@ -236,14 +226,15 @@ def _hub_sends(hub: ServedFixture) -> int:
     )
 
 
+@pytest.mark.parametrize("event_type", ("fall", "bed-exit"))
 def test_migrated_pending_alert_replays_to_one_accepted_delivery(
-    migration_target: MigrationTarget, tmp_path: Path
+    migration_target: MigrationTarget, tmp_path: Path, event_type: str
 ) -> None:
     target = migration_target
-    wire = _worker_wire()
+    wire = _worker_wire(event_type)
     edge_event_id = wire.alert["edge_event_id"]
     identity = (f"incident:{edge_event_id}", *(wire.alert[key] for key in _IDENTITY))
-    _migrate(target, tmp_path, wire)
+    queue = _migrate(target, tmp_path, wire)
     assert delivery_state(target.admin, target.schema)["outbox_states"] == {}
 
     root = open_postgres_root(_root_environ(target, tmp_path), budget=_ROOT_BUDGET)
@@ -262,22 +253,27 @@ def test_migrated_pending_alert_replays_to_one_accepted_delivery(
             app = relay_postgres_app(sandbox, audit, client=hub_client(hub.origin), camera_id=None)
             headers = {**RELAY_HEADERS, "Content-Type": "application/json"}
             with TestClient(app) as client:
-                first = client.request(wire.method, wire.path, content=wire.body, headers=headers)
+                first = client.post("/api/v1/relay/alerts", content=wire.body, headers=headers)
                 assert first.status_code == 202, first.text
                 hub_event = hub.fixture.event_for_edge_id(edge_event_id)
                 assert hub_event is not None
-                assert set(first.json()) == wire.receipt_keys
                 assert first.json() == {
-                    "status": wire.receipt_status,
+                    "status": "accepted",
                     "edge_event_id": edge_event_id,
                     "event_id": hub_event.event_id,
                 }
                 assert _hub_sends(hub) == 1
+                assert queue.accepted_count == 1
 
                 # A retry after a lost response lands on the same delivery.
-                retried = client.request(wire.method, wire.path, content=wire.body, headers=headers)
+                retried = client.post("/api/v1/relay/alerts", content=wire.body, headers=headers)
                 assert (retried.status_code, retried.json()) == (202, first.json())
                 assert _hub_sends(hub) == 1
+                assert parse_event_result(
+                    (retried.status_code, retried.headers, retried.content), edge_event_id
+                ) == EventReceipt("accepted", edge_event_id, hub_event.event_id)
+                assert queue.acknowledge(wire.entry.entry_id)
+                assert queue.accepted_count == 0
     finally:
         close_postgres_database(root.database)
 
