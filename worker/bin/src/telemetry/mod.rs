@@ -2,7 +2,12 @@
 //! `worker.py:_RelayHeartbeat`), the runtime-status publisher (Python
 //! `runtime_status_sender.py`) and the GPU probe behind its `gpu` block.
 //! [`spawn`] runs one [`Publish`] on its own thread; a relay failure is
-//! counted and backed off, and never ends the loop.
+//! counted and backed off, and never ends the loop. Stop disconnects the
+//! channel the backoff `recv_timeout` already observes, so a long backoff
+//! wakes immediately. It does not cancel a publish already in flight.
+//! [`LoopHandle::join`] waits only until the caller's deadline and keeps the
+//! thread when that deadline passes. Drop requests stop and then detaches an
+//! unjoined thread; a dropped handle cannot be joined later.
 
 use std::fmt;
 use std::sync::Arc;
@@ -12,7 +17,9 @@ use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
 use crate::json::JsonError;
+use crate::poll::poll_until;
 use crate::relay::TransportError;
+use crate::seam::Clock;
 
 pub mod gpu;
 pub mod heartbeat;
@@ -126,11 +133,19 @@ struct Counters {
     successes: AtomicU64,
 }
 
+/// Why a telemetry thread did not end cleanly within its join deadline.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum JoinError {
+    Timeout,
+    Panicked,
+}
+
 /// The running loop: its counters, liveness and stop switch.
 pub struct LoopHandle {
     counters: Arc<Counters>,
     stop: Option<Sender<()>>,
     thread: Option<JoinHandle<()>>,
+    joined: Option<Result<(), JoinError>>,
 }
 
 impl LoopHandle {
@@ -156,27 +171,45 @@ impl LoopHandle {
             .is_some_and(|thread| !thread.is_finished())
     }
 
-    /// Stops the loop and waits for its thread; `false` if it had panicked.
-    pub fn stop(mut self) -> bool {
-        self.halt()
+    /// Disconnects the stop channel. Idempotent; does not wait, and does not
+    /// cancel a publish already inside the relay client.
+    pub fn request_stop(&mut self) {
+        drop(self.stop.take());
     }
 
-    fn halt(&mut self) -> bool {
-        drop(self.stop.take());
-        self.thread
-            .take()
-            .is_none_or(|thread| thread.join().is_ok())
+    /// `deadline` is absolute in the supplied clock's monotonic domain.
+    /// A timeout retains the native handle for a later join. A finished join
+    /// is remembered, so a repeated call does not join twice.
+    pub fn join(&mut self, clock: &dyn Clock, deadline: Duration) -> Result<(), JoinError> {
+        if let Some(joined) = self.joined {
+            return joined;
+        }
+        poll_until(clock, deadline, "telemetry loop", || {
+            self.thread.as_ref().is_none_or(JoinHandle::is_finished)
+        })
+        .map_err(|_| JoinError::Timeout)?;
+        let result = match self.thread.take() {
+            Some(thread) => thread.join().map_err(|_| JoinError::Panicked),
+            None => Err(JoinError::Panicked),
+        };
+        self.joined = Some(result);
+        result
     }
 }
 
 impl Drop for LoopHandle {
+    /// Requests stop, then drops the native handle. `JoinHandle`'s own drop
+    /// detaches an unjoined thread; this is not evidence the loop has ended,
+    /// and nothing can rejoin it afterwards.
     fn drop(&mut self) {
-        self.halt();
+        self.request_stop();
     }
 }
 
 /// Starts `publisher` on a thread named `name`, publishing at once and then
-/// on `schedule` until the handle is stopped or dropped.
+/// on `schedule` until the handle is stopped or dropped. The backoff is the
+/// stop channel's `recv_timeout`: disconnect wakes it immediately, and the
+/// delay is unchanged.
 pub fn spawn<P: Publish>(
     name: &str,
     mut publisher: P,
@@ -211,5 +244,6 @@ pub fn spawn<P: Publish>(
         counters,
         stop: Some(stop),
         thread: Some(thread),
+        joined: None,
     })
 }
