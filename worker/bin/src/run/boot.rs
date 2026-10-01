@@ -45,7 +45,8 @@ pub enum BootCause {
     Model(ModelStartError),
 }
 
-/// The failure has already attempted its one report. Never repost it in main.
+/// The failure has consumed its report context. Never repost it in main.
+/// `NoFacility` means an empty admitted roster had no valid report body.
 /// `owners` retains partial startup and the lease, including timed-out threads.
 /// Parent must terminate the process, not reopen models after a failed boot.
 pub struct BootFailure {
@@ -105,7 +106,8 @@ pub struct Booted {
 }
 
 /// Runs steps 2–4 using step-1 validated settings and reporting context.
-/// Genuine failures probe real CUDA state and make exactly one 2s status attempt.
+/// Genuine failures probe real CUDA state and report once with a 2s deadline.
+/// An admitted empty roster instead records `NoFacility`, without a wire body.
 /// Cancellation makes no failure report and does not enter native diagnostics.
 /// The clock must share the signal watchdog's monotonic origin.
 pub fn boot(
