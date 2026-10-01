@@ -4,6 +4,7 @@
 
 pub mod bed;
 pub mod coverage;
+pub mod emit;
 pub mod fall;
 pub mod identity;
 pub mod ingest;

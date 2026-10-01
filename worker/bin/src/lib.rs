@@ -4,6 +4,7 @@
 
 pub mod b64;
 pub mod cli;
+pub mod clips;
 pub mod config;
 pub mod delivery;
 pub mod exit;
@@ -17,4 +18,5 @@ pub mod records;
 pub mod relay;
 pub mod seam;
 pub mod shutdown;
+pub mod telemetry;
 pub mod trace_out;
