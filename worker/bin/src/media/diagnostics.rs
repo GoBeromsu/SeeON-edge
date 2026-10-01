@@ -3,7 +3,7 @@
 //! (~L243-262). They are in-process values; nothing here reaches the wire.
 //! Cameras are roster positions, which equal `SourceConfig::source_id`.
 
-use std::sync::{Mutex, PoisonError};
+use std::sync::Mutex;
 
 use seeon_deepstream_native::{MediaResult, MediaState, MediaStatus};
 
@@ -33,15 +33,20 @@ pub struct Snapshot {
     pub receipts_dropped: u64,
     /// Command replies the requester was no longer waiting for.
     pub replies_dropped: u64,
+    /// Release entered the native stop/reap attempt, including on failure.
+    pub finalization_started: bool,
+    /// That attempt finished (possibly by unwinding), before waiting for root
+    /// close permission. This does not prove downstream clip publication.
+    pub finalization_complete: bool,
     /// Native stop returned OK during release.
     pub stopped: bool,
     /// Native close returned OK after a successful stop with no record slot
     /// reserved. `false` after release means the native handle was leaked on
     /// purpose; the process must exit nonzero rather than reopen media.
     pub closed: bool,
-    /// Release did not call native close: stop failed, or no status read in
-    /// the reap loop showed zero records reserved (`records_reserved` holds
-    /// the last count read). Close over a reserved slot corrupts the heap.
+    /// Close is withheld unless stop succeeded, reap observed zero reserved
+    /// slots, and root permission is valid before the shared deadline.
+    /// `records_reserved` holds the last count read, not proof of finalization.
     pub close_withheld: bool,
 }
 
@@ -132,6 +137,9 @@ impl Diagnostics {
 
     /// Counters stay readable after a panicking writer; each write is whole.
     fn lock(&self) -> std::sync::MutexGuard<'_, Snapshot> {
-        self.inner.lock().unwrap_or_else(PoisonError::into_inner)
+        match self.inner.lock() {
+            Ok(snapshot) => snapshot,
+            Err(poisoned) => poisoned.into_inner(),
+        }
     }
 }

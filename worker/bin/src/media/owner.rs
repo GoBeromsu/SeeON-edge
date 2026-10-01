@@ -2,10 +2,11 @@
 //! `MediaOwner`, reports readiness once, and hands every polled packet over
 //! with `try_send`, counting what a full channel drops. Stop, a fatal status
 //! or a failed call ends the loop; `release` then stops, reaps and closes
-//! only when no record slot is left reserved. A panic in the loop also goes
-//! through `release` before it resumes.
+//! only when no record slot is left reserved and root permits close. A panic
+//! in start or the loop also goes through `release` before it resumes.
 
 use std::io;
+use std::mem::ManuallyDrop;
 use std::panic::{self, AssertUnwindSafe};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -17,6 +18,7 @@ use seeon_deepstream_native::{MediaConfig, MediaError, MediaOwner, MediaPoll, Me
 
 use super::diagnostics::Diagnostics;
 use super::release::{drain_records, release};
+use super::shutdown::ShutdownControl;
 use super::{COMMAND_CAPACITY, Command};
 use crate::exit::Exit;
 use crate::gpu::owners::JoinError;
@@ -31,10 +33,10 @@ const POSE_BURST: usize = 16;
 pub struct MediaParams {
     /// Moved into the thread: `MediaOwner::open` copies it there.
     pub config: MediaConfig,
-    /// The open budget and the release budget, in milliseconds. Release
-    /// takes one deadline before stop; the native stop and the record reaping
-    /// after it share that single budget.
-    pub shutdown_budget_ms: u32,
+    /// Native opening budget only; release uses the shared shutdown control.
+    pub open_budget_ms: u32,
+    pub shutdown: Arc<ShutdownControl>,
+    /// Media-component stop only; GPU owners must remain alive for draining.
     pub stop: Arc<AtomicBool>,
     pub clock: Arc<dyn Clock>,
     /// One channel for every camera, capacity `POSE_PER_CAMERA` x cameras.
@@ -77,8 +79,8 @@ fn run(params: &MediaParams, ready: &SyncSender<Readiness>) {
         .iter()
         .map(|source| source.source_id)
         .collect();
-    let mut owner = match MediaOwner::open(&params.config, params.shutdown_budget_ms) {
-        Ok(owner) => owner,
+    let mut owner = match MediaOwner::open(&params.config, params.open_budget_ms) {
+        Ok(owner) => ManuallyDrop::new(owner),
         Err(error) => {
             // A refused open holds nothing, so there is nothing to release.
             let exit = match error {
@@ -89,19 +91,25 @@ fn run(params: &MediaParams, ready: &SyncSender<Readiness>) {
             return;
         }
     };
-    let started = owner
-        .start()
-        .is_ok_and(|status| status.result == MediaResult::Ok);
-    let readiness = if started { Ok(()) } else { Err(Exit::Runtime) };
-    let delivered = ready.try_send(readiness).is_ok();
-    // A panic in `serve` must not skip the close gate: unwinding would drop
-    // `owner`, and `MediaOwner::drop` stops and closes without reading the
-    // reserved record slots. The panic resumes once `release` has run.
-    let served = if started && delivered {
-        panic::catch_unwind(AssertUnwindSafe(|| serve(&mut owner, params, &sources)))
-    } else {
-        Ok(())
-    };
+    // Guard ownership immediately after open, including start and cleanup:
+    // native Drop must never bypass the reserved-slot/root-permission gate.
+    let mut reported = false;
+    let served = panic::catch_unwind(AssertUnwindSafe(|| {
+        let started = owner
+            .start()
+            .is_ok_and(|status| status.result == MediaResult::Ok);
+        let readiness = if started { Ok(()) } else { Err(Exit::Runtime) };
+        reported = true;
+        let delivered = ready.try_send(readiness).is_ok();
+        if started && delivered {
+            serve(&mut owner, params, &sources);
+        }
+    }));
+    if !reported {
+        ready.try_send(Err(Exit::Runtime)).ok();
+    }
+    // Root observes finalization diagnostics before joining; joining first
+    // would block the root that must grant close permission.
     release(owner, params);
     if let Err(payload) = served {
         panic::resume_unwind(payload);

@@ -6,21 +6,24 @@
 //! take, or a score that fails, is a counted missing observation with reason
 //! `AdapterReturnedNoData`, never a low score.
 
+mod decision;
 pub mod score;
 pub mod window;
+
+pub use decision::DecisionUpdate;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::mpsc::SyncSender;
 
-use seeon_deepstream_native::FrameIdentity;
 use seeon_worker::episode::BusinessEvent;
-use seeon_worker::fall::{FallError, FallPolicyDecider, FallProbabilities};
+use seeon_worker::fall::{FallError, FallPolicyDecider};
 use seeon_worker::pose_bbox56::{PoseBbox56Row, ZERO_ROW};
 use seeon_worker::temporal::{PtsGapTooLargeError, PtsResampler};
 use seeon_worker::trace::DecisionTraceMissingReason as Reason;
 
 use super::ingest::Frame;
 use crate::msg::{FallRequest, FallResponse};
+use decision::Pending;
 use score::probabilities;
 use window::Windows;
 
@@ -49,17 +52,6 @@ pub struct FallCounters {
     pub resample_gap_rows: u64,
     /// Responses for no awaited request.
     pub stale_responses: u64,
-}
-
-/// A decision waiting for scores.
-struct Pending {
-    frame: FrameIdentity,
-    frame_index: i64,
-    time_sec: f64,
-    live: Vec<u64>,
-    awaited: BTreeSet<u64>,
-    probabilities: BTreeMap<u64, FallProbabilities>,
-    reasons: BTreeMap<u64, Reason>,
 }
 
 pub struct FallStage {
@@ -93,10 +85,13 @@ impl FallStage {
 
     /// Takes one frame. Events of a decision still pending from the previous
     /// frame come first; its unanswered tracks are missing observations.
+    /// Each successful update notifies `observer` under the [`DecisionUpdate`]
+    /// contract, even if a later update in this call fails.
     pub fn observe(
         &mut self,
         frame: &Frame,
         requests: &SyncSender<FallRequest>,
+        observer: &mut dyn FnMut(DecisionUpdate<'_>),
     ) -> Result<Vec<BusinessEvent>, FallStageError> {
         let seconds = frame.time_sec.unwrap_or(0.0);
         let pts_ns = (seconds * 1e9) as i64;
@@ -109,7 +104,7 @@ impl FallStage {
             .resampler
             .push(pts_ns, &frame.rows)
             .map_err(FallStageError::Gap)?;
-        let mut events = self.flush()?;
+        let mut events = self.flush(observer)?;
         if resampled.is_empty() {
             events.extend(self.decider.coast()?);
             return Ok(events);
@@ -154,7 +149,7 @@ impl FallStage {
             }
         }
         if pending.awaited.is_empty() {
-            events.extend(self.decide(pending)?);
+            events.extend(self.decide(pending, observer)?);
         } else {
             self.pending = Some(pending);
         }
@@ -162,10 +157,11 @@ impl FallStage {
     }
 
     /// Takes one gpu-fall response; the pending decision is made once its
-    /// last awaited score arrives.
+    /// last awaited score arrives. See [`DecisionUpdate`] for observer duties.
     pub fn consume(
         &mut self,
         response: FallResponse,
+        observer: &mut dyn FnMut(DecisionUpdate<'_>),
     ) -> Result<Vec<BusinessEvent>, FallStageError> {
         let temperature = self.temperature;
         let Some(pending) = self.pending.as_mut() else {
@@ -197,13 +193,17 @@ impl FallStage {
             return Ok(Vec::new());
         }
         match self.pending.take() {
-            Some(pending) => self.decide(pending),
+            Some(pending) => self.decide(pending, observer),
             None => Ok(Vec::new()),
         }
     }
 
     /// Decides a pending frame now, its unanswered tracks as missing.
-    pub fn flush(&mut self) -> Result<Vec<BusinessEvent>, FallStageError> {
+    /// See [`DecisionUpdate`] for observer duties; an empty flush never notifies.
+    pub fn flush(
+        &mut self,
+        observer: &mut dyn FnMut(DecisionUpdate<'_>),
+    ) -> Result<Vec<BusinessEvent>, FallStageError> {
         let Some(mut pending) = self.pending.take() else {
             return Ok(Vec::new());
         };
@@ -213,7 +213,7 @@ impl FallStage {
                 .reasons
                 .insert(track_id, Reason::AdapterReturnedNoData);
         }
-        self.decide(pending)
+        self.decide(pending, observer)
     }
 
     /// Python `release_onset`; `false` when the onset was not held.
@@ -225,20 +225,16 @@ impl FallStage {
         self.counters
     }
 
+    /// Actual outstanding scores for the current pending decision.
+    pub fn pending_scores(&self) -> usize {
+        self.pending
+            .as_ref()
+            .map_or(0, |pending| pending.awaited.len())
+    }
+
     /// The wrapped decider, for the Python `FallDomainDecider` read-outs
     /// (`last_trace_snapshots`, `last_update_evaluated`, the switch total).
     pub fn decider(&self) -> &FallPolicyDecider {
         &self.decider
-    }
-
-    fn decide(&mut self, pending: Pending) -> Result<Vec<BusinessEvent>, FallStageError> {
-        let events = self.decider.update(
-            pending.frame_index,
-            pending.time_sec,
-            &pending.probabilities,
-            pending.live.iter().copied(),
-            Some(&pending.reasons),
-        )?;
-        Ok(events)
     }
 }

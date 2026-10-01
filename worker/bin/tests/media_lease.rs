@@ -31,14 +31,17 @@ use std::time::Duration;
 use seeon_deepstream_native::{
     MediaBinding, MediaConfig, MediaPoll, MediaResult, RecordTicket, SourceConfig,
 };
+use seeon_ml_worker::gpu::owners::JoinError;
 use seeon_ml_worker::media::diagnostics::{Diagnostics, Snapshot};
 use seeon_ml_worker::media::owner::{self, MediaParams};
+use seeon_ml_worker::media::shutdown::ShutdownControl;
 use seeon_ml_worker::media::{COMMAND_CAPACITY, Command};
 use seeon_ml_worker::msg::{
     POSE_PER_CAMERA, PREVIEW_CAPACITY, PosePacket, PreviewPacket, RECORD_CAPACITY, RecordReceipt,
 };
 use seeon_ml_worker::poll::poll_until;
 use seeon_ml_worker::seam::{Clock, SystemClock};
+use seeon_ml_worker::shutdown::ShutdownDeadline;
 
 static GPU: Mutex<()> = Mutex::new(());
 
@@ -51,7 +54,6 @@ const SHUTDOWN_BUDGET_MS: u32 = 5_000;
 /// Engine deserialisation, pipeline start and the first RTSP connect.
 const READY_WAIT: Duration = Duration::from_secs(120);
 const REPLY_WAIT: Duration = Duration::from_secs(5);
-const JOIN_WAIT: Duration = Duration::from_secs(15);
 /// Upper bounds for a condition to hold; none of them is a pause.
 const RECORD_WAIT: Duration = Duration::from_secs(30);
 const RISE_WAIT: Duration = Duration::from_secs(30);
@@ -174,6 +176,8 @@ impl Relay {
 struct Session {
     thread: Option<JoinHandle<()>>,
     stop: Arc<AtomicBool>,
+    deadline: Arc<ShutdownDeadline>,
+    shutdown: Arc<ShutdownControl>,
     clock: Arc<SystemClock>,
     diagnostics: Arc<Diagnostics>,
     commands: SyncSender<Command>,
@@ -186,11 +190,23 @@ struct Session {
 
 impl Session {
     fn start(name: &str) -> Self {
+        Self::start_with_clock(name, |clock| clock)
+    }
+
+    fn start_with_clock(
+        name: &str,
+        media_clock: impl FnOnce(Arc<SystemClock>) -> Arc<dyn Clock>,
+    ) -> Self {
         let record_directory =
             PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(format!("media_lease-{name}"));
         fs::remove_dir_all(&record_directory).ok();
         fs::create_dir_all(&record_directory).expect("the record directory is creatable");
         let stop = Arc::new(AtomicBool::new(false));
+        let deadline = Arc::new(
+            ShutdownDeadline::new(Duration::from_millis(u64::from(SHUTDOWN_BUDGET_MS)))
+                .expect("valid shared shutdown budget"),
+        );
+        let shutdown = Arc::new(ShutdownControl::new(Arc::clone(&deadline)));
         let clock = Arc::new(SystemClock::new());
         let diagnostics = Arc::new(Diagnostics::new(1));
         let (pose_tx, poses) = mpsc::sync_channel(POSE_PER_CAMERA);
@@ -199,9 +215,10 @@ impl Session {
         let (commands, command_rx) = mpsc::sync_channel(COMMAND_CAPACITY);
         let (thread, readiness) = owner::spawn(MediaParams {
             config: config(record_directory),
-            shutdown_budget_ms: SHUTDOWN_BUDGET_MS,
+            open_budget_ms: SHUTDOWN_BUDGET_MS,
+            shutdown: Arc::clone(&shutdown),
             stop: Arc::clone(&stop),
-            clock: clock.clone(),
+            clock: media_clock(Arc::clone(&clock)),
             pose_tx,
             preview_tx,
             record_tx,
@@ -209,10 +226,11 @@ impl Session {
             diagnostics: Arc::clone(&diagnostics),
         })
         .expect("the media thread spawns");
-        assert_eq!(readiness.recv_timeout(READY_WAIT), Ok(Ok(())));
-        Self {
+        let session = Self {
             thread: Some(thread),
             stop,
+            deadline,
+            shutdown,
             clock,
             diagnostics,
             commands,
@@ -221,7 +239,9 @@ impl Session {
             records,
             receipts: Vec::new(),
             next_request: 1,
-        }
+        };
+        assert_eq!(readiness.recv_timeout(READY_WAIT), Ok(Ok(())));
+        session
     }
 
     fn published(&self) -> u64 {
@@ -233,10 +253,13 @@ impl Session {
     /// Consumes every delivered packet; returns how many pose packets came.
     fn drain(&mut self) -> u64 {
         let mut packets = 0;
-        while self.poses.try_recv().is_ok() {
+        while !self.shutdown_expired() && self.poses.try_recv().is_ok() {
             packets += 1;
         }
-        while let Ok(receipt) = self.records.try_recv() {
+        while !self.shutdown_expired() {
+            let Ok(receipt) = self.records.try_recv() else {
+                break;
+            };
             self.receipts.push(receipt);
         }
         packets
@@ -352,15 +375,56 @@ impl Session {
     }
 
     fn stop_and_join(&mut self) {
-        self.stop.store(true, Ordering::SeqCst);
-        self.join(JOIN_WAIT);
+        let deadline = self.begin_shutdown();
+        self.finalize_and_permit(deadline)
+            .expect("finalization precedes root permission");
+        let thread = self.thread.take().expect("the media thread is joined once");
+        let joined = self.join_media(thread);
+        assert_eq!(joined, Ok(()), "{:?}", self.diagnostics.snapshot());
     }
 
-    fn join(&mut self, wait: Duration) {
-        let thread = self.thread.take().expect("the media thread is joined once");
-        let deadline = self.clock.monotonic() + wait;
-        let joined = owner::join(thread, self.clock.as_ref(), deadline);
-        assert_eq!(joined, Ok(()), "{:?}", self.diagnostics.snapshot());
+    fn begin_shutdown(&self) -> Duration {
+        let deadline = self.shutdown.begin(self.clock.monotonic());
+        self.stop.store(true, Ordering::SeqCst);
+        match deadline {
+            Ok(deadline) => deadline,
+            Err(error) => {
+                eprintln!("media fixture cannot begin shutdown: {error}; retaining native state");
+                std::process::exit(1);
+            }
+        }
+    }
+
+    fn shutdown_expired(&self) -> bool {
+        let now = self.clock.monotonic();
+        self.deadline.deadline().is_some_and(|end| now >= end)
+    }
+
+    fn join_media(&self, thread: JoinHandle<()>) -> Result<(), JoinError> {
+        let deadline = self.deadline.deadline().expect("shutdown has begun");
+        poll_until(self.clock.as_ref(), deadline, "media owner exit", || {
+            self.shutdown_expired() || thread.is_finished()
+        })
+        .map_err(JoinError::Timeout)?;
+        owner::join(
+            thread,
+            self.clock.as_ref(),
+            self.deadline
+                .deadline()
+                .expect("shutdown remains requested"),
+        )
+    }
+
+    fn finalize_and_permit(
+        &mut self,
+        deadline: Duration,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        poll_until(self.clock.as_ref(), deadline, "media finalization", || {
+            self.shutdown_expired() || self.diagnostics.snapshot().finalization_complete
+        })?;
+        self.drain();
+        self.shutdown.permit_close(self.clock.monotonic())?;
+        Ok(())
     }
 
     fn assert_shut_down(&self) {
@@ -370,12 +434,16 @@ impl Session {
 }
 
 impl Drop for Session {
-    /// A failed assertion still ends the thread before the next test.
+    /// A failed assertion must not let another test reopen unclosed media.
     fn drop(&mut self) {
-        self.stop.store(true, Ordering::SeqCst);
         if let Some(thread) = self.thread.take() {
-            let deadline = self.clock.monotonic() + JOIN_WAIT;
-            owner::join(thread, self.clock.as_ref(), deadline).ok();
+            let deadline = self.begin_shutdown();
+            let _ = self.finalize_and_permit(deadline);
+            let _ = self.join_media(thread);
+        }
+        if !self.diagnostics.snapshot().closed {
+            eprintln!("media fixture did not prove close; retaining native state until exit");
+            std::process::exit(1);
         }
     }
 }
@@ -517,4 +585,109 @@ fn release_closes_only_with_no_record_reserved_and_the_next_owner_starts() {
     next.stop_and_join();
     next.assert_released("the next owner's stop");
     next.assert_shut_down();
+}
+
+struct PanicClock {
+    clock: Arc<SystemClock>,
+    armed: Arc<AtomicBool>,
+}
+
+impl Clock for PanicClock {
+    fn monotonic(&self) -> Duration {
+        self.clock.monotonic()
+    }
+
+    fn wall(&self) -> std::time::SystemTime {
+        self.clock.wall()
+    }
+
+    fn pause(&self, limit: Duration) {
+        assert!(
+            !self.armed.swap(false, Ordering::SeqCst),
+            "injected one-shot media pause panic"
+        );
+        self.clock.pause(limit);
+    }
+}
+
+struct TestProcess(std::process::Child);
+
+impl Drop for TestProcess {
+    fn drop(&mut self) {
+        if matches!(self.0.try_wait(), Ok(None)) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+}
+
+#[test]
+#[ignore = "requires an actual GPU, SEEON_TEST_MEDIA_INFER, SEEON_TEST_MEDIA_TRACKER and SEEON_TEST_RTSP_URI"]
+fn post_open_media_panic_finalizes_then_returns_typed_join_failure() {
+    const CHILD: &str = "SEEON_TEST_MEDIA_PANIC_CHILD";
+    const CASE: &str = "post_open_media_panic_finalizes_then_returns_typed_join_failure";
+    // Distinct from libtest's zero exit when --exact accidentally selects no test.
+    const COMPLETED: i32 = 42;
+    let _gpu = gpu_lock();
+    if std::env::var_os(CHILD).is_some() {
+        let armed = Arc::new(AtomicBool::new(false));
+        let mut session = Session::start_with_clock("panic-cleanup", |clock| {
+            Arc::new(PanicClock {
+                clock,
+                armed: Arc::clone(&armed),
+            })
+        });
+        session.start_record(RECORD_FORWARD_SECONDS);
+        armed.store(true, Ordering::SeqCst);
+        let clock = Arc::clone(&session.clock);
+        poll_until(
+            clock.as_ref(),
+            clock.monotonic() + Duration::from_millis(u64::from(SHUTDOWN_BUDGET_MS)),
+            "panic finalization",
+            || {
+                session.shutdown_expired()
+                    || session.diagnostics.snapshot().finalization_complete
+                    || session.thread.as_ref().is_some_and(JoinHandle::is_finished)
+            },
+        )
+        .expect("panic cleanup reaches the root barrier");
+        let finalized = session.diagnostics.snapshot();
+        assert!(finalized.finalization_started && finalized.finalization_complete);
+        let deadline = session
+            .shutdown
+            .deadline()
+            .expect("cleanup starts the deadline");
+        session
+            .finalize_and_permit(deadline)
+            .expect("root authorizes close after finalization");
+        let thread = session.thread.take().expect("one media owner");
+        assert_eq!(
+            session.join_media(thread),
+            Err(seeon_ml_worker::gpu::owners::JoinError::Panicked)
+        );
+        session.assert_shut_down();
+        assert_eq!(session.diagnostics.snapshot().records_reserved, 0);
+        drop(session);
+        std::process::exit(COMPLETED);
+    }
+    let mut child = TestProcess(
+        std::process::Command::new(std::env::current_exe().expect("test executable"))
+            .args(["--exact", CASE, "--ignored", "--nocapture"])
+            .env(CHILD, "1")
+            .spawn()
+            .expect("isolated native panic scenario"),
+    );
+    let clock = SystemClock::new();
+    let mut status = None;
+    poll_until(
+        &clock,
+        clock.monotonic() + Duration::from_secs(180),
+        "isolated panic scenario exit",
+        || {
+            status = child.0.try_wait().expect("child status is observable");
+            status.is_some()
+        },
+    )
+    .expect("native panic scenario cannot hang the test process");
+    assert_eq!(status.and_then(|status| status.code()), Some(COMPLETED));
 }

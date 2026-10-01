@@ -345,7 +345,7 @@ fn fall_sequence_replays_the_python_lines() {
         let ingested = ingest(&packet(&frame["input"]))
             .unwrap_or_else(|refusal| panic!("ordinal {ordinal}: ingest refused {refusal:?}"));
         let mut events = stage
-            .observe(&ingested, &requests)
+            .observe(&ingested, &requests, &mut |_| {})
             .unwrap_or_else(|error| panic!("ordinal {ordinal}: observe {error:?}"));
         let sent: Vec<FallRequest> = runner.try_iter().collect();
         let predictions = items(&frame["valid_predictions"]);
@@ -376,7 +376,7 @@ fn fall_sequence_replays_the_python_lines() {
             };
             events.extend(
                 stage
-                    .consume(response)
+                    .consume(response, &mut |_| {})
                     .unwrap_or_else(|error| panic!("ordinal {ordinal}: consume {error:?}")),
             );
         }

@@ -23,10 +23,10 @@ sha2 = "=0.11.0"
 ureq = { version = "=3.4.2", default-features = false, features = ["rustls"] }
 # D3: request-head parsing only.
 httparse = "=1.10.1"
-# D3: SIGTERM and SIGINT flag registration (design §2.4).
+# D3: SIGTERM/SIGINT receipt hooks and async-signal-safe watchdog exit.
 signal-hook = { version = "=0.4.4", default-features = false }
-# D3: flock, fallocate and kernel random bytes for uuid4 ids.
-rustix = { version = "=1.1.5", features = ["std", "rand", "fs"] }
+# D3: flock, fallocate, uuid4 random bytes and primed dynamic monotonic time.
+rustix = { version = "=1.1.5", features = ["std", "rand", "fs", "time"] }
 
 [dev-dependencies]
 # D3: order-preserving parse of the codec-edges key-order input text.

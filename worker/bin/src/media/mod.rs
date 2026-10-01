@@ -10,6 +10,7 @@
 pub mod diagnostics;
 pub mod owner;
 mod release;
+pub mod shutdown;
 
 use std::sync::mpsc::SyncSender;
 
