@@ -75,6 +75,15 @@ Architecture boundaries: `uv run --group lint lint-imports`. Contract-symbol
 exports: `tests/test_contract_symbol_exports.py`. Docs live in
 `docs/architecture.md`, `docs/decisions/`, `docs/runbooks/`.
 
+Rust-transition parity inputs are external verification assets, not service
+configuration or tracked source. Before those suites, run
+`python scripts/prepare_rust_test_inputs.py --archive /path/to/rust-transition-test-inputs-10a06379.tar.gz`.
+The command verifies the pinned archive digest and prepares an ignored local
+cache. Obtain the archive from the verification-asset owner; missing inputs are
+not permission to skip tests or regenerate expected results from Rust output.
+Do not commit the restored JSON data. Small generated test inputs and test helper
+code remain part of the tests.
+
 ## Conventions
 
 - `contracts/` is the contract authority (ADR-0006); nothing mirrors it to or

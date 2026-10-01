@@ -9,6 +9,13 @@ __pycache__/
 .coverage
 htmlcov/
 
+# Explicitly prepared Rust transition test-input cache (never runtime inputs).
+/tests/fixtures/worker-wire/**/*.json
+/tests/fixtures/worker-wire/**/*.sha256
+/tests/fixtures/synthetic-scene-v1.json
+/worker/rust/tests/fixtures/**/*.json
+/worker/runtime/rust/tests/fixtures/gpu/manifest.json
+
 # Node/dashboard output
 node_modules/
 dist/

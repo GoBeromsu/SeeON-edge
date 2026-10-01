@@ -41,6 +41,8 @@ artifacts
 
 # Non-serving source trees not needed by either image
 tests
+worker/rust/tests/fixtures/**/*.json
+worker/runtime/rust/tests/fixtures/gpu/*.json
 demo
 training
 README.md

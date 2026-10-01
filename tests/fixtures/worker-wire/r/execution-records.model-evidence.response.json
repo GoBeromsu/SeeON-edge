@@ -1,8 +1,0 @@
-{
-  "accepted": 1,
-  "batch_id": "77b520cd37befe3365773bc30615cce5479472ba883d9a6c9d3b0f2a03023f63",
-  "committed_at_ns": 1787000000001000000,
-  "duplicates": 0,
-  "rejected": [],
-  "storage_state": "committed"
-}
