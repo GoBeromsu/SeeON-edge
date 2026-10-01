@@ -25,7 +25,7 @@ use super::manifest::MAX_MANIFEST_BYTES;
 use super::publish::{MANIFEST_FILE, MEDIA_FILE};
 
 pub use attestation::Attestation;
-pub use probe::Timing;
+pub use probe::{Timing, video_codec};
 pub use thumbnail::{THUMBNAIL_FILE, write_thumbnail};
 
 pub const ATTESTATION_FILE: &str = "clip.playback-h264.json";

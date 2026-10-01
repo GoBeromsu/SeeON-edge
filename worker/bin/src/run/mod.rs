@@ -16,6 +16,8 @@ use crate::config::model_bundle::identity::IdentityKind;
 
 pub mod boot;
 pub mod calibration;
+pub mod cameras;
+pub mod clip_output;
 pub mod config_digest;
 pub mod decision;
 mod event_payload;
