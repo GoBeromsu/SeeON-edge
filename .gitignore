@@ -56,6 +56,7 @@ data/
 *.png
 *.gif
 *.webp
+!docs/assets/readme-hero.webp
 *.bmp
 *.tif
 *.tiff

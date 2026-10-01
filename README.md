@@ -1,24 +1,36 @@
-# eldercare-fall-ml
+<p align="center">
+  <img src="./docs/assets/readme-hero.webp" alt="Abstract 3D artwork of an edge device and connected signals." width="100%" />
+</p>
 
-Edge ML runtime for fall and bed-exit detection, organized as three deployable
-instances plus a shared library:
+<p align="center"><sub>SENIOR AI LAB · SEEON</sub></p>
 
-- **`backend/`** — FastAPI control/status/relay gateway (`ml-api` image).
-- **`worker/`** — RTSP inference worker that relays facts to the backend (`ml-worker` image).
-- **`front/`** — React/Vite dashboard SPA served by the backend.
-- **`shared/`** — `shared.events` (the backend↔worker wire code); `contracts` is a
-  top-level vendored leaf (ADR-0006).
+<h1 align="center">SeeON Edge</h1>
 
-Training is maintained separately in `SeniorAILab/eldercare-dataset-ops`.
+<p align="center">
+  <strong>Fall and bed-exit detection at the edge.</strong><br />
+  Inference, evidence, and a local operations dashboard.
+</p>
 
-## License notice
+<p align="center">
+  <a href="#setup">Setup</a> ·
+  <a href="#run">Run locally</a> ·
+  <a href="#edge-deployment">Deployment</a> ·
+  <a href="#operations">Operations</a>
+</p>
 
-This project is licensed under the GNU Affero General Public License v3.0
-(`AGPL-3.0-only`); see [`LICENSE`](LICENSE) for the complete terms.
+The edge runtime brings together an RTSP inference worker, a control/status gateway, and a local dashboard. This README describes the current `main` implementation; proposed runtime migrations are not release claims.
 
-The `ultralytics` worker dependency is also licensed under AGPL-3.0. This
-project accepts the obligations of that dependency's AGPL-3.0 license,
-including the applicable source-disclosure requirements.
+## Architecture
+
+| Component | Responsibility |
+| :--- | :--- |
+| `backend/` | FastAPI control, status, and relay gateway; deployed as `ml-api` |
+| `worker/` | RTSP inference worker that relays facts to the backend; deployed as `ml-worker` |
+| `front/` | React/Vite dashboard SPA served by the backend |
+| `shared/` | Backend↔worker wire code in `shared.events` |
+| `contracts/` | Top-level vendored contract leaf (ADR-0006) |
+
+Training is maintained separately in `SeniorAILab/eldercare-dataset-ops`. The repository retains the `eldercare-fall-ml` deployment identity and its existing image names and environment-variable prefixes.
 
 ## Setup
 
@@ -164,3 +176,14 @@ uses `models/` as the default host model-artifact path.
   clip storage and retention policy.
 - [`docs/runbooks/`](docs/runbooks/) — incident runbooks (worker rollback,
   driver/CUDA alignment, local e2e RTSP source, Intel iGPU/VAAPI decode).
+
+## License notice
+
+This project is licensed under the GNU Affero General Public License v3.0
+(`AGPL-3.0-only`); see [`LICENSE`](LICENSE) for the complete terms.
+
+The `ultralytics` worker dependency is also licensed under AGPL-3.0. This
+project accepts the obligations of that dependency's AGPL-3.0 license,
+including the applicable source-disclosure requirements.
+
+The hero is conceptual artwork. It contains no camera feed, resident data, or production-status evidence.
