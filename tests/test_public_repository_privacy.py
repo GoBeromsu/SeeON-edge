@@ -106,9 +106,9 @@ _MEDIA_OR_ARCHIVE_MAGIC = (
 )
 _APPROVED_DOCUMENTATION_ART_PATH = Path("docs/assets/readme-hero.webp")
 _APPROVED_DOCUMENTATION_ART_SHA256 = (
-    "ede866a522b20194945d4a9ea42148e003a4985d5cc13164584d08f9fe50a5e1"
+    "800af6f6bf3dde48c66c29f6bbebec18471c60cde05b789a8ed53ebb76a8c820"
 )
-_APPROVED_DOCUMENTATION_ART_SIZE = 20_364
+_APPROVED_DOCUMENTATION_ART_SIZE = 168_648
 _SYNTHETIC_RTSP_FIXTURES = {
     # 엣지 브링업 스킬의 두 URL 은 값이 아니라 변수 보간이다. 자격증명이 문자열
     # 안에 들어 있는 게 아니라 실행 시점에 환경변수에서 온다. 허용 목록이 정확한
