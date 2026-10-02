@@ -309,6 +309,7 @@ fn active_camera_sigterm_during_native_recording_finalizes_clip_and_retains_queu
 #[test]
 #[ignore = "requires GPU lane 0, genuine schema-1 batch-1 aggregate via SEEON_TEST_ENGINE_IDENTITY and sibling engines, packaged ONNX, SEEON_TEST_MEDIA_INFER, SEEON_TEST_MEDIA_TRACKER, approved SEEON_TEST_RTSP_URI, isolated canonical ml-api, actual ml-worker, SEEON_TEST_PYTHON, and parent-owned clip-store matching SEEON_TEST_CLIP_STORE_OWNER"]
 fn accepted_native_metadata_is_written_to_replay_trace_before_owned_sigterm() {
+    use seeon_ml_worker::seam::{IdSource, RandomIds};
     let shutdown_started = Arc::new(AtomicBool::new(false));
     let _guard = relay_guard();
     let _store = OwnedProductStore::claim();
@@ -319,9 +320,12 @@ fn accepted_native_metadata_is_written_to_replay_trace_before_owned_sigterm() {
         Some(active_camera_config(&uri)),
         Some(Arc::clone(&shutdown_started)),
     );
-    let trace_dir = fixture.state.join("replay-trace");
-    fs::create_dir_all(&trace_dir).expect("owned replay trace directory");
+    // Cargo's mounted temporary root survives both fixture Drop and container removal.
+    let trace_dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
+        .join(format!("native-replay-{}", RandomIds.uuid4().unwrap()));
+    fs::create_dir(&trace_dir).expect("exclusive retained replay directory");
     let trace = trace_path(&trace_dir, ACTIVE_CAMERA_ID);
+    eprintln!("REPLAY_RETAINED_PATH={}", trace.display());
     let mut command = fixture.command("run");
     command.env("CUDA_VISIBLE_DEVICES", "0");
     command.env("WORKER_REPLAY_TRACE_DIR", &trace_dir);

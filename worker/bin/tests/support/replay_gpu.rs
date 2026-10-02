@@ -258,6 +258,7 @@ pub fn shutdown_after_accepted_trace(
     let ready_deadline = clock.monotonic() + TRACE_READY_WAIT;
     let mut early = None;
     let mut saw_marker = false;
+    let mut last_refusal = None;
     let ready = poll_until(
         &clock,
         ready_deadline,
@@ -270,10 +271,23 @@ pub fn shutdown_after_accepted_trace(
             if marker_rx.try_recv().is_ok() {
                 saw_marker = true;
             }
-            saw_marker && inspect_trace(trace, camera_id).is_ok()
+            if !saw_marker {
+                return false;
+            }
+            match inspect_trace(trace, camera_id) {
+                Ok(_) => true,
+                Err(error) => {
+                    last_refusal = Some(error);
+                    false
+                }
+            }
         },
     );
     if ready.is_err() || early.is_some() || !saw_marker {
+        eprintln!(
+            "REPLAY_PRECONDITION_FAILURE path={} refusal={last_refusal:?} marker={saw_marker} early={early:?}",
+            trace.display()
+        );
         fail_owned(
             child,
             early.is_none(),
