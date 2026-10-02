@@ -5,6 +5,8 @@
 //! writer drop continues bookkeeping rather than counting as a failure.
 //! Unlike Python's initial 1x1 placeholder, source loss requires saved actual
 //! dimensions; no geometry is invented when the first capture fails.
+//! Frame geometry is in the configured mux/perception plane, matching Python
+//! convert_frame. Native identity separately retains the decoded source size.
 
 mod camera;
 mod geometry;
@@ -80,7 +82,7 @@ impl ReplayCapture {
         let Some(index) = source_index(frame.identity.source_id, self.cameras.len()) else {
             return;
         };
-        let Some((width, height)) = source_size(frame) else {
+        let Some((width, height)) = perception_size(frame) else {
             self.cameras[index].note_failure();
             return;
         };
@@ -175,7 +177,7 @@ fn source_index(source_id: u32, len: usize) -> Option<usize> {
     usize::try_from(source_id).ok().filter(|index| *index < len)
 }
 
-fn source_size(frame: &Frame) -> Option<(u64, u64)> {
+fn perception_size(frame: &Frame) -> Option<(u64, u64)> {
     let size = (
         u64::try_from(frame.width).ok()?,
         u64::try_from(frame.height).ok()?,

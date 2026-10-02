@@ -27,8 +27,11 @@ const TRACE_READY_WAIT: Duration = Duration::from_secs(45);
 /// Production shutdown budget. Sampled before the flag and SIGTERM.
 const SHUTDOWN_BUDGET: Duration = Duration::from_secs(25);
 const READY_CAMERAS: &str = "ml-worker: policy loop ready cameras=1";
-const SOURCE_WIDTH: u64 = 640;
-const SOURCE_HEIGHT: u64 = 360;
+// Canonical convert_frame receives configured mux dimensions, not decoder size.
+// The independent Python oracle matches SDK rectangles at 1280x720; using the
+// approved video's 640x360 decoder size instead yields zero matched tracks.
+const PERCEPTION_WIDTH: u64 = 1280;
+const PERCEPTION_HEIGHT: u64 = 720;
 
 pub struct ReplayShutdown {
     pub status: ExitStatus,
@@ -141,7 +144,7 @@ fn classify_row(row: &Value, camera_id: &str) -> Result<(), TraceInspectError> {
         .get("frame_height")
         .and_then(Value::as_u64)
         .ok_or(TraceInspectError::Dimensions)?;
-    if width != SOURCE_WIDTH || height != SOURCE_HEIGHT {
+    if width != PERCEPTION_WIDTH || height != PERCEPTION_HEIGHT {
         return Err(TraceInspectError::Dimensions);
     }
     let tracks = object

@@ -388,6 +388,8 @@ fn packet(sequence: u64) -> PosePacket {
             pts_valid: 1,
             source_width: 640,
             source_height: 640,
+            analysis_width: 640,
+            analysis_height: 640,
             ..FrameIdentity::default()
         },
         tensor_present: true,

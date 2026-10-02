@@ -754,7 +754,7 @@ fn replay_trace_inspection_rejects_partial_malformed_and_non_native_rows() {
         replay_gpu::inspect_trace(&path, camera),
         Err(replay_gpu::TraceInspectError::Camera)
     );
-    let wide = row(camera, 1, &pose()).replace("\"frame_width\":640", "\"frame_width\":1280");
+    let wide = row(camera, 1, &pose()).replace("\"frame_width\":1280", "\"frame_width\":640");
     fs::write(&path, format!("{}{wide}\n{wide}\n{wide}\n", header())).expect("dims");
     assert_eq!(
         replay_gpu::inspect_trace(&path, camera),
@@ -806,6 +806,6 @@ fn row(camera: &str, pts: u64, tracks: &str) -> String {
         "{{\"camera_id\":\"{camera}\",\"seq\":{pts},\"pts_ns\":{pts},\"epoch\":1,\
          \"source_event\":\"frame\",\"source\":\"nvdcf\",\"tracks\":{tracks},\
          \"bed_polygon_id\":null,\"bed_polygon\":null,\"bed_polygon_image_size\":null,\
-         \"night_window_active\":false,\"frame_width\":640,\"frame_height\":360}}"
+         \"night_window_active\":false,\"frame_width\":1280,\"frame_height\":720}}"
     )
 }

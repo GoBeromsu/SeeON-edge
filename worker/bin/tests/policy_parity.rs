@@ -85,7 +85,7 @@ fn items(value: &Value) -> &Vec<Value> {
 }
 
 /// The pose packet a golden `input` describes, on the recipe's 1280x720
-/// source with valid pts.
+/// configured mux plane with equal physical extents and valid pts.
 fn packet(input: &Value) -> PosePacket {
     let sequence = unsigned(&input["sequence"]);
     let frame = FrameIdentity {
@@ -95,6 +95,8 @@ fn packet(input: &Value) -> PosePacket {
         frame_number: i64::try_from(sequence).expect("sequence"),
         source_width: 1280,
         source_height: 720,
+        analysis_width: 1280,
+        analysis_height: 720,
         ..FrameIdentity::default()
     };
     let rows = items(&input["rows"])

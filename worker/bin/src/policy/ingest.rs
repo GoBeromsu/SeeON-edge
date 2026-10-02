@@ -21,8 +21,9 @@ const IOU_GATE: f64 = 0.5;
 
 type Box4 = [f64; 4];
 
-/// One matched object's source-coordinate geometry, in native matched order.
-/// Captured before pose-bbox56 feature reduction; not a policy output.
+/// One matched object's configured mux-coordinate geometry, in native matched order.
+/// SDK rectangles are already in those perception coordinates. Captured before
+/// pose-bbox56 feature reduction; not a policy output.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ObservedPose {
     pub track_id: u64,
@@ -35,7 +36,11 @@ pub struct ObservedPose {
 #[derive(Clone, Debug, PartialEq)]
 pub struct Frame {
     pub identity: FrameIdentity,
+    /// Configured mux/perception width, Python MetadataFrame.source_width;
+    /// distinct from the decoded extent retained in identity.source_width.
     pub width: i64,
+    /// Configured mux/perception height, Python MetadataFrame.source_height;
+    /// distinct from the decoded extent retained in identity.source_height.
     pub height: i64,
     /// Every tracked object, matched or not, in native order.
     pub live_track_ids: Vec<u64>,
@@ -49,7 +54,7 @@ pub struct Frame {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum IngestRefusal {
-    /// A zero source width or height leaves no letterbox scale.
+    /// A zero physical source or configured analysis width or height leaves no letterbox scale.
     SourceSize,
     /// The publish sequence does not fit a frame index.
     Sequence,
@@ -60,15 +65,23 @@ pub fn ingest(
     observed: Option<&mut Vec<ObservedPose>>,
 ) -> Result<Frame, IngestRefusal> {
     let identity = packet.frame;
-    if identity.source_width == 0 || identity.source_height == 0 {
+    if identity.source_width == 0
+        || identity.source_height == 0
+        || identity.analysis_width == 0
+        || identity.analysis_height == 0
+    {
         return Err(IngestRefusal::SourceSize);
     }
     let frame_index = i64::try_from(identity.sequence).map_err(|_| IngestRefusal::Sequence)?;
-    let width = i64::from(identity.source_width);
-    let height = i64::from(identity.source_height);
+    // Physical decoded size stays on the identity. Letterbox scale, Frame extent,
+    // and feature normalization use the configured mux size: native copies SDK
+    // rectangles in those coordinates unchanged, and Python convert_frame receives
+    // the same configured frame_width/height.
+    let width = i64::from(identity.analysis_width);
+    let height = i64::from(identity.analysis_height);
     let (frame_w, frame_h) = (
-        f64::from(identity.source_width),
-        f64::from(identity.source_height),
+        f64::from(identity.analysis_width),
+        f64::from(identity.analysis_height),
     );
     // NumPy float32 divided by a Python float stays float32 (NEP 50).
     let scale = (NET_SIZE / frame_w).min(NET_SIZE / frame_h) as f32;

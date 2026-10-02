@@ -85,6 +85,8 @@ fn packet(source_id: u32, sequence: u64, tracks: &[u64]) -> PosePacket {
             frame_number: i64::try_from(sequence).unwrap_or(i64::MAX),
             source_width: 640,
             source_height: 360,
+            analysis_width: 640,
+            analysis_height: 360,
             ..FrameIdentity::default()
         },
         tensor_present: true,

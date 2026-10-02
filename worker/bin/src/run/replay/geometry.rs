@@ -1,7 +1,7 @@
-//! Source-geometry and bed-window normalisation for one replay row.
+//! Perception-plane geometry and bed-window normalisation for one replay row.
 //!
 //! Division follows `_unit_bbox` and `_persisted_polygon`. A zero persisted
-//! image side falls back to the accepted source size, as Python `or` does.
+//! image side falls back to the accepted perception size, as Python `or` does.
 //! The first stored polygon is always offered to row validation. A typed
 //! window or clock problem is returned so the frame can be dropped.
 
@@ -76,7 +76,7 @@ pub(super) fn validated_track(
 }
 
 /// First persisted polygon, even when its points will fail row validation.
-/// A zero persisted side uses the accepted source size.
+/// A zero persisted side uses the accepted perception size.
 pub(super) fn persisted_polygon(
     points: &[(i128, i128)],
     image_width: Option<u64>,
