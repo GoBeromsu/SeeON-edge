@@ -67,9 +67,12 @@ uv run pytest -q
 uvx ruff check .
 uv run --group lint lint-imports
 docker build -f Dockerfile.backend .
-docker build -f Dockerfile.edge .
+docker build --build-arg SOURCE_REVISION="$SOURCE_REVISION" -f Dockerfile.edge .
 pnpm --dir front install --frozen-lockfile && pnpm --dir front test
 ```
+
+The worker image requires an explicit `SOURCE_REVISION` matching its frozen,
+clean source context. Do not stamp a dirty checkout with its base `HEAD`.
 
 Architecture boundaries: `uv run --group lint lint-imports`. Contract-symbol
 exports: `tests/test_contract_symbol_exports.py`. Docs live in

@@ -490,9 +490,12 @@ docker logs --tail 200 eldercare-fall-ml-ml-worker-1
 
 2-2의 드라이버/CUDA 조합 변경을 실제로 수행한 경우에만 아래를 쓴다. 이 절은
 595.84 soft-reload 또는 WPR2 재부팅의 대체 절차가 아니다.
+`SOURCE_REVISION`은 고정된 깨끗한 빌드 소스와 일치하는 커밋으로 설정한다.
+미커밋 변경이 있는 트리의 기존 `HEAD`를 대신 기록하지 않는다.
 
 ```sh
-docker build -f Dockerfile.edge --target runtime -t local/fall-ml-worker:failfast .
+docker build --build-arg SOURCE_REVISION="$SOURCE_REVISION" \
+  -f Dockerfile.edge --target runtime -t local/fall-ml-worker:failfast .
 docker run --rm --gpus all local/fall-ml-worker:failfast \
   python -c "import torch; assert torch.cuda.is_available(); print('OK', torch.cuda.get_arch_list(), torch.cuda.get_device_name(0))"
 

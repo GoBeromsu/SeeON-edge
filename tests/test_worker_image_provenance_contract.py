@@ -1,7 +1,11 @@
 from __future__ import annotations
 
+import os
 import re
+import subprocess
 from pathlib import Path
+
+import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
 DOCKERFILE = ROOT / "Dockerfile.edge"
@@ -17,7 +21,40 @@ def _dockerfile() -> str:
 def test_edge_image_requires_source_revision_without_unsafe_default() -> None:
     source = _dockerfile()
 
-    assert re.search(r"^ARG SOURCE_REVISION=[0-9a-f]{40}$", source, re.MULTILINE)
+    assert re.search(r"^ARG SOURCE_REVISION$", source, re.MULTILINE)
+
+
+@pytest.mark.parametrize(
+    "revision",
+    [None, "", ZERO_REVISION, "1" * 39, "1" * 41, "A" * 40, "g" * 40, "1" * 39 + " ", "1" * 40],
+)
+def test_revision_shell_guard_executes_without_writing_image_markers(
+    revision: str | None,
+) -> None:
+    source = _dockerfile()
+    start = source.index("RUN if ", source.index("ARG SOURCE_REVISION"))
+    end = source.index("    fi;", start) + len("    fi;")
+    guard = source[start:end].removeprefix("RUN ").replace("\\\n", "")
+    assert "install -d" not in guard
+    environment = {"PATH": os.defpath}
+    if revision is not None:
+        environment["SOURCE_REVISION"] = revision
+    result = subprocess.run(
+        ["/bin/sh", "-c", guard],
+        env=environment,
+        capture_output=True,
+        text=True,
+        timeout=5,
+        check=False,
+    )
+    if revision == "1" * 40:
+        assert result.returncode == 0, result.stderr
+        assert result.stderr == ""
+    else:
+        assert result.returncode == 1, result.stderr
+        assert result.stderr == (
+            "SOURCE_REVISION must be a non-zero 40-character lowercase hexadecimal revision\n"
+        )
 
 
 def test_edge_image_build_rejects_zero_and_malformed_source_revisions() -> None:
