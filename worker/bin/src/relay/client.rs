@@ -1,4 +1,5 @@
 //! The request side of Python `shared/events/evidence_http_transport.py`
+//! The request side of Python `shared/events/evidence_http_transport.py`
 //! (`bounded_request`, `bounded_file_request`) and the relay endpoints of
 //! `RelayEvidenceClient`: one ureq agent, one global deadline per call, no
 //! retries, no redirects, no proxy. The relay token travels only in the
@@ -14,8 +15,11 @@ use ureq::{Agent, Body, RequestBuilder};
 
 use super::wire::{MAX_RESPONSE_BYTES, Response};
 
+mod deadline;
 mod error;
 mod url;
+
+pub use deadline::{DeadlineClient, RequestError};
 
 pub use error::{ConfigError, TransportError};
 
@@ -76,6 +80,18 @@ impl RelayClient {
     /// The deadline applied to each call.
     pub fn timeout(&self) -> Duration {
         self.timeout
+    }
+
+    /// A borrowed view that caps each call by the live shutdown deadline.
+    ///
+    /// The view stores no owned agent or token. Callers that already have
+    /// their own timeout contract keep using the unbounded methods.
+    pub fn with_deadline<'a>(
+        &'a self,
+        clock: &'a dyn crate::seam::Clock,
+        deadline: &'a crate::shutdown::ShutdownDeadline,
+    ) -> DeadlineClient<'a> {
+        DeadlineClient::new(self, clock, deadline)
     }
 
     /// GET `path` with a form-encoded query (Python `urlencode`).
@@ -175,34 +191,39 @@ impl RelayClient {
         &self,
         sent: Result<http::Response<Body>, ureq::Error>,
     ) -> Result<Response, TransportError> {
-        let response = sent.map_err(|error| self.transport(&error))?;
-        let status = response.status().as_u16();
-        let headers = response
-            .headers()
-            .iter()
-            .map(|(name, value)| {
-                (
-                    name.as_str().to_owned(),
-                    value.as_bytes().iter().map(|&b| char::from(b)).collect(),
-                )
-            })
-            .collect();
-        let mut body = Vec::new();
-        let limit = u64::try_from(MAX_RESPONSE_BYTES)
-            .unwrap_or(u64::MAX)
-            .saturating_add(1);
-        let mut reader = response.into_body().into_reader().take(limit);
-        reader
-            .read_to_end(&mut body)
-            .map_err(|error| self.transport(&error.into()))?;
-        Ok(Response {
-            status,
-            headers,
-            body,
-        })
+        read_ureq(sent).map_err(|error| self.transport(&error))
     }
 
     fn transport(&self, error: &ureq::Error) -> TransportError {
         TransportError::new(error, self.token.to_str().unwrap_or_default())
     }
+}
+
+/// Status, headers and a body of at most `MAX_RESPONSE_BYTES + 1`. A ureq
+/// error wrapped in `std::io::Error` stays typed so a caller can tell a
+/// global timeout from an ordinary I/O failure.
+fn read_ureq(sent: Result<http::Response<Body>, ureq::Error>) -> Result<Response, ureq::Error> {
+    let response = sent?;
+    let status = response.status().as_u16();
+    let headers = response
+        .headers()
+        .iter()
+        .map(|(name, value)| {
+            (
+                name.as_str().to_owned(),
+                value.as_bytes().iter().map(|&b| char::from(b)).collect(),
+            )
+        })
+        .collect();
+    let mut body = Vec::new();
+    let limit = u64::try_from(MAX_RESPONSE_BYTES)
+        .unwrap_or(u64::MAX)
+        .saturating_add(1);
+    let mut reader = response.into_body().into_reader().take(limit);
+    reader.read_to_end(&mut body).map_err(ureq::Error::from)?;
+    Ok(Response {
+        status,
+        headers,
+        body,
+    })
 }

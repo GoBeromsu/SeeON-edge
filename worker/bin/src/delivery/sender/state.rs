@@ -6,6 +6,16 @@ use std::time::Duration;
 
 use serde_json::Value;
 
+/// A selected entry plus whether admitting it should clear the deferred set.
+///
+/// Clearing is not done by selection. The caller commits it only together
+/// with a real admitted outcome, so a later cutoff leaves the set intact.
+#[derive(Clone, Copy, Debug)]
+pub(super) struct Selection<'a> {
+    pub(super) entry: &'a Value,
+    pub(super) reset_deferred: bool,
+}
+
 /// Python `MAX_ENTRY_ATTEMPTS`: counted attempts before an entry is retired.
 pub const MAX_ENTRY_ATTEMPTS: u32 = 10;
 
@@ -40,7 +50,11 @@ impl SenderState {
     /// `MAX_ENTRY_ATTEMPTS`), keep only due ones, skip deferred ones until
     /// every due entry is deferred, then take the first EVENT or else the
     /// first entry in file-name order.
-    pub(super) fn select<'a>(&mut self, entries: &[&'a Value], now: Duration) -> Option<&'a Value> {
+    ///
+    /// Does not mutate. When every due entry is deferred, `reset_deferred`
+    /// asks the caller to clear that set only if the selected entry is
+    /// actually admitted.
+    pub(super) fn select<'a>(&self, entries: &[&'a Value], now: Duration) -> Option<Selection<'a>> {
         let live: Vec<&'a Value> = entries
             .iter()
             .copied()
@@ -61,20 +75,29 @@ impl SenderState {
         if due.is_empty() {
             return None;
         }
-        let mut undeferred: Vec<&'a Value> = due
+        let undeferred: Vec<&'a Value> = due
             .iter()
             .copied()
             .filter(|entry| !self.is_deferred(entry_id(entry)))
             .collect();
-        if undeferred.is_empty() {
-            self.deferred.clear();
-            undeferred = due;
-        }
-        undeferred
+        let (pool, reset_deferred) = if undeferred.is_empty() {
+            (due, true)
+        } else {
+            (undeferred, false)
+        };
+        let entry = pool
             .iter()
             .copied()
             .find(|entry| entry.get("kind").and_then(Value::as_str) == Some("EVENT"))
-            .or_else(|| undeferred.first().copied())
+            .or_else(|| pool.first().copied())?;
+        Some(Selection {
+            entry,
+            reset_deferred,
+        })
+    }
+
+    pub(super) fn commit_deferred_reset(&mut self) {
+        self.deferred.clear();
     }
 
     pub(super) fn defer(&mut self, entry_id: &str) {

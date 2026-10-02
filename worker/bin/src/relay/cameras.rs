@@ -11,7 +11,7 @@ mod runtime;
 mod window;
 
 pub use camera::{CameraPayload, PulledCamera};
-pub use domains::{DomainSelection, KNOWN_DOMAINS};
+pub use domains::{DomainSelection, KNOWN_DOMAINS, ResolvedDomains};
 pub use runtime::{BedZoneRegion, DEFAULT_CAMERA_FPS, RuntimeCamera};
 pub use window::DetectionWindow;
 
@@ -37,6 +37,8 @@ pub enum CameraConfigError {
         camera_id: String,
         field: &'static str,
     },
+    /// A camera-domain replace-list names a domain this build does not know.
+    UnknownDomain,
 }
 
 /// A validated `BackendWorkerConfigPayload`.
@@ -151,6 +153,7 @@ impl WorkerConfigPayload {
             .filter(|camera| camera.rtsp_url.is_some())
             .map(RuntimeCamera::from_payload)
             .collect::<Result<Vec<_>, _>>()?;
+
         if !self.cameras.is_empty() && cameras.is_empty() {
             return Err(CameraConfigError::NoCamerasParsed);
         }
@@ -194,4 +197,35 @@ fn object_or_null(
         Some(Json::Object(fields)) => Ok(Some(fields.clone())),
         Some(_) => Err(CameraConfigError::Field(key)),
     }
+}
+/// One domain's window input, before clock or zone admission.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum WindowCandidate {
+    Always,
+    Invalid,
+    Window(DetectionWindow),
+}
+
+/// Payload order. An explicit map, even empty, supersedes `night_window`.
+pub(crate) fn window_candidates(
+    config: &WorkerConfigPayload,
+) -> impl Iterator<Item = (&str, WindowCandidate)> {
+    let explicit = config
+        .detection_windows
+        .iter()
+        .flatten()
+        .map(|(domain, value)| {
+            let candidate = match value {
+                Json::Null => WindowCandidate::Always,
+                value => DetectionWindow::shape(value)
+                    .map_or(WindowCandidate::Invalid, WindowCandidate::Window),
+            };
+            (domain.as_str(), candidate)
+        });
+    let legacy = config
+        .night_window
+        .iter()
+        .filter(|_| config.detection_windows.is_none())
+        .map(|window| ("bed_exit", WindowCandidate::Window(window.clone())));
+    explicit.chain(legacy)
 }

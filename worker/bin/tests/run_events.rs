@@ -46,6 +46,9 @@ impl FixedClock {
     fn wall_fixture() -> Self {
         Self::at(UNIX_EPOCH + Duration::from_nanos(WALL_NS))
     }
+    fn advance(&mut self, by: Duration) {
+        self.time += by;
+    }
 }
 
 impl Clock for FixedClock {
@@ -120,6 +123,17 @@ fn wire(record: &Record) -> Result<Value> {
     Ok(serde_json::from_str(&canonical(&record.to_json())?)?)
 }
 
+fn deliver<'a>(
+    delivery: &'a EventDelivery<'a>,
+    event: &BusinessEvent,
+    stream: &Stream,
+    frame: Frame,
+    audit: Option<&seeon_ml_worker::policy::emit::Payload>,
+    observer: &mut dyn FnMut(Record),
+) -> std::result::Result<seeon_ml_worker::run::events::StagedEvent, EventDeliveryError> {
+    let mut prepared = delivery.prepare(event, stream, frame, audit)?;
+    delivery.stage(&mut prepared, observer)
+}
 fn assert_receipt(record: &Record, outcome: &str, reason: Option<&str>) -> Result {
     let actual = wire(record)?;
     assert_eq!(actual["record_kind"], "event.delivery");
@@ -208,11 +222,18 @@ fn durable_admission_precedes_one_receipt_and_matches_python_consumers() -> Resu
     ];
     let mut receipts = Vec::new();
     let mut at_receipt = Vec::new();
-    let staged = delivery.stage(&event, &stream(), frame(), Some(&audit), &mut |record| {
-        // Public queue reads in the callback prove durability precedes observation.
-        at_receipt.push(queue.entries());
-        receipts.push(record);
-    })?;
+    let staged = deliver(
+        &delivery,
+        &event,
+        &stream(),
+        frame(),
+        Some(&audit),
+        &mut |record| {
+            // Public queue reads in the callback prove durability precedes observation.
+            at_receipt.push(queue.entries());
+            receipts.push(record);
+        },
+    )?;
     assert_eq!(staged.event_ref, ID);
     assert_eq!(staged.detected_at, DETECTED_AT);
     assert!(staged.admission.accepted);
@@ -276,16 +297,21 @@ fn queue_conflict_preserves_original_bytes_and_actual_duplicate_result() -> Resu
     let event = event();
     let delivery = EventDelivery::new(&clock, &stager, &queue);
     let mut receipts = Vec::new();
-    delivery.stage(&event, &stream(), frame(), None, &mut |r| receipts.push(r))?;
+    deliver(&delivery, &event, &stream(), frame(), None, &mut |r| {
+        receipts.push(r)
+    })?;
 
     let original = queue.entries()?;
-    let duplicate = delivery.stage(&event, &stream(), frame(), None, &mut |r| receipts.push(r))?;
+    let duplicate = deliver(&delivery, &event, &stream(), frame(), None, &mut |r| {
+        receipts.push(r)
+    })?;
 
     assert!(duplicate.admission.accepted && duplicate.admission.already_admitted);
     // No retry inside the component: a later caller attempt with changed wall
     // time is a real immutable-content conflict, not permission to replace it.
     let later = FixedClock::at(clock.time + Duration::from_secs(1));
-    let failed = EventDelivery::new(&later, &stager, &queue).stage(
+    let failed = deliver(
+        &EventDelivery::new(&later, &stager, &queue),
         &event,
         &stream(),
         frame(),
@@ -315,7 +341,8 @@ fn camera_and_stager_binding_mismatches_never_reach_the_queue() -> Result {
     let mut event = event();
     event.camera_id = "different-camera".into();
     let mut receipts = Vec::new();
-    let failure = EventDelivery::new(&clock, &stager, &queue).stage(
+    let failure = deliver(
+        &EventDelivery::new(&clock, &stager, &queue),
         &event,
         &stream(),
         frame(),
@@ -334,7 +361,8 @@ fn camera_and_stager_binding_mismatches_never_reach_the_queue() -> Result {
     ] {
         let wrong = Stager::new(camera, facility, 7, None)?;
         let mut receipts = Vec::new();
-        let failure = EventDelivery::new(&clock, &wrong, &queue).stage(
+        let failure = deliver(
+            &EventDelivery::new(&clock, &wrong, &queue),
             &event,
             &stream(),
             frame(),
@@ -364,7 +392,9 @@ fn real_stager_serialization_refusals_emit_once_and_never_admit() -> Result {
         event.time_sec = time;
         event.probability = probability;
         let mut receipts = Vec::new();
-        let failure = delivery.stage(&event, &stream(), frame(), None, &mut |r| receipts.push(r));
+        let failure = deliver(&delivery, &event, &stream(), frame(), None, &mut |r| {
+            receipts.push(r)
+        });
 
         assert!(matches!(
             failure,
@@ -393,7 +423,8 @@ fn real_queue_io_failure_is_not_success_or_an_internal_retry() -> Result {
     fs::rename(queue.directory(), root.join("retained"))?;
     fs::write(queue.directory(), b"filesystem failure evidence")?;
     let mut receipts = Vec::new();
-    let failure = EventDelivery::new(&clock, &stager, &queue).stage(
+    let failure = deliver(
+        &EventDelivery::new(&clock, &stager, &queue),
         &event,
         &stream(),
         frame(),
@@ -427,25 +458,50 @@ fn unrepresentable_identity_provenance_and_wall_time_fail_closed() -> Result {
     invalid_event.identity = "camera-7:fall:episode-1".into();
     let mut receipts = Vec::new();
     assert!(matches!(
-        delivery.stage(&invalid_event, &stream(), frame(), None, &mut |r| receipts
-            .push(r)),
+        deliver(
+            &delivery,
+            &invalid_event,
+            &stream(),
+            frame(),
+            None,
+            &mut |r| receipts.push(r)
+        ),
         Err(EventDeliveryError::Identity)
     ));
     let event = event();
     let mut invalid_stream = stream();
-    invalid_stream.worker_boot_id.clear();
-    assert!(matches!(
-        delivery.stage(&event, &invalid_stream, frame(), None, &mut |r| receipts
-            .push(r)),
-        Err(EventDeliveryError::Record(_))
-    ));
+    for worker_boot_id in [String::new(), "bad\0boot".to_owned(), "b".repeat(129)] {
+        invalid_stream.worker_boot_id = worker_boot_id;
+        assert!(matches!(
+            deliver(
+                &delivery,
+                &event,
+                &invalid_stream,
+                frame(),
+                None,
+                &mut |r| receipts.push(r)
+            ),
+            Err(EventDeliveryError::Record(
+                seeon_ml_worker::records::id::ContractError::Identity("worker_boot_id")
+            ))
+        ));
+        assert!(
+            queue.entries()?.is_empty(),
+            "preflight precedes durable admission"
+        );
+        assert!(
+            receipts.is_empty(),
+            "invalid provenance cannot produce a receipt"
+        );
+    }
     for time in [
         UNIX_EPOCH - Duration::from_nanos(1),
         UNIX_EPOCH + Duration::from_secs(u64::MAX / 1_000_000_000 + 1),
     ] {
         let bad_clock = FixedClock::at(time);
         assert!(matches!(
-            EventDelivery::new(&bad_clock, &stager, &queue).stage(
+            deliver(
+                &EventDelivery::new(&bad_clock, &stager, &queue),
                 &event,
                 &stream(),
                 frame(),
@@ -476,7 +532,8 @@ fn whole_second_wall_clock_and_absent_probability_preserve_domain_time() -> Resu
     event.person_id = None;
     event.bed_id = None;
     let mut receipts = Vec::new();
-    let staged = EventDelivery::new(&clock, &stager, &queue).stage(
+    let staged = deliver(
+        &EventDelivery::new(&clock, &stager, &queue),
         &event,
         &stream(),
         Frame {
@@ -534,7 +591,8 @@ fn receipt_observes_post_admission_time_not_the_detection_time() -> Result {
     let stager = stager()?;
     let event = event();
     let mut receipts = Vec::new();
-    let staged = EventDelivery::new(&clock, &stager, &queue).stage(
+    let staged = deliver(
+        &EventDelivery::new(&clock, &stager, &queue),
         &event,
         &stream(),
         frame(),
@@ -567,7 +625,8 @@ fn zero_and_nonzero_entity_ids_and_scalar_audit_are_preserved() -> Result {
         ("config_version".into(), Json::Int(1)),
     ];
     let mut receipts = Vec::new();
-    EventDelivery::new(&clock, &stager, &queue).stage(
+    deliver(
+        &EventDelivery::new(&clock, &stager, &queue),
         &event,
         &stream(),
         frame(),
@@ -603,7 +662,8 @@ fn nested_audit_is_refused_before_clock_or_queue() -> Result {
         vec![("decision_trace_id".into(), Json::Array(Vec::new()))],
     ] {
         let mut receipts = Vec::new();
-        let failure = EventDelivery::new(&clock, &stager, &queue).stage(
+        let failure = deliver(
+            &EventDelivery::new(&clock, &stager, &queue),
             &event,
             &stream(),
             frame(),
@@ -624,7 +684,8 @@ fn absent_audit_is_omitted_rather_than_defaulted() -> Result {
     let clock = FixedClock::wall_fixture();
     let stager = Stager::new("camera-7", "facility-9", 7, None)?;
     let mut receipts = Vec::new();
-    EventDelivery::new(&clock, &stager, &queue).stage(
+    deliver(
+        &EventDelivery::new(&clock, &stager, &queue),
         &event(),
         &stream(),
         frame(),
@@ -637,5 +698,178 @@ fn absent_audit_is_omitted_rather_than_defaulted() -> Result {
     assert_eq!(body["evidence"]["person_id"], 12);
     assert!(body["evidence"].get("bed_id").is_none());
     assert_eq!(receipts.len(), 1);
+    Ok(())
+}
+#[test]
+fn advancing_clock_cannot_change_a_frozen_envelope_on_retry() -> Result {
+    let queue = DeliveryQueue::open(&fresh_dir("frozen-clock")?, true)?;
+    let mut clock = FixedClock::wall_fixture();
+    let stager = stager()?;
+    let mut prepared =
+        EventDelivery::new(&clock, &stager, &queue).prepare(&event(), &stream(), frame(), None)?;
+    clock.advance(Duration::from_secs(30));
+    let mut receipts = Vec::new();
+    let staged = EventDelivery::new(&clock, &stager, &queue)
+        .stage(&mut prepared, &mut |record| receipts.push(record))?;
+    assert_eq!(staged.detected_at, DETECTED_AT);
+    let original = queue.entries()?;
+    assert_eq!(original.len(), 1);
+    assert_eq!(original[0]["detected_at"], DETECTED_AT);
+    let bytes = event_body(&original[0]).map_err(|_| "queued event is not consumable")?;
+    clock.advance(Duration::from_secs(30));
+    let again = EventDelivery::new(&clock, &stager, &queue)
+        .stage(&mut prepared, &mut |record| receipts.push(record))?;
+    assert!(again.admission.accepted);
+    assert_eq!(again.admission, staged.admission);
+    assert!(!again.admission.already_admitted);
+    assert_eq!(again.detected_at, DETECTED_AT);
+    assert_eq!(queue.entries()?, original);
+    assert_eq!(
+        event_body(&queue.entries()?[0]).map_err(|_| "retry changed queued bytes")?,
+        bytes
+    );
+    assert_eq!(receipts.len(), 2);
+    let first = wire(&receipts[0])?;
+    assert_eq!(first["outcome"], "admitted");
+    assert_eq!(first["observed_at_ns"], WALL_NS + 30_000_000_000);
+    assert_eq!(first["frame_seq"], 129);
+    assert_eq!(first["causal_unit_id"], ID);
+    let retry = wire(&receipts[1])?;
+    assert_eq!(retry["outcome"], "admitted");
+    assert_eq!(retry["observed_at_ns"], WALL_NS + 60_000_000_000);
+    assert_eq!(retry["frame_seq"], 129);
+    assert_eq!(retry["causal_unit_id"], ID);
+    Ok(())
+}
+
+#[test]
+fn receipt_clock_failure_after_admission_retries_the_same_frozen_entry() -> Result {
+    struct FailAfterAdmission {
+        inner: FixedClock,
+        queue: DeliveryQueue,
+    }
+    impl FailAfterAdmission {
+        fn open(dir: &std::path::Path) -> Result<Self> {
+            Ok(Self {
+                inner: FixedClock::wall_fixture(),
+                queue: DeliveryQueue::open(dir, true)?,
+            })
+        }
+    }
+    impl Clock for FailAfterAdmission {
+        fn wall(&self) -> SystemTime {
+            if self.queue.accepted_count().expect("queue readable") > 0 {
+                UNIX_EPOCH - Duration::from_nanos(1)
+            } else {
+                self.inner.wall()
+            }
+        }
+        fn monotonic(&self) -> Duration {
+            Duration::ZERO
+        }
+        fn pause(&self, _limit: Duration) {}
+    }
+    let root = fresh_dir("frozen-receipt-clock")?;
+    let clock = FailAfterAdmission::open(&root.join("live"))?;
+    let stager = stager()?;
+    let delivery = EventDelivery::new(&clock, &stager, &clock.queue);
+    let mut prepared = delivery.prepare(&event(), &stream(), frame(), None)?;
+    let mut receipts = Vec::new();
+    let failed = delivery.stage(&mut prepared, &mut |record| receipts.push(record));
+    assert!(matches!(failed, Err(EventDeliveryError::WallTime)));
+    assert!(receipts.is_empty());
+    let admitted = clock.queue.entries()?;
+    assert_eq!(admitted.len(), 1);
+    assert_eq!(admitted[0]["detected_at"], DETECTED_AT);
+    assert_eq!(admitted[0]["edge_event_id"], ID);
+    let entry_id = admitted[0]["entry_id"]
+        .as_str()
+        .ok_or("admitted entry has no id")?;
+    let bytes = event_body(&admitted[0]).map_err(|_| "queued event is not consumable")?;
+    assert!(
+        clock.queue.acknowledge(entry_id)?,
+        "retire the exact admitted entry"
+    );
+    assert!(clock.queue.entries()?.is_empty());
+    // The accepted result is already owned by this prepared value. Retirement
+    // must not make the retry publish a second copy of a known admission.
+    let mut later = FixedClock::wall_fixture();
+    later.advance(Duration::from_secs(5));
+    let retry = EventDelivery::new(&later, &stager, &clock.queue);
+    let staged = retry.stage(&mut prepared, &mut |record| receipts.push(record))?;
+    assert_eq!(
+        staged.admission,
+        seeon_ml_worker::delivery::AdmissionResult {
+            accepted: true,
+            fault: None,
+            already_admitted: false,
+        }
+    );
+    assert_eq!(staged.detected_at, DETECTED_AT);
+    let body: Value = serde_json::from_slice(&bytes)?;
+    assert_eq!(body["evidence"]["identity"], ID);
+    assert_eq!(body["detected_at"], DETECTED_AT);
+    assert!(
+        clock.queue.entries()?.is_empty(),
+        "known admission must not recreate a retired entry"
+    );
+    assert_eq!(receipts.len(), 1);
+    let record = wire(&receipts[0])?;
+    assert_eq!(record["outcome"], "admitted");
+    assert_eq!(record["observed_at_ns"], WALL_NS + 5_000_000_000);
+    assert_eq!(record["frame_seq"], 129);
+    assert_eq!(record["causal_unit_id"], ID);
+    Ok(())
+}
+
+#[test]
+fn known_acceptance_still_refuses_a_differently_bound_stager() -> Result {
+    let queue = DeliveryQueue::open(&fresh_dir("known-binding")?, true)?;
+    let clock = FixedClock::wall_fixture();
+    let stager = stager()?;
+    let delivery = EventDelivery::new(&clock, &stager, &queue);
+    let mut prepared = delivery.prepare(&event(), &stream(), frame(), None)?;
+    let mut receipts = Vec::new();
+    let staged = delivery.stage(&mut prepared, &mut |record| receipts.push(record))?;
+    assert!(staged.admission.accepted && !staged.admission.already_admitted);
+    let admitted = queue.entries()?;
+    assert_eq!(admitted.len(), 1);
+    assert_eq!(admitted[0]["detected_at"], DETECTED_AT);
+    assert_eq!(admitted[0]["edge_event_id"], ID);
+    let entry_id = admitted[0]["entry_id"]
+        .as_str()
+        .ok_or("admitted entry has no id")?
+        .to_owned();
+    assert!(
+        queue.acknowledge(&entry_id)?,
+        "retire the exact admitted entry"
+    );
+    assert!(queue.entries()?.is_empty());
+
+    let wrong = Stager::new("other-camera", "other-facility", 7, None)?;
+    let refused = EventDelivery::new(&clock, &wrong, &queue)
+        .stage(&mut prepared, &mut |record| receipts.push(record));
+    assert!(matches!(refused, Err(EventDeliveryError::StagerIdentity)));
+    assert!(
+        queue.entries()?.is_empty(),
+        "a differently bound stager must not recreate a retired entry"
+    );
+    assert_eq!(receipts.len(), 2);
+    assert_receipt(
+        &receipts[1],
+        "refused",
+        Some("ValueError: stager identity does not match admitted event"),
+    )?;
+
+    let again = EventDelivery::new(&clock, &stager, &queue)
+        .stage(&mut prepared, &mut |record| receipts.push(record))?;
+    assert_eq!(again.admission, staged.admission);
+    assert_eq!(again.detected_at, DETECTED_AT);
+    assert!(
+        queue.entries()?.is_empty(),
+        "the original acceptance must not republish"
+    );
+    assert_eq!(receipts.len(), 3);
+    assert_receipt(&receipts[2], "admitted", None)?;
     Ok(())
 }

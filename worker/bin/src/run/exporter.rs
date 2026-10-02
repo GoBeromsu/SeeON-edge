@@ -125,6 +125,29 @@ pub fn spawn(
     }
     let exporter = Exporter::new(Arc::clone(&lanes), client, provenance, batch_max, flush_ms)
         .map_err(SpawnError::Settings)?;
+    spawn_exporter(exporter, lanes, flush_ms, clock)
+}
+
+/// Transfer the already validated composition without rebuilding its transport
+/// or provenance. Producers retain a clone of its shared lanes before transfer.
+pub fn spawn_composed(
+    composed: crate::records::compose::Composed,
+    clock: Arc<dyn Clock>,
+) -> Result<Handle, SpawnError> {
+    spawn_exporter(
+        composed.exporter,
+        composed.lanes,
+        composed.settings.flush_ms,
+        clock,
+    )
+}
+
+fn spawn_exporter(
+    exporter: Exporter,
+    lanes: Arc<Lanes>,
+    flush_ms: u64,
+    clock: Arc<dyn Clock>,
+) -> Result<Handle, SpawnError> {
     let stop = Arc::new(AtomicBool::new(false));
     let history = Arc::new(Mutex::new(report(&exporter, &lanes, false)));
     let thread_stop = Arc::clone(&stop);

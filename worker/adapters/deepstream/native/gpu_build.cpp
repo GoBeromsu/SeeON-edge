@@ -4,7 +4,6 @@
 #include <NvOnnxParser.h>
 #include <cuda_runtime_api.h>
 #include <fcntl.h>
-#include <sys/stat.h>
 #include <unistd.h>
 
 #include <algorithm>
@@ -12,7 +11,6 @@
 #include <cstring>
 #include <memory>
 #include <stdexcept>
-#include <vector>
 
 namespace {
 constexpr size_t kMaxOnnxBytes = 512U * 1024U * 1024U;
@@ -40,22 +38,6 @@ struct CloseFd {
     int fd;
     ~CloseFd() { if (fd >= 0) close(fd); }
 };
-std::vector<char> read_onnx(const char *path) {
-    require(path && path[0], "ONNX path is required");
-    CloseFd guard{open(path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW)};
-    require(guard.fd >= 0, "ONNX model is not readable");
-    struct stat info{};
-    require(fstat(guard.fd, &info) == 0 && S_ISREG(info.st_mode) && info.st_size > 0 &&
-            static_cast<uint64_t>(info.st_size) <= kMaxOnnxBytes, "ONNX model size or type is invalid");
-    std::vector<char> bytes(static_cast<size_t>(info.st_size));
-    size_t offset = 0;
-    while (offset < bytes.size()) {
-        const ssize_t count = read(guard.fd, bytes.data() + offset, bytes.size() - offset);
-        require(count > 0, "ONNX model read failed");
-        offset += static_cast<size_t>(count);
-    }
-    return bytes;
-}
 // The engine file is created exclusively and removed again unless fully synced.
 void write_engine(const char *path, const void *data, size_t size) {
     require(path && path[0], "engine path is required");
@@ -80,12 +62,15 @@ void write_engine(const char *path, const void *data, size_t size) {
 }
 } // namespace
 
-extern "C" int seeon_gpu_build(const char *onnx_path, const char *engine_path, int32_t device,
-                                const char *input_name, const int32_t *dimensions, int32_t rank,
-                                SeeonGpuBuildIdentity *identity, char *error, size_t error_size) {
+extern "C" int seeon_gpu_build(const uint8_t *onnx_data, size_t onnx_size, const char *engine_path,
+                                int32_t device, const char *input_name, const int32_t *dimensions,
+                                int32_t rank, SeeonGpuBuildIdentity *identity, char *error,
+                                size_t error_size) {
     if (!identity) return error_text(error, error_size, "build identity output is required");
     std::memset(identity, 0, sizeof(*identity));
     try {
+        require(onnx_data && onnx_size > 0 && onnx_size <= kMaxOnnxBytes,
+                "ONNX model size is invalid");
         require(input_name && input_name[0], "input tensor name is required");
         require(dimensions && rank > 0 && rank <= 8, "input rank is unsupported");
         nvinfer1::Dims requested{};
@@ -100,7 +85,6 @@ extern "C" int seeon_gpu_build(const char *onnx_path, const char *engine_path, i
         require(cudaSetDevice(device) == cudaSuccess, "CUDA operation failed; build unavailable");
         cudaDeviceProp properties{};
         require(cudaGetDeviceProperties(&properties, device) == cudaSuccess, "GPU properties are unavailable");
-        const auto onnx = read_onnx(onnx_path);
 
         Logger logger;
         std::unique_ptr<nvinfer1::IBuilder> builder{nvinfer1::createInferBuilder(logger)};
@@ -112,7 +96,8 @@ extern "C" int seeon_gpu_build(const char *onnx_path, const char *engine_path, i
                 "TensorRT network creation failed");
         std::unique_ptr<nvonnxparser::IParser> parser{nvonnxparser::createParser(*network, logger)};
         require(bool(parser), "ONNX parser creation failed");
-        require(parser->parse(onnx.data(), onnx.size()), "ONNX model parse failed");
+        // The caller keeps these bytes alive through serialization and parser destruction.
+        require(parser->parse(onnx_data, onnx_size), "ONNX model parse failed");
 
         require(network->getNbInputs() == 1, "network must have exactly one input");
         nvinfer1::ITensor *input = network->getInput(0);

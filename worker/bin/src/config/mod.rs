@@ -4,12 +4,14 @@
 //! config (`lkg`). Everything here reads files only; the process env arrives
 //! as a map.
 
+pub(crate) mod build_revision;
 pub mod env;
 pub mod lkg;
 pub mod model_bundle;
 pub mod pull;
 pub mod restart;
 pub mod selection;
+pub mod windows;
 
 use std::collections::BTreeMap;
 use std::fs;
@@ -24,7 +26,7 @@ use env::{EnvError, ExecutionRecordsSettings};
 use lkg::{LkgError, LkgStore, StoredConfig};
 use model_bundle::AdmissionError;
 use model_bundle::bundle::{BundleProof, admit_model_bundle};
-use model_bundle::identity::{FLOW_IDENTITY_FILES, IdentityError, verify_engine_identity};
+use model_bundle::identity::{FLOW_IDENTITY_FILES, IdentityError, verify_environment};
 use selection::{ModelSelection, SelectionError, parse_model_selection};
 
 /// Moves the fall selection document (Python fixes `FALL_SELECTION_PATH`).
@@ -116,6 +118,10 @@ fn env_path(env: &BTreeMap<String, String>, key: &str, default: &str) -> PathBuf
     PathBuf::from(env.get(key).map_or(default, String::as_str))
 }
 
+pub(crate) fn models_root(env: &env::Env) -> PathBuf {
+    env_path(env, MODELS_ROOT_ENV, DEFAULT_MODELS_ROOT)
+}
+
 /// `selected_fall_bundle_config_from_environment`: an absent document is
 /// `None`; anything else must be canonical JSON naming a valid selection.
 fn load_selection(path: &Path) -> Result<Option<ModelSelection>, SelectionLoadError> {
@@ -140,27 +146,45 @@ fn load_selection(path: &Path) -> Result<Option<ModelSelection>, SelectionLoadEr
         .map_err(SelectionLoadError::Refused)
 }
 
-/// `verify_engine_identity` over the flow wiring, when any of it is set;
-/// a partly wired flow refuses on the first absent file.
+/// A wired deployment must admit the complete four-engine identity.
 fn engine_identity(
     env: &BTreeMap<String, String>,
+    selection: Option<&(ModelSelection, BundleProof)>,
 ) -> Result<Option<BTreeMap<String, String>>, IdentityError> {
     let artifact_keys = FLOW_IDENTITY_FILES.iter().map(|(_, name)| *name);
-    let mut wiring = [FLOW_ENGINE_ENV, FLOW_ENGINE_IDENTITY_ENV]
-        .into_iter()
-        .chain(artifact_keys);
+    let mut wiring = [
+        FLOW_ENGINE_ENV,
+        FLOW_ENGINE_IDENTITY_ENV,
+        "ML_WORKER_FLOW_ONNX_PATH",
+        "ML_WORKER_STORED_POSE_ENGINE_PATH",
+        "ML_WORKER_BED_ENGINE_PATH",
+        "ML_WORKER_FALL_ENGINE_PATH",
+    ]
+    .into_iter()
+    .chain(artifact_keys);
     if !wiring.any(|name| env.get(name).is_some_and(|value| !value.is_empty())) {
         return Ok(None);
     }
-    let files: Vec<(&str, PathBuf)> = FLOW_IDENTITY_FILES
-        .iter()
-        .map(|(key, name)| (*key, env_path(env, name, "")))
-        .collect();
-    let engine = env_path(env, FLOW_ENGINE_ENV, "");
-    let identity = env_path(env, FLOW_ENGINE_IDENTITY_ENV, "");
-    verify_engine_identity(&engine, &identity, &files, None).map(Some)
+    verify_environment(env, selection, None).map(Some)
 }
 
+/// Selected-model document plus bundle proof, without relay, state, or LKG.
+/// An absent document is `None`. Present documents keep the check-config
+/// selection-then-admission refusal order.
+pub(crate) fn admit_selected_bundle(
+    env: &env::Env,
+) -> Result<Option<(ModelSelection, BundleProof)>, CheckConfigError> {
+    let selection_path = env_path(env, MODEL_SELECTION_PATH_ENV, DEFAULT_SELECTION_PATH);
+    match load_selection(&selection_path).map_err(CheckConfigError::Selection)? {
+        None => Ok(None),
+        Some(desired) => {
+            let models_root = models_root(env);
+            let proof =
+                admit_model_bundle(&models_root, &desired).map_err(CheckConfigError::Admission)?;
+            Ok(Some((desired, proof)))
+        }
+    }
+}
 /// `ml-worker check-config`: design §2.4 steps 1 and 3, file-only.
 pub fn check_config(
     env: &BTreeMap<String, String>,
@@ -170,17 +194,9 @@ pub fn check_config(
     env::reject_retired(env).map_err(CheckConfigError::Env)?;
     env::relay_token(env).map_err(CheckConfigError::Env)?;
     let execution_records = env::execution_records(env).map_err(CheckConfigError::Env)?;
-    let selection_path = env_path(env, MODEL_SELECTION_PATH_ENV, DEFAULT_SELECTION_PATH);
-    let selection = match load_selection(&selection_path).map_err(CheckConfigError::Selection)? {
-        None => None,
-        Some(desired) => {
-            let models_root = env_path(env, MODELS_ROOT_ENV, DEFAULT_MODELS_ROOT);
-            let proof =
-                admit_model_bundle(&models_root, &desired).map_err(CheckConfigError::Admission)?;
-            Some((desired, proof))
-        }
-    };
-    let engine_identity = engine_identity(env).map_err(CheckConfigError::Identity)?;
+    let selection = admit_selected_bundle(env)?;
+    let engine_identity =
+        engine_identity(env, selection.as_ref()).map_err(CheckConfigError::Identity)?;
     let last_known_good = LkgStore::new(&state_dir).load();
     Ok(Checked {
         state_dir,

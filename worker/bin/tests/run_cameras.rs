@@ -12,11 +12,13 @@ use seeon_ml_worker::config::pull::{ConfigSource, PulledConfig};
 use seeon_ml_worker::json::Json;
 use seeon_ml_worker::msg::{FallResponse, PosePacket};
 use seeon_ml_worker::policy::fall::FallStage;
+use seeon_ml_worker::relay::cameras::CameraConfigError;
+use seeon_ml_worker::relay::cameras::RuntimeCamera;
 use seeon_ml_worker::relay::cameras::WorkerConfigPayload;
 use seeon_ml_worker::relay::cameras::policies::{
     PolicySource, PolicyValues, make_effective_policy, resolve_detection_policies,
 };
-use seeon_ml_worker::run::calibration::{Calibration, parse};
+use seeon_ml_worker::run::calibration::{Calibration, CalibrationSource, parse};
 use seeon_ml_worker::run::cameras::{
     CameraPolicyError, PolicyNumberSource, ResolvedFallPolicy, camera_policies, resolve_fall_policy,
 };
@@ -176,19 +178,47 @@ fn modules(fall: Json) -> Json {
 }
 
 fn camera_entry(camera_id: &str, facility_id: &str) -> Json {
-    object(vec![
+    camera_with_domains(camera_id, facility_id, None)
+}
+
+fn camera_with_domains(camera_id: &str, facility_id: &str, domains: Option<Vec<&str>>) -> Json {
+    let mut members = vec![
         ("camera_id", text(camera_id)),
         ("facility_id", text(facility_id)),
         ("rtsp_url", text("rtsp://relay.example/live")),
-    ])
+    ];
+    if let Some(domains) = domains {
+        members.push((
+            "domains",
+            Json::Array(domains.into_iter().map(text).collect()),
+        ));
+    }
+    object(members)
+}
+
+fn disabled_fall() -> Json {
+    object(vec![(
+        "domains",
+        object(vec![("fall", object(vec![("enabled", Json::Bool(false))]))]),
+    )])
 }
 
 fn pulled(cameras: Vec<Json>, policies: Json) -> PulledConfig {
-    let payload = object(vec![
+    pulled_with(cameras, policies, Json::Null)
+}
+
+fn pulled_with(cameras: Vec<Json>, policies: Json, extra: Json) -> PulledConfig {
+    let Json::Object(mut members) = object(vec![
         ("config_version", Json::Int(3)),
         ("cameras", Json::Array(cameras)),
         ("detection_policies", policies),
-    ]);
+    ]) else {
+        unreachable!("object");
+    };
+    if let Json::Object(extra) = extra {
+        members.extend(extra);
+    }
+    let payload = Json::Object(members);
     let config = WorkerConfigPayload::parse(&payload).expect("payload");
     let ids: Vec<String> = config
         .cameras()
@@ -201,6 +231,7 @@ fn pulled(cameras: Vec<Json>, policies: Json) -> PulledConfig {
         cameras: config.runtime_cameras().expect("runtime cameras"),
         policies: resolve_detection_policies(config.detection_policies(), &ids).expect("policies"),
         config,
+        windows: Default::default(),
         source: ConfigSource::Pulled,
         stale: false,
     }
@@ -245,7 +276,7 @@ fn calibration(
     parse(
         &document(temperature, threshold, votes, window, promoted),
         "",
-        None,
+        CalibrationSource::Packaged,
     )
     .expect("calibration")
 }
@@ -376,7 +407,8 @@ fn consume(stage: &mut FallStage, logit: f32) -> Vec<BusinessEvent> {
     let (sender, receiver) = sync_channel(1);
     let mut request = None;
     for sequence in 0..40 {
-        let frame = seeon_ml_worker::policy::ingest::ingest(&packet(sequence)).expect("frame");
+        let frame =
+            seeon_ml_worker::policy::ingest::ingest(&packet(sequence), None).expect("frame");
         assert_eq!(frame.rows.len(), 1);
         stage
             .observe(&frame, &sender, &mut |_| {})
@@ -430,7 +462,10 @@ fn unpromoted_overrides_stay_canonical_and_promoted_receipt_applies() {
             .collect::<Vec<_>>(),
         vec![0, 1],
     );
-    let mut stages: Vec<FallStage> = stages.into_iter().map(|camera| camera.stage).collect();
+    let mut stages: Vec<FallStage> = stages
+        .into_iter()
+        .map(|camera| camera.stage.expect("fall enabled"))
+        .collect();
     assert!(consume(&mut stages[0], 0.0).is_empty());
     assert!(consume(&mut stages[1], 0.0).is_empty());
     assert_eq!(
@@ -470,7 +505,12 @@ fn unpromoted_overrides_stay_canonical_and_promoted_receipt_applies() {
     let promoted_stages =
         camera_policies(&config, &promoted, BOOT, EPOCH, GENERATION, capacities(8))
             .expect("promoted");
-    let mut promoted_stage = promoted_stages.into_iter().next().expect("camera-a").stage;
+    let mut promoted_stage = promoted_stages
+        .into_iter()
+        .next()
+        .expect("camera-a")
+        .stage
+        .expect("fall enabled");
     assert!(
         consume(&mut promoted_stage, 0.0).is_empty(),
         "0.5 is below receipt 0.8"
@@ -489,7 +529,8 @@ fn unpromoted_overrides_stay_canonical_and_promoted_receipt_applies() {
             .into_iter()
             .next()
             .expect("camera-a")
-            .stage;
+            .stage
+            .expect("fall enabled");
     let confirmed = consume(&mut qualifying, 20.0);
     assert_eq!(
         confirmed.len(),
@@ -548,7 +589,8 @@ fn image_default_applies_without_promotion_and_temperature_changes_probability()
     .into_iter()
     .next()
     .expect("camera")
-    .stage;
+    .stage
+    .expect("fall enabled");
     let hot_calibration = calibration(100.0, None, 3, 5, false);
     let mut hot = camera_policies(
         &custom,
@@ -562,7 +604,8 @@ fn image_default_applies_without_promotion_and_temperature_changes_probability()
     .into_iter()
     .next()
     .expect("camera")
-    .stage;
+    .stage
+    .expect("fall enabled");
     consume(&mut cool, 20.0);
     consume(&mut hot, 20.0);
     let cool_probability = trace_float(&cool, DecisionTraceValueName::FallTransitionProbability);
@@ -646,4 +689,134 @@ fn malformed_receipt_and_capacities_refuse_even_when_unpromoted() {
         .expect("sources"),
         CameraPolicyError::SourceId
     );
+}
+
+#[test]
+fn disabled_fall_retains_every_source_index_without_a_stage() {
+    let cameras = vec![
+        camera_with_domains("camera-a", "facility-a", Some(vec!["bed_exit"])),
+        camera_with_domains("camera-b", "facility-b", Some(vec!["bed_exit"])),
+    ];
+    let built = camera_policies(
+        &pulled_with(cameras, Json::Null, disabled_fall()),
+        &calibration(1.0, Some(0.5), 3, 5, false),
+        BOOT,
+        EPOCH,
+        GENERATION,
+        capacities(5),
+    )
+    .expect("disabled roster");
+    assert_eq!(
+        built
+            .iter()
+            .map(|camera| camera.source_id)
+            .collect::<Vec<_>>(),
+        vec![0, 1]
+    );
+    assert!(built.iter().all(|camera| camera.stage.is_none()));
+}
+
+#[test]
+fn partial_global_override_keeps_fall_and_camera_replacement_disables_it() {
+    let cameras = vec![
+        camera_with_domains("camera-a", "facility-a", Some(vec!["bed_exit"])),
+        camera_entry("camera-b", "facility-b"),
+    ];
+    let partial = pulled_with(
+        cameras.clone(),
+        Json::Null,
+        object(vec![(
+            "domains",
+            object(vec![(
+                "bed_exit",
+                object(vec![("enabled", Json::Bool(false))]),
+            )]),
+        )]),
+    );
+    let retained = camera_policies(
+        &partial,
+        &calibration(1.0, None, 3, 5, false),
+        BOOT,
+        EPOCH,
+        GENERATION,
+        capacities(5),
+    )
+    .expect("partial override defaults fall on");
+    assert_eq!(retained.len(), 2);
+    assert!(retained.iter().all(|camera| camera.stage.is_some()));
+
+    let replaced = pulled_with(
+        vec![
+            camera_with_domains("camera-a", "facility-a", Some(vec!["bed_exit"])),
+            camera_with_domains("camera-b", "facility-b", Some(vec!["bed_exit"])),
+        ],
+        Json::Null,
+        Json::Null,
+    );
+    let disabled = camera_policies(
+        &replaced,
+        &calibration(1.0, None, 3, 5, false),
+        BOOT,
+        EPOCH,
+        GENERATION,
+        capacities(5),
+    )
+    .expect("camera list replaces defaults");
+    assert_eq!(
+        disabled
+            .iter()
+            .map(|camera| (camera.source_id, camera.stage.is_none()))
+            .collect::<Vec<_>>(),
+        vec![(0, true), (1, true)]
+    );
+
+    let payload = object(vec![
+        ("config_version", Json::Int(3)),
+        (
+            "cameras",
+            Json::Array(vec![camera_with_domains(
+                "camera-a",
+                "facility-a",
+                Some(vec!["not-a-domain"]),
+            )]),
+        ),
+    ]);
+    let config = WorkerConfigPayload::parse(&payload).expect("payload parses");
+    assert_eq!(
+        config.domain_selection().resolve(),
+        Err(CameraConfigError::UnknownDomain)
+    );
+    let ids = vec!["camera-a".to_owned()];
+    let refused = PulledConfig {
+        directive: config.directive(),
+        policies: resolve_detection_policies(config.detection_policies(), &ids).expect("policies"),
+        cameras: vec![RuntimeCamera {
+            camera_id: "camera-a".to_owned(),
+            facility_id: "facility-a".to_owned(),
+            rtsp_url: "rtsp://relay.example/live".to_owned(),
+            fps: 30.0,
+            frame_stride: 1,
+            decode_backend: None,
+            label: None,
+            bed_zone_regions: Vec::new(),
+            bed_zone_image_width: None,
+            bed_zone_image_height: None,
+        }],
+        payload,
+        config,
+        windows: Default::default(),
+        source: ConfigSource::Pulled,
+        stale: false,
+    };
+    assert!(matches!(
+        camera_policies(
+            &refused,
+            &calibration(1.0, None, 3, 5, false),
+            BOOT,
+            EPOCH,
+            GENERATION,
+            capacities(5),
+        ),
+        Err(CameraPolicyError::Domains)
+    ));
 }

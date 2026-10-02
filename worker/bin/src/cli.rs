@@ -1,14 +1,19 @@
-//! The `ml-worker` command line: `check-config [--state-dir <path>]`, and the
+//! The `ml-worker` command line: `run` (the default), `check-config`, and the
 //! flag set of `_build_parser` in `worker/__main__.py` that every command
 //! shares. Python's `--config` (B11) and `--max-frames-per-camera` (X11 b)
-//! are refused, with or without a value.
+//! are refused, with or without a value. `engine-build` has its own flag set.
+
+mod engine_build;
 
 use std::ffi::{OsStr, OsString};
 use std::path::PathBuf;
 
 use crate::exit::Exit;
+pub use engine_build::{EngineBuildFlags, ParseError as EngineBuildParseError};
 
 const CHECK_CONFIG: &str = "check-config";
+const ENGINE_BUILD: &str = "engine-build";
+const RUN: &str = "run";
 const HEARTBEAT_ON_START: &str = "--heartbeat-on-start";
 const STATE_DIR: &str = "--state-dir";
 /// Python flags the Rust worker refuses.
@@ -26,17 +31,22 @@ pub struct Flags {
 /// A command the worker runs.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum Command {
+    /// Runs the admitted worker until shutdown or a restart directive.
+    Run(Flags),
     /// Checks the env, model bundle and engine identity, touching no GPU,
     /// camera or network.
     CheckConfig(Flags),
+    /// Builds engines from the approved flag set. Parsing only; the parent
+    /// wires execution.
+    EngineBuild(Box<EngineBuildFlags>),
 }
 
 /// Why the command line was refused; every refusal exits 2, as an
 /// `argparse` error does.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum CliError {
-    /// No command, or a command this worker does not have.
-    Command(Option<OsString>),
+    /// A command this worker does not have.
+    Command(OsString),
     /// An argument that is not a known flag.
     UnknownFlag(OsString),
     /// `--config` or `--max-frames-per-camera`.
@@ -45,6 +55,8 @@ pub enum CliError {
     MissingValue,
     /// `--heartbeat-on-start=<value>`: the flag takes no value.
     UnexpectedValue,
+    /// `engine-build` was refused. The inner error carries no secret or raw value.
+    EngineBuild(engine_build::ParseError),
 }
 
 impl CliError {
@@ -97,10 +109,18 @@ pub fn parse_flags(arguments: &[OsString]) -> Result<Flags, CliError> {
 /// Parses the arguments after the program name.
 pub fn parse(arguments: &[OsString]) -> Result<Command, CliError> {
     match arguments.split_first() {
+        None => Ok(Command::Run(Flags::default())),
+        Some((command, flags)) if command == RUN => parse_flags(flags).map(Command::Run),
+        Some((command, flags)) if command == ENGINE_BUILD => engine_build::parse(flags)
+            .map(|flags| Command::EngineBuild(Box::new(flags)))
+            .map_err(CliError::EngineBuild),
         Some((command, flags)) if command == CHECK_CONFIG => {
             parse_flags(flags).map(Command::CheckConfig)
         }
-        first => Err(CliError::Command(first.map(|(command, _)| command.clone()))),
+        Some((flag, _)) if flag.as_encoded_bytes().starts_with(b"-") => {
+            parse_flags(arguments).map(Command::Run)
+        }
+        Some((command, _)) => Err(CliError::Command(command.clone())),
     }
 }
 
@@ -133,9 +153,14 @@ mod tests {
     #[test]
     fn refusals_exit_two() {
         let refused = [
-            vec![],
-            vec!["run"],
+            vec!["unknown-command"],
             vec!["--check-config"],
+            vec!["run", "--config", "x.yaml"],
+            vec!["run", "--max-frames-per-camera=1"],
+            vec!["run", "--heartbeat-on-start=1"],
+            vec!["run", "--state-dir"],
+            vec!["run", "positional"],
+            vec!["--config=x.yaml"],
             vec!["check-config", "--config", "x.yaml"],
             vec!["check-config", "--config=x.yaml"],
             vec!["check-config", "--max-frames-per-camera", "1"],
@@ -151,5 +176,34 @@ mod tests {
             let error = parse(&arguments(&case)).expect_err("refused");
             assert_eq!(error.exit(), Exit::Config, "{case:?}");
         }
+    }
+
+    #[test]
+    fn explicit_and_default_run_share_flags_without_selecting_static_check() {
+        let flags = Flags {
+            heartbeat_on_start: true,
+            state_dir: Some(PathBuf::from("/state")),
+        };
+        for arguments in [
+            arguments(&["run", "--heartbeat-on-start", "--state-dir=/state"]),
+            arguments(&["--state-dir", "/state", "--heartbeat-on-start"]),
+        ] {
+            assert_eq!(parse(&arguments), Ok(Command::Run(flags.clone())));
+        }
+        assert_eq!(parse(&[]), Ok(Command::Run(Flags::default())));
+    }
+    #[test]
+    fn engine_build_dispatches_before_default_run_and_exits_two() {
+        let parsed = parse(&arguments(&["engine-build", "--force"])).expect_err("incomplete");
+        assert_eq!(
+            parsed,
+            CliError::EngineBuild(EngineBuildParseError::MissingRequired)
+        );
+        assert_eq!(parsed.exit(), Exit::Config);
+        assert_eq!(
+            parse(&arguments(&["--engine-build"])),
+            Err(CliError::UnknownFlag(OsString::from("--engine-build")))
+        );
+        assert_eq!(parse(&[]), Ok(Command::Run(Flags::default())));
     }
 }

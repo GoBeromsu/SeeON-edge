@@ -4,7 +4,9 @@ use std::process::Command;
 use std::sync::OnceLock;
 
 use seeon_ml_worker::json::Json;
-use seeon_ml_worker::run::calibration::{Calibration, CalibrationError, parse};
+use seeon_ml_worker::run::calibration::{
+    Calibration, CalibrationError, CalibrationSource as Source, parse,
+};
 
 const IDENTITY: &str = "pose-bbox56/낙상/é";
 
@@ -67,7 +69,11 @@ fn parses_integer_and_float_temperatures_without_f32_narrowing() {
         (Json::Float(f64::from_bits(1)), f64::from_bits(1)),
     ] {
         assert_eq!(
-            parse(&changed("temperature", Some(input)), IDENTITY, None),
+            parse(
+                &changed("temperature", Some(input)),
+                IDENTITY,
+                Source::Packaged
+            ),
             Ok(Calibration {
                 temperature: expected,
                 receipt_threshold: Some(0.7),
@@ -88,7 +94,7 @@ fn refuses_nonobject_documents() {
         Json::Int(1),
     ] {
         assert_eq!(
-            parse(&document, IDENTITY, None),
+            parse(&document, IDENTITY, Source::Packaged),
             Err(CalibrationError::InvalidDocument)
         );
     }
@@ -115,7 +121,7 @@ fn class_order_is_required_and_exact() {
         ]))),
     ] {
         assert_eq!(
-            parse(&changed("class_order", order), IDENTITY, None),
+            parse(&changed("class_order", order), IDENTITY, Source::Packaged),
             Err(CalibrationError::ClassOrder)
         );
     }
@@ -123,10 +129,10 @@ fn class_order_is_required_and_exact() {
 
 #[test]
 fn binds_exact_utf8_identity_to_python_sha256() {
-    assert!(parse(&valid(), IDENTITY, None).is_ok());
+    assert!(parse(&valid(), IDENTITY, Source::Packaged).is_ok());
     // Same human-readable accent, different UTF-8: identities are not normalized.
     assert_eq!(
-        parse(&valid(), "pose-bbox56/낙상/e\u{301}", None),
+        parse(&valid(), "pose-bbox56/낙상/e\u{301}", Source::Packaged),
         Err(CalibrationError::PreprocessingIdentity)
     );
     for digest in [None, Some(Json::Null), Some(Json::Str("0".repeat(64)))] {
@@ -134,7 +140,7 @@ fn binds_exact_utf8_identity_to_python_sha256() {
             parse(
                 &changed("preprocessing_identity_digest", digest),
                 IDENTITY,
-                None
+                Source::Packaged
             ),
             Err(CalibrationError::PreprocessingIdentity)
         );
@@ -152,7 +158,7 @@ fn temperature_rejects_missing_nonnumeric_nonfinite_and_nonpositive_values() {
         Some(Json::Array(vec![])),
     ] {
         assert_eq!(
-            parse(&changed("temperature", value), IDENTITY, None),
+            parse(&changed("temperature", value), IDENTITY, Source::Packaged),
             Err(CalibrationError::TemperatureType)
         );
     }
@@ -167,7 +173,11 @@ fn temperature_rejects_missing_nonnumeric_nonfinite_and_nonpositive_values() {
         Json::Float(-0.5),
     ] {
         assert_eq!(
-            parse(&changed("temperature", Some(value)), IDENTITY, None),
+            parse(
+                &changed("temperature", Some(value)),
+                IDENTITY,
+                Source::Packaged
+            ),
             Err(CalibrationError::TemperatureValue)
         );
     }
@@ -194,7 +204,7 @@ fn temporal_rule_requires_both_integers_and_ordered_positive_bounds() {
         Some(temporal(Json::Int(3), Json::Int(2))),
     ] {
         assert_eq!(
-            parse(&changed("temporal_rule", rule), IDENTITY, None),
+            parse(&changed("temporal_rule", rule), IDENTITY, Source::Packaged),
             Err(CalibrationError::TemporalRule)
         );
     }
@@ -205,7 +215,7 @@ fn temporal_rule_requires_both_integers_and_ordered_positive_bounds() {
                 Some(temporal(Json::Int(votes), Json::Int(window))),
             ),
             IDENTITY,
-            None,
+            Source::Packaged,
         )
         .expect("valid integer bounds");
         assert_eq!(
@@ -226,14 +236,18 @@ fn promotion_flag_is_required_boolean_not_truthiness() {
         Some(Json::Float(1.0)),
     ] {
         assert_eq!(
-            parse(&changed("promotion_eligible", flag), IDENTITY, None),
+            parse(
+                &changed("promotion_eligible", flag),
+                IDENTITY,
+                Source::Packaged
+            ),
             Err(CalibrationError::PromotionEligibility)
         );
     }
     let parsed = parse(
         &changed("promotion_eligible", Some(Json::Bool(false))),
         IDENTITY,
-        None,
+        Source::Packaged,
     )
     .expect("ineligible calibration is usable without receipt selection");
     assert!(!parsed.promotion_eligible);
@@ -257,7 +271,7 @@ fn absent_or_invalid_optional_threshold_does_not_become_a_default() {
         Some(Json::Float(1.01)),
         Some(Json::Int(2)),
     ] {
-        let parsed = parse(&changed("threshold", threshold), IDENTITY, None)
+        let parsed = parse(&changed("threshold", threshold), IDENTITY, Source::Packaged)
             .expect("optional threshold is not required");
         assert_eq!(parsed.receipt_threshold, None);
     }
@@ -271,7 +285,7 @@ fn absent_or_invalid_optional_threshold_does_not_become_a_default() {
         let parsed = parse(
             &changed("threshold", Some(threshold)),
             IDENTITY,
-            Some(expected),
+            Source::SelectedReceipt(expected),
         )
         .expect("numeric endpoint or interior grant");
         assert_eq!(parsed.receipt_threshold, Some(expected));
@@ -280,12 +294,12 @@ fn absent_or_invalid_optional_threshold_does_not_become_a_default() {
 
 #[test]
 fn receipt_selection_requires_publisher_eligibility_and_numeric_matching_grant() {
-    assert!(parse(&valid(), IDENTITY, Some(0.7)).is_ok());
+    assert!(parse(&valid(), IDENTITY, Source::SelectedReceipt(0.7)).is_ok());
     assert_eq!(
         parse(
             &changed("promotion_eligible", Some(Json::Bool(false))),
             IDENTITY,
-            Some(0.7)
+            Source::SelectedReceipt(0.7)
         ),
         Err(CalibrationError::ReceiptIneligible)
     );
@@ -303,7 +317,11 @@ fn receipt_selection_requires_publisher_eligibility_and_numeric_matching_grant()
         (Some(Json::Float(f64::INFINITY)), f64::NEG_INFINITY),
     ] {
         assert_eq!(
-            parse(&changed("threshold", grant), IDENTITY, Some(declared)),
+            parse(
+                &changed("threshold", grant),
+                IDENTITY,
+                Source::SelectedReceipt(declared)
+            ),
             Err(CalibrationError::ReceiptGrant)
         );
     }
@@ -340,12 +358,12 @@ print(json.dumps([(bits(a), bits(b), math.isclose(a, b)) for a, b in pairs]))
         let result = parse(
             &changed("threshold", Some(Json::Float(granted))),
             IDENTITY,
-            Some(declared),
+            Source::SelectedReceipt(declared),
         );
         if close {
             assert_eq!(
                 result.expect("Python matching grant").receipt_threshold,
-                Some(granted)
+                Some(declared)
             );
         } else {
             assert_eq!(result, Err(CalibrationError::ReceiptGrant));
@@ -355,8 +373,8 @@ print(json.dumps([(bits(a), bits(b), math.isclose(a, b)) for a, b in pairs]))
 
 #[test]
 fn raw_grant_check_does_not_add_selection_admission_bounds() {
-    // Python's receipt helper uses the raw number, independently of the optional
-    // [0, 1] projection. Real selection admission belongs to the caller.
+    // Python's receipt helper uses the raw number. The selected runner retains
+    // its declared threshold; real selection admission belongs to the caller.
     for grant in [-1.0, 2.0, f64::INFINITY, f64::NEG_INFINITY] {
         let expected = python_stdout(
             "import math, sys; v = float(sys.argv[1]); print(math.isclose(v, v))",
@@ -366,9 +384,9 @@ fn raw_grant_check_does_not_add_selection_admission_bounds() {
         let parsed = parse(
             &changed("threshold", Some(Json::Float(grant))),
             IDENTITY,
-            Some(grant),
+            Source::SelectedReceipt(grant),
         )
         .expect("equal numeric raw grant follows Python");
-        assert_eq!(parsed.receipt_threshold, None);
+        assert_eq!(parsed.receipt_threshold, Some(grant));
     }
 }

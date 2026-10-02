@@ -131,7 +131,7 @@ fn association_matches_the_python_rows() {
     for case in cases {
         let name = text(&case["name"]);
         let expected = &case["expected"];
-        let frame = ingest(&packet(&case["input"]))
+        let frame = ingest(&packet(&case["input"]), None)
             .unwrap_or_else(|refusal| panic!("{name}: ingest refused {refusal:?}"));
         let live: Vec<u64> = items(&expected["live_track_ids"])
             .iter()
@@ -342,7 +342,7 @@ fn fall_sequence_replays_the_python_lines() {
     let mut events_total = 0;
     for frame in frames {
         let ordinal = unsigned(&frame["ordinal"]);
-        let ingested = ingest(&packet(&frame["input"]))
+        let ingested = ingest(&packet(&frame["input"]), None)
             .unwrap_or_else(|refusal| panic!("ordinal {ordinal}: ingest refused {refusal:?}"));
         let mut events = stage
             .observe(&ingested, &requests, &mut |_| {})

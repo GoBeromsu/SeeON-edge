@@ -4,6 +4,13 @@ DeepStream Flow worker: SDK-owned capture, decode, inference, and tracking; CPU-
 Image `ml-worker`. Sole production command: `python -m worker`.
 Replay is backend-owned; the production worker has no replay CLI.
 
+Rust verification binaries capture `ML_WORKER_BUILD_REVISION` at compilation.
+Only a trusted build of frozen, clean source may supply that declaration; a
+runtime environment value cannot attribute an undeclared binary. Image markers
+and runtime revision values must agree with the compiled declaration. Runtime
+Git is not a source of identity for an already-compiled executable. This is
+caller-declared attribution, not final-image attestation or a production cutover.
+
 ## Layers
 
 Run `uv run --group lint lint-imports` for configured contracts. A forbidden import means the design is wrong: add a Protocol in `interfaces/` and inject from `runtime/`. Focused dependency tests and manual path review own native/vendor ceilings.

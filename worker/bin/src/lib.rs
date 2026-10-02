@@ -15,8 +15,9 @@ pub mod config;
 #[forbid(unsafe_code)]
 pub mod delivery;
 #[forbid(unsafe_code)]
-pub mod exit;
+pub mod engine_build;
 #[forbid(unsafe_code)]
+pub mod exit;
 pub mod gpu;
 #[forbid(unsafe_code)]
 pub mod json;

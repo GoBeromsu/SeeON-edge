@@ -8,6 +8,7 @@ use super::models::{CleanupError, ModelOwners, ModelStartError, StartKind};
 use super::settings::{self, Settings};
 use super::status::{BootReason, BootStatusContext, ReportOutcome};
 use super::{Admitted, IdentityError};
+use crate::config::model_bundle::identity::hardware_matches;
 use crate::exit::Exit;
 use crate::gpu::lease::{self, LeaseError};
 use crate::seam::Clock;
@@ -182,6 +183,40 @@ pub fn boot(
             shutdown,
         )));
     }
+    let hardware = match seeon_deepstream_native::hardware_identity(policy.device_ordinal) {
+        Ok(hardware) => hardware,
+        Err(_) => {
+            return Err(fail(
+                BootCause::CudaUnavailable,
+                report,
+                Some(gpu),
+                Some(models),
+                clock,
+                &shutdown,
+                policy.device_ordinal,
+            ));
+        }
+    };
+    if !hardware_matches(&admitted.flow.identity, policy.device_ordinal, &hardware) {
+        return Err(fail(
+            BootCause::Identity(IdentityError::Engine(
+                crate::config::model_bundle::identity::IdentityKind::Hardware,
+            )),
+            report,
+            Some(gpu),
+            Some(models),
+            clock,
+            &shutdown,
+            policy.device_ordinal,
+        ));
+    }
+    if shutdown.deadline().is_some() {
+        return Err(BootError::Stopped(startup::stopped(
+            Some(models),
+            clock,
+            shutdown,
+        )));
+    }
     if let Err(error) = models.start(&admitted.engines, policy, clock) {
         if error.kind == StartKind::Stopped {
             return Err(BootError::Stopped(startup::stopped(
@@ -246,4 +281,44 @@ fn fail(
         owners: owners.map(Box::new),
         shutdown: Arc::clone(shutdown),
     }))
+}
+
+#[cfg(test)]
+mod identity_tests {
+    use super::hardware_matches;
+    use seeon_deepstream_native::GpuHardwareIdentity;
+    use std::collections::BTreeMap;
+
+    #[test]
+    fn measured_hardware_must_match_every_recorded_field() {
+        let actual = GpuHardwareIdentity {
+            trt_version: 101600,
+            compute_major: 12,
+            compute_minor: 0,
+            device_name: "unit-test device".to_owned(),
+        };
+        let identity: BTreeMap<String, String> = [
+            ("device", "0"),
+            ("trt_version", "101600"),
+            ("device_name", "unit-test device"),
+            ("compute_capability", "12.0"),
+        ]
+        .into_iter()
+        .map(|(key, value)| (key.to_owned(), value.to_owned()))
+        .collect();
+        assert!(hardware_matches(&identity, 0, &actual));
+        assert!(!hardware_matches(&identity, 1, &actual));
+        for (key, wrong) in [
+            ("device", "1"),
+            ("trt_version", "101601"),
+            ("device_name", "another device"),
+            ("compute_capability", "12.1"),
+        ] {
+            let mut mismatch = identity.clone();
+            mismatch.insert(key.to_owned(), wrong.to_owned());
+            assert!(!hardware_matches(&mismatch, 0, &actual), "{key}");
+            mismatch.remove(key);
+            assert!(!hardware_matches(&mismatch, 0, &actual), "missing {key}");
+        }
+    }
 }

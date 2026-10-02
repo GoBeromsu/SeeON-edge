@@ -19,6 +19,9 @@ pub struct BundleProof {
     pub members: Vec<String>,
     pub receipts: Vec<String>,
     pub member_digests: BTreeMap<String, String>,
+    /// Exact digest-verified bytes for runtime admission, not a mutable reread.
+    pub calibration: Vec<u8>,
+    pub conformance: (String, Vec<u8>),
     /// The seven bundle identities plus the `evaluation` and `field` receipt
     /// digests.
     pub identities: BTreeMap<String, String>,
@@ -113,13 +116,13 @@ fn verify_selection_documents(
     root: &Path,
     digests: &BTreeMap<String, String>,
     desired: &ModelSelection,
-) -> Admission<()> {
+) -> Admission<Vec<u8>> {
     const FORMAT: &str = "bundle-manifest.json";
     const CALIBRATION: &str = "calibration.json";
     if !digests.contains_key(FORMAT) {
         return refuse(AdmissionKind::NoBundleManifestMember, "");
     }
-    let raw = read_regular(&root.join(FORMAT), &format!("member {FORMAT}"))?;
+    let raw = read_verified_member(root, digests, FORMAT)?;
     let Some(manifest) = parse_json(&raw) else {
         return refuse(AdmissionKind::MemberInvalidJson, FORMAT);
     };
@@ -130,7 +133,7 @@ fn verify_selection_documents(
     if observed != Some(&Json::Str(desired.bundle_format.clone())) {
         return refuse(AdmissionKind::BundleFormat, "");
     }
-    let raw = read_regular(&root.join(CALIBRATION), &format!("member {CALIBRATION}"))?;
+    let raw = read_verified_member(root, digests, CALIBRATION)?;
     let Some(calibration) = parse_json(&raw) else {
         return refuse(AdmissionKind::MemberInvalidJson, CALIBRATION);
     };
@@ -141,7 +144,19 @@ fn verify_selection_documents(
     if model_selection_digest(&temporal_rule).ok().as_ref() != Some(&desired.policy_digest) {
         return refuse(AdmissionKind::PolicyDigest, "");
     }
-    Ok(())
+    Ok(raw)
+}
+
+fn read_verified_member(
+    root: &Path,
+    digests: &BTreeMap<String, String>,
+    relative: &str,
+) -> Admission<Vec<u8>> {
+    let raw = read_regular(&root.join(relative), &format!("member {relative}"))?;
+    if digests.get(relative) != Some(&sha256_hex(&raw)) {
+        return refuse(AdmissionKind::MemberMismatch, relative);
+    }
+    Ok(raw)
 }
 
 /// `admit_model_bundle(models_root, desired)` for a parsed selection.
@@ -213,7 +228,7 @@ pub fn admit_model_bundle(models_root: &Path, desired: &ModelSelection) -> Admis
     if conformance != 1 {
         return refuse(AdmissionKind::ConformanceDigest, "");
     }
-    verify_selection_documents(&root, &member_digests, desired)?;
+    let calibration = verify_selection_documents(&root, &member_digests, desired)?;
     let receipt_identities = verify_required_members(&root, members, receipts, desired)?;
     let path = |(path, _): &(String, String)| path.clone();
     let members: Vec<String> = observed_members.iter().map(path).collect();
@@ -226,11 +241,22 @@ pub fn admit_model_bundle(models_root: &Path, desired: &ModelSelection) -> Admis
         .map(|(field, value)| ((*field).to_owned(), (*value).clone()))
         .collect();
     identities.extend(receipt_identities);
+    let conformance_path = member_digests
+        .iter()
+        .find(|(_, digest)| **digest == desired.conformance_digest)
+        .map(|(path, _)| path)
+        .expect("one conformance member was verified");
+    let conformance = (
+        conformance_path.clone(),
+        read_verified_member(&root, &member_digests, conformance_path)?,
+    );
     Ok(BundleProof {
         bundle_sha256: sha.clone(),
         members,
         receipts,
         member_digests,
+        calibration,
+        conformance,
         identities,
     })
 }

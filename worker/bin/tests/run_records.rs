@@ -441,6 +441,56 @@ fn start(lanes: Arc<Lanes>, base: &str, clock: Arc<dyn Clock>) -> exporter::Hand
 }
 
 #[test]
+fn composed_exporter_preserves_pending_lane_records_and_provenance() {
+    let relay = relay(1);
+    let lanes = Arc::new(Lanes::new(4).unwrap());
+    let client = RelayClient::new(&relay.base, "<relay-token>", RELAY_TIMEOUT).unwrap();
+    let pipeline = seeon_ml_worker::records::compose::Composed {
+        settings: seeon_ml_worker::config::env::ExecutionRecordsSettings {
+            lane_capacity: 4,
+            batch_max: 1,
+            flush_ms: 50,
+        },
+        exporter: seeon_ml_worker::records::Exporter::new(
+            Arc::clone(&lanes),
+            client,
+            provenance(),
+            1,
+            50,
+        )
+        .unwrap(),
+        lanes: Arc::clone(&lanes),
+    };
+    assert!(lanes.try_emit(record()));
+    let (clock, _paused, _permit) = gate_clock();
+    let mut owner = exporter::spawn_composed(pipeline, clock).unwrap();
+    let body = relay.posted.recv_timeout(SAFETY).unwrap();
+    assert_eq!(body["records"][0], value(&record()));
+    assert_eq!(
+        body["provenance"]["config_digest"],
+        provenance().config_digest
+    );
+    owner.request_stop();
+    relay.reply.send(200).unwrap();
+    relay.thread.join().unwrap();
+    let report = owner
+        .join(&JoinClock::default(), Duration::from_secs(3600))
+        .unwrap();
+    assert!(report.finished);
+    assert!(!report.pending);
+    assert!(!lanes.has_work());
+    assert!(report.failures.is_empty());
+    assert_eq!(
+        report
+            .receipts
+            .iter()
+            .map(|receipt| receipt.accepted)
+            .sum::<u64>(),
+        1
+    );
+}
+
+#[test]
 fn exporter_drains_late_policy_records_and_retains_timed_out_owner() {
     let relay = relay(2);
     let lanes = Arc::new(Lanes::new(4).unwrap());

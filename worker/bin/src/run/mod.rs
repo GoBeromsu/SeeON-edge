@@ -20,13 +20,19 @@ pub mod cameras;
 pub mod clip_output;
 pub mod config_digest;
 pub mod decision;
+mod delivery;
 mod event_payload;
 pub mod events;
+pub mod execution;
 pub mod exporter;
+pub mod fall_evidence;
+pub mod media_config;
 pub mod models;
 pub mod policy;
 pub mod pump;
 pub mod records;
+mod replay;
+pub mod runtime_manifest;
 pub mod settings;
 pub mod status;
 
@@ -150,6 +156,11 @@ pub enum IdentityError {
     Environment,
     Selection,
     Bundle(AdmissionKind),
+    Packaged(AdmissionKind),
+    Calibration(calibration::CalibrationError),
+    Conformance(crate::config::model_bundle::conformance::ConformanceError),
+    OutputClassCount,
+    SelectionThreshold,
     Engine(IdentityKind),
     Flow(FlowBootKind),
     FlowValue(&'static str),
@@ -162,4 +173,5 @@ pub struct Admitted {
     pub checked: Checked,
     pub flow: FlowSettings,
     pub engines: ModelEngines,
+    pub fall: fall_evidence::FallEvidence,
 }

@@ -21,6 +21,16 @@ const IOU_GATE: f64 = 0.5;
 
 type Box4 = [f64; 4];
 
+/// One matched object's source-coordinate geometry, in native matched order.
+/// Captured before pose-bbox56 feature reduction; not a policy output.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ObservedPose {
+    pub track_id: u64,
+    pub bbox: [f64; 4],
+    pub confidence: f64,
+    pub keypoints: Vec<Keypoint>,
+}
+
 /// One frame's fall inputs.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Frame {
@@ -45,7 +55,10 @@ pub enum IngestRefusal {
     Sequence,
 }
 
-pub fn ingest(packet: &PosePacket) -> Result<Frame, IngestRefusal> {
+pub fn ingest(
+    packet: &PosePacket,
+    observed: Option<&mut Vec<ObservedPose>>,
+) -> Result<Frame, IngestRefusal> {
     let identity = packet.frame;
     if identity.source_width == 0 || identity.source_height == 0 {
         return Err(IngestRefusal::SourceSize);
@@ -68,7 +81,7 @@ pub fn ingest(packet: &PosePacket) -> Result<Frame, IngestRefusal> {
         .collect();
     let boxes: Vec<Box4> = packet.objects.iter().map(object_box).collect();
     let assigned = associate(&boxes, &candidates);
-    let mut keypoints: Vec<(u64, Box4, Vec<Keypoint>)> = Vec::new();
+    let mut matched: Vec<ObservedPose> = Vec::new();
     for ((object, object_box), candidate) in packet.objects.iter().zip(&boxes).zip(assigned) {
         let Some(candidate) = candidate else {
             continue;
@@ -83,19 +96,25 @@ pub fn ingest(packet: &PosePacket) -> Result<Frame, IngestRefusal> {
                 ]
             })
             .collect();
-        keypoints.push((object.track_id, object_box.map(f64::trunc), points));
-    }
-    let tracks = keypoints
-        .iter()
-        .map(|(track_id, bbox, points)| PoseBbox56Track {
-            track_id: *track_id,
+        matched.push(ObservedPose {
+            track_id: object.track_id,
+            bbox: object_box.map(f64::trunc),
+            confidence: f64::from(object.confidence),
             keypoints: points,
-            bbox: Some(bbox.as_slice()),
         });
+    }
+    let tracks = matched.iter().map(|pose| PoseBbox56Track {
+        track_id: pose.track_id,
+        keypoints: &pose.keypoints,
+        bbox: Some(pose.bbox.as_slice()),
+    });
     let rows = pose_bbox56_tracks(tracks, width, height)
         .into_iter()
         .collect();
     let time_sec = (identity.pts_valid != 0).then(|| identity.pts_ns as f64 / 1e9);
+    if let Some(observed) = observed {
+        *observed = matched;
+    }
     Ok(Frame {
         identity,
         width,

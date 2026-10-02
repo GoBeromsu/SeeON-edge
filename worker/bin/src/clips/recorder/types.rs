@@ -48,9 +48,14 @@ pub enum Admit {
 
 #[derive(Debug)]
 pub enum RecorderError {
+    /// `take_unstarted` is only legal after `quiesce`.
+    NotQuiesced,
     BlankEventRef,
     PendingFull,
-    WrongCamera { expected: u32, received: u32 },
+    WrongCamera {
+        expected: u32,
+        received: u32,
+    },
     DuplicateSealed(u32),
     UnexpectedSession(u32),
     Save(PublishError),

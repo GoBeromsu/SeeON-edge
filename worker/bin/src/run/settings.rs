@@ -5,6 +5,7 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use crate::cli::{self, Flags};
+use crate::config::build_revision::{self, BuildRevisionError, ResolvedRevision};
 use crate::config::env::{self, Env, EnvError, ExecutionRecordsSettings};
 use crate::config::model_bundle::flow_boot;
 use crate::config::{self, CheckConfigError};
@@ -40,6 +41,7 @@ impl SettingsError {
 /// Validated step-1 inputs. The retained environment is deliberately not Debug.
 pub struct Settings {
     pub(crate) env: Env,
+    pub(crate) build_revision: ResolvedRevision,
     pub(crate) flags: Flags,
     pub(crate) state_dir: PathBuf,
     pub(crate) execution_records: Option<ExecutionRecordsSettings>,
@@ -95,8 +97,10 @@ impl Settings {
             bed: required("ML_WORKER_BED_ENGINE_PATH")?,
             stored_pose: required("ML_WORKER_STORED_POSE_ENGINE_PATH")?,
         };
+        let build_revision = build_revision::current(&env);
         Ok(Self {
             env,
+            build_revision,
             flags,
             state_dir,
             execution_records,
@@ -107,6 +111,12 @@ impl Settings {
 
     pub fn flags(&self) -> &Flags {
         &self.flags
+    }
+    pub(crate) fn build_revision(&self) -> Result<Option<&str>, BuildRevisionError> {
+        match &self.build_revision {
+            Ok(revision) => Ok(revision.as_deref()),
+            Err(error) => Err(*error),
+        }
     }
     pub fn state_dir(&self) -> &std::path::Path {
         &self.state_dir
@@ -136,8 +146,18 @@ pub(crate) fn admit(settings: &Settings) -> Result<Admitted, IdentityError> {
         },
     )?;
     let env = &settings.env;
-    let identity = flow_boot::verify_flow_boot_inputs(env, settings.policy.deployed_batch)
-        .map_err(|error| IdentityError::Flow(error.kind))?;
+    let admitted_identity = checked
+        .engine_identity
+        .clone()
+        .ok_or(IdentityError::FlowValue(
+            "ML_WORKER_FLOW_ENGINE_IDENTITY_PATH",
+        ))?;
+    let identity = flow_boot::verify_admitted_flow_inputs(
+        env,
+        settings.policy.deployed_batch,
+        admitted_identity,
+    )
+    .map_err(|error| IdentityError::Flow(error.kind))?;
     let rtsp_reconnect_interval_sec = flow_boot::rtsp_reconnect_interval_sec(env)
         .map_err(|error| IdentityError::Flow(error.kind))?;
     let path = |key| {
@@ -170,11 +190,13 @@ pub(crate) fn admit(settings: &Settings) -> Result<Admitted, IdentityError> {
         rtsp_reconnect_interval_sec,
         identity,
     };
+    let fall = super::fall_evidence::admit(&checked)?;
     let engines = ModelEngines::admit(&settings.engines).map_err(IdentityError::Model)?;
     Ok(Admitted {
         checked,
         flow,
         engines,
+        fall,
     })
 }
 

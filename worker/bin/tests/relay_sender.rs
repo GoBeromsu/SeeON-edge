@@ -14,6 +14,8 @@ use std::fs;
 use std::io::{self, Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, SystemTime};
@@ -31,8 +33,12 @@ use seeon_ml_worker::relay::capabilities::{
 };
 use seeon_ml_worker::relay::client::ALERT_DELIVERY_TIMEOUT;
 use seeon_ml_worker::seam::Clock;
+use seeon_ml_worker::shutdown::ShutdownDeadline;
 
 const RELAY_TOKEN: &str = "<relay-token>";
+fn running() -> AtomicBool {
+    AtomicBool::new(false)
+}
 const SAFETY_TIMEOUT: Duration = Duration::from_secs(30);
 /// Headers the HTTP stack owns; the manifest records none of them.
 const TRANSPORT_OWNED: [&str; 7] = [
@@ -216,6 +222,9 @@ impl Clock for FixedClock {
     }
     fn pause(&self, _limit: Duration) {}
 }
+fn open_deadline() -> ShutdownDeadline {
+    ShutdownDeadline::new(Duration::from_secs(25)).expect("budget")
+}
 
 struct Recorded {
     method: String,
@@ -352,6 +361,9 @@ fn transport_record(recorded: &Recorded, timeout: Duration) -> Value {
 
 /// Picks the reply for one recorded request: (status code, body).
 type Route = Box<dyn Fn(&Recorded) -> (u16, Vec<u8>) + Send>;
+/// Runs after that request's full body is read and before any response byte.
+/// It decides only this relay's deadline or stop.
+type BodyObserver = Box<dyn Fn(&Recorded) + Send>;
 
 /// A loopback relay that answers every request through its route until a
 /// connection closes without sending a byte.
@@ -366,6 +378,16 @@ impl Relay {
         let (listener, base) = loopback();
         let address = listener.local_addr().expect("bound address");
         let server = thread::spawn(move || serve_until_closed(&listener, &route));
+        Relay {
+            base,
+            address,
+            server,
+        }
+    }
+    fn start_publishing(route: Route, on_body: BodyObserver) -> Relay {
+        let (listener, base) = loopback();
+        let address = listener.local_addr().expect("bound address");
+        let server = thread::spawn(move || serve_publishing(&listener, &route, &on_body));
         Relay {
             base,
             address,
@@ -397,6 +419,33 @@ fn serve_until_closed(listener: &TcpListener, route: &Route) -> io::Result<Vec<R
             return Ok(served);
         }
         let recorded = read_request(&mut stream)?;
+        let (status, reply) = route(&recorded);
+        let head = format!(
+            "HTTP/1.1 {status} Relay\r\nContent-Type: application/json\r\n\
+             Content-Length: {}\r\nConnection: close\r\n\r\n",
+            reply.len()
+        );
+        stream.write_all(head.as_bytes())?;
+        stream.write_all(&reply)?;
+        stream.flush()?;
+        served.push(recorded);
+    }
+}
+fn serve_publishing(
+    listener: &TcpListener,
+    route: &Route,
+    on_body: &BodyObserver,
+) -> io::Result<Vec<Recorded>> {
+    let mut served = Vec::new();
+    loop {
+        let (mut stream, _) = listener.accept()?;
+        stream.set_read_timeout(Some(SAFETY_TIMEOUT))?;
+        let mut probe = [0_u8; 1];
+        if stream.peek(&mut probe)? == 0 {
+            return Ok(served);
+        }
+        let recorded = read_request(&mut stream)?;
+        on_body(&recorded);
         let (status, reply) = route(&recorded);
         let head = format!(
             "HTTP/1.1 {status} Relay\r\nContent-Type: application/json\r\n\
@@ -578,7 +627,15 @@ fn drain_bodies_equal_relay_goldens() {
     let client = relay.client();
     let mut state = SenderState::new();
 
-    let summary = drain_pass(&queue, &client, &mut state, &FixedClock, true);
+    let summary = drain_pass(
+        &queue,
+        &client,
+        &mut state,
+        &FixedClock,
+        &open_deadline(),
+        &running(),
+        true,
+    );
     let requests = relay.stop();
 
     assert_eq!(requests.len(), entries.len(), "one request per entry");
@@ -653,7 +710,15 @@ fn status_422_dead_letters_python_file() {
     let relay = Relay::start(relay_route(disposition_reply("422-permanent")));
     let mut state = SenderState::new();
 
-    let summary = drain_pass(&queue, &relay.client(), &mut state, &FixedClock, true);
+    let summary = drain_pass(
+        &queue,
+        &relay.client(),
+        &mut state,
+        &FixedClock,
+        &open_deadline(),
+        &running(),
+        true,
+    );
     let requests = relay.stop();
 
     assert_eq!(requests.len(), 1, "one alert POST");
@@ -690,7 +755,15 @@ fn snapshot_422_with_mapping_code_dead_letters() {
     }));
     let mut state = SenderState::new();
 
-    let summary = drain_pass(&queue, &relay.client(), &mut state, &FixedClock, true);
+    let summary = drain_pass(
+        &queue,
+        &relay.client(),
+        &mut state,
+        &FixedClock,
+        &open_deadline(),
+        &running(),
+        true,
+    );
     let requests = relay.stop();
 
     assert_eq!(requests.len(), 1, "one snapshot attachment POST");
@@ -723,7 +796,15 @@ fn accepted_local_alert_still_posts_both_snapshots() {
     let client = relay.client();
     let mut state = SenderState::new();
 
-    let summary = drain_pass(&queue, &client, &mut state, &FixedClock, true);
+    let summary = drain_pass(
+        &queue,
+        &client,
+        &mut state,
+        &FixedClock,
+        &open_deadline(),
+        &running(),
+        true,
+    );
     let requests = relay.stop();
 
     assert_eq!(requests.len(), 3, "the alert and both snapshot requests");
@@ -773,7 +854,15 @@ fn python_exceptions_map_to_rust_variants() {
         let mut state = SenderState::new();
         let id = entry_id(&entry);
 
-        let summary = drain_pass(&queue, &client, &mut state, &FixedClock, true);
+        let summary = drain_pass(
+            &queue,
+            &client,
+            &mut state,
+            &FixedClock,
+            &open_deadline(),
+            &running(),
+            true,
+        );
 
         assert_eq!(
             summary.outcomes,
@@ -788,4 +877,690 @@ fn python_exceptions_map_to_rust_variants() {
         assert_eq!(state.attempts(&id), 1, "{origin}");
         assert!(state.is_deferred(&id), "{origin}");
     }
+}
+/// Monotonic time that publishes `deadline` while it is being read.
+struct PublishingClock {
+    deadline: Arc<ShutdownDeadline>,
+    at: Duration,
+    observed: Duration,
+}
+
+impl Clock for PublishingClock {
+    fn monotonic(&self) -> Duration {
+        self.deadline.request_at(self.at).expect("observation");
+        self.observed
+    }
+    fn wall(&self) -> SystemTime {
+        SystemTime::UNIX_EPOCH
+    }
+    fn pause(&self, _limit: Duration) {}
+}
+
+struct At(Duration);
+
+impl Clock for At {
+    fn monotonic(&self) -> Duration {
+        self.0
+    }
+    fn wall(&self) -> SystemTime {
+        FixedClock.wall()
+    }
+    fn pause(&self, _limit: Duration) {}
+}
+
+struct AfterAcknowledgment {
+    entry: PathBuf,
+    deadline: Arc<ShutdownDeadline>,
+}
+
+impl Clock for AfterAcknowledgment {
+    fn monotonic(&self) -> Duration {
+        if !self
+            .entry
+            .try_exists()
+            .expect("observe real queue retirement")
+        {
+            self.deadline
+                .request_at(Duration::ZERO)
+                .expect("observation");
+        }
+        Duration::from_secs(26)
+    }
+    fn wall(&self) -> SystemTime {
+        FixedClock.wall()
+    }
+    fn pause(&self, _limit: Duration) {}
+}
+
+fn expired_deadline() -> ShutdownDeadline {
+    let deadline = ShutdownDeadline::new(Duration::from_nanos(1)).expect("budget");
+    deadline.request_at(Duration::ZERO).expect("observation");
+    deadline
+}
+
+fn equal_deadline() -> ShutdownDeadline {
+    let deadline = ShutdownDeadline::new(Duration::from_secs(1)).expect("budget");
+    deadline.request_at(Duration::ZERO).expect("observation");
+    deadline
+}
+
+fn queue_files(names: &[&str]) -> BTreeMap<String, Vec<u8>> {
+    names
+        .iter()
+        .map(|name| ((*name).to_owned(), fixture_bytes(name)))
+        .chain(std::iter::once((
+            ".delivery-queue.lock".to_owned(),
+            Vec::new(),
+        )))
+        .collect()
+}
+
+fn assert_unchanged(queue: &DeliveryQueue, root: &Path, names: &[&str]) {
+    assert_eq!(files_by_name(&root.join("queue")), queue_files(names));
+    assert!(!root.join("queue-dead-letter").exists());
+    assert_eq!(queue.entries().expect("queue listing").len(), names.len());
+}
+
+#[test]
+fn expired_or_equal_cutoff_sends_nothing() {
+    for (label, deadline) in [("expired", expired_deadline()), ("equal", equal_deadline())] {
+        let bytes = fixture_bytes(EVENT_FILE);
+        let (root, queue) = staged_queue(label, &[(EVENT_FILE, bytes)]);
+        let relay = Relay::start(Box::new(|_: &Recorded| (500, b"{}".to_vec())));
+        let mut state = SenderState::new();
+
+        let summary = drain_pass(
+            &queue,
+            &relay.client(),
+            &mut state,
+            &At(Duration::from_secs(1)),
+            &deadline,
+            &running(),
+            true,
+        );
+        let requests = relay.stop();
+
+        assert!(requests.is_empty(), "{label} sent HTTP");
+        assert!(summary.outcomes.is_empty(), "{label}");
+        assert!(matches!(summary.stop, DrainStop::Cutoff), "{label}");
+        assert_eq!(
+            state.attempts("event-a5e15ff2-90fd-4764-be74-a7da4f573cc9"),
+            0
+        );
+        assert!(!state.is_deferred("event-a5e15ff2-90fd-4764-be74-a7da4f573cc9"));
+        assert_unchanged(&queue, &root, &[EVENT_FILE]);
+    }
+}
+
+#[test]
+fn earlier_observation_during_clock_read_cuts_off_before_http() {
+    let bytes = fixture_bytes(EVENT_FILE);
+    let (root, queue) = staged_queue("clock-read", &[(EVENT_FILE, bytes)]);
+    let deadline = Arc::new(ShutdownDeadline::new(Duration::from_secs(1)).expect("budget"));
+    let clock = PublishingClock {
+        deadline: Arc::clone(&deadline),
+        at: Duration::from_secs(10),
+        observed: Duration::from_secs(11),
+    };
+    let relay = Relay::start(Box::new(|_: &Recorded| (500, b"{}".to_vec())));
+    let mut state = SenderState::new();
+
+    let summary = drain_pass(
+        &queue,
+        &relay.client(),
+        &mut state,
+        &clock,
+        &deadline,
+        &running(),
+        true,
+    );
+    let requests = relay.stop();
+
+    assert!(requests.is_empty());
+    assert!(summary.outcomes.is_empty());
+    assert!(matches!(summary.stop, DrainStop::Cutoff));
+    assert_unchanged(&queue, &root, &[EVENT_FILE]);
+}
+
+#[test]
+fn acknowledged_prefix_then_cutoff_leaves_suffix_bytes() {
+    let event = fixture_bytes(EVENT_FILE);
+    let attachment = fixture_bytes(ATTACHMENT_FILE);
+    let (root, queue) = staged_queue(
+        "prefix-cutoff",
+        &[(EVENT_FILE, event), (ATTACHMENT_FILE, attachment.clone())],
+    );
+    let deadline = Arc::new(ShutdownDeadline::new(Duration::from_secs(25)).expect("budget"));
+    let clock = AfterAcknowledgment {
+        entry: root.join("queue").join(EVENT_FILE),
+        deadline: Arc::clone(&deadline),
+    };
+    let relay = Relay::start(Box::new(|request: &Recorded| {
+        if request_path(request) == golden_path(ALERT) {
+            return (
+                    200,
+                    br#"{"status":"accepted","edge_event_id":"a5e15ff2-90fd-4764-be74-a7da4f573cc9","event_id":"hub-1"}"#
+                        .to_vec(),
+                );
+        }
+        (500, b"{}".to_vec())
+    }));
+    let mut state = SenderState::new();
+
+    let summary = drain_pass(
+        &queue,
+        &relay.client(),
+        &mut state,
+        &clock,
+        &deadline,
+        &running(),
+        true,
+    );
+    let requests = relay.stop();
+
+    assert_eq!(requests.len(), 1);
+    assert_eq!(summary.outcomes.len(), 1);
+    assert!(summary.outcomes[0].1.is_acknowledged());
+    assert!(matches!(summary.stop, DrainStop::Cutoff));
+    assert_eq!(
+        files_by_name(&root.join("queue")),
+        queue_files(&[ATTACHMENT_FILE])
+    );
+    assert_eq!(
+        state.attempts(&entry_id(
+            &serde_json::from_slice(&fixture_bytes(ATTACHMENT_FILE)).unwrap()
+        )),
+        0
+    );
+    assert!(!root.join("queue-dead-letter").exists());
+}
+
+#[test]
+fn late_valid_receipt_and_422_preserve_queue_without_attempt() {
+    let event = fixture_bytes(EVENT_FILE);
+    let clip = fixture_bytes(CLIP_READY_FILE);
+    let attachment = fixture_bytes(ATTACHMENT_FILE);
+    let cases: [(&str, &str, Route); 3] = [
+        (
+            "late-event",
+            EVENT_FILE,
+            Box::new(|request: &Recorded| {
+                assert_eq!(request_path(request), golden_path(ALERT));
+                (
+                    200,
+                    br#"{"status":"accepted","edge_event_id":"a5e15ff2-90fd-4764-be74-a7da4f573cc9","event_id":"hub-1"}"#
+                        .to_vec(),
+                )
+            }),
+        ),
+        (
+            "late-clip",
+            CLIP_READY_FILE,
+            Box::new(|request: &Recorded| {
+                assert_eq!(request_path(request), golden_path(CLIP_READY));
+                (
+                    200,
+                    br#"{"clip_id":"clip-ready-0001","state":"READY","state_version":1}"#.to_vec(),
+                )
+            }),
+        ),
+        (
+            "late-422",
+            ATTACHMENT_FILE,
+            Box::new(|request: &Recorded| {
+                assert_eq!(request_path(request), golden_path(SNAPSHOT_ATTACHMENT));
+                (
+                    422,
+                    br#"{"detail":{"code":"CAMERA_MAPPING_MISSING"}}"#.to_vec(),
+                )
+            }),
+        ),
+    ];
+    let staged = [event, clip, attachment];
+    for ((label, file, route), bytes) in cases.into_iter().zip(staged) {
+        let id = entry_id(&serde_json::from_slice(&bytes).expect("entry"));
+        let (root, queue) = staged_queue(label, &[(file, bytes)]);
+        let deadline = Arc::new(ShutdownDeadline::new(Duration::from_secs(25)).expect("budget"));
+        let observed = Arc::clone(&deadline);
+        let relay = Relay::start_publishing(
+            route,
+            Box::new(move |_request| {
+                observed.request_at(Duration::ZERO).expect("observation");
+            }),
+        );
+        let mut state = SenderState::new();
+
+        let summary = drain_pass(
+            &queue,
+            &relay.client(),
+            &mut state,
+            &At(Duration::from_secs(26)),
+            &deadline,
+            &running(),
+            true,
+        );
+        let requests = relay.stop();
+
+        assert_eq!(requests.len(), 1, "{label}");
+        assert_eq!(
+            summary.outcomes,
+            vec![(id.clone(), EntryOutcome::Cutoff)],
+            "{label}"
+        );
+        assert!(matches!(summary.stop, DrainStop::Cutoff), "{label}");
+        assert_eq!(state.attempts(&id), 0, "{label}");
+        assert!(!state.is_deferred(&id), "{label}");
+        assert!(state.blocked_until(&id).is_none(), "{label}");
+        assert_unchanged(&queue, &root, &[file]);
+    }
+}
+
+#[test]
+fn cutoff_preserves_deferred_selection_state() {
+    let clip = fixture_bytes(CLIP_READY_FILE);
+    let id = entry_id(&serde_json::from_slice(&clip).expect("clip"));
+    let (root, queue) = staged_queue("deferred-cutoff", &[(CLIP_READY_FILE, clip)]);
+    let mut state = SenderState::new();
+    let seeded = drain_pass(
+        &queue,
+        &RelayClient::new(&dead_relay(), RELAY_TOKEN, ALERT_DELIVERY_TIMEOUT).expect("client"),
+        &mut state,
+        &FixedClock,
+        &open_deadline(),
+        &running(),
+        false,
+    );
+    assert!(matches!(seeded.stop, DrainStop::Unacknowledged));
+    assert!(state.is_deferred(&id));
+    assert_eq!(state.attempts(&id), 0);
+    let relay = Relay::start(Box::new(|_: &Recorded| (500, b"{}".to_vec())));
+
+    let summary = drain_pass(
+        &queue,
+        &relay.client(),
+        &mut state,
+        &At(Duration::from_secs(1)),
+        &expired_deadline(),
+        &running(),
+        true,
+    );
+    let requests = relay.stop();
+
+    assert!(requests.is_empty());
+    assert!(summary.outcomes.is_empty());
+    assert!(matches!(summary.stop, DrainStop::Cutoff));
+    assert!(state.is_deferred(&id));
+    assert_eq!(state.attempts(&id), 0);
+    assert_unchanged(&queue, &root, &[CLIP_READY_FILE]);
+}
+
+#[test]
+fn deferred_reset_keeps_the_selected_items_fresh_deferral() {
+    let clip = fixture_bytes(CLIP_READY_FILE);
+    let id = entry_id(&serde_json::from_slice(&clip).expect("clip"));
+    let (_root, queue) = staged_queue("deferred-reset", &[(CLIP_READY_FILE, clip)]);
+    let mut state = SenderState::new();
+    let client =
+        RelayClient::new(&dead_relay(), RELAY_TOKEN, ALERT_DELIVERY_TIMEOUT).expect("client");
+    let first = drain_pass(
+        &queue,
+        &client,
+        &mut state,
+        &FixedClock,
+        &open_deadline(),
+        &running(),
+        false,
+    );
+    assert!(state.is_deferred(&id), "{first:?}");
+
+    let second = drain_pass(
+        &queue,
+        &client,
+        &mut state,
+        &FixedClock,
+        &open_deadline(),
+        &running(),
+        false,
+    );
+
+    assert!(matches!(second.stop, DrainStop::Unacknowledged));
+    assert!(matches!(
+        second.outcomes.as_slice(),
+        [(_, EntryOutcome::ClipExportDisabled)]
+    ));
+    assert!(state.is_deferred(&id));
+    assert_eq!(state.attempts(&id), 0);
+    assert_eq!(queue.entries().expect("queue listing").len(), 1);
+}
+
+#[test]
+fn every_kind_uses_the_bounded_deadline_path() {
+    let files = [
+        EVENT_FILE,
+        CLIP_READY_FILE,
+        ATTACHMENT_FILE,
+        DISPOSITION_FILE,
+    ];
+    let staged: Vec<(&str, Vec<u8>)> = files
+        .iter()
+        .map(|file| (*file, fixture_bytes(file)))
+        .collect();
+    let (_root, queue) = staged_queue("bounded-kinds", &staged);
+    let deadline = Arc::new(ShutdownDeadline::new(Duration::from_secs(25)).expect("budget"));
+    let observed = Arc::clone(&deadline);
+    let disposition = golden_path(SNAPSHOT_DISPOSITION);
+    let relay = Relay::start_publishing(
+        Box::new(|request: &Recorded| {
+            let path = request_path(request);
+            let body = if path == golden_path(ALERT) {
+                br#"{"status":"accepted","edge_event_id":"a5e15ff2-90fd-4764-be74-a7da4f573cc9","event_id":"hub-1"}"#
+                    .to_vec()
+            } else if path == golden_path(CLIP_READY) {
+                br#"{"clip_id":"clip-ready-0001","state":"READY","state_version":1}"#.to_vec()
+            } else {
+                br#"{"status":"accepted"}"#.to_vec()
+            };
+            (200, body)
+        }),
+        Box::new(move |request| {
+            if request_path(request) == disposition {
+                observed.request_at(Duration::ZERO).expect("observation");
+            }
+        }),
+    );
+    let mut state = SenderState::new();
+
+    let summary = drain_pass(
+        &queue,
+        &relay.client(),
+        &mut state,
+        &At(Duration::from_secs(26)),
+        &deadline,
+        &running(),
+        true,
+    );
+    let requests = relay.stop();
+
+    assert_eq!(requests.len(), 4);
+    assert_eq!(summary.outcomes.len(), 4);
+    assert!(
+        summary.outcomes[..3]
+            .iter()
+            .all(|(_, outcome)| outcome.is_acknowledged())
+    );
+    assert!(matches!(summary.outcomes[3].1, EntryOutcome::Cutoff));
+    assert!(matches!(summary.stop, DrainStop::Cutoff));
+    assert_eq!(queue.entries().expect("queue listing").len(), 1);
+}
+#[test]
+fn owner_stop_after_first_ack_leaves_suffix() {
+    let event = fixture_bytes(EVENT_FILE);
+    let attachment = fixture_bytes(ATTACHMENT_FILE);
+    let (root, queue) = staged_queue(
+        "owner-stop",
+        &[(EVENT_FILE, event), (ATTACHMENT_FILE, attachment.clone())],
+    );
+    let stop = Arc::new(AtomicBool::new(false));
+    let observed_stop = Arc::clone(&stop);
+    let relay = Relay::start_publishing(
+        Box::new(|request: &Recorded| {
+            assert_eq!(request_path(request), golden_path(ALERT));
+            (
+                200,
+                br#"{"status":"accepted","edge_event_id":"a5e15ff2-90fd-4764-be74-a7da4f573cc9","event_id":"hub-1"}"#
+                    .to_vec(),
+            )
+        }),
+        Box::new(move |request| {
+            if request_path(request) == golden_path(ALERT) {
+                observed_stop.store(true, Ordering::SeqCst);
+            }
+        }),
+    );
+    let mut state = SenderState::new();
+
+    let summary = drain_pass(
+        &queue,
+        &relay.client(),
+        &mut state,
+        &FixedClock,
+        &open_deadline(),
+        stop.as_ref(),
+        true,
+    );
+    let requests = relay.stop();
+
+    assert_eq!(requests.len(), 1);
+    assert_eq!(summary.outcomes.len(), 1);
+    assert!(summary.outcomes[0].1.is_acknowledged());
+    assert!(matches!(summary.stop, DrainStop::Stopped));
+    assert!(!matches!(summary.stop, DrainStop::Cutoff));
+    assert_eq!(
+        files_by_name(&root.join("queue")),
+        queue_files(&[ATTACHMENT_FILE])
+    );
+    assert!(!root.join("queue-dead-letter").exists());
+}
+
+const POST_COMMIT_SCAN_LINK: &str = "post-commit-scan.json";
+
+fn accepted_event_route() -> Route {
+    Box::new(|request: &Recorded| {
+        assert_eq!(request_path(request), golden_path(ALERT));
+        (
+            200,
+            br#"{"status":"accepted","edge_event_id":"a5e15ff2-90fd-4764-be74-a7da4f573cc9","event_id":"hub-1"}"#
+                .to_vec(),
+        )
+    })
+}
+
+fn refused_attachment_route() -> Route {
+    Box::new(|request: &Recorded| {
+        assert_eq!(request_path(request), golden_path(SNAPSHOT_ATTACHMENT));
+        (
+            422,
+            br#"{"detail":{"code":"CAMERA_MAPPING_MISSING"}}"#.to_vec(),
+        )
+    })
+}
+
+/// A `*.json` name with no target. Queue publication is already complete, so
+/// the next published-path scan fails on this owned link.
+fn plant_post_commit_scan_fault(queue: &Path) {
+    let missing = queue.join("missing-scan-target");
+    assert!(
+        !missing.exists(),
+        "scan target must be absent inside the queue"
+    );
+    std::os::unix::fs::symlink(&missing, queue.join(POST_COMMIT_SCAN_LINK))
+        .expect("post-commit scan fault");
+}
+
+fn remove_post_commit_scan_fault(queue: &Path) {
+    fs::remove_file(queue.join(POST_COMMIT_SCAN_LINK)).expect("owned scan fault removed");
+}
+
+#[test]
+fn post_commit_scan_fault_after_acceptance_is_cleanup_failure() {
+    let bytes = fixture_bytes(EVENT_FILE);
+    let id = entry_id(&serde_json::from_slice(&bytes).expect("event"));
+    let (root, queue) = staged_queue("ack-cleanup", &[(EVENT_FILE, bytes)]);
+    let queue_dir = root.join("queue");
+    let observed = queue_dir.clone();
+    let relay = Relay::start_publishing(
+        accepted_event_route(),
+        Box::new(move |_request| {
+            plant_post_commit_scan_fault(&observed);
+        }),
+    );
+    let mut state = SenderState::new();
+
+    let summary = drain_pass(
+        &queue,
+        &relay.client(),
+        &mut state,
+        &FixedClock,
+        &open_deadline(),
+        &running(),
+        true,
+    );
+    let requests = relay.stop();
+    remove_post_commit_scan_fault(&queue_dir);
+
+    assert_eq!(requests.len(), 1);
+    assert!(
+        requests[0].body.is_some(),
+        "observer ran before a full body"
+    );
+    assert_eq!(
+        summary.outcomes,
+        vec![(id.clone(), EntryOutcome::AckRemovalFailed)]
+    );
+    assert!(!summary.outcomes[0].1.is_acknowledged());
+    assert!(matches!(summary.stop, DrainStop::Unacknowledged));
+    assert!(!queue_dir.join(EVENT_FILE).exists());
+    assert_eq!(queue.entries().expect("queue listing"), Vec::<Value>::new());
+    assert_eq!(state.attempts(&id), 0);
+    assert!(state.is_deferred(&id));
+    assert!(state.blocked_until(&id).is_none());
+    assert!(!root.join("queue-dead-letter").exists());
+}
+
+#[test]
+fn post_commit_scan_fault_after_refusal_retains_original_bytes() {
+    let bytes = fixture_bytes(ATTACHMENT_FILE);
+    let id = entry_id(&serde_json::from_slice(&bytes).expect("attachment"));
+    let (root, queue) = staged_queue("retain-cleanup", &[(ATTACHMENT_FILE, bytes.clone())]);
+    let queue_dir = root.join("queue");
+    let observed = queue_dir.clone();
+    let relay = Relay::start_publishing(
+        refused_attachment_route(),
+        Box::new(move |_request| {
+            plant_post_commit_scan_fault(&observed);
+        }),
+    );
+    let mut state = SenderState::new();
+
+    let summary = drain_pass(
+        &queue,
+        &relay.client(),
+        &mut state,
+        &FixedClock,
+        &open_deadline(),
+        &running(),
+        true,
+    );
+    let requests = relay.stop();
+    remove_post_commit_scan_fault(&queue_dir);
+
+    assert_eq!(requests.len(), 1);
+    assert!(
+        requests[0].body.is_some(),
+        "observer ran before a full body"
+    );
+    assert_eq!(
+        summary.outcomes,
+        vec![(id.clone(), EntryOutcome::RetentionDeferred { status: 422 })]
+    );
+    assert!(matches!(summary.stop, DrainStop::Unacknowledged));
+    assert!(!queue_dir.join(ATTACHMENT_FILE).exists());
+    assert_eq!(queue.entries().expect("queue listing"), Vec::<Value>::new());
+    assert_eq!(
+        fs::read(
+            queue
+                .dead_letter_directory()
+                .join(format!("422.0.{ATTACHMENT_FILE}"))
+        )
+        .expect("retained bytes"),
+        bytes
+    );
+    assert_eq!(state.attempts(&id), 0);
+    assert!(state.is_deferred(&id));
+}
+
+#[test]
+fn already_removed_entry_is_acknowledged_after_acceptance() {
+    let bytes = fixture_bytes(EVENT_FILE);
+    let id = entry_id(&serde_json::from_slice(&bytes).expect("event"));
+    let (root, queue) = staged_queue("already-acked", &[(EVENT_FILE, bytes)]);
+    let queue_dir = root.join("queue");
+    let relay = Relay::start_publishing(
+        accepted_event_route(),
+        Box::new({
+            let queue_dir = queue_dir.clone();
+            let id = id.clone();
+            move |_request| {
+                let same = DeliveryQueue::open(&queue_dir, false).expect("same queue");
+                assert!(same.acknowledge(&id).expect("entry removed before reply"));
+            }
+        }),
+    );
+    let mut state = SenderState::new();
+
+    let summary = drain_pass(
+        &queue,
+        &relay.client(),
+        &mut state,
+        &FixedClock,
+        &open_deadline(),
+        &running(),
+        true,
+    );
+    let requests = relay.stop();
+
+    assert_eq!(requests.len(), 1);
+    assert_eq!(
+        summary.outcomes,
+        vec![(id.clone(), EntryOutcome::Acknowledged)]
+    );
+    assert!(matches!(summary.stop, DrainStop::Idle));
+    assert!(!queue_dir.join(EVENT_FILE).exists());
+    assert_eq!(queue.entries().expect("queue listing"), Vec::<Value>::new());
+    assert_eq!(state.attempts(&id), 0);
+    assert!(!state.is_deferred(&id));
+    assert!(!root.join("queue-dead-letter").exists());
+}
+
+#[test]
+fn already_removed_entry_after_refusal_is_unconfirmed_retention() {
+    let bytes = fixture_bytes(ATTACHMENT_FILE);
+    let id = entry_id(&serde_json::from_slice(&bytes).expect("attachment"));
+    let (root, queue) = staged_queue("already-refused", &[(ATTACHMENT_FILE, bytes)]);
+    let queue_dir = root.join("queue");
+    let relay = Relay::start_publishing(
+        refused_attachment_route(),
+        Box::new({
+            let queue_dir = queue_dir.clone();
+            let id = id.clone();
+            move |_request| {
+                let same = DeliveryQueue::open(&queue_dir, false).expect("same queue");
+                assert!(same.acknowledge(&id).expect("entry removed before reply"));
+            }
+        }),
+    );
+    let mut state = SenderState::new();
+
+    let summary = drain_pass(
+        &queue,
+        &relay.client(),
+        &mut state,
+        &FixedClock,
+        &open_deadline(),
+        &running(),
+        true,
+    );
+    let requests = relay.stop();
+
+    assert_eq!(requests.len(), 1);
+    assert_eq!(
+        summary.outcomes,
+        vec![(id.clone(), EntryOutcome::RetentionDeferred { status: 422 })]
+    );
+    assert!(matches!(summary.stop, DrainStop::Unacknowledged));
+    assert!(!queue_dir.join(ATTACHMENT_FILE).exists());
+    assert_eq!(queue.entries().expect("queue listing"), Vec::<Value>::new());
+    assert!(!queue.dead_letter_directory().exists());
+    assert_eq!(state.attempts(&id), 0);
+    assert!(state.is_deferred(&id));
 }

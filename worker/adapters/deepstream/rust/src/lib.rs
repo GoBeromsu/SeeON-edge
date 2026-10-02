@@ -25,7 +25,10 @@ mod nvml;
 pub use clip_decode::{ClipDecoder, ClipError, ClipFrame};
 pub use gpu::GpuModel;
 pub use gpu_build::{EngineBuildIdentity, build_engine};
-pub use nvml::{GpuDeviceReport, NvmlStatus, device_report};
+pub use nvml::{
+    GpuDeviceReport, GpuHardwareIdentity, NvmlStatus, RuntimeVersions, device_report,
+    hardware_identity, runtime_versions,
+};
 
 mod media;
 mod media_ffi;
@@ -41,6 +44,7 @@ pub use media_types::{
 
 const MAX_RANK: usize = 8;
 const MAX_OUTPUTS: usize = 8;
+const MAX_ONNX_BYTES: usize = 512 * 1024 * 1024;
 const MAX_ELEMENTS: usize = 256 * 1024 * 1024 / size_of::<f32>();
 
 /// Path-free failures. Admission failure includes missing GPUs, unreadable or
@@ -49,6 +53,7 @@ const MAX_ELEMENTS: usize = 256 * 1024 * 1024 / size_of::<f32>();
 pub enum StateError {
     InvalidDevice,
     InvalidPath,
+    InvalidOnnx,
     InvalidName,
     InvalidShape,
     InvalidCapacity,
@@ -65,6 +70,7 @@ impl std::fmt::Display for StateError {
         formatter.write_str(match self {
             Self::InvalidDevice => "GPU device must be nonnegative",
             Self::InvalidPath => "engine path must be nonempty and contain no NUL",
+            Self::InvalidOnnx => "ONNX bytes must be nonempty and at most 512 MiB",
             Self::InvalidName => "tensor name must be nonempty",
             Self::InvalidShape => "tensor rank, dimension, or dimension product is invalid",
             Self::InvalidCapacity => "tensor capacity is invalid or does not match its shape",
@@ -156,7 +162,8 @@ mod ffi {
         pub fn seeon_gpu_metrics(model: *mut Model, metrics: *mut GpuMetrics) -> c_int;
         pub fn seeon_gpu_close(model: *mut Model);
         pub fn seeon_gpu_build(
-            onnx_path: *const c_char,
+            onnx_data: *const u8,
+            onnx_size: usize,
             engine_path: *const c_char,
             device: i32,
             input_name: *const c_char,
@@ -167,6 +174,8 @@ mod ffi {
             error_size: usize,
         ) -> c_int;
         pub fn seeon_gpu_device_report(device: i32, report: *mut DeviceReport) -> c_int;
+        pub fn seeon_gpu_runtime_versions(versions: *mut RuntimeVersions) -> c_int;
+        pub fn seeon_gpu_hardware_identity(device: i32, identity: *mut HardwareIdentity) -> c_int;
     }
     #[repr(C)]
     pub struct BuildIdentity {
@@ -184,6 +193,18 @@ mod ffi {
         pub has_device_name: i32,
         pub driver_version: [c_char; 80],
         pub device_name: [c_char; 96],
+    }
+    #[repr(C)]
+    pub struct RuntimeVersions {
+        pub trt_version: i32,
+        pub cuda_runtime_version: i32,
+    }
+    #[repr(C)]
+    pub struct HardwareIdentity {
+        pub trt_version: i32,
+        pub compute_major: i32,
+        pub compute_minor: i32,
+        pub device_name: [c_char; 256],
     }
 }
 

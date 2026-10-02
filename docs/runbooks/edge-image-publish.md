@@ -473,7 +473,7 @@ field receipts are externally hashed, non-recursive receipts. A selected bundle
 must pass `admit → construct → warm → persist` before camera activation. Any
 failure refuses boot; no fallback is permitted while a selection exists.
 
-Runtime provenance is dedicated local state, never an alert payload. Each boot
+Python runtime provenance is dedicated local state, never an alert payload. Each boot
 writes an immutable mode-0600 record under
 `/var/lib/seeon-state/runtime-provenance/`; an atomic mode-0600 latest readback
 is published at `/var/lib/seeon-state/applied-runtime-manifest.json`. Runtime
@@ -504,7 +504,36 @@ print(latest.read_text())
 '
 ```
 
-The active contract is the packaged pose+bbox56 proxy bundle, `fall.v2`,
+The Rust qualification path uses language-neutral manifest schema 2. Resolve
+the digest carried by the event directly to
+`/var/lib/seeon-state/runtime-provenance/<manifest-sha256>/manifest.json`;
+the SHA-256 covers the exact canonical UTF-8 file bytes, without a trailing
+newline. That body is immutable, mode 0600, and persisted before the event
+stager receives its digest. Existing Python boot records and
+`applied-runtime-manifest.json` are retained for rollback, not updated or treated
+as the current Rust readback.
+
+Rust records measured linked TensorRT/CUDA version encodings and distinct
+admitted-engine and published-model hashes. These do not prove engine-to-ONNX
+build linkage. `worker_image_digest` requires a digest-pinned image identity
+(`sha256:<64 lowercase hex>` or an image reference ending in that digest);
+a mutable tag is not a digest. Use the existing deployment image authority,
+not a new field-tech setting. A selected manifest construction or persistence
+failure refuses startup; packaged omission is allowed only after an actual
+reported failure.
+
+Camera entries retain their media-source identity when fall detection is
+disabled: `enabled` is false and both policy fields are null. The admitted
+fall engine remains a `warm_owner`, not a `live_score` component.
+
+At most 512 content-addressed manifest directories are retained. Python
+per-boot JSON files do not consume that bound. New content is refused at
+capacity; referenced history is never automatically pruned. Preserve event
+references and rollback evidence before any operator-authorized cleanup.
+These producer/storage checks do not authorize Rust cutover: original GPU,
+engine binding, shutdown, final-image, and service acceptance gates still apply.
+
+For the existing Python deployment, the active contract is the packaged pose+bbox56 proxy bundle, `fall.v2`,
 `fall.policy.v2`, and temporal input `[30,56]` scored on the CPU. An admitted
 content-addressed candidate bundle remains dark and inert until it is selected:
 it is not an active module or policy and is never part of the packaged receipt.

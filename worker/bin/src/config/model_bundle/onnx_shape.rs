@@ -165,13 +165,22 @@ fn first_input_dims(input: &[u8]) -> Option<Vec<Dim>> {
 
 /// `input_dims(onnx_path)`: the first graph input's declared dims.
 pub fn input_dims(path: &Path) -> Result<Vec<Dim>, OnnxShapeError> {
+    let bytes = fs::read(path).map_err(|_| OnnxShapeError {
+        kind: OnnxShapeKind::Unloadable,
+        subject: path.to_string_lossy().into_owned(),
+    })?;
+    input_dims_bytes(&bytes, path)
+}
+
+/// `input_dims` on already-captured model bytes. `path` is only the
+/// diagnostic subject; these bytes are never reread from it.
+pub fn input_dims_bytes(bytes: &[u8], path: &Path) -> Result<Vec<Dim>, OnnxShapeError> {
     let refuse = |kind| OnnxShapeError {
         kind,
         subject: path.to_string_lossy().into_owned(),
     };
     let unloadable = || refuse(OnnxShapeKind::Unloadable);
-    let bytes = fs::read(path).map_err(|_| unloadable())?;
-    let graph = nested(&bytes, MODEL_GRAPH)
+    let graph = nested(bytes, MODEL_GRAPH)
         .flatten()
         .ok_or_else(unloadable)?;
     let found = fields(graph).ok_or_else(unloadable)?;

@@ -18,12 +18,14 @@ use std::time::{Duration, SystemTime};
 use serde_json::{Map, Value};
 use sha2::{Digest, Sha256};
 
-use seeon_ml_worker::config::lkg::Directive;
+use seeon_ml_worker::config::lkg::{Directive, LkgStore};
 use seeon_ml_worker::config::pull::{
-    CONFIG_PULL_TIMEOUT, ConfigSource, PullError, check_release_identity, poll_worker_config,
-    pull_startup_config,
+    CONFIG_PULL_TIMEOUT, ConfigSource, PullError, PulledConfig, WorkerConfigPoll,
+    check_release_identity, poll_worker_config as poll_from_zoneinfo,
+    pull_startup_config as pull_startup_from_zoneinfo,
 };
 use seeon_ml_worker::config::restart::{RESTART_POLL_INTERVAL, RestartCheck};
+use seeon_ml_worker::config::windows::{WindowError, ZONEINFO_DIR};
 use seeon_ml_worker::json::{Json, Serialiser};
 use seeon_ml_worker::relay::cameras::policies::parse_policy_bundle;
 use seeon_ml_worker::seam::Clock;
@@ -42,6 +44,15 @@ const TRANSPORT_OWNED: [&str; 6] = [
 const WORKER_CONFIG: &str = "r/worker-config.response.json";
 const RELEASE_IDENTITY: &str = "r/release-identity.response.json";
 const LKG_STORE: &str = "d/config-lkg";
+
+// Golden transport cases use the image's zone source. Asset-fault cases below
+// pass their owned real filesystem source to the same production functions.
+fn pull_startup_config(url: &str, token: &str, state: &Path) -> Result<PulledConfig, PullError> {
+    pull_startup_from_zoneinfo(url, token, state, Path::new(ZONEINFO_DIR))
+}
+fn poll_worker_config(url: &str, token: &str) -> Result<Option<WorkerConfigPoll>, WindowError> {
+    poll_from_zoneinfo(url, token, Path::new(ZONEINFO_DIR))
+}
 
 static SERIAL: AtomicU64 = AtomicU64::new(0);
 
@@ -85,6 +96,17 @@ fn scratch(label: &str) -> PathBuf {
     }
     fs::create_dir_all(&directory).expect("scratch dir");
     directory
+}
+struct OwnedScratch(PathBuf);
+
+impl Drop for OwnedScratch {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.0);
+    }
+}
+
+fn owned_scratch(label: &str) -> OwnedScratch {
+    OwnedScratch(scratch(label))
 }
 
 /// Every file below `root` except the lock, by relative path.
@@ -411,11 +433,15 @@ fn restart_decision(config: &Value) -> (Option<Directive>, Option<Directive>) {
     let mut check = RestartCheck::new(boot.directive, RESTART_POLL_INTERVAL);
     let (server, base) = serve_json(config);
     let mut polled = None;
-    let decision = check.check(&FixedClock, || {
-        let poll = poll_worker_config(&base, RELAY_TOKEN);
-        polled = poll.as_ref().map(|poll| poll.directive);
-        poll.map(|poll| poll.restart_candidate())
-    });
+    let decision = check
+        .check(&FixedClock, || {
+            let poll = poll_worker_config(&base, RELAY_TOKEN)?;
+            polled = poll.as_ref().map(|poll| poll.directive);
+            Ok::<_, seeon_ml_worker::config::windows::WindowError>(
+                poll.map(|poll| poll.restart_candidate()),
+            )
+        })
+        .expect("no local zone asset fault");
     let recorded = joined(server);
     assert_eq!(
         transport_record(&recorded, CONFIG_PULL_TIMEOUT),
@@ -696,7 +722,9 @@ fn malformed_policy_bundle_on_poll_gives_none() {
     let refused = policy_case(&policy_bundle_golden(), "refuse-schema-version-2");
     assert_eq!(refused["accepted"], Value::Bool(false));
     let (server, base) = serve_json(&config_with_policies(&refused["bundle"]));
-    let polled = poll_worker_config(&base, RELAY_TOKEN).map(|poll| poll.directive);
+    let polled = poll_worker_config(&base, RELAY_TOKEN)
+        .expect("valid zone assets")
+        .map(|poll| poll.directive);
     let recorded = joined(server);
     assert_eq!(
         transport_record(&recorded, CONFIG_PULL_TIMEOUT),
@@ -722,7 +750,346 @@ fn valid_policy_bundle_is_accepted_on_pull() {
     );
 
     let (server, base) = serve_json(&config);
-    let polled = poll_worker_config(&base, RELAY_TOKEN).map(|poll| poll.directive);
+    let polled = poll_worker_config(&base, RELAY_TOKEN)
+        .expect("valid zone assets")
+        .map(|poll| poll.directive);
     joined(server);
     assert_eq!(polled, Some(golden_directive(&config)));
+}
+
+fn unknown_domain_payload() -> Value {
+    let mut config = read_json(WORKER_CONFIG);
+    config["cameras"][0]["domains"] =
+        Value::Array(vec![Value::from("fall"), Value::from("not-a-domain")]);
+    let version = config["config_version"].as_i64().expect("version");
+    config["config_version"] = Value::from(version + 1);
+    config
+}
+
+#[test]
+fn unknown_domain_fresh_pull_keeps_valid_lkg() {
+    let scratch = owned_scratch("unknown-domain-lkg");
+    copy_python_store(&scratch.0);
+    let config = unknown_domain_payload();
+    let (server, base) = serve_json(&config);
+    let pulled = pull_startup_config(&base, RELAY_TOKEN, &scratch.0).expect("LKG config");
+    let recorded = joined(server);
+
+    assert_eq!(
+        transport_record(&recorded, CONFIG_PULL_TIMEOUT),
+        manifest_transport(WORKER_CONFIG)
+    );
+    assert_eq!((pulled.source, pulled.stale), (ConfigSource::Lkg, true));
+    assert_eq!(pulled.payload, Json::from(&read_json(WORKER_CONFIG)));
+    assert_eq!(
+        store_files(&scratch.0.join("config-lkg")),
+        store_files(&worker_wire(LKG_STORE))
+    );
+
+    let (server, base) = serve_json(&config);
+    let polled = poll_worker_config(&base, RELAY_TOKEN)
+        .expect("valid zone assets")
+        .map(|poll| poll.directive);
+    joined(server);
+    assert_eq!(
+        polled,
+        Some(golden_directive(&config)),
+        "Python poll does not run startup domain admission"
+    );
+}
+
+#[test]
+fn unknown_domain_fresh_pull_without_lkg_refuses() {
+    let scratch = owned_scratch("unknown-domain-empty");
+    let config = unknown_domain_payload();
+    let (server, base) = serve_json(&config);
+    let refused = pull_startup_config(&base, RELAY_TOKEN, &scratch.0);
+    joined(server);
+    assert_eq!(refused, Err(PullError::NoConfig));
+    assert!(
+        !scratch.0.join("config-lkg").exists(),
+        "a refused payload must not publish a store"
+    );
+}
+
+fn window_config(start: &str, tz: &str) -> Value {
+    let mut config = read_json(WORKER_CONFIG);
+    config["config_version"] = Value::from(config["config_version"].as_i64().unwrap() + 1);
+    config["detection_windows"] = serde_json::json!({
+        "fall": {"start":start, "end":"02:00", "tz":tz}
+    });
+    config
+}
+
+#[test]
+fn strict_windows_refuse_before_cache_but_remain_poll_candidates() {
+    for start in ["1:00", "01:0", "١:٠"] {
+        let state = owned_scratch("strict-window");
+        let config = window_config(start, "UTC");
+        let (server, base) = serve_json(&config);
+        assert_eq!(
+            pull_startup_config(&base, RELAY_TOKEN, &state.0),
+            Err(PullError::NoConfig)
+        );
+        joined(server);
+        assert!(!state.0.join("config-lkg").exists());
+
+        let (server, base) = serve_json(&config);
+        let polled = poll_worker_config(&base, RELAY_TOKEN)
+            .unwrap()
+            .expect("canonical poll candidate");
+        joined(server);
+        assert_eq!(polled.directive, golden_directive(&config));
+        assert_eq!(polled.windows["fall"].definition.start, start);
+        assert!(
+            polled.windows["fall"]
+                .window
+                .contains(
+                    seeon_worker::detection_window::AwareDateTime::from_utc_system_time(
+                        SystemTime::UNIX_EPOCH + Duration::from_secs(5400)
+                    )
+                    .unwrap()
+                )
+                .unwrap()
+        );
+    }
+}
+
+#[test]
+fn poll_uses_registry_cameras_without_startup_camera_or_domain_gates() {
+    // Independently checked with BackendWorkerConfigPayload.to_pulled_config
+    // versus to_worker_config: only startup applies these three refusals.
+    let cases = [
+        serde_json::json!([{}]),
+        serde_json::json!([{"camera_id":"camera-a","rtsp_url":"rtsp://relay.invalid/live","fps":-1}]),
+        serde_json::json!([{"camera_id":"camera-a","rtsp_url":"rtsp://relay.invalid/live","domains":["unknown"]}]),
+    ];
+    for (index, cameras) in cases.into_iter().enumerate() {
+        let state = owned_scratch("poll-camera-boundary");
+        let config = serde_json::json!({"config_version":8,"cameras":cameras});
+        let (server, base) = serve_json(&config);
+        assert_eq!(
+            pull_startup_config(&base, RELAY_TOKEN, &state.0),
+            Err(PullError::NoConfig)
+        );
+        joined(server);
+        assert!(!state.0.join("config-lkg").exists());
+        let (server, base) = serve_json(&config);
+        let polled = poll_worker_config(&base, RELAY_TOKEN)
+            .unwrap()
+            .expect("Python poll candidate");
+        joined(server);
+        assert_eq!(
+            polled.directive,
+            Directive {
+                generation: 0,
+                version: 8,
+                registry: 0
+            }
+        );
+        assert_eq!(
+            polled.cameras.len(),
+            usize::from(index == 2),
+            "invalid fps drops that registry entry; poll still admits its empty roster"
+        );
+        assert!(polled.windows.is_empty());
+    }
+}
+
+#[test]
+fn mixed_unicode_is_cached_verbatim_and_unknown_zone_drops_before_strictness() {
+    let state = owned_scratch("mixed-window-cache");
+    let config = window_config("0１:00", "UTC");
+    let (server, base) = serve_json(&config);
+    let admitted = pull_startup_config(&base, RELAY_TOKEN, &state.0).unwrap();
+    joined(server);
+    assert_eq!(admitted.windows["fall"].definition.start, "0１:00");
+    let stored = LkgStore::new(&state.0).load().unwrap().unwrap();
+    assert_eq!(stored.payload, Json::from(&config));
+    let offline = pull_startup_config(&dead_relay(), RELAY_TOKEN, &state.0).unwrap();
+    assert_eq!(offline.windows, admitted.windows);
+    assert_eq!(offline.source, ConfigSource::Lkg);
+
+    let state = owned_scratch("loose-unknown-zone");
+    let config = window_config("1:00", "Seeon/Not_A_Zone");
+    let (server, base) = serve_json(&config);
+    let admitted = pull_startup_config(&base, RELAY_TOKEN, &state.0).unwrap();
+    joined(server);
+    assert!(
+        admitted.windows.is_empty(),
+        "unknown zone drops before strict width validation"
+    );
+    assert_eq!(
+        admitted.payload,
+        Json::from(&config),
+        "cache retains source payload, not a normalized rewrite"
+    );
+}
+
+#[test]
+fn strict_fresh_and_stored_windows_cannot_replace_valid_startup_configuration() {
+    let state = owned_scratch("strict-window-lkg");
+    copy_python_store(&state.0);
+    let before = store_files(&state.0.join("config-lkg"));
+    let config = window_config("1:00", "UTC");
+    let (server, base) = serve_json(&config);
+    let pulled = pull_startup_config(&base, RELAY_TOKEN, &state.0).expect("valid LKG fallback");
+    joined(server);
+    assert_eq!(pulled.source, ConfigSource::Lkg);
+    assert_eq!(store_files(&state.0.join("config-lkg")), before);
+
+    let invalid_state = owned_scratch("stored-strict-window");
+    let store = LkgStore::new(&invalid_state.0);
+    assert!(
+        store
+            .save(&Json::from(&config), golden_directive(&config))
+            .unwrap()
+    );
+    let before = store_files(&invalid_state.0.join("config-lkg"));
+    assert_eq!(
+        pull_startup_config(&dead_relay(), RELAY_TOKEN, &invalid_state.0),
+        Err(PullError::NoConfig)
+    );
+    assert_eq!(
+        store_files(&invalid_state.0.join("config-lkg")),
+        before,
+        "offline refusal does not delete cache evidence"
+    );
+
+    let golden = read_json(WORKER_CONFIG);
+    let (server, base) = serve_json(&golden);
+    let fresh = pull_startup_config(&base, RELAY_TOKEN, &invalid_state.0)
+        .expect("fresh wins over invalid newer cache");
+    joined(server);
+    assert_eq!(fresh.source, ConfigSource::Pulled);
+    assert_eq!(fresh.payload, Json::from(&golden));
+    assert!(!invalid_state.0.join("config-lkg/current.json").exists());
+    assert!(
+        invalid_state
+            .0
+            .join("config-lkg/revisions")
+            .join(revision_name(golden_directive(&config)))
+            .is_file()
+    );
+}
+
+#[test]
+fn local_zone_faults_never_fall_back_to_or_delete_existing_lkg() {
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
+    assert_ne!(
+        fs::metadata("/proc/self").unwrap().uid(),
+        0,
+        "permission proof needs unprivileged execution"
+    );
+    for permission_denied in [false, true] {
+        let state = owned_scratch("asset-window-lkg");
+        copy_python_store(&state.0);
+        let zones = state.0.join("zoneinfo");
+        fs::create_dir(&zones).unwrap();
+        let asset = zones.join("Broken");
+        let bytes = fs::read(Path::new(ZONEINFO_DIR).join("UTC")).unwrap();
+        if permission_denied {
+            fs::write(&asset, &bytes).unwrap();
+            fs::set_permissions(&asset, fs::Permissions::from_mode(0o000)).unwrap();
+        } else {
+            fs::write(&asset, &bytes[..20]).unwrap();
+        }
+        let fault = if permission_denied {
+            WindowError::Io(io::ErrorKind::PermissionDenied)
+        } else {
+            WindowError::CorruptTzif
+        };
+        let config = window_config("01:00", "Broken");
+        let before = store_files(&state.0.join("config-lkg"));
+        let (server, base) = serve_json(&config);
+        let error = pull_startup_from_zoneinfo(&base, RELAY_TOKEN, &state.0, &zones).unwrap_err();
+        joined(server);
+        assert_eq!(error, PullError::WindowAsset(fault));
+        assert_eq!(error.exit(), seeon_ml_worker::exit::Exit::Runtime);
+        assert_eq!(store_files(&state.0.join("config-lkg")), before);
+
+        let (server, base) = serve_json(&config);
+        assert_eq!(poll_from_zoneinfo(&base, RELAY_TOKEN, &zones), Err(fault));
+        joined(server);
+
+        let store = LkgStore::new(&state.0);
+        assert!(
+            store
+                .save(&Json::from(&config), golden_directive(&config))
+                .unwrap()
+        );
+        let before = store_files(&state.0.join("config-lkg"));
+        assert_eq!(
+            pull_startup_from_zoneinfo(&dead_relay(), RELAY_TOKEN, &state.0, &zones),
+            Err(PullError::WindowAsset(fault))
+        );
+        assert_eq!(store_files(&state.0.join("config-lkg")), before);
+
+        // The race-losing fresh path must not classify a local asset fault
+        // as corrupt cache and clear current.json.
+        let (server, base) = serve_json(&read_json(WORKER_CONFIG));
+        assert_eq!(
+            pull_startup_from_zoneinfo(&base, RELAY_TOKEN, &state.0, &zones),
+            Err(PullError::WindowAsset(fault))
+        );
+        joined(server);
+        assert_eq!(store_files(&state.0.join("config-lkg")), before);
+    }
+}
+
+#[test]
+fn startup_camera_window_and_domain_refusals_keep_python_priority() {
+    let state = owned_scratch("window-priority");
+    let zones = state.0.join("zoneinfo");
+    fs::create_dir(&zones).unwrap();
+    fs::write(zones.join("Broken"), b"TZif\0").unwrap();
+    let mut config = window_config("01:00", "Broken");
+    config["cameras"][0]["domains"] = serde_json::json!(["unknown"]);
+    let (server, base) = serve_json(&config);
+    assert_eq!(
+        pull_startup_from_zoneinfo(&base, RELAY_TOKEN, &state.0, &zones),
+        Err(PullError::WindowAsset(WindowError::CorruptTzif)),
+        "canonical window asset fault precedes domain resolution"
+    );
+    joined(server);
+    config["cameras"][0]["fps"] = Value::from(-1);
+    let (server, base) = serve_json(&config);
+    assert_eq!(
+        pull_startup_from_zoneinfo(&base, RELAY_TOKEN, &state.0, &zones),
+        Err(PullError::NoConfig),
+        "runtime camera validation precedes the window walk"
+    );
+    joined(server);
+    assert!(!state.0.join("config-lkg").exists());
+}
+
+#[test]
+fn restart_fault_preserves_tracker_and_consumes_the_attempted_interval() {
+    let boot = Directive {
+        generation: 1,
+        version: 2,
+        registry: 3,
+    };
+    let mut checker = RestartCheck::new(boot, RESTART_POLL_INTERVAL);
+    assert_eq!(
+        checker.check(&FixedClock, || Err::<Option<Directive>, _>(
+            WindowError::CorruptTzif
+        )),
+        Err(WindowError::CorruptTzif)
+    );
+    assert_eq!(checker.tracker().current(), boot);
+    let mut called = false;
+    let result = checker.check(&FixedClock, || {
+        called = true;
+        Ok::<_, WindowError>(Some(Directive {
+            version: 99,
+            ..boot
+        }))
+    });
+    assert_eq!(result, Ok(None));
+    assert!(
+        !called,
+        "a fault must not cause an unbounded immediate retry"
+    );
+    assert_eq!(checker.tracker().current(), boot);
 }

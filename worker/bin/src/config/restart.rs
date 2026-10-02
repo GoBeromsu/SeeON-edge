@@ -71,18 +71,20 @@ impl RestartCheck {
     /// The directive to restart for, if any. `pull` runs only when the
     /// interval has passed since the last pull (the first call always
     /// pulls, as Python starts at `-interval`).
-    pub fn check<F>(&mut self, clock: &dyn Clock, pull: F) -> Option<RestartDirective>
+    /// A typed fault propagates without changing the tracker; the attempted
+    /// pull still consumes this interval.
+    pub fn check<F, E>(&mut self, clock: &dyn Clock, pull: F) -> Result<Option<RestartDirective>, E>
     where
-        F: FnOnce() -> Option<RestartDirective>,
+        F: FnOnce() -> Result<Option<RestartDirective>, E>,
     {
         let now = clock.monotonic();
         if let Some(last) = self.last_checked
             && now.saturating_sub(last) < self.interval
         {
-            return None;
+            return Ok(None);
         }
         self.last_checked = Some(now);
-        self.tracker.observe(pull()?)
+        Ok(pull()?.and_then(|candidate| self.tracker.observe(candidate)))
     }
 
     /// The tracker, for the current directive.

@@ -5,11 +5,13 @@
 
 pub mod bundle;
 pub mod composition;
+pub mod conformance;
 pub mod flow_boot;
 pub mod identity;
 pub mod layout;
 pub mod manifest;
 pub mod onnx_shape;
+pub mod packaged;
 mod receipt;
 mod tree;
 
@@ -50,6 +52,8 @@ pub enum AdmissionKind {
     UnknownIdentityFields,
     /// `bundle member is invalid`.
     MemberInvalid,
+    /// A required packaged model/evidence member is not listed.
+    MemberUnlisted,
     /// `bundle content identity mismatch`.
     ContentIdentity,
     /// `member mismatch: {path}`.

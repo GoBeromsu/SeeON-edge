@@ -28,7 +28,13 @@ pub(super) fn sidecar_json(
                 ("camera_id".to_owned(), text(&event.camera_id)),
                 ("facility_id".to_owned(), text(&event.facility_id)),
                 ("time_sec".to_owned(), Json::Float(event.time_sec)),
-                ("probability".to_owned(), Json::Float(event.probability)),
+                (
+                    "probability".to_owned(),
+                    match event.probability {
+                        None => Json::Null,
+                        Some(probability) => Json::Float(probability),
+                    },
+                ),
             ])
         })
         .collect();

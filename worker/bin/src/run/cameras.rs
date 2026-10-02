@@ -1,4 +1,4 @@
-//! One fall stage per already admitted runtime camera.
+//! One fall stage per already admitted runtime camera when fall is enabled.
 //! Precedence is `worker/domains/registry.py` `_effective_transition_threshold`.
 
 use std::fmt;
@@ -48,6 +48,8 @@ pub struct ResolvedFallPolicy {
 /// A roster entry cannot become a fall stage. No document text is retained.
 #[derive(Clone, Debug, PartialEq)]
 pub enum CameraPolicyError {
+    /// Effective domain selection refused. The cause is not retained.
+    Domains,
     /// The roster index does not fit `source_id` or `MEDIA_MAX_SOURCES`.
     SourceId,
     /// Calibration votes or window do not fit the policy `usize` fields.
@@ -68,6 +70,7 @@ impl fmt::Display for CameraPolicyError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::SourceId => formatter.write_str("roster index is not a fall source id"),
+            Self::Domains => formatter.write_str("effective domain selection refused"),
             Self::CalibrationBound => {
                 formatter.write_str("calibration votes or window do not fit fall policy")
             }
@@ -86,6 +89,7 @@ impl std::error::Error for CameraPolicyError {
             Self::Policy(error) | Self::Decider(error) => Some(error),
             // FallStageError is a typed refusal but not an std::error::Error.
             Self::Stage(_)
+            | Self::Domains
             | Self::SourceId
             | Self::CalibrationBound
             | Self::PolicyMissing
@@ -103,23 +107,29 @@ pub fn camera_policies(
     source_generation: u64,
     capacities: FallCapacities,
 ) -> Result<Vec<CameraPolicy>, CameraPolicyError> {
-    config
-        .cameras
-        .iter()
-        .enumerate()
-        .map(|(index, camera)| {
+    let selection = config.config.domain_selection();
+    let domains = selection
+        .resolve()
+        .map_err(|_| CameraPolicyError::Domains)?;
+    let mut policies = Vec::with_capacity(config.cameras.len());
+    for (index, camera) in config.cameras.iter().enumerate() {
+        let source_id = admitted_source(index)?;
+        let stage = if domains.fall {
             let resolved = resolve_fall_policy(&config.policies, &camera.camera_id, calibration)?;
-            stage_for(
-                index,
+            Some(fall_stage(
                 camera,
                 boot_id,
                 stream_epoch,
                 source_generation,
                 capacities,
                 &resolved,
-            )
-        })
-        .collect()
+            )?)
+        } else {
+            None
+        };
+        policies.push(CameraPolicy { source_id, stage });
+    }
+    Ok(policies)
 }
 
 /// Python `_effective_transition_threshold` for one admitted camera.
@@ -185,19 +195,21 @@ pub fn resolve_fall_policy(
     })
 }
 
-fn stage_for(
-    index: usize,
+fn admitted_source(index: usize) -> Result<u32, CameraPolicyError> {
+    if index >= MEDIA_MAX_SOURCES {
+        return Err(CameraPolicyError::SourceId);
+    }
+    u32::try_from(index).map_err(|_| CameraPolicyError::SourceId)
+}
+
+fn fall_stage(
     camera: &RuntimeCamera,
     boot_id: &str,
     stream_epoch: &str,
     source_generation: u64,
     capacities: FallCapacities,
     resolved: &ResolvedFallPolicy,
-) -> Result<CameraPolicy, CameraPolicyError> {
-    if index >= MEDIA_MAX_SOURCES {
-        return Err(CameraPolicyError::SourceId);
-    }
-    let source_id = u32::try_from(index).map_err(|_| CameraPolicyError::SourceId)?;
+) -> Result<FallStage, CameraPolicyError> {
     let parameters = FallPolicyParameters {
         transition_threshold: resolved.transition_threshold,
         transition_votes: resolved.transition_votes,
@@ -215,11 +227,10 @@ fn stage_for(
         capacities,
     )
     .map_err(CameraPolicyError::Decider)?;
-    let stage = FallStage::new(decider, resolved.temperature).map_err(CameraPolicyError::Stage)?;
-    Ok(CameraPolicy { source_id, stage })
+    FallStage::new(decider, resolved.temperature).map_err(CameraPolicyError::Stage)
 }
 
-fn admitted_fall<'a>(
+pub(crate) fn admitted_fall<'a>(
     policies: &'a PolicyBundle,
     camera_id: &str,
 ) -> Result<&'a EffectivePolicy, CameraPolicyError> {

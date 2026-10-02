@@ -1,4 +1,6 @@
-use crate::{StateError, element_count, engine_path, ffi, fixed_text, validate_name};
+use crate::{
+    MAX_ONNX_BYTES, StateError, element_count, engine_path, ffi, fixed_text, validate_name,
+};
 use std::ffi::{CStr, c_char};
 use std::path::Path;
 
@@ -15,18 +17,20 @@ pub struct EngineBuildIdentity {
 }
 
 /// Builds a strongly typed FP32 engine with TF32 off and one static input
-/// profile, writing a new file at `engine` (never overwriting). Offline only:
-/// the worker never builds at runtime. The native call selects `device` on the
-/// calling thread. Native diagnostics are not copied; failure is `Unavailable`.
+/// profile, writing a new file at `engine` (never overwriting). `onnx` is
+/// borrowed only for this synchronous call; native parses those bytes and
+/// retains no pointer. Offline only: the worker never builds at runtime. The
+/// native call selects `device` on the calling thread. Native diagnostics are
+/// not copied; failure is `Unavailable`.
 pub fn build_engine(
-    onnx: &Path,
+    onnx: &[u8],
     engine: &Path,
     device: i32,
     input_name: &CStr,
     dimensions: &[i32],
 ) -> Result<EngineBuildIdentity, StateError> {
-    let onnx = engine_path(onnx, device)?;
     let engine = engine_path(engine, device)?;
+    validate_onnx_size(onnx.len())?;
     validate_name(input_name)?;
     element_count(dimensions)?;
     let mut identity = ffi::BuildIdentity {
@@ -37,12 +41,14 @@ pub fn build_engine(
         device_name: [0; 256],
     };
     let mut error: [c_char; 256] = [0; 256];
-    // SAFETY: both terminated paths, the terminated input name, the dimension
-    // slice (rank checked to 1..=8 above) and the repr(C) identity outlive this
-    // synchronous call. Native retains no pointer and writes at most the sizes given.
+    // SAFETY: the ONNX slice, the terminated engine path, the terminated input
+    // name, the dimension slice (rank checked to 1..=8 above) and the repr(C)
+    // identity outlive this synchronous call. Native retains no pointer and
+    // writes at most the sizes given.
     let status = unsafe {
         ffi::seeon_gpu_build(
             onnx.as_ptr(),
+            onnx.len(),
             engine.as_ptr(),
             device,
             input_name.as_ptr(),
@@ -57,6 +63,14 @@ pub fn build_engine(
         return Err(StateError::Unavailable);
     }
     identity_from_native(&identity)
+}
+
+fn validate_onnx_size(size: usize) -> Result<(), StateError> {
+    if size == 0 || size > MAX_ONNX_BYTES {
+        Err(StateError::InvalidOnnx)
+    } else {
+        Ok(())
+    }
 }
 
 fn identity_from_native(identity: &ffi::BuildIdentity) -> Result<EngineBuildIdentity, StateError> {
@@ -140,25 +154,42 @@ mod tests {
 
     #[test]
     fn build_arguments_are_rejected_locally() {
-        let path = Path::new("model.onnx");
+        let onnx = b"not-a-real-model";
+        let path = Path::new("model.engine");
         let dims = [1, 3, 640, 640];
         assert_eq!(
-            build_engine(path, Path::new(""), 0, c"images", &dims),
+            build_engine(onnx, Path::new(""), 0, c"images", &dims),
             Err(StateError::InvalidPath)
         );
         assert_eq!(
-            build_engine(path, path, -1, c"images", &dims),
+            build_engine(onnx, path, -1, c"images", &dims),
             Err(StateError::InvalidDevice)
         );
         assert_eq!(
-            build_engine(path, path, 0, c"", &dims),
+            build_engine(&[], path, 0, c"images", &dims),
+            Err(StateError::InvalidOnnx)
+        );
+        assert_eq!(
+            build_engine(onnx, path, 0, c"", &dims),
             Err(StateError::InvalidName)
         );
         for dims in [&[][..], &[1, 0], &[1; 9]] {
             assert_eq!(
-                build_engine(path, path, 0, c"images", dims),
+                build_engine(onnx, path, 0, c"images", dims),
                 Err(StateError::InvalidShape)
             );
         }
+    }
+
+    #[test]
+    fn onnx_byte_cap_is_inclusive_without_allocating_the_limit() {
+        assert_eq!(validate_onnx_size(0), Err(StateError::InvalidOnnx));
+        assert_eq!(validate_onnx_size(1), Ok(()));
+        assert_eq!(validate_onnx_size(MAX_ONNX_BYTES), Ok(()));
+        assert_eq!(
+            validate_onnx_size(MAX_ONNX_BYTES + 1),
+            Err(StateError::InvalidOnnx)
+        );
+        assert_eq!(validate_onnx_size(usize::MAX), Err(StateError::InvalidOnnx));
     }
 }

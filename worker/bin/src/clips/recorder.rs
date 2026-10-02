@@ -1,10 +1,16 @@
 //! The per-camera smart-record state machine, ported from `SmartRecordActor`.
 //!
-//! Recording is always on: there is no toggle. Alerts start a recording or
-//! extend the running one up to `CAP_SECONDS`; alerts that race a stop wait
-//! for the next recording. A sealed recording is handed to a save callback
-//! and the recorder returns to idle whatever the save returned (X18: the
-//! Python actor stays in FINALIZING when its sink raises).
+//! Recording is always on until `quiesce`: there is no toggle and no restart.
+//! Alerts start a recording or extend the running one up to `CAP_SECONDS`;
+//! alerts that race a stop wait for the next recording. A sealed recording is
+//! handed to a save callback and the recorder returns to idle whatever the
+//! save returned (X18: the Python actor stays in FINALIZING when its sink
+//! raises).
+//!
+//! `quiesce` is a one-way admission guard for process shutdown. It does not
+//! stop, finalize, or close the native recording: the media owner still does
+//! that and delivers the receipt. After quiescence, no path starts or extends
+//! a recording. Alerts that never started stay pending for `take_unstarted`.
 
 pub mod plane;
 pub mod types;
@@ -46,6 +52,7 @@ pub struct Recorder<P: RecordPlane> {
     stop_due: Duration,
     sealed: VecDeque<u32>,
     counters: Counters,
+    quiesced: bool,
 }
 
 impl<P: RecordPlane> Recorder<P> {
@@ -63,6 +70,7 @@ impl<P: RecordPlane> Recorder<P> {
             stop_due: Duration::ZERO,
             sealed: VecDeque::new(),
             counters: Counters::default(),
+            quiesced: false,
         }
     }
 
@@ -82,6 +90,25 @@ impl<P: RecordPlane> Recorder<P> {
         self.counters
     }
 
+    pub fn is_quiesced(&self) -> bool {
+        self.quiesced
+    }
+
+    /// One-way shutdown admission guard. Idempotent. Does not stop, finalize,
+    /// or close native recording, and does not clear accepted alerts.
+    pub fn quiesce(&mut self) {
+        self.quiesced = true;
+    }
+
+    /// Drains alerts that never started. Only legal after `quiesce`; does not
+    /// steal contributors of a recording the media owner still has to seal.
+    pub fn take_unstarted(&mut self) -> Result<Vec<Contributor>, RecorderError> {
+        if !self.quiesced {
+            return Err(RecorderError::NotQuiesced);
+        }
+        Ok(std::mem::take(&mut self.pending))
+    }
+
     pub fn admit(&mut self, event_ref: &str, detected_at: Utc) -> Result<Admit, RecorderError> {
         if event_ref.trim().is_empty() {
             return Err(RecorderError::BlankEventRef);
@@ -90,6 +117,12 @@ impl<P: RecordPlane> Recorder<P> {
             event_ref: event_ref.to_owned(),
             detected_at,
         };
+        if self.quiesced {
+            // Late alerts stay pending. They are not attributed to media that
+            // is already stopping, and they are not started.
+            self.enqueue(alert)?;
+            return Ok(Admit::Queued);
+        }
         match self.state {
             State::Recording => {
                 self.counters.sequence += 1;
@@ -110,8 +143,11 @@ impl<P: RecordPlane> Recorder<P> {
     }
 
     /// Starts waiting alerts when idle and stops a recording whose extension
-    /// window closed before the cap.
+    /// window closed before the cap. After `quiesce`, starts nothing.
     pub fn tick(&mut self) -> State {
+        if self.quiesced {
+            return self.state;
+        }
         match self.state {
             State::Idle if !self.pending.is_empty() => {
                 self.start_pending();
@@ -134,8 +170,9 @@ impl<P: RecordPlane> Recorder<P> {
         self.state
     }
 
-    /// Hands a sealed recording to `save`, then returns to idle and starts
-    /// any alerts that waited, whatever `save` returned.
+    /// Hands a sealed recording to `save`, then returns to idle. Waiting
+    /// alerts start only while the recorder has not quiesced. A save failure
+    /// is returned as-is and does not start a recording after quiescence.
     pub fn on_receipt(
         &mut self,
         receipt: &RecordReceipt,
@@ -178,7 +215,7 @@ impl<P: RecordPlane> Recorder<P> {
         self.ticket = None;
         self.boundary = Boundary::None;
         self.state = State::Idle;
-        if !self.pending.is_empty() {
+        if !self.quiesced && !self.pending.is_empty() {
             self.start_pending();
         }
         saved.map_err(RecorderError::Save)
@@ -204,6 +241,9 @@ impl<P: RecordPlane> Recorder<P> {
     }
 
     fn start_pending(&mut self) -> Admit {
+        if self.quiesced {
+            return Admit::Queued;
+        }
         let ticket = match self.plane.start(LOOKBACK_SECONDS, CAP_SECONDS) {
             Ok(ticket) => ticket,
             Err(refusal) => {

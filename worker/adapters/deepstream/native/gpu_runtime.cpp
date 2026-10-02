@@ -301,3 +301,54 @@ extern "C" int seeon_gpu_device_report(int32_t device, SeeonGpuDeviceReport *rep
                               cudaSetDevice(device) == cudaSuccess && cudaFree(nullptr) == cudaSuccess ? 1 : 0;
     return 0;
 }
+
+extern "C" int seeon_gpu_runtime_versions(SeeonGpuRuntimeVersions *versions) {
+    if (!versions) return -1;
+    std::memset(versions, 0, sizeof(*versions));
+    try {
+        const int32_t trt_version = getInferLibVersion();
+        int cuda_runtime_version = 0;
+        if (trt_version <= 0 ||
+            cudaRuntimeGetVersion(&cuda_runtime_version) != cudaSuccess ||
+            cuda_runtime_version <= 0) {
+            std::memset(versions, 0, sizeof(*versions));
+            return -1;
+        }
+        versions->trt_version = trt_version;
+        versions->cuda_runtime_version = cuda_runtime_version;
+        return 0;
+    } catch (...) {
+        std::memset(versions, 0, sizeof(*versions));
+        return -1;
+    }
+}
+extern "C" int seeon_gpu_hardware_identity(int32_t device, SeeonGpuHardwareIdentity *identity) {
+    if (!identity) return -1;
+    std::memset(identity, 0, sizeof(*identity));
+    if (device < 0) return -1;
+    try {
+        const int32_t trt_version = getInferLibVersion();
+        int devices = 0;
+        cudaDeviceProp properties{};
+        if (trt_version <= 0 || cudaGetDeviceCount(&devices) != cudaSuccess || device >= devices ||
+            cudaGetDeviceProperties(&properties, device) != cudaSuccess) {
+            std::memset(identity, 0, sizeof(*identity));
+            return -1;
+        }
+        const size_t name_length = strnlen(properties.name, sizeof(properties.name));
+        if (properties.major <= 0 || properties.minor < 0 || name_length == 0 ||
+            name_length >= sizeof(identity->device_name)) {
+            std::memset(identity, 0, sizeof(*identity));
+            return -1;
+        }
+        identity->trt_version = trt_version;
+        identity->compute_major = properties.major;
+        identity->compute_minor = properties.minor;
+        std::memcpy(identity->device_name, properties.name, name_length);
+        identity->device_name[name_length] = '\0';
+        return 0;
+    } catch (...) {
+        std::memset(identity, 0, sizeof(*identity));
+        return -1;
+    }
+}

@@ -5,10 +5,14 @@
 
 use std::sync::Mutex;
 
+use crate::exit::Exit;
+
 use seeon_deepstream_native::{MediaResult, MediaState, MediaStatus};
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct CameraCounters {
+    /// Last native video-link flag, retained without inferring frame admission.
+    pub video_linked: u32,
     /// Python `_publish_sequence`: native `SourceStatus::frames`, monotonic
     /// and never consumed, so it survives the policy side draining `pose_rx`.
     pub published_frames: u64,
@@ -22,6 +26,12 @@ pub struct CameraCounters {
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Snapshot {
+    /// Open returned an error without transferring a native owner. This is
+    /// distinct from stop/finalization/close and must never fabricate them.
+    pub open_refused: bool,
+    /// Actual Rust owner termination cause. `None` is an ordinary explicit
+    /// stop. This is not a native diagnostic and not a native-close fact.
+    pub failure: Option<Exit>,
     /// `None` until the first successful `read_status`.
     pub state: Option<MediaState>,
     /// The last status read reported a native fatal.
@@ -109,7 +119,25 @@ impl Diagnostics {
                 .cameras
                 .resize(status.sources.len(), CameraCounters::default());
         }
-        for (counters, source) in snapshot.cameras.iter_mut().zip(&status.sources) {
+        for (source_id, (counters, source)) in
+            snapshot.cameras.iter_mut().zip(&status.sources).enumerate()
+        {
+            let linked = counters.video_linked == 0 && source.video_linked == 1;
+            let first_frame = counters.published_frames == 0 && source.frames > 0;
+            let first_objects = counters.objects_observed == 0 && source.objects > 0;
+            if linked || first_frame || first_objects {
+                eprintln!(
+                    "ml-worker: media observation source_id={source_id} video_linked={} frames={} objects={} tensor_absent={} overwritten={} dropped={} malformed={}",
+                    source.video_linked,
+                    source.frames,
+                    source.objects,
+                    source.tensor_absent,
+                    source.overwritten,
+                    source.dropped,
+                    source.malformed
+                );
+            }
+            counters.video_linked = source.video_linked;
             counters.published_frames = source.frames;
             counters.objects_observed = source.objects;
             counters.frames_without_pose_tensor = source.tensor_absent;

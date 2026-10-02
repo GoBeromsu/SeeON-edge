@@ -17,7 +17,7 @@ mod policy;
 mod bed;
 
 use policy::{Fields, Transcript};
-use seeon_worker::detection_window::DetectionWindowError;
+use seeon_worker::detection_window::{self, DetectionWindow, DetectionWindowError};
 use serde_json::Value;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
@@ -528,4 +528,191 @@ fn fatal_onset_conserves_prefix_and_exact_release_after_poison() {
         out.ends_with(&format!("{}\n", support::text(&fatal["end"]))),
         "{context}: call count"
     );
+}
+
+/// Captured bytes are the rules. `source_path` is the checked caller-supplied
+/// name, not evidence that construction read a file.
+#[test]
+fn captured_tzif_bytes_match_filesystem_and_survive_source_mutation() {
+    let zones = frozen_zones("captured-bytes");
+    let root = zones.path();
+    let clocks = [
+        ("UTC", 0_i32, "1970-01-01T00:00:00", true),
+        ("UTC", 0, "1970-01-01T00:01:00", false),
+        ("Asia/Seoul", 0, "1969-12-31T23:59:59", true),
+        ("Asia/Seoul", 0, "1960-01-01T00:00:00", true),
+        ("America/New_York", 0, "1969-12-31T23:59:59", true),
+        ("America/New_York", 0, "1970-01-01T00:01:00", false),
+        ("America/New_York", -4 * 3600, "2024-11-03T01:30:00", true),
+        ("America/New_York", -5 * 3600, "2024-11-03T01:30:00", true),
+        ("America/New_York", 0, "2024-03-10T06:29:59", false),
+        ("America/New_York", 0, "2024-03-10T06:30:00", true),
+        ("America/New_York", 0, "2024-03-10T07:00:00", true),
+    ];
+    for file in support::array(&fixture()["zoneinfo"]["files"]) {
+        let key = support::text(&file["key"]);
+        let captured = tzif_bytes(file);
+        let expected_path = detection_window::zoneinfo_path(key, root).expect("checked path");
+        assert_eq!(expected_path, root.join(key));
+        let (start, end, membership) = match key {
+            "UTC" => ("00:00", "00:01", clocks_for(key, &clocks)),
+            "Asia/Seoul" => ("08:30", "09:00", clocks_for(key, &clocks)),
+            "America/New_York" => ("01:30", "19:01", clocks_for(key, &clocks)),
+            other => panic!("unexpected frozen zone {other}"),
+        };
+        let from_file =
+            DetectionWindow::from_zoneinfo_dir(start, end, key, root).expect("filesystem window");
+        let from_bytes =
+            DetectionWindow::from_tzif_bytes(start, end, key, root, &captured).expect("captured");
+        assert_eq!(from_bytes, from_file, "{key}: captured rules");
+        assert_eq!(from_bytes.source_path(), expected_path.as_path());
+        for (offset, text, expected) in membership {
+            let now = external(text, offset);
+            assert_eq!(from_bytes.contains(now).unwrap(), expected, "{key} {text}");
+            assert_eq!(from_file.contains(now).unwrap(), expected, "{key} {text}");
+        }
+    }
+
+    let seoul = tzif_bytes(
+        support::array(&fixture()["zoneinfo"]["files"])
+            .iter()
+            .find(|file| support::text(&file["key"]) == "Asia/Seoul")
+            .expect("Seoul record"),
+    );
+    let seoul_path = root.join("Asia/Seoul");
+    std::fs::write(&seoul_path, b"not tzif").expect("mutate captured source");
+    let still = DetectionWindow::from_tzif_bytes("21:00", "05:00", "Asia/Seoul", root, &seoul)
+        .expect("captured bytes ignore the mutated file");
+    assert_eq!(still.source_path(), seoul_path.as_path());
+    let in_seoul_but_not_utc = external("1970-01-01T16:00:00", 0);
+    assert!(still.contains(in_seoul_but_not_utc).unwrap());
+    assert_eq!(
+        DetectionWindow::from_zoneinfo_dir("21:00", "05:00", "Asia/Seoul", root),
+        Err(DetectionWindowError::InvalidZoneData)
+    );
+    std::fs::remove_file(&seoul_path).expect("remove source after capture");
+    let after_removal =
+        DetectionWindow::from_tzif_bytes("21:00", "05:00", "Asia/Seoul", root, &seoul)
+            .expect("captured bytes ignore removal");
+    assert_eq!(after_removal, still);
+    assert!(after_removal.contains(in_seoul_but_not_utc).unwrap());
+    assert_eq!(
+        DetectionWindow::from_zoneinfo_dir("21:00", "05:00", "Asia/Seoul", root),
+        Err(DetectionWindowError::ZoneDataUnavailable)
+    );
+}
+
+fn tzif_bytes(file: &Value) -> Vec<u8> {
+    support::array(&file["bytes"])
+        .iter()
+        .map(|byte| u8::try_from(support::uint(byte)).expect("TZif byte"))
+        .collect()
+}
+
+fn clocks_for<'a>(key: &str, clocks: &'a [(&str, i32, &str, bool)]) -> Vec<(i32, &'a str, bool)> {
+    clocks
+        .iter()
+        .filter(|row| row.0 == key)
+        .map(|row| (row.1, row.2, row.3))
+        .collect()
+}
+
+fn external(text: &str, offset: i32) -> seeon_worker::detection_window::AwareDateTime {
+    seeon_worker::detection_window::AwareDateTime::new(
+        text.parse().unwrap(),
+        Some(offset),
+        seeon_worker::detection_window::ClockRelation::DifferentTzinfo,
+    )
+    .unwrap()
+}
+
+#[test]
+fn zoneinfo_path_refuses_before_io_and_bytes_need_no_file() {
+    let directory = ZoneDir::new("byte-nonexistent-root");
+    let missing = directory.path().join("not-created");
+    assert!(!missing.exists(), "fixture root must not exist");
+    for (tz, expected) in [
+        ("", DetectionWindowError::InvalidZoneName),
+        ("../UTC", DetectionWindowError::InvalidZoneName),
+        ("Asia/../Seoul", DetectionWindowError::InvalidZoneName),
+        ("UTC/.", DetectionWindowError::InvalidZoneName),
+        ("Asia//Seoul", DetectionWindowError::InvalidZoneName),
+        ("UTC\0", DetectionWindowError::InvalidZoneName),
+        ("not a zone", DetectionWindowError::InvalidZoneName),
+    ] {
+        assert_eq!(
+            detection_window::zoneinfo_path(tz, &missing),
+            Err(expected),
+            "{tz:?}"
+        );
+        assert_eq!(
+            DetectionWindow::from_tzif_bytes("00:00", "01:00", tz, &missing, b"TZif"),
+            Err(expected),
+            "{tz:?} must fail before any byte or filesystem use"
+        );
+    }
+    assert_eq!(
+        detection_window::zoneinfo_path("UTC", Path::new("relative")),
+        Err(DetectionWindowError::InvalidZoneDirectory)
+    );
+    assert_eq!(
+        DetectionWindow::from_zoneinfo_dir("00:00", "01:00", "UTC", Path::new("relative")),
+        Err(DetectionWindowError::InvalidZoneDirectory)
+    );
+    let overlong = PathBuf::from(format!(
+        "/{}",
+        "x".repeat(detection_window::MAX_ZONE_PATH_BYTES)
+    ));
+    for root in [Path::new("relative"), overlong.as_path()] {
+        assert_eq!(
+            detection_window::zoneinfo_path("../UTC", root),
+            Err(DetectionWindowError::InvalidZoneName)
+        );
+    }
+    assert_eq!(
+        detection_window::zoneinfo_path("UTC", &overlong),
+        Err(DetectionWindowError::InvalidZoneDirectory)
+    );
+    for root in [&missing, &overlong] {
+        assert_eq!(
+            DetectionWindow::from_zoneinfo_dir("bad", "01:00", "../UTC", root),
+            Err(DetectionWindowError::InvalidTime)
+        );
+        assert_eq!(
+            DetectionWindow::from_tzif_bytes("bad", "01:00", "../UTC", root, b"bad"),
+            Err(DetectionWindowError::InvalidTime)
+        );
+    }
+
+    let zones = frozen_zones("byte-admission");
+    let utc = tzif_bytes(&fixture()["zoneinfo"]["files"][0]);
+    assert_eq!(
+        support::text(&fixture()["zoneinfo"]["files"][0]["key"]),
+        "UTC"
+    );
+    let named_only =
+        DetectionWindow::from_tzif_bytes("0:0", "1:00", "UTC", &missing, &utc).expect("no file");
+    assert_eq!(named_only.source_path(), missing.join("UTC").as_path());
+    assert!(
+        named_only
+            .contains(external("1970-01-01T00:00:00", 0))
+            .unwrap()
+    );
+    assert_eq!(
+        DetectionWindow::from_zoneinfo_dir("00:00", "01:00", "UTC", &missing),
+        Err(DetectionWindowError::ZoneDataUnavailable)
+    );
+    let oversized = vec![0_u8; seeon_worker::detection_window::MAX_TZIF_BYTES + 1];
+    assert_eq!(
+        DetectionWindow::from_tzif_bytes("00:00", "01:00", "UTC", &missing, &oversized),
+        Err(DetectionWindowError::ZoneDataTooLarge)
+    );
+    assert_eq!(
+        DetectionWindow::from_tzif_bytes("00:00", "01:00", "UTC", &missing, b"not tzif"),
+        Err(DetectionWindowError::InvalidZoneData)
+    );
+    let real = DetectionWindow::from_zoneinfo_dir("00:00", "01:00", "UTC", zones.path()).unwrap();
+    let captured =
+        DetectionWindow::from_tzif_bytes("00:00", "01:00", "UTC", zones.path(), &utc).unwrap();
+    assert_eq!(captured, real);
 }

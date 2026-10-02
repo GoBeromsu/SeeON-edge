@@ -753,7 +753,8 @@ fn fp32_engines_build_without_tf32_on_sm_120() {
     let mut engines = Map::new();
     let _gpu = gpu_lock();
     for (role, onnx) in ROLES.iter().zip(&onnx) {
-        let onnx_sha256 = hex(&sha256(&read(onnx, role.onnx_var)));
+        let onnx_bytes = read(onnx, role.onnx_var);
+        let onnx_sha256 = hex(&sha256(&onnx_bytes));
         assert_eq!(
             onnx_sha256,
             text(&manifest["models"][role.key], "onnx_sha256"),
@@ -761,7 +762,7 @@ fn fp32_engines_build_without_tf32_on_sm_120() {
             role.onnx_var
         );
         let engine = run.join(role.engine_file);
-        let identity = build_engine(onnx, &engine, DEVICE, role.input, role.dimensions)
+        let identity = build_engine(&onnx_bytes, &engine, DEVICE, role.input, role.dimensions)
             .unwrap_or_else(|error| panic!("build {} engine: {error:?}", role.key));
         assert!(!identity.tf32_enabled, "{} engine allows TF32", role.key);
         assert_eq!(

@@ -482,7 +482,7 @@ fn t30_inner_writes() {
         camera_id: CAMERA.to_owned(),
         facility_id: "facility-1".to_owned(),
         time_sec: 1.0,
-        probability: 0.9,
+        probability: Some(0.9),
     };
     let events = BTreeMap::from([(EVENT_REF.to_owned(), event)]);
     let sidecar = SealedSidecars::new(root.join(SIDECAR_DIR))

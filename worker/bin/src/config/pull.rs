@@ -6,6 +6,7 @@
 //! `config::lkg`. Python's `--config` YAML fallback is not carried, so no
 //! relay and no LKG is a typed refusal.
 
+use std::collections::BTreeMap;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, ErrorKind, Read};
 use std::os::unix::fs::OpenOptionsExt;
@@ -18,11 +19,12 @@ use ureq::http::HeaderValue;
 
 use crate::config::lkg::{LkgError, LkgStore, StoredConfig};
 use crate::config::restart::RestartDirective;
+use crate::config::windows::{self, AdmissionMode, AdmittedWindow, WindowDrop, WindowError};
 use crate::config::{lookup, parse_json};
 use crate::exit::Exit;
 use crate::json::Json;
 use crate::relay::cameras::policies::{PolicyBundle, resolve_detection_policies};
-use crate::relay::cameras::{RuntimeCamera, WorkerConfigPayload};
+use crate::relay::cameras::{PulledCamera, RuntimeCamera, WorkerConfigPayload};
 use crate::relay::client::TOKEN_HEADER;
 use crate::relay::wire::MAX_RESPONSE_BYTES;
 
@@ -53,11 +55,14 @@ pub struct PulledConfig {
     /// The payload as pulled or stored.
     pub payload: Json,
     pub config: WorkerConfigPayload,
-    /// `to_worker_config` cameras; never empty when cameras were declared.
+    /// Usable `to_worker_config` cameras; may be empty when valid registry
+    /// entries have no local RTSP URL. A wholly malformed roster is refused.
     pub cameras: Vec<RuntimeCamera>,
     /// `resolved_detection_policies`: the parsed bundle, or the image
     /// default for every parsed camera when the payload carries none.
     pub policies: PolicyBundle,
+    /// Canonical windows with strict startup validation and captured zone rules.
+    pub windows: BTreeMap<String, AdmittedWindow>,
     pub directive: RestartDirective,
     pub source: ConfigSource,
     /// True for an LKG config.
@@ -68,7 +73,9 @@ pub struct PulledConfig {
 #[derive(Clone, Debug, PartialEq)]
 pub struct WorkerConfigPoll {
     pub config: WorkerConfigPayload,
-    pub cameras: Vec<RuntimeCamera>,
+    /// Polling carries parsed registry entries, not startup runtime admission.
+    pub cameras: Vec<PulledCamera>,
+    pub windows: BTreeMap<String, AdmittedWindow>,
     pub directive: RestartDirective,
     pub clip_export_enabled: bool,
     pub clip_export_version: i128,
@@ -91,6 +98,8 @@ pub enum PullError {
     FormatMismatch,
     /// A 2xx identity body Python cannot read (it raises and exits 1).
     MalformedReleaseIdentity,
+    /// A local zone asset failed; this is not a malformed relay payload or LKG miss.
+    WindowAsset(WindowError),
     /// No valid fresh pull and no usable LKG.
     NoConfig,
 }
@@ -99,7 +108,7 @@ impl PullError {
     pub fn exit(&self) -> Exit {
         match self {
             Self::SchemaMismatch { .. } | Self::FormatMismatch => Exit::RefuseToStart,
-            Self::MalformedReleaseIdentity => Exit::Runtime,
+            Self::MalformedReleaseIdentity | Self::WindowAsset(_) => Exit::Runtime,
             Self::NoConfig => Exit::Config,
         }
     }
@@ -151,11 +160,14 @@ pub fn pull_startup_config(
     relay_url: &str,
     relay_token: &str,
     state_dir: &Path,
+    zoneinfo_dir: &Path,
 ) -> Result<PulledConfig, PullError> {
     let store = LkgStore::new(state_dir);
     let directory = state_dir.join("config-lkg");
-    let fresh = fetch_worker_config(relay_url, relay_token)
-        .and_then(|payload| snapshot(payload, ConfigSource::Pulled));
+    let fresh = match fetch_worker_config(relay_url, relay_token) {
+        Some(payload) => snapshot(payload, ConfigSource::Pulled, zoneinfo_dir)?,
+        None => None,
+    };
     if let Some(fresh) = fresh {
         match store.save(&fresh.payload, fresh.directive) {
             Ok(true) => return Ok(fresh),
@@ -170,7 +182,7 @@ pub fn pull_startup_config(
                 return Ok(fresh);
             }
         };
-        if let Some(pulled) = from_stored(stored) {
+        if let Some(pulled) = from_stored(stored, zoneinfo_dir)? {
             return Ok(pulled);
         }
         eprintln!(
@@ -182,7 +194,7 @@ pub fn pull_startup_config(
         return Ok(fresh);
     }
     match store.load() {
-        Ok(Some(stored)) => from_stored(stored).ok_or(PullError::NoConfig),
+        Ok(Some(stored)) => from_stored(stored, zoneinfo_dir)?.ok_or(PullError::NoConfig),
         Ok(None) => Err(PullError::NoConfig),
         Err(error) => {
             report_store_error(&directory, &error);
@@ -236,44 +248,142 @@ fn unlink_current(directory: &Path) -> io::Result<()> {
     File::open(directory)?.sync_all()
 }
 
-/// Python `pull_worker_config_poll`: `None` on any pull or payload failure.
-pub fn poll_worker_config(relay_url: &str, relay_token: &str) -> Option<WorkerConfigPoll> {
-    let pulled = snapshot(
-        fetch_worker_config(relay_url, relay_token)?,
-        ConfigSource::Pulled,
+/// Python `pull_worker_config_poll`: canonical windows and policy validation,
+/// not `to_worker_config`. Local asset exceptions remain distinguishable from
+/// malformed payloads; the restart caller handles IO as Python's checker does.
+pub fn poll_worker_config(
+    relay_url: &str,
+    relay_token: &str,
+    zoneinfo_dir: &Path,
+) -> Result<Option<WorkerConfigPoll>, WindowError> {
+    let Some(payload) = fetch_worker_config(relay_url, relay_token) else {
+        return Ok(None);
+    };
+    let Some(config) = parsed_payload(&payload, ConfigSource::Pulled) else {
+        return Ok(None);
+    };
+    let windows = windows::admit_at(
+        &config,
+        zoneinfo_dir,
+        AdmissionMode::Poll,
+        &mut report_window_drop,
     )?;
-    Some(WorkerConfigPoll {
-        clip_export_enabled: pulled.config.clip_export_enabled(),
-        clip_export_version: pulled.config.clip_export_version(),
-        directive: pulled.directive,
-        cameras: pulled.cameras,
-        config: pulled.config,
-    })
+    if resolved_policies(&config, ConfigSource::Pulled).is_none() {
+        return Ok(None);
+    }
+    Ok(Some(WorkerConfigPoll {
+        clip_export_enabled: config.clip_export_enabled(),
+        clip_export_version: config.clip_export_version(),
+        directive: config.directive(),
+        cameras: config.pulled_cameras(),
+        config,
+        windows,
+    }))
 }
 
 /// Python `_snapshot_from_stored`: the stored payload re-validated, and
 /// its directive equal to the stored one.
-fn from_stored(stored: StoredConfig) -> Option<PulledConfig> {
-    let pulled = snapshot(stored.payload, ConfigSource::Lkg)?;
-    (pulled.directive == stored.directive).then_some(pulled)
+fn from_stored(
+    stored: StoredConfig,
+    zoneinfo_dir: &Path,
+) -> Result<Option<PulledConfig>, PullError> {
+    let Some(pulled) = snapshot(stored.payload, ConfigSource::Lkg, zoneinfo_dir)? else {
+        return Ok(None);
+    };
+    Ok((pulled.directive == stored.directive).then_some(pulled))
 }
 
 /// Python `_snapshot_from_payload`: `BackendWorkerConfigPayload` then
 /// `to_worker_config`, whose `resolved_detection_policies` refuses a
 /// malformed bundle (`pull_models.py:287-295`). A refused bundle is never
-/// saved: a fresh pull falls back to the LKG, an LKG is skipped and a poll
-/// yields no restart candidate. The refusal lines are the ones
+/// saved: a malformed fresh pull falls back to the LKG, an invalid LKG is
+/// skipped. Local zone asset faults propagate without deleting valid cache
+/// data. The refusal lines are the ones
 /// `load_worker_config_from_relay` prints (`config_pull.py:135-136`, `167-168`).
-fn snapshot(payload: Json, source: ConfigSource) -> Option<PulledConfig> {
-    let config = WorkerConfigPayload::parse(&payload).ok()?;
-    let cameras = config.runtime_cameras().ok()?;
+fn snapshot(
+    payload: Json,
+    source: ConfigSource,
+    zoneinfo_dir: &Path,
+) -> Result<Option<PulledConfig>, PullError> {
+    let Some(config) = parsed_payload(&payload, source) else {
+        return Ok(None);
+    };
+    let Ok(cameras) = config.runtime_cameras() else {
+        report_malformed(source);
+        return Ok(None);
+    };
+    let windows = match windows::admit_at(
+        &config,
+        zoneinfo_dir,
+        AdmissionMode::Startup,
+        &mut report_window_drop,
+    ) {
+        Ok(windows) => windows,
+        Err(WindowError::StrictClock) => {
+            report_malformed(source);
+            return Ok(None);
+        }
+        Err(error) => return Err(PullError::WindowAsset(error)),
+    };
+    if config.domain_selection().resolve().is_err() {
+        report_malformed(source);
+        return Ok(None);
+    }
+    let Some(policies) = resolved_policies(&config, source) else {
+        return Ok(None);
+    };
+    Ok(Some(PulledConfig {
+        directive: config.directive(),
+        payload,
+        config,
+        cameras,
+        policies,
+        windows,
+        source,
+        stale: source == ConfigSource::Lkg,
+    }))
+}
+
+fn parsed_payload(payload: &Json, source: ConfigSource) -> Option<WorkerConfigPayload> {
+    match WorkerConfigPayload::parse(payload) {
+        Ok(config) => Some(config),
+        Err(_) => {
+            report_malformed(source);
+            None
+        }
+    }
+}
+
+fn report_malformed(source: ConfigSource) {
+    match source {
+        ConfigSource::Pulled => eprintln!("worker config pull skipped: malformed payload"),
+        ConfigSource::Lkg => eprintln!("worker config LKG skipped: malformed payload"),
+    }
+}
+
+fn report_window_drop(drop: WindowDrop<'_>) {
+    match drop.definition {
+        Some(window) => eprintln!(
+            "detection window for domain {:?} is invalid ({}): start={:?} end={:?} tz={:?}; \
+             falling open to ALWAYS/24-7 detection for this domain",
+            drop.domain, drop.reason, window.start, window.end, window.tz,
+        ),
+        None => eprintln!(
+            "detection window for domain {:?} is invalid ({}); \
+             falling open to ALWAYS/24-7 detection for this domain",
+            drop.domain, drop.reason,
+        ),
+    }
+}
+
+fn resolved_policies(config: &WorkerConfigPayload, source: ConfigSource) -> Option<PolicyBundle> {
     let camera_ids: Vec<String> = config
         .cameras()
         .into_iter()
         .map(|camera| camera.camera_id)
         .collect();
-    let policies = match resolve_detection_policies(config.detection_policies(), &camera_ids) {
-        Ok(policies) => policies,
+    match resolve_detection_policies(config.detection_policies(), &camera_ids) {
+        Ok(policies) => Some(policies),
         Err(error) => {
             match source {
                 ConfigSource::Pulled => {
@@ -283,18 +393,9 @@ fn snapshot(payload: Json, source: ConfigSource) -> Option<PulledConfig> {
                     eprintln!("ml-worker: worker config LKG detection policy refused: {error}");
                 }
             }
-            return None;
+            None
         }
-    };
-    Some(PulledConfig {
-        directive: config.directive(),
-        payload,
-        config,
-        cameras,
-        policies,
-        source,
-        stale: source == ConfigSource::Lkg,
-    })
+    }
 }
 
 /// Python `_pull_payload`: only a 200 JSON object counts.

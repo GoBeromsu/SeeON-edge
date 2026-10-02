@@ -73,7 +73,7 @@ fn parse(bytes: &[u8], sidecar_path: PathBuf) -> Option<Recovery> {
             camera_id: text(item, "camera_id")?,
             facility_id: text(item, "facility_id")?,
             time_sec: item.get("time_sec")?.as_f64()?,
-            probability: item.get("probability")?.as_f64()?,
+            probability: finite_probability(item.get("probability")?)?,
         };
         events.insert(event.identity.clone(), event);
     }
@@ -92,4 +92,17 @@ fn parse(bytes: &[u8], sidecar_path: PathBuf) -> Option<Recovery> {
 
 fn text(value: &Value, key: &str) -> Option<String> {
     value.get(key)?.as_str().map(str::to_owned)
+}
+
+/// Null is absent. A finite number, including zero, is present. Missing,
+/// bool, string, object, array, and non-finite values are not a probability.
+fn finite_probability(value: &Value) -> Option<Option<f64>> {
+    match value {
+        Value::Null => Some(None),
+        Value::Number(number) => {
+            let probability = number.as_f64()?;
+            probability.is_finite().then_some(Some(probability))
+        }
+        Value::Bool(_) | Value::String(_) | Value::Array(_) | Value::Object(_) => None,
+    }
 }

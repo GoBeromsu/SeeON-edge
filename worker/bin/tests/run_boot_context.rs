@@ -34,6 +34,7 @@ fn config(facilities: &[&str]) -> PulledConfig {
         payload,
         config,
         cameras,
+        windows: Default::default(),
         source: ConfigSource::Pulled,
         stale: false,
     }

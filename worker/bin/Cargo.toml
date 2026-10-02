@@ -26,7 +26,7 @@ httparse = "=1.10.1"
 # D3: SIGTERM/SIGINT receipt hooks and async-signal-safe watchdog exit.
 signal-hook = { version = "=0.4.4", default-features = false }
 # D3: flock, fallocate, uuid4 random bytes and primed dynamic monotonic time.
-rustix = { version = "=1.1.5", features = ["std", "rand", "fs", "time"] }
+rustix = { version = "=1.1.5", features = ["std", "rand", "fs", "time", "process"] }
 
 [dev-dependencies]
 # D3: order-preserving parse of the codec-edges key-order input text.

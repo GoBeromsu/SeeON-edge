@@ -6,7 +6,7 @@
 use serde_json::Value;
 
 use crate::delivery::EntryKind;
-use crate::relay::RelayClient;
+use crate::relay::client::{DeadlineClient, RequestError};
 use crate::relay::wire::{DeliveryFailure, HttpResult, classify_http_failure, parse_json_object};
 use crate::seam::Clock;
 
@@ -22,6 +22,19 @@ pub enum MediaEntryError {
     NotAnObject,
     /// The entry kind is not a snapshot attachment or disposition.
     NotMedia,
+}
+
+/// Local cutoff is control flow, not an invalid entry or relay rejection.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MediaSendError {
+    Invalid(MediaEntryError),
+    Cutoff,
+}
+
+impl From<MediaEntryError> for MediaSendError {
+    fn from(error: MediaEntryError) -> Self {
+        Self::Invalid(error)
+    }
 }
 
 /// The relay path for a media entry kind; `None` for EVENT and CLIP.
@@ -68,15 +81,26 @@ pub fn parse_relay_acceptance(
 }
 
 /// POST one queued snapshot attachment or disposition. The outer `Err` is an
-/// entry that cannot be sent at all; the inner result is the relay's verdict.
+/// invalid entry or local cutoff; the inner result is the relay's verdict.
 pub fn send_media(
-    client: &RelayClient,
+    client: &DeadlineClient<'_>,
     kind: EntryKind,
     entry: &Value,
     clock: &dyn Clock,
-) -> Result<Result<(), DeliveryFailure>, MediaEntryError> {
+) -> Result<Result<(), DeliveryFailure>, MediaSendError> {
+    if client.check().is_err() {
+        return Err(MediaSendError::Cutoff);
+    }
     let path = media_path(kind).ok_or(MediaEntryError::NotMedia)?;
     let body = media_body(entry)?;
-    let result = client.post_json(path, &body).map_err(DeliveryFailure::from);
-    Ok(parse_relay_acceptance(result, clock))
+    let result = match client.post_json(path, &body) {
+        Ok(response) => Ok(response),
+        Err(RequestError::Transport(error)) => Err(DeliveryFailure::from(error)),
+        Err(RequestError::Cutoff) => return Err(MediaSendError::Cutoff),
+    };
+    let parsed = parse_relay_acceptance(result, clock);
+    if client.check().is_err() {
+        return Err(MediaSendError::Cutoff);
+    }
+    Ok(parsed)
 }

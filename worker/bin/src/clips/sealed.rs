@@ -44,7 +44,8 @@ pub struct SealedEvent {
     pub camera_id: String,
     pub facility_id: String,
     pub time_sec: f64,
-    pub probability: f64,
+    /// Absent model probability is JSON null; never a fabricated number.
+    pub probability: Option<f64>,
 }
 
 /// A persisted sidecar read back for replay.

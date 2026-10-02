@@ -6,7 +6,7 @@
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
-use super::identity::{FLOW_IDENTITY_FILES, IdentityKind, verify_engine_identity};
+use super::identity::{IdentityKind, verify_environment};
 use super::onnx_shape::{Dim, OnnxShapeKind, batch_axis_is_dynamic, input_dims};
 use crate::config::env::Env;
 
@@ -26,8 +26,6 @@ pub const FLOW_BOOT_ENV: [&str; 12] = [
     "ML_WORKER_FLOW_BATCH_SIZE",
 ];
 
-const ENGINE_PATH: &str = "ML_WORKER_FLOW_ENGINE_PATH";
-const ENGINE_IDENTITY_PATH: &str = "ML_WORKER_FLOW_ENGINE_IDENTITY_PATH";
 const ONNX_PATH: &str = "ML_WORKER_FLOW_ONNX_PATH";
 const BATCH_SIZE: &str = "ML_WORKER_FLOW_BATCH_SIZE";
 const RTSP_RECONNECT_INTERVAL_SEC: &str = "ML_WORKER_FLOW_RTSP_RECONNECT_INTERVAL_SEC";
@@ -48,7 +46,7 @@ pub enum FlowBootKind {
     WiringMissing,
     /// `flow profile batch size must be a positive integer`.
     BatchNotPositive,
-    /// A `verify_engine_identity` refusal; the subject is its subject.
+    /// An aggregate identity refusal; the subject names the failed binding.
     Identity(IdentityKind),
     /// `Flow engine batch {identity} does not match configured batch
     /// {configured}`; the subject is `"{identity} {configured}"`.
@@ -94,7 +92,7 @@ fn value<'a>(env: &'a Env, key: &str) -> &'a str {
 /// names. It does not skip U+001C..U+001F, which `str.strip()` does.
 /// Unicode digits (fullwidth, Arabic-Indic) are refused although Python
 /// `int()` accepts them: a deliberate fail-closed deviation.
-fn positive_int(text: &str) -> Option<String> {
+pub(crate) fn positive_int(text: &str) -> Option<String> {
     let trimmed = text.trim_matches(char::is_whitespace);
     let (negative, body) = match trimmed.strip_prefix('-') {
         Some(rest) => (true, rest),
@@ -163,6 +161,33 @@ pub fn verify_flow_boot_inputs(
     env: &Env,
     deployed_batch: Option<i128>,
 ) -> Boot<BTreeMap<String, String>> {
+    verify_with(env, deployed_batch, || {
+        let selection = crate::config::admit_selected_bundle(env).map_err(|_| FlowBootError {
+            kind: FlowBootKind::Identity(IdentityKind::Schema),
+            subject: "fall.bundle".to_owned(),
+        })?;
+        verify_environment(env, selection.as_ref(), None).map_err(|error| FlowBootError {
+            kind: FlowBootKind::Identity(error.kind),
+            subject: error.subject,
+        })
+    })
+}
+
+/// Runtime reuses the exact identity and selection admitted by check_config.
+/// It must not reload a potentially different selection between these gates.
+pub(crate) fn verify_admitted_flow_inputs(
+    env: &Env,
+    deployed_batch: Option<i128>,
+    identity: BTreeMap<String, String>,
+) -> Boot<BTreeMap<String, String>> {
+    verify_with(env, deployed_batch, || Ok(identity))
+}
+
+fn verify_with(
+    env: &Env,
+    deployed_batch: Option<i128>,
+    load: impl FnOnce() -> Boot<BTreeMap<String, String>>,
+) -> Boot<BTreeMap<String, String>> {
     let missing: Vec<&str> = FLOW_BOOT_ENV
         .into_iter()
         .filter(|key| value(env, key).is_empty())
@@ -173,21 +198,23 @@ pub fn verify_flow_boot_inputs(
     let Some(configured) = positive_int(value(env, BATCH_SIZE)) else {
         return refuse(FlowBootKind::BatchNotPositive, "");
     };
-    let files: Vec<(&str, PathBuf)> = FLOW_IDENTITY_FILES
-        .into_iter()
-        .map(|(key, name)| (key, PathBuf::from(value(env, name))))
-        .collect();
-    let identity = verify_engine_identity(
-        &PathBuf::from(value(env, ENGINE_PATH)),
-        &PathBuf::from(value(env, ENGINE_IDENTITY_PATH)),
-        &files,
-        deployed_batch,
-    )
-    .map_err(|error| FlowBootError {
-        kind: FlowBootKind::Identity(error.kind),
-        subject: error.subject,
-    })?;
+    let identity = load()?;
     let built = identity.get("batch_size").map_or("", String::as_str);
+    if let Some(deployed) = deployed_batch {
+        if deployed < 0 {
+            return refuse(
+                FlowBootKind::Identity(IdentityKind::NegativeDeployedBatch),
+                "",
+            );
+        }
+        if built
+            .parse::<i128>()
+            .ok()
+            .is_none_or(|batch| batch < deployed)
+        {
+            return refuse(FlowBootKind::Identity(IdentityKind::BatchNotCovering), "");
+        }
+    }
     if built != configured {
         return refuse(
             FlowBootKind::BatchMismatch,
@@ -208,3 +235,7 @@ pub fn verify_flow_boot_inputs(
     }
     Ok(identity)
 }
+
+#[cfg(test)]
+#[path = "flow_boot/policy_tests.rs"]
+mod policy_tests;

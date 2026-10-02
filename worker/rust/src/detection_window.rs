@@ -6,6 +6,16 @@
 //! There is no bundled database, environment/system-zone lookup, or UTC fallback.
 //! Reconstruct a window after a tzdata update: loaded rules are immutable.
 //!
+//! `zoneinfo_path` validates the IANA key and explicit root before any open.
+//! `from_tzif_bytes` compiles caller-captured bytes for that same checked path
+//! and performs no filesystem IO. `source_path` records that caller-supplied
+//! name; it is not evidence that a file was read. `from_zoneinfo_dir` still
+//! opens and reads that path itself and still collapses every open/read
+//! failure to `ZoneDataUnavailable`. Callers that need to separate Python
+//! fail-open (missing or non-TZif) from an actual IO or corruption fault
+//! classify the open themselves, then compile the captured bytes. There is no
+//! environment lookup, global cache, or second timezone database.
+//!
 //! Admission limits are explicit: 256-byte zone names, 4096-byte paths, 1 MiB
 //! TZif files, ASCII one/two-digit HH:MM components (Python also accepts some
 //! Unicode decimal digits), Python years 1..=9999, microsecond civil precision,
@@ -16,6 +26,7 @@
 use std::fs::File;
 use std::io::Read;
 use std::path::{Path, PathBuf};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use jiff::Timestamp;
 pub use jiff::civil::DateTime;
@@ -75,6 +86,8 @@ pub enum ClockRelation {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ValidatedClock {
     SameTargetCivil(DateTime),
+    // Construct only through AwareDateTime::new's canonicalization: equality
+    // must compare instants, not noncanonical seconds/fraction pairs.
     ExternalInstant(Timestamp),
 }
 
@@ -105,6 +118,11 @@ impl AwareDateTime {
                 let timestamp = offset
                     .to_timestamp(local)
                     .map_err(|_| DetectionWindowError::ClockOutOfRange)?;
+                // An offset crossing the epoch can produce a noncanonical
+                // seconds/fraction pair. Store the checked instant, not its
+                // representation, so equivalent external clocks compare equal.
+                let timestamp = Timestamp::from_nanosecond(timestamp.as_nanosecond())
+                    .map_err(|_| DetectionWindowError::ClockOutOfRange)?;
                 // Python may overflow while subtracting the source offset,
                 // even if a subsequent target conversion would be in range.
                 if !(1..=9999).contains(&Offset::UTC.to_datetime(timestamp).year()) {
@@ -114,6 +132,37 @@ impl AwareDateTime {
             }
         };
         Ok(Self(clock))
+    }
+    /// Convert an injected UTC `SystemTime` to Python microsecond civil precision.
+    ///
+    /// Truncation is Euclidean floor, so a negative sub-microsecond remainder
+    /// moves to the previous microsecond. The civil value is built only through
+    /// Jiff's checked timestamp and `Offset::UTC`; this method does not read the
+    /// wall clock, environment, or system zone.
+    /// Like Python `datetime.now(UTC)`, its tzinfo differs from every target
+    /// `ZoneInfo`, including `ZoneInfo("UTC")`.
+    pub fn from_utc_system_time(time: SystemTime) -> Result<Self, DetectionWindowError> {
+        let nanoseconds = match time.duration_since(UNIX_EPOCH) {
+            Ok(duration) => i128::try_from(duration.as_nanos())
+                .map_err(|_| DetectionWindowError::ClockOutOfRange)?,
+            Err(earlier) => {
+                let signed = i128::try_from(earlier.duration().as_nanos())
+                    .map_err(|_| DetectionWindowError::ClockOutOfRange)?;
+                signed
+                    .checked_neg()
+                    .ok_or(DetectionWindowError::ClockOutOfRange)?
+            }
+        };
+        let microseconds = i64::try_from(nanoseconds.div_euclid(1_000))
+            .map_err(|_| DetectionWindowError::ClockOutOfRange)?;
+        let timestamp = Timestamp::from_microsecond(microseconds)
+            .map_err(|_| DetectionWindowError::ClockOutOfRange)?;
+        let local = Offset::UTC.to_datetime(timestamp);
+        // Injected instants use ClockOutOfRange; new validates civil inputs separately.
+        if !(1..=9999).contains(&local.year()) {
+            return Err(DetectionWindowError::ClockOutOfRange);
+        }
+        Self::new(local, Some(0), ClockRelation::DifferentTzinfo)
     }
 }
 
@@ -131,39 +180,35 @@ impl DetectionWindow {
         tz: &str,
         zoneinfo_dir: &Path,
     ) -> Result<Self, DetectionWindowError> {
-        let start = parse_hhmm(start)?;
-        let end = parse_hhmm(end)?;
-        if tz.is_empty()
-            || tz.len() > MAX_ZONE_NAME_BYTES
-            || tz
-                .split('/')
-                .any(|part| part.is_empty() || part == "." || part == "..")
-            || !tz
-                .bytes()
-                .all(|c| c.is_ascii_alphanumeric() || b"/_-+.".contains(&c))
-        {
-            return Err(DetectionWindowError::InvalidZoneName);
-        }
-        let source_path = zoneinfo_dir.join(tz);
-        if !zoneinfo_dir.is_absolute() || source_path.as_os_str().len() > MAX_ZONE_PATH_BYTES {
-            return Err(DetectionWindowError::InvalidZoneDirectory);
-        }
+        let (start, end) = checked_bounds(start, end)?;
+        let source_path = zoneinfo_path(tz, zoneinfo_dir)?;
         let file =
             File::open(&source_path).map_err(|_| DetectionWindowError::ZoneDataUnavailable)?;
         let mut bytes = Vec::new();
+        // Bound the read. This does not reject an oversized file before open,
+        // and a failed read stays ZoneDataUnavailable: this constructor does
+        // not classify IO separately.
         file.take(MAX_TZIF_BYTES as u64 + 1)
             .read_to_end(&mut bytes)
             .map_err(|_| DetectionWindowError::ZoneDataUnavailable)?;
-        if bytes.len() > MAX_TZIF_BYTES {
-            return Err(DetectionWindowError::ZoneDataTooLarge);
-        }
-        let zone = TimeZone::tzif(tz, &bytes).map_err(|_| DetectionWindowError::InvalidZoneData)?;
-        Ok(Self {
-            start,
-            end,
-            zone,
-            source_path,
-        })
+        compile(start, end, tz, source_path, &bytes)
+    }
+
+    /// Compile exact captured TZif bytes. `zoneinfo_dir` and `tz` are checked
+    /// with the same name/root/path rules as `from_zoneinfo_dir`, then used only
+    /// as `source_path`. No file is opened or read. Bytes above 1 MiB are
+    /// `ZoneDataTooLarge` before decode; other non-TZif input is
+    /// `InvalidZoneData`.
+    pub fn from_tzif_bytes(
+        start: &str,
+        end: &str,
+        tz: &str,
+        zoneinfo_dir: &Path,
+        bytes: &[u8],
+    ) -> Result<Self, DetectionWindowError> {
+        let (start, end) = checked_bounds(start, end)?;
+        let source_path = zoneinfo_path(tz, zoneinfo_dir)?;
+        compile(start, end, tz, source_path, bytes)
     }
 
     pub fn source_path(&self) -> &Path {
@@ -180,7 +225,11 @@ impl DetectionWindow {
                 let offset = self.zone.to_offset(timestamp);
                 let local = offset.to_datetime(timestamp);
                 if !(1..=9999).contains(&local.year())
-                    || offset.to_timestamp(local).ok() != Some(timestamp)
+                    || offset
+                        .to_timestamp(local)
+                        .map(|value| value.as_nanosecond())
+                        .ok()
+                        != Some(timestamp.as_nanosecond())
                 {
                     return Err(DetectionWindowError::ClockOutOfRange);
                 }
@@ -209,10 +258,57 @@ fn parse_hhmm(value: &str) -> Result<Time, DetectionWindowError> {
         .map_err(|_| DetectionWindowError::InvalidTime)
 }
 
+/// Existing name, root, and joined-path checks, before any open.
+/// An invalid key is `InvalidZoneName` even when the root is also invalid.
+/// A relative root or a joined path over the byte bound is `InvalidZoneDirectory`.
+/// This does not check that the path exists.
+pub fn zoneinfo_path(tz: &str, zoneinfo_dir: &Path) -> Result<PathBuf, DetectionWindowError> {
+    if tz.is_empty()
+        || tz.len() > MAX_ZONE_NAME_BYTES
+        || tz
+            .split('/')
+            .any(|part| part.is_empty() || part == "." || part == "..")
+        || !tz
+            .bytes()
+            .all(|c| c.is_ascii_alphanumeric() || b"/_-+.".contains(&c))
+    {
+        return Err(DetectionWindowError::InvalidZoneName);
+    }
+    let source_path = zoneinfo_dir.join(tz);
+    if !zoneinfo_dir.is_absolute() || source_path.as_os_str().len() > MAX_ZONE_PATH_BYTES {
+        return Err(DetectionWindowError::InvalidZoneDirectory);
+    }
+    Ok(source_path)
+}
+
+fn checked_bounds(start: &str, end: &str) -> Result<(Time, Time), DetectionWindowError> {
+    Ok((parse_hhmm(start)?, parse_hhmm(end)?))
+}
+
+fn compile(
+    start: Time,
+    end: Time,
+    tz: &str,
+    source_path: PathBuf,
+    bytes: &[u8],
+) -> Result<DetectionWindow, DetectionWindowError> {
+    if bytes.len() > MAX_TZIF_BYTES {
+        return Err(DetectionWindowError::ZoneDataTooLarge);
+    }
+    let zone = TimeZone::tzif(tz, bytes).map_err(|_| DetectionWindowError::InvalidZoneData)?;
+    Ok(DetectionWindow {
+        start,
+        end,
+        zone,
+        source_path,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use ClockRelation::{DifferentTzinfo, SameTargetTzinfo};
+    use std::time::Duration;
 
     // Onsite tests must use the SAME tree as their Python reference. Missing
     // system data is a test error, never a skip or an alternate database.
@@ -406,5 +502,117 @@ mod tests {
             window("00:00", "01:00", "America/New_York").contains(early),
             Err(DetectionWindowError::ClockOutOfRange)
         );
+    }
+    fn injected(offset: Duration, before_epoch: bool) -> SystemTime {
+        if before_epoch {
+            UNIX_EPOCH.checked_sub(offset).unwrap()
+        } else {
+            UNIX_EPOCH.checked_add(offset).unwrap()
+        }
+    }
+
+    #[test]
+    fn injected_utc_epoch_and_microsecond_floor_match_python_civil_time() {
+        let cases = [
+            (Duration::ZERO, false, "1970-01-01T00:00:00"),
+            (Duration::from_nanos(999), false, "1970-01-01T00:00:00"),
+            (
+                Duration::from_nanos(1_000),
+                false,
+                "1970-01-01T00:00:00.000001",
+            ),
+            (Duration::from_nanos(1), true, "1969-12-31T23:59:59.999999"),
+            (
+                Duration::from_nanos(1_000),
+                true,
+                "1969-12-31T23:59:59.999999",
+            ),
+            (
+                Duration::from_nanos(1_001),
+                true,
+                "1969-12-31T23:59:59.999998",
+            ),
+        ];
+        let utc_night = window("23:59", "00:01", "UTC");
+        let seoul_night = window("23:59", "00:01", "Asia/Seoul");
+        let new_york_evening = window("18:59", "19:01", "America/New_York");
+        for (offset, before_epoch, civil) in cases {
+            let clock =
+                AwareDateTime::from_utc_system_time(injected(offset, before_epoch)).unwrap();
+            let expected = aware(civil, 0, DifferentTzinfo);
+            assert_eq!(clock, expected);
+            assert_eq!(
+                utc_night.contains(clock),
+                Ok(true),
+                "UTC membership for {civil}: {clock:?}"
+            );
+            assert_eq!(
+                seoul_night.contains(clock),
+                Ok(false),
+                "Seoul membership for {civil}: {clock:?}"
+            );
+            assert_eq!(
+                new_york_evening.contains(clock),
+                Ok(true),
+                "New York membership for {civil}: {clock:?}"
+            );
+        }
+        assert_eq!(
+            aware("1970-01-01T08:59:59.999999", 9 * 3600, DifferentTzinfo),
+            aware("1969-12-31T23:59:59.999999", 0, DifferentTzinfo)
+        );
+        assert_eq!(
+            aware("1969-12-31T19:00:00.000001", -5 * 3600, DifferentTzinfo),
+            aware("1970-01-01T00:00:00.000001", 0, DifferentTzinfo)
+        );
+    }
+
+    #[test]
+    fn injected_fold_instants_agree_with_existing_utc_aware_construction() {
+        // America/New_York repeated 01:30 on 2024-11-03. These are the two UTC
+        // instants selected by the -04:00 and -05:00 fold offsets.
+        let fold = window("01:30", "02:00", "America/New_York");
+        for (seconds, offset) in [(1_730_611_800_i64, -4 * 3600), (1_730_615_400, -5 * 3600)] {
+            let instant = UNIX_EPOCH + Duration::from_secs(seconds as u64);
+            let injected = AwareDateTime::from_utc_system_time(instant).unwrap();
+            let constructed = aware("2024-11-03T01:30:00", offset, DifferentTzinfo);
+            assert_eq!(injected, constructed);
+            assert_eq!(
+                fold.contains(injected).unwrap(),
+                fold.contains(constructed).unwrap()
+            );
+            assert!(fold.contains(injected).unwrap());
+        }
+    }
+
+    #[test]
+    fn injected_utc_refuses_python_and_jiff_range_without_clamping() {
+        let python_start = injected(Duration::from_secs(62_135_596_800), true);
+        let pre_python = python_start - Duration::from_micros(1);
+        assert_eq!(
+            AwareDateTime::from_utc_system_time(pre_python),
+            Err(DetectionWindowError::ClockOutOfRange)
+        );
+        assert!(AwareDateTime::from_utc_system_time(python_start).is_ok());
+
+        let past_python = UNIX_EPOCH + Duration::from_secs(253_402_300_800);
+        assert_eq!(
+            AwareDateTime::from_utc_system_time(past_python),
+            Err(DetectionWindowError::ClockOutOfRange)
+        );
+        assert_eq!(
+            AwareDateTime::from_utc_system_time(past_python - Duration::from_micros(1)),
+            Err(DetectionWindowError::ClockOutOfRange)
+        );
+
+        // Jiff's declared limit reserves offset headroom inside Python's range.
+        let last_jiff_microsecond = UNIX_EPOCH
+            + Duration::from_micros(u64::try_from(Timestamp::MAX.as_microsecond()).unwrap());
+        let past_jiff = last_jiff_microsecond + Duration::from_micros(1);
+        assert_eq!(
+            AwareDateTime::from_utc_system_time(past_jiff),
+            Err(DetectionWindowError::ClockOutOfRange)
+        );
+        assert!(AwareDateTime::from_utc_system_time(last_jiff_microsecond).is_ok());
     }
 }

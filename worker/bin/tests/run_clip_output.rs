@@ -83,7 +83,7 @@ fn recovery_at(
             camera_id: camera.to_owned(),
             facility_id: facility.to_owned(),
             time_sec: 12.5,
-            probability: 0.9,
+            probability: Some(0.9),
         },
     );
     Recovery {
@@ -256,7 +256,7 @@ fn missing_contributor_cross_camera_and_facility_are_refused() {
             camera_id: CAMERA.to_owned(),
             facility_id: "fac-2".to_owned(),
             time_sec: 13.0,
-            probability: 0.8,
+            probability: Some(0.8),
         },
     );
     facility.sealed.contributors.push(SealedContributor {

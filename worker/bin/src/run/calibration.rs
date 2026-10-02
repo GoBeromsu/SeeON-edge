@@ -14,6 +14,14 @@ pub struct Calibration {
     pub promotion_eligible: bool,
 }
 
+/// Existing runner authority, not an inferred promotion from file contents.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum CalibrationSource {
+    Packaged,
+    SelectedDefault(f64),
+    SelectedReceipt(f64),
+}
+
 /// Static refusals never carry document values or preprocessing identities.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum CalibrationError {
@@ -46,12 +54,12 @@ impl fmt::Display for CalibrationError {
 
 impl std::error::Error for CalibrationError {}
 
-/// Mirrors `ort_pose_bbox56` calibration parsing. `Some` requests receipt-grant
-/// validation, not permission to promote a publisher-ineligible calibration.
+/// Mirrors packaged/selected `ort_pose_bbox56` metadata. Selection admission
+/// owns declared threshold bounds; receipt selection still requires its grant.
 pub fn parse(
     document: &Json,
     preprocessing_identity: &str,
-    declared_receipt_threshold: Option<f64>,
+    source: CalibrationSource,
 ) -> Result<Calibration, CalibrationError> {
     let Json::Object(members) = document else {
         return Err(CalibrationError::InvalidDocument);
@@ -87,26 +95,33 @@ pub fn parse(
         return Err(CalibrationError::TemporalRule);
     }
     let candidate_threshold = number(member(members, "threshold"));
-    let receipt_threshold = candidate_threshold.filter(|value| (0.0..=1.0).contains(value));
-    let Some(Json::Bool(promotion_eligible)) = member(members, "promotion_eligible") else {
-        return Err(CalibrationError::PromotionEligibility);
+    let (receipt_threshold, promotion_eligible) = match source {
+        CalibrationSource::Packaged => {
+            let Some(Json::Bool(eligible)) = member(members, "promotion_eligible") else {
+                return Err(CalibrationError::PromotionEligibility);
+            };
+            (
+                candidate_threshold.filter(|value| (0.0..=1.0).contains(value)),
+                *eligible,
+            )
+        }
+        CalibrationSource::SelectedDefault(declared) => (Some(declared), false),
+        CalibrationSource::SelectedReceipt(declared) => {
+            if member(members, "promotion_eligible") != Some(&Json::Bool(true)) {
+                return Err(CalibrationError::ReceiptIneligible);
+            }
+            if !candidate_threshold.is_some_and(|granted| isclose(granted, declared)) {
+                return Err(CalibrationError::ReceiptGrant);
+            }
+            (Some(declared), true)
+        }
     };
-    if let Some(declared) = declared_receipt_threshold {
-        if !promotion_eligible {
-            return Err(CalibrationError::ReceiptIneligible);
-        }
-        // Python validates the numeric grant itself, not the optional in-range
-        // projection above. Selection admission owns its own threshold bounds.
-        if !candidate_threshold.is_some_and(|granted| isclose(granted, declared)) {
-            return Err(CalibrationError::ReceiptGrant);
-        }
-    }
     Ok(Calibration {
         temperature,
         receipt_threshold,
         transition_votes: *votes,
         transition_window: *window,
-        promotion_eligible: *promotion_eligible,
+        promotion_eligible,
     })
 }
 
@@ -129,7 +144,7 @@ fn number(value: Option<&Json>) -> Option<f64> {
 
 /// Python `math.isclose` defaults: rel_tol=1e-9, abs_tol=0.0. Equality must
 /// precede the infinity refusal; neither NaN nor opposite infinities is close.
-fn isclose(left: f64, right: f64) -> bool {
+pub(crate) fn isclose(left: f64, right: f64) -> bool {
     if left == right {
         return true;
     }

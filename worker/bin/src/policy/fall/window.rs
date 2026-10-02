@@ -98,7 +98,6 @@ impl Windows {
         }
         outcome
     }
-
     /// The stream-epoch reset of a PTS rollback: a fresh classifier.
     pub fn clear(&mut self) {
         *self = Self::default();

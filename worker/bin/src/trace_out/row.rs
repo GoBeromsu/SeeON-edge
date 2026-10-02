@@ -21,7 +21,7 @@ pub const KEYPOINTS: usize = 17;
 /// `(x, y, confidence)`; every value is a unit float.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ReplayTrack {
-    pub track_id: i64,
+    pub track_id: i128,
     pub lifecycle: Lifecycle,
     pub bbox: [f64; 5],
     pub keypoints: [[f64; 3]; KEYPOINTS],
@@ -110,7 +110,7 @@ impl ReplayTrack {
     fn to_json(&self) -> Json {
         let points = self.keypoints.iter().map(|point| floats(point)).collect();
         Json::Object(vec![
-            member("track_id", Json::Int(i128::from(self.track_id))),
+            member("track_id", Json::Int(self.track_id)),
             member("lifecycle", Json::Str(self.lifecycle.as_str().to_owned())),
             member("bbox", floats(&self.bbox)),
             member("keypoints", Json::Array(points)),

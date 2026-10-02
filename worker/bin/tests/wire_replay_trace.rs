@@ -66,7 +66,7 @@ fn fresh_dir(name: &str) -> PathBuf {
     dir
 }
 
-fn track(track_id: i64) -> ReplayTrack {
+fn track(track_id: i128) -> ReplayTrack {
     let mut keypoints = [[0.0; 3]; 17];
     for (index, point) in (0u8..).zip(keypoints.iter_mut()) {
         *point = [
@@ -212,6 +212,16 @@ fn wire_canonical_matches_python_golden() {
         sha256_hex(canonical.as_bytes()),
         golden_entry(WIRE_GOLDEN)["sha256"]
     );
+}
+#[test]
+fn u64_max_track_id_serialises_as_an_exact_integer() {
+    let mut row = golden_row(1);
+    row.tracks[0].track_id = i128::from(u64::MAX);
+    let line = row
+        .encode_line()
+        .expect("max native id is a valid track id");
+    assert!(line.contains("\"track_id\":18446744073709551615,"));
+    assert!(!line.contains("18446744073709552000"));
 }
 
 #[test]
@@ -480,6 +490,7 @@ from shared.events.replay_wire import decode_replay_trace
 from worker.pipeline.trace.replay_trace_writer import ReplayTraceWriter
 
 header, rows = decode_jsonl(Path(sys.argv[1]).read_text(encoding="utf-8"))
+assert rows[-1].tracks[0].track_id == 18446744073709551615
 wire = decode_replay_trace(json.loads(Path(sys.argv[2]).read_text(encoding="utf-8")))
 results = []
 for scenario in json.loads(sys.argv[3]):
@@ -524,6 +535,9 @@ fn python_decodes_rust_outputs_and_rotates_alike() {
     lost.lifecycle = Lifecycle::Lost;
     wide.tracks.push(lost);
     rows.push(wide);
+    let mut native_max = golden_row(10);
+    native_max.tracks[0].track_id = i128::from(u64::MAX);
+    rows.push(native_max);
 
     let mut all = ReplayTraceWriter::new(&dir.join("all"), CAMERA, DEFAULT_MAX_BYTES, 1)
         .expect("writer opens");

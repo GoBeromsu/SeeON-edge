@@ -34,7 +34,17 @@ pub(super) fn require_directory(path: &Path, label: &str) -> Admission<()> {
 /// open (ELOOP) and so reports "unavailable", as in Python.
 pub(super) fn read_regular(path: &Path, label: &str) -> Admission<Vec<u8>> {
     let flags = OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC;
-    let Ok(descriptor) = rustix::fs::open(path, flags, Mode::empty()) else {
+    read_file(path, label, flags)
+}
+
+/// Packaged bundles retain Python's final-component symlink-following policy.
+pub(super) fn read_following(path: &Path, label: &str) -> Admission<Vec<u8>> {
+    read_file(path, label, OFlags::RDONLY | OFlags::CLOEXEC)
+}
+
+fn read_file(path: &Path, label: &str, flags: OFlags) -> Admission<Vec<u8>> {
+    // Both modes require regular files; never wait for a FIFO writer before fstat.
+    let Ok(descriptor) = rustix::fs::open(path, flags | OFlags::NONBLOCK, Mode::empty()) else {
         return refuse(AdmissionKind::Unavailable, label);
     };
     let mut file = File::from(descriptor);
@@ -52,7 +62,7 @@ pub(super) fn read_regular(path: &Path, label: &str) -> Admission<Vec<u8>> {
 
 /// `Path.resolve(strict=False)`: follow every existing symlink, keep the
 /// missing tail as written, and apply `..` to the resolved prefix.
-fn resolve_lenient(path: &Path) -> Admission<PathBuf> {
+pub(super) fn resolve_lenient(path: &Path) -> Admission<PathBuf> {
     let unavailable = || refuse(AdmissionKind::PathUnavailable, "");
     let Ok(absolute) = std::path::absolute(path) else {
         return unavailable();

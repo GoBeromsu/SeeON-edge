@@ -91,7 +91,11 @@ fn events_of(call: &Value) -> BTreeMap<String, SealedEvent> {
                 camera_id: text(event, "camera_id"),
                 facility_id: text(event, "facility_id"),
                 time_sec: event["time_sec"].as_f64().expect("time_sec"),
-                probability: event["probability"].as_f64().expect("probability"),
+                probability: match &event["probability"] {
+                    Value::Null => None,
+                    Value::Number(number) => Some(number.as_f64().expect("finite probability")),
+                    other => panic!("probability {other}"),
+                },
             };
             (event_ref.clone(), sealed)
         })
@@ -573,6 +577,247 @@ fn malformed_sidecars_are_kept_unchanged_and_counted() {
     for (path, bytes) in &malformed {
         assert_eq!(&fs::read(path).expect("kept"), bytes, "{}", path.display());
     }
+}
+
+fn event_with(identity: &str, probability: Option<f64>) -> SealedEvent {
+    SealedEvent {
+        domain: "fall".to_owned(),
+        event_type: "fall_detected".to_owned(),
+        identity: identity.to_owned(),
+        camera_id: "cam-optional".to_owned(),
+        facility_id: "facility-1".to_owned(),
+        time_sec: 12.5,
+        probability,
+    }
+}
+
+fn clip_with(clip_id: &str, refs: &[&str]) -> SealedClip {
+    SealedClip {
+        clip_id: clip_id.to_owned(),
+        path: format!("/srv/seeon/flow-out/{clip_id}.mp4"),
+        duration_ms: 4_000,
+        boundary: "end".to_owned(),
+        contributors: refs
+            .iter()
+            .enumerate()
+            .map(|(index, event_ref)| SealedContributor {
+                event_ref: (*event_ref).to_owned(),
+                detected_at: format!("2026-08-17T09:00:0{index}.000000+00:00"),
+            })
+            .collect(),
+    }
+}
+
+fn persisted_events(bench: &Bench, clip_id: &str) -> BTreeMap<String, SealedEvent> {
+    let pending = bench.sidecars.pending("cam-optional").expect("pending");
+    assert!(pending.malformed.is_empty());
+    let recovery = pending
+        .recoveries
+        .iter()
+        .find(|recovery| recovery.sealed.clip_id == clip_id)
+        .unwrap_or_else(|| panic!("{clip_id} was not recovered"));
+    recovery.events.clone()
+}
+
+#[test]
+fn absent_probability_persists_as_null_and_zero_stays_present() {
+    let bench = Bench::new("optional-probability");
+    let absent = event_with("evt-absent", None);
+    let zero = event_with("evt-zero", Some(0.0));
+    let present = event_with("evt-present", Some(0.875));
+    let clip = clip_with(
+        "sealed-optional-probability",
+        &["evt-absent", "evt-zero", "evt-present"],
+    );
+    let events = BTreeMap::from([
+        ("evt-absent".to_owned(), absent.clone()),
+        ("evt-zero".to_owned(), zero.clone()),
+        ("evt-present".to_owned(), present.clone()),
+    ]);
+    let path = bench.sidecars.persist(&clip, &events).expect("persist");
+    let bytes = fs::read(&path).expect("sidecar bytes");
+    let document: Value = serde_json::from_slice(&bytes).expect("sidecar JSON");
+    let written: Vec<&Value> = document["events"]
+        .as_array()
+        .expect("events")
+        .iter()
+        .collect();
+    assert_eq!(written[0]["probability"], Value::Null);
+    assert_eq!(written[1]["probability"], serde_json::json!(0.0));
+    assert_eq!(written[2]["probability"], serde_json::json!(0.875));
+    assert_ne!(written[0]["probability"], written[1]["probability"]);
+
+    let recovered = persisted_events(&bench, "sealed-optional-probability");
+    assert_eq!(recovered["evt-absent"].probability, None);
+    assert_eq!(recovered["evt-zero"].probability, Some(0.0));
+    assert_eq!(recovered["evt-present"].probability, Some(0.875));
+    assert_eq!(recovered["evt-absent"], absent);
+    assert_eq!(recovered["evt-zero"], zero);
+}
+
+#[test]
+fn nonfinite_probability_is_refused_and_invalid_shapes_stay_malformed() {
+    let bench = Bench::new("invalid-probability");
+    let clip = clip_with("sealed-nonfinite", &["evt-nan"]);
+    let events = BTreeMap::from([("evt-nan".to_owned(), event_with("evt-nan", Some(f64::NAN)))]);
+    let refused = bench.sidecars.persist(&clip, &events);
+    assert!(
+        matches!(refused, Err(SealedError::NonFinite)),
+        "{refused:?}"
+    );
+    assert!(
+        !bench
+            .sidecars
+            .directory()
+            .join("sealed-nonfinite.json")
+            .exists(),
+        "non-finite persist writes nothing"
+    );
+
+    let legal = clip_with("sealed-legal-zero", &["evt-zero"]);
+    let legal_events = BTreeMap::from([("evt-zero".to_owned(), event_with("evt-zero", Some(0.0)))]);
+    let legal_path = bench
+        .sidecars
+        .persist(&legal, &legal_events)
+        .expect("legal persist");
+    let legal_bytes = fs::read(&legal_path).expect("legal bytes");
+    let document: Value = serde_json::from_slice(&legal_bytes).expect("legal JSON");
+    let shapes = [
+        (Value::Bool(false), "bool"),
+        (serde_json::json!({"value": 0.0}), "object"),
+        (Value::String("0.0".to_owned()), "string"),
+        (serde_json::json!(["0.0"]), "array"),
+    ];
+    for (shape, name) in shapes {
+        let mut forged = document.clone();
+        forged["clip_id"] = Value::from(format!("sealed-{name}"));
+        forged["events"][0]["identity"] = Value::from(format!("evt-{name}"));
+        forged["events"][0]["probability"] = shape;
+        forged["contributors"][0]["event_ref"] = Value::from(format!("evt-{name}"));
+        let forged_path = bench
+            .sidecars
+            .directory()
+            .join(format!("sealed-{name}.json"));
+        fs::write(&forged_path, forged.to_string()).expect("forged sidecar");
+    }
+    let mut missing = document.clone();
+    missing["clip_id"] = Value::from("sealed-missing");
+    missing["events"][0]["identity"] = Value::from("evt-missing");
+    missing["contributors"][0]["event_ref"] = Value::from("evt-missing");
+    missing["events"][0]
+        .as_object_mut()
+        .expect("event")
+        .remove("probability");
+    fs::write(
+        bench.sidecars.directory().join("sealed-missing.json"),
+        missing.to_string(),
+    )
+    .expect("missing probability");
+
+    let pending = bench.sidecars.pending("cam-optional").expect("pending");
+    assert_eq!(pending.recoveries.len(), 1);
+    assert_eq!(
+        pending.recoveries[0].events["evt-zero"].probability,
+        Some(0.0)
+    );
+    let mut malformed: Vec<String> = pending
+        .malformed
+        .iter()
+        .map(|path| {
+            path.file_name()
+                .expect("name")
+                .to_str()
+                .expect("utf-8")
+                .to_owned()
+        })
+        .collect();
+    malformed.sort();
+    assert_eq!(
+        malformed,
+        [
+            "sealed-array.json",
+            "sealed-bool.json",
+            "sealed-missing.json",
+            "sealed-object.json",
+            "sealed-string.json",
+        ]
+    );
+    assert_eq!(fs::read(&legal_path).expect("legal kept"), legal_bytes);
+}
+
+/// Python `_event_payload` through `FlowSealedSidecars.persist`. The current
+/// Python `BusinessEvent.probability` annotation is `float`, so the oracle
+/// compares a legal zero; null is the Rust wire for an absent value.
+const PROBABILITY_ORACLE: &str = r#"
+import json, pathlib, sys
+from worker.pipeline.output.evidence.flow_sealed_sidecar import FlowSealedSidecars
+from worker.pipeline.output.evidence.smart_record_actor import ClipContributor, ClipSealed
+from worker.types import BusinessEvent
+spec = json.loads(sys.argv[1])
+events = {
+    item["identity"]: BusinessEvent(
+        domain=item["domain"], event_type=item["event_type"], identity=item["identity"],
+        camera_id=item["camera_id"], facility_id=item["facility_id"],
+        time_sec=item["time_sec"], probability=item["probability"],
+    )
+    for item in spec["events"]
+}
+sealed = ClipSealed(
+    clip_id=spec["clip_id"], path=spec["path"], duration_ms=spec["duration_ms"],
+    contributors=tuple(ClipContributor(**item) for item in spec["contributors"]),
+    boundary=spec["boundary"],
+)
+print(FlowSealedSidecars(pathlib.Path(sys.argv[2])).persist(sealed, events).read_text(encoding="utf-8"), end="")
+"#;
+
+#[test]
+#[ignore = "requires SEEON_TEST_PYTHON with the worker package on PYTHONPATH"]
+fn python_writes_absent_and_zero_probability_with_the_same_sidecar_bytes() {
+    let python = std::env::var("SEEON_TEST_PYTHON").expect("SEEON_TEST_PYTHON");
+    let bench = Bench::new("python-probability");
+    let clip = clip_with("sealed-python-probability", &["evt-absent", "evt-zero"]);
+    let events = BTreeMap::from([
+        ("evt-absent".to_owned(), event_with("evt-absent", None)),
+        ("evt-zero".to_owned(), event_with("evt-zero", Some(0.0))),
+    ]);
+    let rust_path = bench
+        .sidecars
+        .persist(&clip, &events)
+        .expect("rust persist");
+    let rust_bytes = fs::read(&rust_path).expect("rust bytes");
+    fs::remove_file(&rust_path).expect("clear rust sidecar");
+
+    let spec = serde_json::json!({
+        "clip_id": clip.clip_id,
+        "path": clip.path,
+        "duration_ms": clip.duration_ms,
+        "boundary": clip.boundary,
+        "contributors": clip.contributors.iter().map(|contributor| serde_json::json!({
+            "event_ref": contributor.event_ref,
+            "detected_at": contributor.detected_at,
+        })).collect::<Vec<_>>(),
+        "events": events.values().map(|event| serde_json::json!({
+            "domain": event.domain,
+            "event_type": event.event_type,
+            "identity": event.identity,
+            "camera_id": event.camera_id,
+            "facility_id": event.facility_id,
+            "time_sec": event.time_sec,
+            "probability": event.probability,
+        })).collect::<Vec<_>>(),
+    });
+    let output = Command::new(python)
+        .args(["-c", PROBABILITY_ORACLE])
+        .arg(spec.to_string())
+        .arg(bench.sidecars.directory())
+        .output()
+        .expect("python");
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(output.stdout, rust_bytes);
 }
 
 /// Python's `FlowSealedSidecars.pending_for_camera` over the Rust-written

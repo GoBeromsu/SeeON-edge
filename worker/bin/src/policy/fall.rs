@@ -9,6 +9,9 @@
 mod decision;
 pub mod score;
 pub mod window;
+#[cfg(test)]
+#[path = "fall/window_gate_tests.rs"]
+mod window_gate_tests;
 
 pub use decision::DecisionUpdate;
 
@@ -154,6 +157,14 @@ impl FallStage {
             self.pending = Some(pending);
         }
         Ok(events)
+    }
+
+    /// Whether this response is for the current pending frame and an awaited track.
+    /// Does not consume the response or change counters.
+    pub fn expects_response(&self, response: &FallResponse) -> bool {
+        self.pending.as_ref().is_some_and(|pending| {
+            pending.frame == response.frame && pending.awaited.contains(&response.track_id)
+        })
     }
 
     /// Takes one gpu-fall response; the pending decision is made once its

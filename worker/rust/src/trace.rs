@@ -51,6 +51,7 @@ tokens!(DecisionTraceReason {
 });
 tokens!(DecisionTraceState {
     Unknown => "unknown",
+    NotEvaluated => "not-evaluated",
     Clear => "clear",
     TransitionCandidate => "transition-candidate",
     TransitionConfirmed => "transition-confirmed",
@@ -72,6 +73,7 @@ tokens!(DecisionTraceValueName {
     TransitionWindow => "transition_window",
     ContainmentRatio => "containment_ratio",
     BedId => "bed_id",
+    DecisionState => "decision_state",
     MinContainment => "min_containment",
     CandidateFrames => "candidate_frames",
     HoldFramesThreshold => "hold_frames_threshold",
@@ -256,6 +258,28 @@ impl DecisionTraceSnapshot {
             BTreeMap::from([(DecisionTraceValueName::FallTransitionProbability, reason)]),
         )
         .expect("missing-only trace has no known values to overlap")
+    }
+
+    /// Authoritative outside-window receipt: the gate evaluated this frame
+    /// without scoring, so both states stay not-evaluated and the only missing
+    /// value is `decision_state`.
+    pub fn outside_detection_window() -> Self {
+        Self::new(
+            DecisionTraceReason::OutsideDetectionWindow,
+            (
+                DecisionTraceState::NotEvaluated,
+                DecisionTraceState::NotEvaluated,
+            ),
+            false,
+            None,
+            None,
+            BTreeMap::new(),
+            BTreeMap::from([(
+                DecisionTraceValueName::DecisionState,
+                DecisionTraceMissingReason::OutsideDetectionWindow,
+            )]),
+        )
+        .expect("missing-only outside-window trace has no known values to overlap")
     }
 }
 
@@ -477,6 +501,30 @@ mod tests {
         assert_eq!(key.as_str(), "fall_transition_probability");
         assert_eq!(reason.as_str(), "classifier-stride-not-due");
         assert_eq!(DecisionTraceReason::from_token("arbitrary-text"), None);
+    }
+
+    #[test]
+    fn outside_detection_window_snapshot_is_missing_only_and_canonical() {
+        let snapshot = DecisionTraceSnapshot::outside_detection_window();
+        assert_eq!(snapshot.reason.as_str(), "outside-detection-window");
+        assert_eq!(snapshot.previous_state.as_str(), "not-evaluated");
+        assert_eq!(snapshot.current_state.as_str(), "not-evaluated");
+        assert!(!snapshot.triggered);
+        assert_eq!(snapshot.track_id, None);
+        assert_eq!(snapshot.bed_id, None);
+        assert!(snapshot.values().is_empty());
+        assert_eq!(snapshot.missing_values().len(), 1);
+        let (name, reason) = snapshot.missing_values().first_key_value().unwrap();
+        assert_eq!(name.as_str(), "decision_state");
+        assert_eq!(reason.as_str(), "outside-detection-window");
+        assert_eq!(
+            DecisionTraceState::from_token("not-evaluated"),
+            Some(DecisionTraceState::NotEvaluated)
+        );
+        assert_eq!(
+            DecisionTraceValueName::from_token("decision_state"),
+            Some(DecisionTraceValueName::DecisionState)
+        );
     }
 }
 

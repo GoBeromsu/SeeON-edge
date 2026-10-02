@@ -75,18 +75,23 @@ impl Fixture {
     }
 
     /// `check-config --state-dir <state> <extra>` under a cleared env that
-    /// has `env` plus `HOME`; returns the exit code.
+    /// has `env` plus `HOME` and the native library search path; returns the exit code.
     fn run(&self, env: &[(&str, &str)], extra: &[&str]) -> i32 {
-        let status = Command::new(env!("CARGO_BIN_EXE_ml-worker"))
+        let mut command = Command::new(env!("CARGO_BIN_EXE_ml-worker"));
+        command
             .arg("check-config")
             .arg("--state-dir")
             .arg(self.state_dir())
             .args(extra)
             .env_clear()
             .env("HOME", self.root.join("home"))
-            .envs(env.iter().copied())
-            .status()
-            .expect("ml-worker runs");
+            .envs(env.iter().copied());
+        // The executable now links the real native owners, even for static
+        // check-config. Preserve loader configuration, not worker settings.
+        if let Some(path) = std::env::var_os("LD_LIBRARY_PATH") {
+            command.env("LD_LIBRARY_PATH", path);
+        }
+        let status = command.status().expect("ml-worker runs");
         status.code().expect("exited, not signalled")
     }
 

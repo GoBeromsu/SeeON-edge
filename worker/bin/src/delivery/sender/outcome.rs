@@ -29,12 +29,14 @@ impl From<MediaEntryError> for InvalidEntry {
 /// What one `run_once` step did to its entry.
 #[derive(Clone, Debug, PartialEq)]
 pub enum EntryOutcome {
-    /// The relay acknowledged (2xx, or 409 with a matching receipt); removed.
+    /// The relay acknowledged (2xx, or 409 with a matching receipt);
+    /// local removal succeeded or the entry was already absent.
     Acknowledged,
     /// Moved to the dead-letter directory under `status`.
     DeadLettered { status: u16 },
-    /// Dead-lettering failed or retention is full; the entry stays.
-    RetentionFull { status: u16 },
+    /// Local retention is unconfirmed. The entry is deferred for selection;
+    /// the queue or retention directory may already have changed.
+    RetentionDeferred { status: u16 },
     /// The entry stays; `counted` says whether an attempt was spent.
     Failed {
         failure: DeliveryFailure,
@@ -46,8 +48,14 @@ pub enum EntryOutcome {
     Invalid(InvalidEntry),
     /// Clip export is disabled by the backend; the clip stays.
     ClipExportDisabled,
-    /// The relay acknowledged but removing the file failed; it stays.
+    /// The relay accepted the entry, but queue cleanup failed. File presence
+    /// is not known; the entry is deferred for selection.
     AckRemovalFailed,
+    /// Shutdown cut the step off before local sender-state or queue
+    /// acknowledgement and retention effects. Not an acknowledgement,
+    /// failure, or retry. A completed remote POST or PUT is not cancelled
+    /// or uncommitted by this outcome.
+    Cutoff,
 }
 
 impl EntryOutcome {
@@ -67,6 +75,13 @@ pub enum DrainStop {
     StepLimit,
     /// The queue could not be listed; entries stay durable.
     Queue(QueueError),
+    /// Shutdown cut the pass off. Earlier outcomes stay; nothing further was
+    /// acknowledged or rewritten.
+    Cutoff,
+    /// The owner stop flag was set before the next entry started. Not a
+    /// cutoff and not a delivery failure. An entry already in progress
+    /// finished its bookkeeping.
+    Stopped,
 }
 
 #[derive(Debug)]
