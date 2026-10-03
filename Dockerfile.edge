@@ -124,6 +124,12 @@ RUN --mount=type=secret,id=rust-test-inputs,required=true,uid=65534,gid=65534 \
 
 FROM ghcr.io/astral-sh/uv:python3.12-bookworm-slim@sha256:e5b65587bce7de595f299855d7385fe7fca39b8a74baa261ba1b7147afa78e58 AS uv-bin
 
+# Filter build/verification sources before they enter any shipping image layer.
+# cargo-build and cargo-verify retain their complete, independent source copies.
+FROM uv-bin AS worker-runtime-source
+COPY worker /worker
+RUN rm -rf /worker/bin /worker/rust /worker/runtime/rust /worker/adapters/deepstream/rust
+
 FROM nvcr.io/nvidia/deepstream@sha256:f6fa0247da9290979cbb05749e7da9435d089c93db7c4dcfe85ba2488b5f4994 AS runtime
 WORKDIR /app
 RUN apt-get update \
@@ -171,7 +177,7 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 
 COPY contracts ./contracts
 COPY shared ./shared
-COPY worker ./worker
+COPY --from=worker-runtime-source /worker ./worker
 COPY worker/adapters/deepstream/configs /opt/seeon/deepstream-flow
 RUN mkdir -p \
         /root/.local/state/ml-worker \

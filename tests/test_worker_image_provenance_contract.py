@@ -272,6 +272,57 @@ def test_runtime_packages_release_binary_and_native_libraries_without_verificati
     assert 'ENV ML_WORKER_BUILD_REVISION="${SOURCE_REVISION}"' in runtime
 
 
+def test_runtime_copies_filtered_worker_without_shipping_build_stage_layers() -> None:
+    source = _dockerfile()
+    stages = _stages(source)
+    assert "FROM uv-bin AS worker-runtime-source" in source
+    assert "COPY worker /worker" in stages["worker-runtime-source"]
+    assert "COPY --from=worker-runtime-source /worker ./worker" in stages["runtime"]
+    assert "COPY worker " not in stages["runtime"]
+    runtime_header = next(
+        match.group(0) for match in _STAGE_HEADER.finditer(source) if match.group(1) == "runtime"
+    )
+    assert runtime_header.startswith("FROM nvcr.io/nvidia/deepstream@sha256:")
+    for tree in ("bin", "rust", "runtime/rust", "adapters/deepstream/rust"):
+        assert f"COPY worker/{tree} ./worker/{tree}" in stages["cargo-build"]
+
+
+def test_worker_payload_filter_removes_only_rust_trees_before_final_copy(tmp_path: Path) -> None:
+    commands = _commands(_stages(_dockerfile())["worker-runtime-source"])
+    assert len(commands) == 1
+    tokens = shlex.split(commands[0])
+    removed = ("bin", "rust", "runtime/rust", "adapters/deepstream/rust")
+    assert tokens[:2] == ["rm", "-rf"]
+    assert tokens[2:] == [f"/worker/{tree}" for tree in removed]
+    root = tmp_path / "worker payload"
+    for tree in removed:
+        fixture = root / tree / "tests" / "private-fixture.json"
+        fixture.parent.mkdir(parents=True)
+        fixture.write_bytes(b"verification-only")
+    kept = {
+        "__main__.py": b"python entry",
+        "runtime/worker.py": b"python composition",
+        "adapters/deepstream/configs/labels.txt": b"person\n",
+        "adapters/deepstream/metadata.py": b"python adapter",
+        "tools/edge_engine_build.py": b"offline builder",
+    }
+    for name, content in kept.items():
+        path = root / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(content)
+    subprocess.run(
+        ["/bin/sh", "-eu", "-c", commands[0].replace("/worker", shlex.quote(str(root)))],
+        check=True,
+        capture_output=True,
+        timeout=5,
+    )
+    for tree in removed:
+        assert not (root / tree).exists()
+    assert {
+        str(path.relative_to(root)): path.read_bytes() for path in root.rglob("*") if path.is_file()
+    } == kept
+
+
 def test_cargo_verify_requires_secret_and_keeps_cpu_tests_unchanged() -> None:
     verify = _stages(_dockerfile())["cargo-verify"]
     test_commands = [command for command in _commands(verify) if "cargo test" in command]
