@@ -95,9 +95,13 @@ ONNX bytes through the existing ONNX Runtime CPU library. The role owners in
 person-box decoding, bed tensors and fall windows. Thread-confined actors in
 `worker/bin/src/inference/cpu.rs` now warm and execute all three roles, retain
 the loaded ORT version and fatal failures independently of reply queues, and
-return CPU results without accelerator claims. Startup provider selection and
-model admission are not yet connected to these actors; the Rust camera loop
-still starts TensorRT owners. The native Makefile requires `ORT_INCLUDE_DIR`
+return CPU results without accelerator claims. Rust `run` and `check-config`
+accept `--auxiliary-runtime=onnxruntime-cpu`; the default remains `tensorrt`.
+CPU startup requires the matching schema-2 identity, binds captured model bytes
+to its retained source hashes, and passes those bytes to the existing owners.
+Unused auxiliary GPU engine paths are not required or opened. Live-pose GPU,
+lease, CUDA, hardware and Flow admission remain mandatory, including idle boot.
+The native Makefile requires `ORT_INCLUDE_DIR`
 with three digest-checked API-29 headers; their immutable source and hashes are
 listed in that Makefile. `make test-ort` additionally requires a Python
 environment with ONNX, NumPy, and ONNX Runtime 1.29.0.
@@ -116,9 +120,15 @@ batch inputs remain required. The default `--auxiliary-runtime=tensorrt`
 retains schema 1 and requires all three auxiliary engine outputs. Cache reuse
 must match the selected provider; neither mode falls back to the other.
 
-Run startup still selects TensorRT owners. The offline hybrid route does not
-establish an end-to-end mixed-provider worker, and native CPU shutdown
-qualification remains blocked by observed worker-thread execution stalls.
+Applied CPU provenance names ONNX hashes, observed ORT versions and the accepted
+thread policy, not auxiliary GPU engines or measured OS worker counts. Its
+build-level TensorRT fields are scoped as `media_inference_runtime` and
+`media_inference_runtime_version_encoded`; all-GPU manifests retain their
+existing fields. The image checks the pinned CPU loader library path at build.
+
+This wiring does not establish camera-to-PostgreSQL usability. Native CPU
+shutdown qualification remains blocked by observed worker-thread execution
+stalls; production remains the existing Python worker.
 
 CPU reference values are recorded independently by
 `python tests_support/record_ort_cpu_outputs.py --models <models> --fixtures <gpu-v2a> --output <new-directory>`,

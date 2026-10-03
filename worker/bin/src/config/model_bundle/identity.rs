@@ -12,6 +12,37 @@ pub(crate) use environment::verify_environment;
 pub(crate) use infer::engine_only as engine_only_config;
 pub(crate) use schema::{SchemaError, native_profile, validate_entries, validate_hybrid_entries};
 
+/// Explicit auxiliary provider selection; the live pose remains TensorRT.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum AuxiliaryRuntime {
+    #[default]
+    TensorRt,
+    OnnxRuntimeCpu,
+}
+
+impl AuxiliaryRuntime {
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "tensorrt" => Some(Self::TensorRt),
+            "onnxruntime-cpu" => Some(Self::OnnxRuntimeCpu),
+            _ => None,
+        }
+    }
+}
+
+/// Exact source hashes compared by successful CPU identity admission.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CpuModelHashes {
+    pub stored_pose: String,
+    pub bed: String,
+    pub fall: String,
+}
+
+pub(crate) struct VerifiedEnvironment {
+    pub flow: std::collections::BTreeMap<String, String>,
+    pub cpu_model_hashes: Option<CpuModelHashes>,
+}
+
 /// Caller-declared deployment authority, not a measured container identity.
 pub fn deployment_image_digest(reference: &str) -> Option<&str> {
     let digest = reference
@@ -87,4 +118,35 @@ fn refuse<T>(kind: IdentityKind, subject: &str) -> Result<T, IdentityError> {
         kind,
         subject: subject.to_owned(),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::AuxiliaryRuntime;
+
+    #[test]
+    fn auxiliary_runtime_accepts_only_explicit_cli_spellings() {
+        assert_eq!(
+            AuxiliaryRuntime::parse("tensorrt"),
+            Some(AuxiliaryRuntime::TensorRt)
+        );
+        assert_eq!(
+            AuxiliaryRuntime::parse("onnxruntime-cpu"),
+            Some(AuxiliaryRuntime::OnnxRuntimeCpu)
+        );
+        for value in [
+            "",
+            "cpu",
+            "onnxruntime",
+            "TensorRt",
+            "ONNXRUNTIME-CPU",
+            " tensorrt",
+            "tensorrt ",
+            "onnxruntime-cpu\n",
+            "tensorrt=onnxruntime-cpu",
+            "tensorrt\0",
+        ] {
+            assert_eq!(AuxiliaryRuntime::parse(value), None, "{value:?}");
+        }
+    }
 }

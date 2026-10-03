@@ -92,6 +92,32 @@ def test_unnamed_final_stage_cannot_hide_from_packaging_assertions() -> None:
         _stages(_dockerfile() + "\nFROM cargo-verify\n")
 
 
+@pytest.mark.parametrize("payload", [None, b"", b"test-library-bytes"])
+def test_cpu_loader_path_has_an_executed_image_presence_guard(
+    tmp_path: Path, payload: bytes | None
+) -> None:
+    source = (ROOT / "worker/bin/src/run/cpu_admission.rs").read_text(encoding="utf-8")
+    declared = re.search(r'const RUNTIME_LIBRARY: &str =\s*"([^"]+)";', source)
+    assert declared is not None
+    guards = [
+        shlex.split(part.strip())
+        for command in _commands(_stages(_dockerfile())["runtime"])
+        for part in command.split("&&")
+        if part.strip().startswith("test -s ")
+    ]
+    assert ["test", "-s", declared.group(1)] in guards
+    library = tmp_path / "libonnxruntime.so"
+    if payload is not None:
+        library.write_bytes(payload)
+    result = subprocess.run(
+        ["/bin/sh", "-c", 'test -s "$1"', "ort-image-guard", str(library)],
+        capture_output=True,
+        timeout=5,
+        check=False,
+    )
+    assert result.returncode == (0 if payload else 1)
+
+
 @pytest.mark.parametrize(
     "revision",
     [

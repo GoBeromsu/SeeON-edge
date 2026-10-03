@@ -46,7 +46,11 @@ fn main() -> ExitCode {
 }
 
 fn check_config(flags: cli::Flags) -> ExitCode {
-    match config::check_config(&environment(), flags.state_dir.as_deref()) {
+    match config::check_config(
+        &environment(),
+        flags.state_dir.as_deref(),
+        flags.auxiliary_runtime,
+    ) {
         Ok(checked) => {
             if let Err(error) = &checked.last_known_good {
                 eprintln!("ml-worker: last-known-good config unreadable: {error:?}");

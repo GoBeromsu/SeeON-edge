@@ -6,7 +6,7 @@
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
-use super::identity::{IdentityKind, verify_environment};
+use super::identity::{AuxiliaryRuntime, IdentityKind, verify_environment};
 use super::onnx_shape::{Dim, OnnxShapeKind, batch_axis_is_dynamic, input_dims};
 use crate::config::env::Env;
 
@@ -155,8 +155,8 @@ fn printed(dim: &Dim) -> String {
     }
 }
 
-/// `verify_flow_boot_inputs(env, deployed_batch=...)`: the verified engine
-/// identity map, or the first refusal in Python's order.
+/// Python-equivalent TensorRT gate: the verified engine identity map, or the
+/// first refusal in Python's order. Run reuses provider-aware admission below.
 pub fn verify_flow_boot_inputs(
     env: &Env,
     deployed_batch: Option<i128>,
@@ -166,10 +166,12 @@ pub fn verify_flow_boot_inputs(
             kind: FlowBootKind::Identity(IdentityKind::Schema),
             subject: "fall.bundle".to_owned(),
         })?;
-        verify_environment(env, selection.as_ref(), None).map_err(|error| FlowBootError {
-            kind: FlowBootKind::Identity(error.kind),
-            subject: error.subject,
-        })
+        verify_environment(env, selection.as_ref(), None, AuxiliaryRuntime::TensorRt)
+            .map(|verified| verified.flow)
+            .map_err(|error| FlowBootError {
+                kind: FlowBootKind::Identity(error.kind),
+                subject: error.subject,
+            })
     })
 }
 

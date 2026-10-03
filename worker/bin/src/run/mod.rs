@@ -19,6 +19,7 @@ pub mod calibration;
 pub mod cameras;
 pub mod clip_output;
 pub mod config_digest;
+mod cpu_admission;
 pub mod decision;
 mod delivery;
 mod event_payload;
@@ -166,13 +167,19 @@ pub enum IdentityError {
     Flow(FlowBootKind),
     FlowValue(&'static str),
     Model(EngineFileError),
+    CpuSource(ModelRole),
 }
 
-/// Selected bundle proof, actual engine hashes and the verified Flow identity.
+pub enum AdmittedModels {
+    TensorRt(ModelEngines),
+    OnnxRuntimeCpu(models::CpuModels),
+}
+
+/// Selected bundle proof, admitted model inputs and the verified Flow identity.
 pub struct Admitted {
     /// Preserves the established optional packaged selection and LKG read result.
     pub checked: Checked,
     pub flow: FlowSettings,
-    pub engines: ModelEngines,
+    pub models: AdmittedModels,
     pub fall: fall_evidence::FallEvidence,
 }

@@ -8,10 +8,16 @@ use crate::cli::{self, Flags};
 use crate::config::build_revision::{self, BuildRevisionError, ResolvedRevision};
 use crate::config::env::{self, Env, EnvError, ExecutionRecordsSettings};
 use crate::config::model_bundle::flow_boot;
+use crate::config::model_bundle::identity::AuxiliaryRuntime;
 use crate::config::{self, CheckConfigError};
 use crate::exit::Exit;
 
-use super::{Admitted, EngineFiles, FlowSettings, IdentityError, ModelEngines};
+use super::{Admitted, AdmittedModels, EngineFiles, FlowSettings, IdentityError, ModelEngines};
+
+pub(crate) enum ModelFiles {
+    TensorRt(EngineFiles),
+    OnnxRuntimeCpu,
+}
 
 /// Explicit deployment/model policy; no device, threshold or timing fallback.
 #[derive(Clone, Copy, Debug)]
@@ -45,7 +51,7 @@ pub struct Settings {
     pub(crate) flags: Flags,
     pub(crate) state_dir: PathBuf,
     pub(crate) execution_records: Option<ExecutionRecordsSettings>,
-    pub(crate) engines: EngineFiles,
+    pub(crate) models: ModelFiles,
     pub(crate) policy: BootPolicy,
 }
 
@@ -92,10 +98,13 @@ impl Settings {
             _ => Err(SettingsError::Required(key)),
         };
         // Names approved in design §6.3; frozen config/env has no parser for these yet.
-        let engines = EngineFiles {
-            fall: required("ML_WORKER_FALL_ENGINE_PATH")?,
-            bed: required("ML_WORKER_BED_ENGINE_PATH")?,
-            stored_pose: required("ML_WORKER_STORED_POSE_ENGINE_PATH")?,
+        let models = match flags.auxiliary_runtime {
+            AuxiliaryRuntime::TensorRt => ModelFiles::TensorRt(EngineFiles {
+                fall: required("ML_WORKER_FALL_ENGINE_PATH")?,
+                bed: required("ML_WORKER_BED_ENGINE_PATH")?,
+                stored_pose: required("ML_WORKER_STORED_POSE_ENGINE_PATH")?,
+            }),
+            AuxiliaryRuntime::OnnxRuntimeCpu => ModelFiles::OnnxRuntimeCpu,
         };
         let build_revision = build_revision::current(&env);
         Ok(Self {
@@ -104,7 +113,7 @@ impl Settings {
             flags,
             state_dir,
             execution_records,
-            engines,
+            models,
             policy,
         })
     }
@@ -137,14 +146,17 @@ impl Settings {
 
 /// Step 3, called after lease acquisition. No network, CUDA or owner creation.
 pub(crate) fn admit(settings: &Settings) -> Result<Admitted, IdentityError> {
-    let checked = config::check_config(&settings.env, Some(&settings.state_dir)).map_err(
-        |error| match error {
-            CheckConfigError::Env(_) => IdentityError::Environment,
-            CheckConfigError::Selection(_) => IdentityError::Selection,
-            CheckConfigError::Admission(error) => IdentityError::Bundle(error.kind),
-            CheckConfigError::Identity(error) => IdentityError::Engine(error.kind),
-        },
-    )?;
+    let checked = config::check_config(
+        &settings.env,
+        Some(&settings.state_dir),
+        settings.flags.auxiliary_runtime,
+    )
+    .map_err(|error| match error {
+        CheckConfigError::Env(_) => IdentityError::Environment,
+        CheckConfigError::Selection(_) => IdentityError::Selection,
+        CheckConfigError::Admission(error) => IdentityError::Bundle(error.kind),
+        CheckConfigError::Identity(error) => IdentityError::Engine(error.kind),
+    })?;
     let env = &settings.env;
     let admitted_identity = checked
         .engine_identity
@@ -191,11 +203,18 @@ pub(crate) fn admit(settings: &Settings) -> Result<Admitted, IdentityError> {
         identity,
     };
     let fall = super::fall_evidence::admit(&checked)?;
-    let engines = ModelEngines::admit(&settings.engines).map_err(IdentityError::Model)?;
+    let models = match &settings.models {
+        ModelFiles::TensorRt(files) => {
+            AdmittedModels::TensorRt(ModelEngines::admit(files).map_err(IdentityError::Model)?)
+        }
+        ModelFiles::OnnxRuntimeCpu => AdmittedModels::OnnxRuntimeCpu(super::cpu_admission::admit(
+            env, &checked, &fall, &flow,
+        )?),
+    };
     Ok(Admitted {
         checked,
         flow,
-        engines,
+        models,
         fall,
     })
 }

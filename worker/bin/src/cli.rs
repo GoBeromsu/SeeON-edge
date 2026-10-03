@@ -1,13 +1,15 @@
 //! The `ml-worker` command line: `run` (the default), `check-config`, and the
-//! flag set of `_build_parser` in `worker/__main__.py` that every command
-//! shares. Python's `--config` (B11) and `--max-frames-per-camera` (X11 b)
-//! are refused, with or without a value. `engine-build` has its own flag set.
+//! shared worker flags plus explicit Rust auxiliary provider selection.
+//! Python's `--config` (B11) and `--max-frames-per-camera` (X11 b) are refused,
+//! with or without a value. `engine-build` has its own flag set.
 
 mod engine_build;
 
 use std::ffi::{OsStr, OsString};
+use std::os::unix::ffi::OsStrExt;
 use std::path::PathBuf;
 
+use crate::config::model_bundle::identity::AuxiliaryRuntime;
 use crate::exit::Exit;
 pub use engine_build::{AuxiliaryBuild, EngineBuildFlags, ParseError as EngineBuildParseError};
 
@@ -16,6 +18,7 @@ const ENGINE_BUILD: &str = "engine-build";
 const RUN: &str = "run";
 const HEARTBEAT_ON_START: &str = "--heartbeat-on-start";
 const STATE_DIR: &str = "--state-dir";
+const AUXILIARY_RUNTIME: &str = "--auxiliary-runtime";
 /// Python flags the Rust worker refuses.
 const REFUSED: [&str; 2] = ["--config", "--max-frames-per-camera"];
 
@@ -26,6 +29,8 @@ pub struct Flags {
     pub heartbeat_on_start: bool,
     /// `--state-dir <path>`; `None` means `$HOME/.local/state/ml-worker`.
     pub state_dir: Option<PathBuf>,
+    /// `--auxiliary-runtime`: explicit provider for auxiliary models only.
+    pub auxiliary_runtime: AuxiliaryRuntime,
 }
 
 /// A command the worker runs.
@@ -51,10 +56,12 @@ pub enum CliError {
     UnknownFlag(OsString),
     /// `--config` or `--max-frames-per-camera`.
     RefusedFlag(&'static str),
-    /// `--state-dir` without a value.
+    /// `--state-dir` or `--auxiliary-runtime` without a value.
     MissingValue,
     /// `--heartbeat-on-start=<value>`: the flag takes no value.
     UnexpectedValue,
+    /// An unsupported or non-UTF-8 auxiliary runtime; no raw value is retained.
+    InvalidAuxiliaryRuntime,
     /// `engine-build` was refused. The inner error carries no secret or raw value.
     EngineBuild(engine_build::ParseError),
 }
@@ -65,18 +72,21 @@ impl CliError {
     }
 }
 
-/// Splits `--flag=value` into the flag and its value; an argument that is
-/// not UTF-8 is never split.
+/// Split the ASCII separator without decoding a possibly non-UTF-8 path.
 fn split_flag(argument: &OsStr) -> (&OsStr, Option<&OsStr>) {
-    match argument.to_str().and_then(|text| text.split_once('=')) {
-        Some((flag, value)) => (OsStr::new(flag), Some(OsStr::new(value))),
+    let bytes = argument.as_bytes();
+    match bytes.iter().position(|byte| *byte == b'=') {
+        Some(index) => (
+            OsStr::from_bytes(&bytes[..index]),
+            Some(OsStr::from_bytes(&bytes[index + 1..])),
+        ),
         None => (argument, None),
     }
 }
 
 /// Parses the flags that follow a command. A value is either
-/// `--state-dir=<path>` or the next argument, which must not start with `-`;
-/// a repeated `--state-dir` keeps the last value, as `argparse` does.
+/// `--name=value` or the next argument, which must not start with `-`;
+/// repeated value flags keep the last value, as `argparse` does.
 pub fn parse_flags(arguments: &[OsString]) -> Result<Flags, CliError> {
     let mut flags = Flags::default();
     let mut remaining = arguments.iter();
@@ -90,7 +100,7 @@ pub fn parse_flags(arguments: &[OsString]) -> Result<Flags, CliError> {
                 return Err(CliError::UnexpectedValue);
             }
             flags.heartbeat_on_start = true;
-        } else if flag == STATE_DIR {
+        } else if flag == STATE_DIR || flag == AUXILIARY_RUNTIME {
             let value = match value {
                 Some(value) => value,
                 None => match remaining.next() {
@@ -98,7 +108,14 @@ pub fn parse_flags(arguments: &[OsString]) -> Result<Flags, CliError> {
                     _ => return Err(CliError::MissingValue),
                 },
             };
-            flags.state_dir = Some(PathBuf::from(value));
+            if flag == STATE_DIR {
+                flags.state_dir = Some(PathBuf::from(value));
+            } else {
+                flags.auxiliary_runtime = value
+                    .to_str()
+                    .and_then(AuxiliaryRuntime::parse)
+                    .ok_or(CliError::InvalidAuxiliaryRuntime)?;
+            }
         } else {
             return Err(CliError::UnknownFlag(argument.clone()));
         }
@@ -127,6 +144,7 @@ pub fn parse(arguments: &[OsString]) -> Result<Command, CliError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::os::unix::ffi::OsStringExt;
 
     fn arguments(texts: &[&str]) -> Vec<OsString> {
         texts.iter().map(OsString::from).collect()
@@ -144,6 +162,7 @@ mod tests {
         let flags = Flags {
             heartbeat_on_start: true,
             state_dir: Some(PathBuf::from("/b")),
+            auxiliary_runtime: AuxiliaryRuntime::TensorRt,
         };
         assert_eq!(parsed, Ok(Command::CheckConfig(flags)));
         let bare = parse(&arguments(&["check-config"]));
@@ -183,6 +202,7 @@ mod tests {
         let flags = Flags {
             heartbeat_on_start: true,
             state_dir: Some(PathBuf::from("/state")),
+            auxiliary_runtime: AuxiliaryRuntime::TensorRt,
         };
         for arguments in [
             arguments(&["run", "--heartbeat-on-start", "--state-dir=/state"]),
@@ -192,6 +212,159 @@ mod tests {
         }
         assert_eq!(parse(&[]), Ok(Command::Run(Flags::default())));
     }
+
+    #[test]
+    fn auxiliary_modes_share_both_syntaxes_and_flag_orders_across_runtime_commands() {
+        for command in [None, Some(RUN), Some(CHECK_CONFIG)] {
+            for (value, auxiliary_runtime) in [
+                ("tensorrt", AuxiliaryRuntime::TensorRt),
+                ("onnxruntime-cpu", AuxiliaryRuntime::OnnxRuntimeCpu),
+            ] {
+                for attached in [false, true] {
+                    for mode_first in [false, true] {
+                        let mut values: Vec<OsString> =
+                            command.into_iter().map(OsString::from).collect();
+                        let mode = if attached {
+                            vec![OsString::from(format!("{AUXILIARY_RUNTIME}={value}"))]
+                        } else {
+                            arguments(&[AUXILIARY_RUNTIME, value])
+                        };
+                        let common = arguments(&[HEARTBEAT_ON_START, STATE_DIR, "/state"]);
+                        if mode_first {
+                            values.extend(mode);
+                            values.extend(common);
+                        } else {
+                            values.extend(common);
+                            values.extend(mode);
+                        }
+                        let flags = Flags {
+                            heartbeat_on_start: true,
+                            state_dir: Some(PathBuf::from("/state")),
+                            auxiliary_runtime,
+                        };
+                        let expected = if command == Some(CHECK_CONFIG) {
+                            Command::CheckConfig(flags)
+                        } else {
+                            Command::Run(flags)
+                        };
+                        assert_eq!(parse(&values), Ok(expected), "{values:?}");
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn repeated_auxiliary_runtime_keeps_the_last_valid_value() {
+        for command in [None, Some(RUN), Some(CHECK_CONFIG)] {
+            for (first, last, expected) in [
+                (
+                    "tensorrt",
+                    "onnxruntime-cpu",
+                    AuxiliaryRuntime::OnnxRuntimeCpu,
+                ),
+                ("onnxruntime-cpu", "tensorrt", AuxiliaryRuntime::TensorRt),
+            ] {
+                for attached_last in [false, true] {
+                    let mut values: Vec<OsString> =
+                        command.into_iter().map(OsString::from).collect();
+                    if attached_last {
+                        values.extend(arguments(&[AUXILIARY_RUNTIME, first]));
+                        values.push(OsString::from(format!("{AUXILIARY_RUNTIME}={last}")));
+                    } else {
+                        values.push(OsString::from(format!("{AUXILIARY_RUNTIME}={first}")));
+                        values.extend(arguments(&[AUXILIARY_RUNTIME, last]));
+                    }
+                    let parsed = parse(&values).expect("valid duplicate modes");
+                    let flags = match parsed {
+                        Command::Run(flags) | Command::CheckConfig(flags) => flags,
+                        Command::EngineBuild(_) => panic!("runtime dispatch expected"),
+                    };
+                    assert_eq!(flags.auxiliary_runtime, expected, "{values:?}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn omitted_auxiliary_mode_preserves_tensor_rt_for_every_runtime_dispatch() {
+        for values in [
+            Vec::new(),
+            arguments(&[RUN]),
+            arguments(&[CHECK_CONFIG]),
+            arguments(&[HEARTBEAT_ON_START]),
+        ] {
+            let flags = match parse(&values).expect("runtime command") {
+                Command::Run(flags) | Command::CheckConfig(flags) => flags,
+                Command::EngineBuild(_) => panic!("runtime dispatch expected"),
+            };
+            assert_eq!(flags.auxiliary_runtime, AuxiliaryRuntime::TensorRt);
+        }
+    }
+
+    #[test]
+    fn malformed_auxiliary_modes_refuse_before_later_valid_duplicates() {
+        for command in [None, Some(RUN), Some(CHECK_CONFIG)] {
+            for value in [
+                "",
+                "cpu",
+                "onnxruntime",
+                "TensorRt",
+                "ONNXRUNTIME-CPU",
+                " tensorrt",
+                "tensorrt ",
+                "onnxruntime-cpu\n",
+                "tensorrt=onnxruntime-cpu",
+                "tensorrt\0",
+            ] {
+                for attached in [false, true] {
+                    let mut values: Vec<OsString> =
+                        command.into_iter().map(OsString::from).collect();
+                    if attached {
+                        values.push(OsString::from(format!("{AUXILIARY_RUNTIME}={value}")));
+                    } else {
+                        values.extend(arguments(&[AUXILIARY_RUNTIME, value]));
+                    }
+                    values.push(OsString::from("--auxiliary-runtime=onnxruntime-cpu"));
+                    let error = parse(&values).expect_err("invalid mode");
+                    assert_eq!(error, CliError::InvalidAuxiliaryRuntime);
+                    assert_eq!(error.exit(), Exit::Config);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn non_utf8_and_missing_auxiliary_values_refuse_without_retaining_the_value() {
+        for command in [None, Some(RUN), Some(CHECK_CONFIG)] {
+            for mode in [
+                vec![
+                    OsString::from(AUXILIARY_RUNTIME),
+                    OsString::from_vec(vec![0xff]),
+                ],
+                vec![OsString::from_vec(b"--auxiliary-runtime=\xff".to_vec())],
+            ] {
+                let mut values: Vec<OsString> = command.into_iter().map(OsString::from).collect();
+                values.extend(mode);
+                let error = parse(&values).expect_err("non-UTF-8 mode");
+                assert_eq!(error, CliError::InvalidAuxiliaryRuntime);
+                assert_eq!(error.exit(), Exit::Config);
+            }
+            for following in [
+                None,
+                Some(HEARTBEAT_ON_START),
+                Some("--auxiliary-runtime=tensorrt"),
+            ] {
+                let mut values: Vec<OsString> = command.into_iter().map(OsString::from).collect();
+                values.push(OsString::from(AUXILIARY_RUNTIME));
+                values.extend(following.into_iter().map(OsString::from));
+                let error = parse(&values).expect_err("missing mode");
+                assert_eq!(error, CliError::MissingValue);
+                assert_eq!(error.exit(), Exit::Config);
+            }
+        }
+    }
+
     #[test]
     fn engine_build_dispatches_before_default_run_and_exits_two() {
         let parsed = parse(&arguments(&["engine-build", "--force"])).expect_err("incomplete");

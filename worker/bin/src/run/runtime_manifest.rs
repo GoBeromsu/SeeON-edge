@@ -7,8 +7,9 @@ mod store;
 use std::fmt;
 use std::path::{Path, PathBuf};
 
-use super::{Booted, media_config::MediaAssembly};
+use super::{Booted, ModelRole, media_config::MediaAssembly};
 use crate::config::pull::PulledConfig;
+use crate::inference::Runtime;
 use crate::json::{Json, JsonError, Serialiser};
 use crate::records::id::sha256_hex;
 
@@ -67,6 +68,26 @@ impl fmt::Display for ManifestError {
 }
 impl std::error::Error for ManifestError {}
 
+#[derive(Clone, Copy)]
+struct ModelRuntimeFacts<'a> {
+    fall: &'a Runtime,
+    bed: &'a Runtime,
+    stored_pose: &'a Runtime,
+}
+impl<'a> ModelRuntimeFacts<'a> {
+    fn new(
+        fall: Option<&'a Runtime>,
+        bed: Option<&'a Runtime>,
+        stored_pose: Option<&'a Runtime>,
+    ) -> Result<Self, ManifestError> {
+        Ok(Self {
+            fall: fall.ok_or(ManifestError::Missing("fall_runtime"))?,
+            bed: bed.ok_or(ManifestError::Missing("bed_runtime"))?,
+            stored_pose: stored_pose.ok_or(ManifestError::Missing("stored_pose_runtime"))?,
+        })
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Manifest {
     canonical: String,
@@ -97,13 +118,18 @@ impl Manifest {
     }
 }
 
-/// Called only after model boot and media/policy assembly admission. The model
-/// hashes name admitted engines, not a claimed engine-to-ONNX build derivation.
+/// Called only after model boot and media/policy assembly admission. Auxiliary
+/// facts come from retained owners; live media still requires verified GPU facts.
 pub fn build(
     booted: &Booted,
     config: &PulledConfig,
     media: &MediaAssembly,
 ) -> Result<Manifest, ManifestError> {
+    let runtimes = ModelRuntimeFacts::new(
+        booted.models.runtime(ModelRole::Fall),
+        booted.models.runtime(ModelRole::Bed),
+        booted.models.runtime(ModelRole::StoredPose),
+    )?;
     let versions =
         seeon_deepstream_native::runtime_versions().map_err(|_| ManifestError::RuntimeFacts)?;
     Manifest::freeze(&content::build(
@@ -113,6 +139,7 @@ pub fn build(
         config,
         media,
         versions,
+        runtimes,
     )?)
 }
 

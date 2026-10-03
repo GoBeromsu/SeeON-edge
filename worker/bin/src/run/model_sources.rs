@@ -96,7 +96,7 @@ pub(crate) fn capture_fall(env: &Env) -> Result<CapturedOnnx, SourceError> {
     }
 }
 
-fn capture_member(
+pub(crate) fn capture_member(
     path: &Path,
     expected: &str,
     nofollow: bool,

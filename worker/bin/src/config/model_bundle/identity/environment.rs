@@ -1,11 +1,11 @@
 //! Existing deployment paths and admitted fall selection feed the pure file gate.
 
-use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use super::{
-    BED_ONNX, EnginePaths, FLOW_IDENTITY_FILES, IdentityError, IdentityInputs, IdentityKind,
-    OBSERVER_LIBRARY, fingerprint, refuse, verify_aggregate,
+    AuxiliaryRuntime, BED_ONNX, CpuModelHashes, EnginePaths, FLOW_IDENTITY_FILES, IdentityError,
+    IdentityInputs, IdentityKind, OBSERVER_LIBRARY, VerifiedEnvironment, fingerprint, refuse,
+    verify_aggregate,
 };
 use crate::config::env::Env;
 use crate::config::model_bundle::bundle::BundleProof;
@@ -16,7 +16,8 @@ pub(crate) fn verify_environment(
     env: &Env,
     selection: Option<&(ModelSelection, BundleProof)>,
     deployed_batch: Option<i128>,
-) -> Result<BTreeMap<String, String>, IdentityError> {
+    auxiliary_runtime: AuxiliaryRuntime,
+) -> Result<VerifiedEnvironment, IdentityError> {
     let path = |key: &str| -> Result<PathBuf, IdentityError> {
         env.get(key)
             .filter(|value| !value.is_empty())
@@ -27,9 +28,14 @@ pub(crate) fn verify_environment(
             })
     };
     let live_pose = path("ML_WORKER_FLOW_ENGINE_PATH")?;
-    let stored_pose = path("ML_WORKER_STORED_POSE_ENGINE_PATH")?;
-    let bed = path("ML_WORKER_BED_ENGINE_PATH")?;
-    let fall = path("ML_WORKER_FALL_ENGINE_PATH")?;
+    let auxiliary_paths = match auxiliary_runtime {
+        AuxiliaryRuntime::TensorRt => Some([
+            path("ML_WORKER_STORED_POSE_ENGINE_PATH")?,
+            path("ML_WORKER_BED_ENGINE_PATH")?,
+            path("ML_WORKER_FALL_ENGINE_PATH")?,
+        ]),
+        AuxiliaryRuntime::OnnxRuntimeCpu => None,
+    };
     let identity = path("ML_WORKER_FLOW_ENGINE_IDENTITY_PATH")?;
     let pose_onnx = path("ML_WORKER_FLOW_ONNX_PATH")?;
     let pose_sha = fingerprint(&pose_onnx, "pose.onnx")?;
@@ -66,15 +72,21 @@ pub(crate) fn verify_environment(
         .iter()
         .map(|(key, name)| Ok((*key, path(name)?)))
         .collect::<Result<Vec<_>, IdentityError>>()?;
-    verify_aggregate(
+    let engines = match &auxiliary_paths {
+        Some([stored_pose, bed, fall]) => EnginePaths::TensorRt {
+            live_pose: &live_pose,
+            stored_pose,
+            bed,
+            fall,
+        },
+        None => EnginePaths::OnnxRuntimeCpu {
+            live_pose: &live_pose,
+        },
+    };
+    let flow = verify_aggregate(
         &identity,
         IdentityInputs {
-            engines: EnginePaths::TensorRt {
-                live_pose: &live_pose,
-                stored_pose: &stored_pose,
-                bed: &bed,
-                fall: &fall,
-            },
+            engines,
             pose_onnx_sha256: &pose_sha,
             bed_onnx_sha256: &bed_sha,
             fall_onnx_sha256: fall_sha,
@@ -84,5 +96,92 @@ pub(crate) fn verify_environment(
             configured_batch: Some(configured_batch),
             deployed_batch,
         },
-    )
+    )?;
+    let cpu_model_hashes = match auxiliary_runtime {
+        AuxiliaryRuntime::TensorRt => None,
+        AuxiliaryRuntime::OnnxRuntimeCpu => Some(CpuModelHashes {
+            stored_pose: pose_sha,
+            bed: bed_sha,
+            fall: fall_sha.clone(),
+        }),
+    };
+    Ok(VerifiedEnvironment {
+        flow,
+        cpu_model_hashes,
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn refusal(env: &Env, runtime: AuxiliaryRuntime, kind: IdentityKind, subject: &str) {
+        let error = verify_environment(env, None, None, runtime)
+            .err()
+            .expect("incomplete environment must refuse");
+        assert_eq!((error.kind, error.subject), (kind, subject.to_owned()));
+    }
+
+    #[test]
+    fn tensor_rt_keeps_all_required_engine_paths_in_existing_order() {
+        let mut env = Env::from([(
+            "ML_WORKER_FLOW_ENGINE_PATH".to_owned(),
+            "/unused".to_owned(),
+        )]);
+        for key in [
+            "ML_WORKER_STORED_POSE_ENGINE_PATH",
+            "ML_WORKER_BED_ENGINE_PATH",
+            "ML_WORKER_FALL_ENGINE_PATH",
+            "ML_WORKER_FLOW_ENGINE_IDENTITY_PATH",
+            "ML_WORKER_FLOW_ONNX_PATH",
+        ] {
+            refusal(
+                &env,
+                AuxiliaryRuntime::TensorRt,
+                IdentityKind::ArtifactAbsent,
+                key,
+            );
+            env.insert(key.to_owned(), "/unused".to_owned());
+        }
+    }
+
+    #[test]
+    fn cpu_skips_auxiliary_gpu_paths_but_requires_live_identity_and_source() {
+        for value in [None, Some(""), Some("/unused"), Some("\0")] {
+            let mut env = Env::new();
+            if let Some(value) = value {
+                for key in [
+                    "ML_WORKER_STORED_POSE_ENGINE_PATH",
+                    "ML_WORKER_BED_ENGINE_PATH",
+                    "ML_WORKER_FALL_ENGINE_PATH",
+                ] {
+                    env.insert(key.to_owned(), value.to_owned());
+                }
+            }
+            for key in [
+                "ML_WORKER_FLOW_ENGINE_PATH",
+                "ML_WORKER_FLOW_ENGINE_IDENTITY_PATH",
+                "ML_WORKER_FLOW_ONNX_PATH",
+            ] {
+                refusal(
+                    &env,
+                    AuxiliaryRuntime::OnnxRuntimeCpu,
+                    IdentityKind::ArtifactAbsent,
+                    key,
+                );
+                env.insert(key.to_owned(), "/unused".to_owned());
+            }
+            // A directory refuses before the fixed image bed and SDK observer files.
+            env.insert(
+                "ML_WORKER_FLOW_ONNX_PATH".to_owned(),
+                env!("CARGO_MANIFEST_DIR").to_owned(),
+            );
+            refusal(
+                &env,
+                AuxiliaryRuntime::OnnxRuntimeCpu,
+                IdentityKind::ArtifactUnreadable,
+                "pose.onnx",
+            );
+        }
+    }
 }

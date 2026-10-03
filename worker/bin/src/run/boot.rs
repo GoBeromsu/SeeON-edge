@@ -217,7 +217,7 @@ pub fn boot(
             shutdown,
         )));
     }
-    if let Err(error) = models.start(ModelInputs::TensorRt(&admitted.engines), policy, clock) {
+    if let Err(error) = models.start(ModelInputs::from(&admitted.models), policy, clock) {
         if error.kind == StartKind::Stopped {
             return Err(BootError::Stopped(startup::stopped(
                 Some(models),

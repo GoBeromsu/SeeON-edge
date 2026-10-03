@@ -6,8 +6,8 @@ use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 use std::sync::mpsc::Receiver;
 
-use super::super::ModelEngines;
 use super::super::settings::BootPolicy;
+use super::super::{AdmittedModels, ModelEngines};
 use crate::gpu::owners;
 use crate::inference::Owner;
 use crate::inference::cpu::{self, CapturedModel};
@@ -25,6 +25,15 @@ pub struct CpuModels {
 pub enum ModelInputs<'a> {
     TensorRt(&'a ModelEngines),
     OnnxRuntimeCpu(&'a CpuModels),
+}
+
+impl<'a> From<&'a AdmittedModels> for ModelInputs<'a> {
+    fn from(models: &'a AdmittedModels) -> Self {
+        match models {
+            AdmittedModels::TensorRt(engines) => Self::TensorRt(engines),
+            AdmittedModels::OnnxRuntimeCpu(models) => Self::OnnxRuntimeCpu(models),
+        }
+    }
 }
 
 impl ModelInputs<'_> {

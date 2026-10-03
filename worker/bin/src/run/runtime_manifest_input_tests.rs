@@ -1,20 +1,25 @@
 //! Schema-2 content from typed admitted facts. Values are unit-test identities,
-//! not a GPU execution and not a live inference claim.
+//! not a native execution and not a live inference claim.
 use std::collections::BTreeMap;
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::Duration;
 
 use seeon_deepstream_native::RuntimeVersions;
+use seeon_worker_runtime::cpu::{Info, Threads};
 use seeon_worker_runtime::evidence::EngineDigest;
 
-use super::{Manifest, ManifestError, SCHEMA_VERSION};
+use super::{Manifest, ManifestError, ModelRuntimeFacts, SCHEMA_VERSION};
 use crate::cli::Flags;
 use crate::config::Checked;
 use crate::config::env::Env;
 use crate::config::model_bundle::bundle::BundleProof;
+use crate::config::model_bundle::identity::{AuxiliaryRuntime, CpuModelHashes};
 use crate::config::pull::{ConfigSource, PulledConfig};
 use crate::config::selection::{ModelSelection, Publication};
+use crate::inference::Runtime;
 use crate::json::Json;
+use crate::records::id::sha256_hex;
 use crate::relay::cameras::WorkerConfigPayload;
 use crate::relay::cameras::policies::{
     PolicySource, PolicyValues, make_effective_policy, resolve_detection_policies,
@@ -22,10 +27,11 @@ use crate::relay::cameras::policies::{
 use crate::run::cameras::{PolicyNumberSource, resolve_fall_policy};
 use crate::run::config_digest::config_digest;
 use crate::run::media_config::{self, MediaAssembly};
-use crate::run::settings::BootPolicy;
+use crate::run::models::CpuModels;
+use crate::run::settings::{BootPolicy, ModelFiles};
 use crate::run::{
-    Admitted, EngineArtifact, EngineFiles, FlowSettings, ModelEngines, Settings, calibration,
-    fall_evidence::FallEvidence,
+    Admitted, AdmittedModels, EngineArtifact, EngineFiles, FlowSettings, ModelEngines, ModelRole,
+    Settings, calibration, fall_evidence::FallEvidence,
 };
 use crate::telemetry::gpu::GpuStatus;
 
@@ -44,6 +50,9 @@ struct Facts {
     config: PulledConfig,
     media: MediaAssembly,
     versions: RuntimeVersions,
+    fall_runtime: Option<Runtime>,
+    bed_runtime: Option<Runtime>,
+    stored_pose_runtime: Option<Runtime>,
 }
 
 fn text(value: &str) -> Json {
@@ -85,14 +94,17 @@ fn settings(revision: Option<&str>) -> Settings {
     Settings {
         build_revision: crate::config::build_revision::resolve(revision, &env, Ok(None)),
         env,
-        flags: Flags::default(),
+        flags: Flags {
+            auxiliary_runtime: AuxiliaryRuntime::TensorRt,
+            ..Flags::default()
+        },
         state_dir: PathBuf::from("/tmp/seeon-unit-manifest"),
         execution_records: None,
-        engines: EngineFiles {
+        models: ModelFiles::TensorRt(EngineFiles {
             fall: PathBuf::from("/models/unit/fall.engine"),
             bed: PathBuf::from("/models/unit/bed.engine"),
             stored_pose: PathBuf::from("/models/unit/pose.engine"),
-        },
+        }),
         policy: BootPolicy {
             device_ordinal: 0,
             stored_pose_threshold: 0.5,
@@ -196,6 +208,7 @@ fn admitted(selected: bool, promoted: bool, temperature: f64) -> Admitted {
             execution_records: None,
             selection: selected.then(|| (selection(), proof())),
             engine_identity: None,
+            cpu_model_hashes: None,
             last_known_good: Ok(None),
         },
         flow: FlowSettings {
@@ -216,11 +229,11 @@ fn admitted(selected: bool, promoted: bool, temperature: f64) -> Admitted {
             rtsp_reconnect_interval_sec: 9,
             identity,
         },
-        engines: ModelEngines {
+        models: AdmittedModels::TensorRt(ModelEngines {
             fall: engine(0xaa),
             bed: engine(0xbb),
             stored_pose: engine(0xcc),
-        },
+        }),
         fall: FallEvidence {
             calibration: calibration(temperature, promoted),
             model_version: ONNX.to_owned(),
@@ -316,6 +329,9 @@ fn roster(config: PulledConfig, admitted: Admitted) -> Facts {
         config,
         media,
         versions: versions(10_03_02, 12_04_01),
+        fall_runtime: Some(Runtime::TensorRt),
+        bed_runtime: Some(Runtime::TensorRt),
+        stored_pose_runtime: Some(Runtime::TensorRt),
     }
 }
 
@@ -394,6 +410,76 @@ fn facts() -> Facts {
         config,
         media,
         versions: versions(10_03_02, 12_04_01),
+        fall_runtime: Some(Runtime::TensorRt),
+        bed_runtime: Some(Runtime::TensorRt),
+        stored_pose_runtime: Some(Runtime::TensorRt),
+    }
+}
+
+fn cpu_runtime(version: &str, threads: Threads, output_count: u32) -> Runtime {
+    Runtime::OnnxRuntimeCpu(Info {
+        abi_version: 1,
+        input_count: 1,
+        output_count,
+        threads,
+        runtime_version: version.to_owned(),
+    })
+}
+
+fn cpu_facts() -> Facts {
+    let mut facts = facts();
+    facts.settings.flags.auxiliary_runtime = AuxiliaryRuntime::OnnxRuntimeCpu;
+    facts.settings.models = ModelFiles::OnnxRuntimeCpu;
+    let models = CpuModels {
+        runtime_library: PathBuf::from("/unit/nonexistent/libonnxruntime.so"),
+        fall: Arc::from(&b"unit-fall-onnx"[..]),
+        bed: Arc::from(&b"unit-bed-onnx"[..]),
+        stored_pose: Arc::from(&b"unit-stored-pose-onnx"[..]),
+    };
+    let hashes = CpuModelHashes {
+        fall: sha256_hex(&models.fall),
+        bed: sha256_hex(&models.bed),
+        stored_pose: sha256_hex(&models.stored_pose),
+    };
+    facts.admitted.fall.model_version = hashes.fall.clone();
+    facts.admitted.checked.cpu_model_hashes = Some(hashes);
+    facts.admitted.models = AdmittedModels::OnnxRuntimeCpu(models);
+    facts.fall_runtime = Some(cpu_runtime("1.29.0", Threads::Default, 1));
+    facts.bed_runtime = Some(cpu_runtime("1.29.1", Threads::Single, 2));
+    facts.stored_pose_runtime = Some(cpu_runtime("1.30.0", Threads::Single, 1));
+    facts
+}
+
+fn runtime_slot(facts: &mut Facts, role: ModelRole) -> &mut Option<Runtime> {
+    match role {
+        ModelRole::Fall => &mut facts.fall_runtime,
+        ModelRole::Bed => &mut facts.bed_runtime,
+        ModelRole::StoredPose => &mut facts.stored_pose_runtime,
+    }
+}
+
+fn cpu_hash(facts: &mut Facts, role: ModelRole) -> &mut String {
+    let hashes = facts
+        .admitted
+        .checked
+        .cpu_model_hashes
+        .as_mut()
+        .expect("CPU proof");
+    match role {
+        ModelRole::Fall => &mut hashes.fall,
+        ModelRole::Bed => &mut hashes.bed,
+        ModelRole::StoredPose => &mut hashes.stored_pose,
+    }
+}
+
+fn cpu_bytes(facts: &mut Facts, role: ModelRole) -> &mut Arc<[u8]> {
+    let AdmittedModels::OnnxRuntimeCpu(models) = &mut facts.admitted.models else {
+        panic!("CPU admitted models");
+    };
+    match role {
+        ModelRole::Fall => &mut models.fall,
+        ModelRole::Bed => &mut models.bed,
+        ModelRole::StoredPose => &mut models.stored_pose,
     }
 }
 
@@ -405,11 +491,26 @@ fn content(facts: &Facts) -> Result<Json, ManifestError> {
         &facts.config,
         &facts.media,
         facts.versions,
+        ModelRuntimeFacts::new(
+            facts.fall_runtime.as_ref(),
+            facts.bed_runtime.as_ref(),
+            facts.stored_pose_runtime.as_ref(),
+        )?,
     )
 }
 
 fn frozen(facts: &Facts) -> Manifest {
     Manifest::freeze(&content(facts).expect("manifest content")).expect("canonical")
+}
+
+fn component<'a>(value: &'a Json, role: &str) -> &'a Json {
+    let Json::Array(components) = field(value, "components") else {
+        panic!("components");
+    };
+    components
+        .iter()
+        .find(|item| field(item, "role") == &text(role))
+        .unwrap_or_else(|| panic!("missing component {role}"))
 }
 
 fn source_name(source: PolicyNumberSource) -> &'static str {
@@ -569,6 +670,356 @@ fn packaged_inputs_populate_supplied_identities_without_omission() {
     );
     assert_ne!(resolved.threshold_source, PolicyNumberSource::Receipt);
 }
+
+#[test]
+fn tensorrt_build_and_component_canonical_bytes_keep_the_legacy_fields_and_digests() {
+    let input = facts();
+    let value = content(&input).expect("TensorRT content");
+    let expected_build = object(vec![
+        ("worker_build_revision", text(REVISION)),
+        ("worker_image_digest", text(IMAGE)),
+        ("edge_database_schema_version", Json::Int(19)),
+        ("implementation_language", text("rust")),
+        ("package_version", text(env!("CARGO_PKG_VERSION"))),
+        ("os_name", text(std::env::consts::OS)),
+        ("architecture", text(std::env::consts::ARCH)),
+        ("inference_runtime", text("tensorrt")),
+        ("inference_runtime_version_encoded", Json::Int(10_03_02)),
+        ("cuda_runtime_version_encoded", Json::Int(12_04_01)),
+        ("driver_version", text("580.65.06")),
+        ("device_name", text("unit-test-device")),
+    ]);
+    let expected_components = Json::Array(
+        [
+            ("fall", 'a', "live_score"),
+            ("bed", 'b', "warm_owner"),
+            ("stored_pose", 'c', "warm_owner"),
+            ("pose", 'e', "media_plane_infer"),
+        ]
+        .into_iter()
+        .map(|(role, fill, use_kind)| {
+            object(vec![
+                ("role", text(role)),
+                ("admitted_engine_sha256", text(&digest(fill))),
+                ("use", text(use_kind)),
+                ("runtime", text("tensorrt")),
+            ])
+        })
+        .collect(),
+    );
+    for (key, expected) in [
+        ("build", expected_build),
+        ("components", expected_components),
+    ] {
+        let actual = Manifest::freeze(field(&value, key)).expect("actual canonical");
+        let legacy = Manifest::freeze(&expected).expect("legacy canonical");
+        assert_eq!(actual.canonical(), legacy.canonical(), "{key}");
+        assert_eq!(actual.sha256(), legacy.sha256(), "{key}");
+    }
+
+    let before = frozen(&input);
+    let mut changed = facts();
+    let AdmittedModels::TensorRt(engines) = &mut changed.admitted.models else {
+        panic!("TensorRT models");
+    };
+    engines.fall.digest = engine(0xdd).digest;
+    let updated = content(&changed).expect("changed admitted engine");
+    assert_eq!(
+        field(component(&updated, "fall"), "admitted_engine_sha256"),
+        &text(&digest('d'))
+    );
+    assert_ne!(before.sha256(), frozen(&changed).sha256());
+}
+
+#[test]
+fn cpu_components_name_only_retained_sources_observed_versions_and_session_policy() {
+    let input = cpu_facts();
+    let value = content(&input).expect("CPU content");
+    let hashes = input
+        .admitted
+        .checked
+        .cpu_model_hashes
+        .as_ref()
+        .expect("CPU proof");
+    for (role, hash, use_kind, version, policy) in [
+        ("fall", &hashes.fall, "live_score", "1.29.0", "default"),
+        ("bed", &hashes.bed, "warm_owner", "1.29.1", "single"),
+        (
+            "stored_pose",
+            &hashes.stored_pose,
+            "warm_owner",
+            "1.30.0",
+            "single",
+        ),
+    ] {
+        assert_eq!(
+            component(&value, role),
+            &object(vec![
+                ("role", text(role)),
+                ("admitted_onnx_sha256", text(hash)),
+                ("use", text(use_kind)),
+                ("runtime", text("onnxruntime")),
+                ("provider", text("cpu")),
+                ("runtime_version", text(version)),
+                ("thread_policy", text(policy)),
+            ])
+        );
+    }
+    let gpu_value = content(&facts()).expect("legacy GPU content");
+    assert_eq!(component(&value, "pose"), component(&gpu_value, "pose"));
+    let Json::Object(mut media_build) = field(&gpu_value, "build").clone() else {
+        panic!("build");
+    };
+    for (key, _) in &mut media_build {
+        match key.as_str() {
+            "inference_runtime" => *key = "media_inference_runtime".into(),
+            "inference_runtime_version_encoded" => {
+                *key = "media_inference_runtime_version_encoded".into();
+            }
+            _ => {}
+        }
+    }
+    assert_eq!(field(&value, "build"), &Json::Object(media_build));
+    let manifest = frozen(&input);
+    assert!(!manifest.canonical().contains("/unit/"));
+    assert!(!manifest.canonical().contains("/models/"));
+    assert!(!manifest.canonical().contains("\"threads\""));
+    assert!(!manifest.canonical().contains("worker_count"));
+    assert_ne!(manifest.sha256(), frozen(&facts()).sha256());
+}
+
+#[test]
+#[ignore = "requires SEEON_TEST_PYTHON with canonical provenance implementation"]
+fn python_reads_the_actual_cpu_manifest_without_rewriting() {
+    super::tests::assert_python_accepts(&frozen(&cpu_facts()));
+}
+
+#[test]
+fn cpu_selected_bundle_keeps_proof_and_disabled_fall_keeps_only_the_warm_owner() {
+    let mut input = cpu_facts();
+    let mut selected_proof = proof();
+    selected_proof.member_digests.insert(
+        "model.onnx".into(),
+        input.admitted.fall.model_version.clone(),
+    );
+    input.admitted.checked.selection = Some((selection(), selected_proof));
+    input.config = with_domains(
+        input.config,
+        object(vec![("fall", object(vec![("enabled", Json::Bool(false))]))]),
+    );
+    let value = content(&input).expect("selected disabled CPU content");
+    assert_eq!(
+        field(field(&value, "bundle"), "authority"),
+        &text("selected")
+    );
+    assert_eq!(
+        field(field(&value, "bundle"), "bundle_sha256"),
+        &text(BUNDLE_SHA)
+    );
+    assert_eq!(field(component(&value, "fall"), "use"), &text("warm_owner"));
+    assert_eq!(
+        field(component(&value, "fall"), "runtime"),
+        &text("onnxruntime")
+    );
+    let Json::Array(cameras) = field(&value, "cameras") else {
+        panic!("cameras");
+    };
+    assert_eq!(field(&cameras[0], "enabled"), &Json::Bool(false));
+    assert_eq!(field(&cameras[0], "applied_policy"), &Json::Null);
+}
+
+#[test]
+fn cpu_version_policy_and_proven_source_changes_each_change_the_manifest_digest() {
+    for role in [ModelRole::Fall, ModelRole::Bed, ModelRole::StoredPose] {
+        let baseline = frozen(&cpu_facts());
+        let mut version = cpu_facts();
+        let Some(Runtime::OnnxRuntimeCpu(info)) = runtime_slot(&mut version, role).as_mut() else {
+            panic!("CPU runtime");
+        };
+        info.runtime_version = "1.31.0+verified-test".into();
+        assert_ne!(baseline.sha256(), frozen(&version).sha256());
+
+        let mut policy = cpu_facts();
+        let Some(Runtime::OnnxRuntimeCpu(info)) = runtime_slot(&mut policy, role).as_mut() else {
+            panic!("CPU runtime");
+        };
+        info.threads = match info.threads {
+            Threads::Default => Threads::Single,
+            Threads::Single => Threads::Default,
+        };
+        assert_ne!(baseline.sha256(), frozen(&policy).sha256());
+
+        let mut source = cpu_facts();
+        *cpu_bytes(&mut source, role) = Arc::from(&b"changed-unit-onnx"[..]);
+        let hash = sha256_hex(b"changed-unit-onnx");
+        *cpu_hash(&mut source, role) = hash.clone();
+        if role == ModelRole::Fall {
+            source.admitted.fall.model_version = hash;
+        }
+        assert_ne!(baseline.sha256(), frozen(&source).sha256());
+    }
+}
+
+#[test]
+fn selected_admitted_and_observed_providers_must_agree_for_every_role() {
+    let mut selected_cpu = facts();
+    selected_cpu.settings.flags.auxiliary_runtime = AuxiliaryRuntime::OnnxRuntimeCpu;
+    assert_eq!(
+        content(&selected_cpu),
+        Err(ManifestError::Contradictory("auxiliary_runtime"))
+    );
+    let mut selected_gpu = cpu_facts();
+    selected_gpu.settings.flags.auxiliary_runtime = AuxiliaryRuntime::TensorRt;
+    assert_eq!(
+        content(&selected_gpu),
+        Err(ManifestError::Contradictory("auxiliary_runtime"))
+    );
+
+    for (role, field) in [
+        (ModelRole::Fall, "fall_runtime"),
+        (ModelRole::Bed, "bed_runtime"),
+        (ModelRole::StoredPose, "stored_pose_runtime"),
+    ] {
+        let mut cpu = cpu_facts();
+        *runtime_slot(&mut cpu, role) = Some(Runtime::TensorRt);
+        assert_eq!(content(&cpu), Err(ManifestError::Contradictory(field)));
+        let mut gpu = facts();
+        *runtime_slot(&mut gpu, role) = Some(cpu_runtime("1.29.0", Threads::Default, 1));
+        assert_eq!(content(&gpu), Err(ManifestError::Contradictory(field)));
+        for mut missing in [facts(), cpu_facts()] {
+            *runtime_slot(&mut missing, role) = None;
+            assert_eq!(content(&missing), Err(ManifestError::Missing(field)));
+        }
+    }
+    let mut contradictory_proof = facts();
+    contradictory_proof.admitted.checked.cpu_model_hashes =
+        cpu_facts().admitted.checked.cpu_model_hashes;
+    assert_eq!(
+        content(&contradictory_proof),
+        Err(ManifestError::Contradictory("cpu_model_hashes"))
+    );
+}
+
+#[test]
+fn cpu_hash_proof_is_required_valid_and_equal_to_the_retained_bytes() {
+    let mut missing = cpu_facts();
+    missing.admitted.checked.cpu_model_hashes = None;
+    assert_eq!(
+        content(&missing),
+        Err(ManifestError::Missing("cpu_model_hashes"))
+    );
+    for (role, field) in [
+        (ModelRole::Fall, "fall_onnx_sha256"),
+        (ModelRole::Bed, "bed_onnx_sha256"),
+        (ModelRole::StoredPose, "stored_pose_onnx_sha256"),
+    ] {
+        for hash in [
+            String::new(),
+            "a".repeat(63),
+            "a".repeat(65),
+            "A".repeat(64),
+            "g".repeat(64),
+        ] {
+            let mut malformed = cpu_facts();
+            *cpu_hash(&mut malformed, role) = hash;
+            assert_eq!(content(&malformed), Err(ManifestError::Invalid(field)));
+        }
+        let mut mismatch = cpu_facts();
+        *cpu_hash(&mut mismatch, role) = digest('0');
+        assert_eq!(content(&mismatch), Err(ManifestError::Contradictory(field)));
+        let mut changed_bytes = cpu_facts();
+        *cpu_bytes(&mut changed_bytes, role) = Arc::from(&b"unproved-source"[..]);
+        assert_eq!(
+            content(&changed_bytes),
+            Err(ManifestError::Contradictory(field))
+        );
+        let mut empty_bytes = cpu_facts();
+        *cpu_bytes(&mut empty_bytes, role) = Arc::from(&b""[..]);
+        *cpu_hash(&mut empty_bytes, role) = sha256_hex(b"");
+        assert_eq!(content(&empty_bytes), Err(ManifestError::Invalid(field)));
+    }
+    let mut contradictory_fall = cpu_facts();
+    contradictory_fall.admitted.fall.model_version = ONNX.into();
+    assert_eq!(
+        content(&contradictory_fall),
+        Err(ManifestError::Contradictory("fall_onnx_sha256"))
+    );
+}
+
+#[test]
+fn malformed_cpu_runtime_metadata_is_not_a_manifest_identity() {
+    for (role, field) in [
+        (ModelRole::Fall, "fall_runtime"),
+        (ModelRole::Bed, "bed_runtime"),
+        (ModelRole::StoredPose, "stored_pose_runtime"),
+    ] {
+        for version in ["", " \t", "1.29.0\n", "1.29.0\0", &"v".repeat(64)] {
+            let mut invalid = cpu_facts();
+            *runtime_slot(&mut invalid, role) = Some(cpu_runtime(version, Threads::Single, 1));
+            assert_eq!(content(&invalid), Err(ManifestError::Invalid(field)));
+        }
+        for invalid_metadata in 0..4 {
+            let mut invalid = cpu_facts();
+            let Some(Runtime::OnnxRuntimeCpu(info)) = runtime_slot(&mut invalid, role).as_mut()
+            else {
+                panic!("CPU runtime");
+            };
+            match invalid_metadata {
+                0 => info.abi_version = 0,
+                1 => info.input_count = 0,
+                2 => info.output_count = 0,
+                3 => info.output_count = 3,
+                _ => unreachable!(),
+            }
+            assert_eq!(content(&invalid), Err(ManifestError::Invalid(field)));
+        }
+        let mut unsafe_version = cpu_facts();
+        *runtime_slot(&mut unsafe_version, role) =
+            Some(cpu_runtime("/private/runtime-version", Threads::Single, 1));
+        assert_eq!(
+            Manifest::freeze(&content(&unsafe_version).expect("typed facts")),
+            Err(ManifestError::Canonical(
+                crate::json::JsonError::UnsafeValue
+            ))
+        );
+    }
+}
+
+#[test]
+fn cpu_auxiliary_models_do_not_replace_the_live_media_gpu_requirements() {
+    let mut input = cpu_facts();
+    input.admitted.flow.identity.remove("engine_sha256");
+    assert_eq!(
+        content(&input),
+        Err(ManifestError::Missing("pose_engine_sha256"))
+    );
+    let mut input = cpu_facts();
+    input
+        .admitted
+        .flow
+        .identity
+        .insert("engine_sha256".into(), "not-an-engine-hash".into());
+    assert_eq!(
+        content(&input),
+        Err(ManifestError::Invalid("pose_engine_sha256"))
+    );
+    let mut input = cpu_facts();
+    input.gpu.cuda_context_ok = false;
+    assert_eq!(
+        content(&input),
+        Err(ManifestError::Invalid("accelerator_runtime"))
+    );
+    let mut input = cpu_facts();
+    input.versions = versions(0, 12_04_01);
+    assert_eq!(
+        content(&input),
+        Err(ManifestError::Invalid("accelerator_runtime"))
+    );
+    let mut input = cpu_facts();
+    input.gpu.device_name = None;
+    assert_eq!(content(&input), Err(ManifestError::Missing("device_name")));
+}
+
 #[test]
 fn disabled_fall_keeps_roster_identity_and_names_no_applied_policy() {
     let enabled = facts();

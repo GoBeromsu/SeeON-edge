@@ -917,4 +917,118 @@ mod hybrid_reader {
             fs::write(&fixture.engines[index], bytes).unwrap();
         }
     }
+
+    #[test]
+    #[ignore = "requires the image-owned SDK observer file; file-only CLI check, no GPU/model execution"]
+    fn check_config_cli_admits_cpu_sources_and_refuses_wrong_provider_or_changed_bytes() {
+        let fixture = Fixture::new();
+        let models = fixture.root.join("models");
+        let fall_root = models.join("fall/pose-bbox56-gru");
+        fs::create_dir_all(fall_root.join("conformance")).unwrap();
+        fs::create_dir_all(models.join("bed")).unwrap();
+        let pose = models.join("pose.onnx");
+        let bed = models.join("bed/yolo26l-seg.onnx");
+        fs::write(&pose, b"synthetic-pose-source").unwrap();
+        fs::write(&bed, b"synthetic-bed-source").unwrap();
+        // These documents prove only packaged file integrity, not fall metadata
+        // validity, ONNX execution, GPU hardware, or usable runtime startup.
+        let mut members = Vec::new();
+        for (name, bytes) in [
+            ("model.onnx", b"synthetic-fall-source".as_slice()),
+            ("model.pt", b"synthetic-weights"),
+            ("calibration.json", b"{}"),
+            ("conformance/fixture.json", b"{}"),
+        ] {
+            fs::write(fall_root.join(name), bytes).unwrap();
+            members.push(json!({
+                "relative_path": name, "sha256": sha256_hex(bytes), "size": bytes.len(),
+            }));
+        }
+        fs::write(
+            fall_root.join("bundle-manifest.json"),
+            serde_json::to_vec(&json!({"files": members})).unwrap(),
+        )
+        .unwrap();
+        let mut document = fixture.document();
+        let pose_sha = sha256_hex(&fs::read(&pose).unwrap());
+        document["engines"]["live_pose"]["onnx_sha256"] = json!(pose_sha);
+        document["engines"]["live_pose"]["observer_library_sha256"] = json!(sha256_hex(
+            &fs::read("/opt/nvidia/deepstream/deepstream/lib/libnvds_infer.so")
+                .expect("selected file-only integration requires the SDK observer"),
+        ));
+        document["auxiliary"]["models"]["stored_pose"]["onnx_sha256"] = json!(pose_sha);
+        document["auxiliary"]["models"]["bed"]["onnx_sha256"] =
+            json!(sha256_hex(&fs::read(&bed).unwrap()));
+        document["auxiliary"]["models"]["fall"]["onnx_sha256"] =
+            json!(sha256_hex(&fs::read(fall_root.join("model.onnx")).unwrap()));
+        fixture.write(&document);
+        let mut command = std::process::Command::new(env!("CARGO_BIN_EXE_ml-worker"));
+        command.current_dir(&fixture.root).env_clear();
+        if let Some(loader) = std::env::var_os("LD_LIBRARY_PATH") {
+            command.env("LD_LIBRARY_PATH", loader);
+        }
+        command
+            .env("RELAY_TOKEN", "file-only-provider-test")
+            .env("ML_WORKER_IMAGE", IMAGE)
+            .env("ML_WORKER_FLOW_BATCH_SIZE", "2")
+            .env("ML_WORKER_FLOW_ENGINE_PATH", &fixture.engines[0])
+            .env("ML_WORKER_FLOW_ENGINE_IDENTITY_PATH", &fixture.identity)
+            .env("ML_WORKER_FLOW_ONNX_PATH", &pose)
+            .env(
+                "ML_WORKER_MODEL_SELECTION_PATH",
+                fixture.root.join("absent-selection.json"),
+            )
+            .args(["check-config", "--state-dir"])
+            .arg(fixture.root.join("state"));
+        for (key, path) in &fixture.flow {
+            let environment = match *key {
+                "infer_config_sha256" => "ML_WORKER_FLOW_INFER_CONFIG",
+                "tracker_config_sha256" => "ML_WORKER_FLOW_TRACKER_CONFIG",
+                "tracker_library_sha256" => "ML_WORKER_FLOW_TRACKER_LIBRARY",
+                "parser_lib_sha256" => "ML_WORKER_FLOW_PARSER_LIBRARY",
+                _ => unreachable!("fixture Flow artifact"),
+            };
+            command.env(environment, path);
+        }
+        // Duplicate flags intentionally exercise the same last-value contract
+        // as the real dispatcher, without rebuilding the fixture between requests.
+        command.arg("--auxiliary-runtime=onnxruntime-cpu");
+        let accepted = config_output(&mut command);
+        assert!(
+            accepted.status.success(),
+            "{}",
+            String::from_utf8_lossy(&accepted.stderr)
+        );
+        assert!(fixture.engines[1..].iter().all(|path| !path.exists()));
+        command.arg("--auxiliary-runtime=tensorrt");
+        assert_eq!(config_output(&mut command).status.code(), Some(3));
+        command.arg("--auxiliary-runtime=onnxruntime-cpu");
+        assert!(config_output(&mut command).status.success());
+        fs::write(&bed, b"changed-after-identity").unwrap();
+        assert_eq!(config_output(&mut command).status.code(), Some(3));
+    }
+
+    fn config_output(command: &mut std::process::Command) -> std::process::Output {
+        use std::process::Stdio;
+        use std::time::{Duration, Instant};
+        let mut child = command
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            match child.try_wait() {
+                Ok(Some(_)) => return child.wait_with_output().unwrap(),
+                Ok(None) if Instant::now() < deadline => {
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+                result => {
+                    let _ = child.kill();
+                    let output = child.wait_with_output().expect("reap file-only CLI child");
+                    panic!("file-only check-config did not finish: {result:?}; {output:?}");
+                }
+            }
+        }
+    }
 }

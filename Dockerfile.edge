@@ -188,6 +188,7 @@ RUN --mount=type=cache,target=/root/.cache/uv \
     && python -m pip install --no-cache-dir pyyaml \
     && python -c 'import importlib.util as u; assert u.find_spec("pyservicemaker"), "pyservicemaker not visible from the venv"' \
     && python -c 'import onnxruntime; assert "CPUExecutionProvider" in onnxruntime.get_available_providers()' \
+    && test -s /app/.venv/lib/python3.12/site-packages/onnxruntime/capi/libonnxruntime.so.1.29.0 \
     && ! python -c 'import torch' \
     && ! python -c 'import ultralytics'
 

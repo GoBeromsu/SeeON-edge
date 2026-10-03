@@ -1,7 +1,8 @@
 use seeon_deepstream_native::RuntimeVersions;
 
-use super::{ManifestError, SCHEMA_VERSION, components, object, text};
+use super::{ManifestError, ModelRuntimeFacts, SCHEMA_VERSION, components, object, text};
 use crate::config::build_revision::BuildRevisionError;
+use crate::config::model_bundle::identity::AuxiliaryRuntime;
 use crate::config::pull::PulledConfig;
 use crate::json::Json;
 use crate::relay::cameras::WorkerConfigPayload;
@@ -77,6 +78,7 @@ pub(super) fn build(
     config: &PulledConfig,
     media: &MediaAssembly,
     versions: RuntimeVersions,
+    runtimes: ModelRuntimeFacts<'_>,
 ) -> Result<Json, ManifestError> {
     let revision = settings
         .build_revision()
@@ -136,7 +138,8 @@ pub(super) fn build(
         cameras.push((&camera.camera_id, content));
     }
     cameras.sort_by(|left, right| left.0.cmp(right.0));
-    let components = components::engines(admitted, fall_enabled)?;
+    let selected = settings.flags().auxiliary_runtime;
+    let components = components::models(admitted, selected, runtimes, fall_enabled)?;
     let fall = &admitted.fall;
     let bundle = match &admitted.checked.selection {
         Some((_, proof)) => object([
@@ -156,6 +159,13 @@ pub(super) fn build(
         None => object([("authority", text("packaged"))]),
     };
     let media_plan = components::media_plan(media);
+    let (runtime_field, version_field) = match selected {
+        AuxiliaryRuntime::TensorRt => ("inference_runtime", "inference_runtime_version_encoded"),
+        AuxiliaryRuntime::OnnxRuntimeCpu => (
+            "media_inference_runtime",
+            "media_inference_runtime_version_encoded",
+        ),
+    };
     Ok(object([
         ("manifest_schema_version", Json::Int(SCHEMA_VERSION)),
         (
@@ -171,11 +181,8 @@ pub(super) fn build(
                 ("package_version", text(env!("CARGO_PKG_VERSION"))),
                 ("os_name", text(std::env::consts::OS)),
                 ("architecture", text(std::env::consts::ARCH)),
-                ("inference_runtime", text("tensorrt")),
-                (
-                    "inference_runtime_version_encoded",
-                    Json::Int(i128::from(versions.trt_version)),
-                ),
+                (runtime_field, text("tensorrt")),
+                (version_field, Json::Int(i128::from(versions.trt_version))),
                 (
                     "cuda_runtime_version_encoded",
                     Json::Int(i128::from(versions.cuda_runtime_version)),

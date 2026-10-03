@@ -194,6 +194,8 @@ fn empty_roster_still_reaches_the_lease_gate_and_preserves_its_exit() {
         Flags {
             heartbeat_on_start: false,
             state_dir: Some(state.clone()),
+            auxiliary_runtime:
+                seeon_ml_worker::config::model_bundle::identity::AuxiliaryRuntime::TensorRt,
         },
         BootPolicy {
             device_ordinal: 0,
@@ -224,4 +226,50 @@ fn empty_roster_still_reaches_the_lease_gate_and_preserves_its_exit() {
     drop(failure);
     drop(held);
     std::fs::remove_dir_all(&state).expect("owned cleanup");
+}
+
+#[test]
+fn explicit_cpu_settings_do_not_require_unused_engines_or_relax_other_policy() {
+    use seeon_ml_worker::config::env::Env;
+    use seeon_ml_worker::run::{BootPolicy, Settings, SettingsError};
+    use std::ffi::OsString;
+
+    let mut env = Env::new();
+    env.insert("RELAY_TOKEN".into(), "test-token".into());
+    let policy = BootPolicy {
+        device_ordinal: 0,
+        stored_pose_threshold: 0.5,
+        deployed_batch: None,
+        readiness_budget: Duration::from_secs(1),
+    };
+    let cpu = [
+        OsString::from("--auxiliary-runtime=onnxruntime-cpu"),
+        OsString::from("--state-dir=/unopened-provider-test-state"),
+    ];
+    assert!(Settings::parse(env.clone(), &cpu, policy).is_ok());
+    assert_eq!(
+        Settings::parse(env.clone(), &cpu[1..], policy).err(),
+        Some(SettingsError::Required("ML_WORKER_FALL_ENGINE_PATH"))
+    );
+    for key in [
+        "ML_WORKER_FALL_ENGINE_PATH",
+        "ML_WORKER_BED_ENGINE_PATH",
+        "ML_WORKER_STORED_POSE_ENGINE_PATH",
+    ] {
+        env.insert(key.into(), " ".into());
+    }
+    assert!(Settings::parse(env.clone(), &cpu, policy).is_ok());
+    let invalid = BootPolicy {
+        readiness_budget: Duration::ZERO,
+        ..policy
+    };
+    assert_eq!(
+        Settings::parse(env.clone(), &cpu, invalid).err(),
+        Some(SettingsError::Policy("readiness_budget"))
+    );
+    env.insert("ML_WORKER_PROFILE".into(), "retired".into());
+    assert_eq!(
+        Settings::parse(env, &cpu, policy).err(),
+        Some(SettingsError::Policy("ML_WORKER_PROFILE"))
+    );
 }

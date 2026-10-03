@@ -89,6 +89,8 @@ impl Fixture {
             Flags {
                 heartbeat_on_start: false,
                 state_dir: Some(self.state_dir.clone()),
+                auxiliary_runtime:
+                    seeon_ml_worker::config::model_bundle::identity::AuxiliaryRuntime::TensorRt,
             },
             BootPolicy {
                 device_ordinal: 0,

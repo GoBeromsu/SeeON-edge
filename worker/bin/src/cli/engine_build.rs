@@ -5,6 +5,8 @@ use std::ffi::{OsStr, OsString};
 use std::os::unix::ffi::OsStrExt;
 use std::path::PathBuf;
 
+use crate::config::model_bundle::identity::AuxiliaryRuntime;
+
 /// Common required path flags, in declaration order.
 const REQUIRED_PATHS: [&str; 8] = [
     "--onnx",
@@ -34,11 +36,6 @@ pub enum AuxiliaryBuild {
         bed_engine: PathBuf,
         fall_engine: PathBuf,
     },
-    OnnxRuntimeCpu,
-}
-
-enum AuxiliaryRuntime {
-    TensorRt,
     OnnxRuntimeCpu,
 }
 
@@ -134,11 +131,8 @@ fn parse_batch(value: &OsStr) -> Result<u32, ParseError> {
 }
 
 fn parse_auxiliary_runtime(value: &OsStr) -> Result<AuxiliaryRuntime, ParseError> {
-    match value.to_str().ok_or(ParseError::NotUtf8)? {
-        "tensorrt" => Ok(AuxiliaryRuntime::TensorRt),
-        "onnxruntime-cpu" => Ok(AuxiliaryRuntime::OnnxRuntimeCpu),
-        _ => Err(ParseError::InvalidAuxiliaryRuntime),
-    }
+    AuxiliaryRuntime::parse(value.to_str().ok_or(ParseError::NotUtf8)?)
+        .ok_or(ParseError::InvalidAuxiliaryRuntime)
 }
 
 /// Parses `engine-build` arguments. A value is `--name=value` or the next
