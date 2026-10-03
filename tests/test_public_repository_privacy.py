@@ -1531,6 +1531,7 @@ _PUBLISH_STEP_SEQUENCE: tuple[tuple[str, str | None], ...] = (
     ("", "actions/checkout@"),
     ("Resolve deploy SHA", None),
     ("Prepare hosted runner disk", None),
+    ("Share Docker image storage", None),
     ("Set up Docker Buildx", "docker/setup-buildx-action@"),
     ("Login to GitHub Container Registry", "docker/login-action@"),
     ("Decide, per image", None),
@@ -1614,6 +1615,165 @@ def test_edge_image_runner_cleanup_cannot_be_dropped() -> None:
         _assert_bounded_hosted_runner_disk_preparation(workflow)
 
 
+_SHARED_DOCKER_STORAGE_SCRIPT = (
+    "set -euo pipefail\n"
+    "sudo python3 - <<'PYCONFIG'\n"
+    "import json\n"
+    "import subprocess\n"
+    "from pathlib import Path\n"
+    'path = Path("/etc/docker/daemon.json")\n'
+    "original = path.read_bytes() if path.exists() else None\n"
+    "config = json.loads(original) if original is not None else {}\n"
+    "if not isinstance(config, dict):\n"
+    '    raise SystemExit("Docker daemon configuration must be an object")\n'
+    'features = config.setdefault("features", {})\n'
+    "if not isinstance(features, dict):\n"
+    '    raise SystemExit("Docker daemon features must be an object")\n'
+    'features["containerd-snapshotter"] = True\n'
+    "try:\n"
+    '    path.write_text(json.dumps(config) + "\\n")\n'
+    '    subprocess.run(["systemctl", "restart", "docker"], check=True)\n'
+    "    status = json.loads(subprocess.check_output(\n"
+    '        ["docker", "info", "--format", "{{json .DriverStatus}}"], text=True\n'
+    "    ))\n"
+    '    if ["driver-type", "io.containerd.snapshotter.v1"] not in status:\n'
+    '        raise RuntimeError("Docker containerd image store is not active")\n'
+    "except Exception:\n"
+    "    if original is None:\n"
+    "        path.unlink(missing_ok=True)\n"
+    "    else:\n"
+    "        path.write_bytes(original)\n"
+    '    subprocess.run(["systemctl", "restart", "docker"], check=False)\n'
+    "    raise\n"
+    "PYCONFIG\n"
+    "df -h /\n"
+)
+
+
+def _assert_hosted_shared_docker_storage(workflow: dict[str, object]) -> None:
+    steps = _steps(_jobs(workflow)["publish"])
+    storage = steps[3]
+    assert storage == {
+        "name": "Share Docker image storage for build and smoke",
+        "if": "runner.environment == 'github-hosted' && runner.os == 'Linux'",
+        "run": _SHARED_DOCKER_STORAGE_SCRIPT,
+    }
+    builder = next(s for s in steps if s.get("name") == "Set up Docker Buildx")
+    assert builder["with"] == {"driver": "docker"}
+
+
+def test_edge_image_storage_is_shared_without_replacing_daemon_config() -> None:
+    _assert_hosted_shared_docker_storage(_workflow("edge-images.yml"))
+
+
+@pytest.mark.parametrize("field", ["if", "run"])
+def test_edge_image_storage_rejects_unguarded_or_expanded_changes(field: str) -> None:
+    workflow = copy.deepcopy(_workflow("edge-images.yml"))
+    _jobs(workflow)["publish"]["steps"][3][field] = "always()" if field == "if" else "true\n"
+
+    with pytest.raises(AssertionError):
+        _assert_hosted_shared_docker_storage(workflow)
+
+
+def test_edge_image_storage_rejects_a_second_builder_store() -> None:
+    workflow = copy.deepcopy(_workflow("edge-images.yml"))
+    _jobs(workflow)["publish"]["steps"][4]["with"]["driver"] = "docker-container"
+
+    with pytest.raises(AssertionError):
+        _assert_hosted_shared_docker_storage(workflow)
+
+
+def _docker_storage_setup_python(path: Path) -> str:
+    source = _SHARED_DOCKER_STORAGE_SCRIPT.split("sudo python3 - <<'PYCONFIG'\n", 1)[1]
+    source = source.split("\nPYCONFIG", 1)[0]
+    target = 'Path("/etc/docker/daemon.json")'
+    assert source.count(target) == 1
+    return source.replace(target, f"Path({str(path)!r})")
+
+
+@pytest.mark.parametrize(
+    "existing", [None, {"log-driver": "json-file", "features": {"buildkit": True}}]
+)
+def test_edge_image_storage_preserves_existing_config(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, existing: dict[str, object] | None
+) -> None:
+    config = tmp_path / "daemon.json"
+    if existing is not None:
+        config.write_text(json.dumps(existing))
+    calls: list[list[str]] = []
+
+    def restart(argv: list[str], *, check: bool) -> None:
+        assert check
+        calls.append(argv)
+
+    def info(argv: list[str], *, text: bool) -> str:
+        assert argv == ["docker", "info", "--format", "{{json .DriverStatus}}"]
+        assert text
+        return '[["driver-type", "io.containerd.snapshotter.v1"]]'
+
+    monkeypatch.setattr(subprocess, "run", restart)
+    monkeypatch.setattr(subprocess, "check_output", info)
+    exec(compile(_docker_storage_setup_python(config), "daemon-setup", "exec"), {})
+    expected = copy.deepcopy(existing) if existing is not None else {}
+    expected.setdefault("features", {})["containerd-snapshotter"] = True
+    assert json.loads(config.read_text()) == expected
+    assert calls == [["systemctl", "restart", "docker"]]
+
+
+@pytest.mark.parametrize("original", [None, b'{ "log-driver": "json-file" }\n'])
+@pytest.mark.parametrize("failure", ["restart", "verify"])
+def test_edge_image_storage_restores_config_on_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, original: bytes | None, failure: str
+) -> None:
+    config = tmp_path / "daemon.json"
+    if original is not None:
+        config.write_bytes(original)
+    calls: list[tuple[list[str], bool]] = []
+
+    def restart(argv: list[str], *, check: bool) -> None:
+        calls.append((argv, check))
+        if check and failure == "restart":
+            raise subprocess.CalledProcessError(1, argv)
+
+    def info(argv: list[str], *, text: bool) -> str:
+        del argv, text
+        return '[["driver-type", "overlay2"]]'
+
+    monkeypatch.setattr(subprocess, "run", restart)
+    monkeypatch.setattr(subprocess, "check_output", info)
+    with pytest.raises((subprocess.CalledProcessError, RuntimeError)):
+        exec(compile(_docker_storage_setup_python(config), "daemon-setup", "exec"), {})
+    assert calls == [
+        (["systemctl", "restart", "docker"], True),
+        (["systemctl", "restart", "docker"], False),
+    ]
+    if original is None:
+        assert not config.exists()
+    else:
+        assert config.read_bytes() == original
+
+
+@pytest.mark.parametrize("original", [b"[]", b'{"features": []}', b"not json"])
+def test_edge_image_storage_invalid_config_is_never_overwritten(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, original: bytes
+) -> None:
+    config = tmp_path / "daemon.json"
+    config.write_bytes(original)
+    calls: list[tuple[object, ...]] = []
+
+    def forbidden(*args: object, **kwargs: object) -> None:
+        del kwargs
+        calls.append(args)
+        pytest.fail("Invalid daemon config must never invoke service commands")
+
+    monkeypatch.setattr(subprocess, "run", forbidden)
+    monkeypatch.setattr(subprocess, "check_output", forbidden)
+    with pytest.raises((SystemExit, json.JSONDecodeError)):
+        exec(compile(_docker_storage_setup_python(config), "daemon-setup", "exec"), {})
+    assert config.read_bytes() == original
+    assert not calls
+
+
 def test_the_required_edge_image_check_is_never_gated_off() -> None:
     """The gate must report on every pull request.
 
@@ -1660,12 +1820,12 @@ def test_edge_image_workflow_is_reachable_from_pull_request() -> None:
     [
         # A moved tag is a moved commit; both required checks run fork code.
         ("edge-images.yml", "publish", 0, "actions/checkout@v4"),
-        ("edge-images.yml", "publish", 3, "docker/setup-buildx-action@v3"),
-        ("edge-images.yml", "publish", 4, "docker/login-action@v3"),
-        ("edge-images.yml", "publish", 6, "docker/build-push-action@v6"),
-        # The ml-worker build action needs the same immutable pin as ml-api.
+        ("edge-images.yml", "publish", 4, "docker/setup-buildx-action@v3"),
+        ("edge-images.yml", "publish", 5, "docker/login-action@v3"),
         ("edge-images.yml", "publish", 7, "docker/build-push-action@v6"),
-        ("edge-images.yml", "publish", 14, "actions/upload-artifact@v4"),
+        # The ml-worker build action needs the same immutable pin as ml-api.
+        ("edge-images.yml", "publish", 8, "docker/build-push-action@v6"),
+        ("edge-images.yml", "publish", 15, "actions/upload-artifact@v4"),
         # A branch ref is worse: it moves on every upstream push.
         ("edge-images.yml", "publish", 0, "actions/checkout@main"),
         # A 40-char string that is not hex must not pass for a commit.
@@ -1688,12 +1848,12 @@ def test_pull_request_pin_policy_rejects_an_unpinned_action(
     [
         # Ungated: a fork PR would export into the cross-branch BuildKit cache
         # that later trusted runs on main restore from.
-        (6, "type=gha,scope=edge-ml-api,mode=max"),
-        (7, "type=gha,scope=edge-ml-worker,mode=max"),
+        (7, "type=gha,scope=edge-ml-api,mode=max"),
+        (8, "type=gha,scope=edge-ml-worker,mode=max"),
         # Gated on the wrong side of the condition.
-        (7, "${{ env.PUSH_IMAGES == 'false' && 'type=gha,mode=max' || '' }}"),
+        (8, "${{ env.PUSH_IMAGES == 'false' && 'type=gha,mode=max' || '' }}"),
         # Right prefix, but the fallback exports anyway.
-        (7, "${{ env.PUSH_IMAGES == 'true' && 'type=gha,mode=max' || 'type=gha' }}"),
+        (8, "${{ env.PUSH_IMAGES == 'true' && 'type=gha,mode=max' || 'type=gha' }}"),
     ],
 )
 def test_edge_image_policy_rejects_an_ungated_cache_export(step_index: int, cache_to: str) -> None:
@@ -1744,16 +1904,16 @@ def test_edge_image_policy_rejects_a_write_scope_on_a_second_job() -> None:
     ("step_index", "field", "value"),
     [
         # Logging in to ghcr.io on a PR run is the whole thing the gate stops.
-        (4, "if", "always()"),
+        (5, "if", "always()"),
         # Pushing an image built from a PR's own Dockerfile.
-        (6, "push", "true"),
         (7, "push", "true"),
+        (8, "push", "true"),
         # Re-tagging a published digest is a registry write with no `push:`
         # input, so it needs the gate just as much as a build does.
-        (9, "if", "always()"),
-        (10, "if", "env.BUILD_ML_WORKER != 'true'"),
+        (10, "if", "always()"),
+        (11, "if", "env.BUILD_ML_WORKER != 'true'"),
         # An artifact upload on a PR run publishes an unpullable digest.
-        (14, "if", "always()"),
+        (15, "if", "always()"),
     ],
 )
 def test_edge_image_policy_rejects_an_ungated_token_consumer(
@@ -1775,10 +1935,10 @@ def test_edge_image_policy_rejects_an_ungated_token_consumer(
     [
         # Removing the login step rather than un-gating it must not read as "no
         # ungated consumer found, therefore safe".
-        (4, "registry login"),
+        (5, "registry login"),
         # Same for the boot smoke: deleting it is the required check silently
         # becoming a build-only gate again, which is the #195 failure mode.
-        (8, "boot smoke"),
+        (9, "boot smoke"),
     ],
 )
 def test_edge_image_policy_rejects_dropping_a_gated_step(step_index: int, why: str) -> None:
@@ -1810,7 +1970,7 @@ def _assert_edge_image_boot_smoke_and_direct_load(workflow: dict[str, object]) -
     assert worker["with"]["load"] == "${{ env.RELEASE_BUILD != 'true' }}"
     assert "outputs" not in worker["with"]
     # Release and reuse behavior stays digest-based; release builds still push
-    # an attested index, with no local-image exporter attached.
+    # an attested index, with no explicit local-load request.
     assert worker["with"]["provenance"] == "${{ env.RELEASE_BUILD == 'true' }}"
     assert worker["with"]["push"] == _PUSH_GATE_EXPR
     assert 'SMOKE_REF="$IMAGE_NAMESPACE/ml-worker@$ML_WORKER_DIGEST"' in str(pull[0]["run"])

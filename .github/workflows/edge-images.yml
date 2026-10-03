@@ -229,8 +229,49 @@ jobs:
             /usr/share/swift /usr/local/.ghcup/ghc
           df -h /
 
+      - name: Share Docker image storage for build and smoke
+        # On disposable hosted runners only: preserve all existing daemon
+        # settings and opt into the containerd image store. The built-in Docker
+        # builder then publishes/boots from the same layer store instead of
+        # importing a second DeepStream copy from a standalone BuildKit daemon.
+        if: runner.environment == 'github-hosted' && runner.os == 'Linux'
+        run: |
+          set -euo pipefail
+          sudo python3 - <<'PYCONFIG'
+          import json
+          import subprocess
+          from pathlib import Path
+          path = Path("/etc/docker/daemon.json")
+          original = path.read_bytes() if path.exists() else None
+          config = json.loads(original) if original is not None else {}
+          if not isinstance(config, dict):
+              raise SystemExit("Docker daemon configuration must be an object")
+          features = config.setdefault("features", {})
+          if not isinstance(features, dict):
+              raise SystemExit("Docker daemon features must be an object")
+          features["containerd-snapshotter"] = True
+          try:
+              path.write_text(json.dumps(config) + "\n")
+              subprocess.run(["systemctl", "restart", "docker"], check=True)
+              status = json.loads(subprocess.check_output(
+                  ["docker", "info", "--format", "{{json .DriverStatus}}"], text=True
+              ))
+              if ["driver-type", "io.containerd.snapshotter.v1"] not in status:
+                  raise RuntimeError("Docker containerd image store is not active")
+          except Exception:
+              if original is None:
+                  path.unlink(missing_ok=True)
+              else:
+                  path.write_bytes(original)
+              subprocess.run(["systemctl", "restart", "docker"], check=False)
+              raise
+          PYCONFIG
+          df -h /
+
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3.12.0
+        with:
+          driver: docker
 
       - name: Login to GitHub Container Registry
         if: env.PUSH_IMAGES == 'true'
@@ -314,7 +355,7 @@ jobs:
           push: ${{ env.PUSH_IMAGES == 'true' }}
           provenance: ${{ env.RELEASE_BUILD == 'true' }}
           # Releases still publish the attested index and smoke its digest.
-          # Only non-release builds load locally; no persistent tar duplicates
+          # Only non-release builds request loading; no persistent tar duplicates
           # the image while BuildKit and the Docker daemon also hold layers.
           load: ${{ env.RELEASE_BUILD != 'true' }}
           build-args: |
@@ -404,9 +445,9 @@ jobs:
               previous = plan.get("previous_digest") or ""
               if plan["build"]:
                   if not built:
-                      # A pull request build has no exporter for ml-api (no
-                      # push, no load), so buildx reports no digest -- expected,
-                      # and there is nothing pullable to name. On a publishing
+                      # A non-publishing build may omit a digest depending on
+                      # the builder/exporter. No registry object is promised,
+                      # even if the built-in driver loads locally. On a publishing
                       # run the same emptiness is a real failure, and used to be
                       # written into the artifact as `ml-api@` with no digest.
                       if os.environ.get("PUSH_IMAGES") == "true":
@@ -455,7 +496,7 @@ jobs:
         # The complement of the local-image smoke above: this is the path where
         # there is no fresh local build graph to smoke, because ml-worker was
         # either REUSED from a previous release or built on a release (which
-        # pushes an OCI index and loads nothing). Both cases pull the exact
+        # pushes an OCI index). Both cases pull the exact
         # bytes this run pins, which is the stronger evidence for a seal: it
         # boots what was actually published, not merely what was built.
         #
