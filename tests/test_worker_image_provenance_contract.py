@@ -259,6 +259,14 @@ def test_cargo_verify_requires_secret_and_keeps_cpu_tests_unchanged() -> None:
     assert "cargo test --locked --workspace" in test_commands[0]
     assert test_commands[0].endswith("cargo test --locked --workspace")
     assert "FROM cargo-build AS cargo-verify" in _dockerfile()
+    assert "USER 65534:65534" in verify
+    assert "chown -R 65534:65534 /usr/src/myapp" in verify
+    assert "ENV CARGO_HOME=/tmp/seeon-cargo" in verify
+    assert "id=rust-test-inputs,required=true,uid=65534,gid=65534" in test_commands[0]
+    assert (
+        "id=seeon-rust-verification-registry,target=/tmp/seeon-cargo/registry,uid=65534,gid=65534"
+        in test_commands[0]
+    )
     assert "ML_WORKER_BUILD_REVISION" not in test_commands[0]
     assert "-- --skip" not in test_commands[0]
     assert (

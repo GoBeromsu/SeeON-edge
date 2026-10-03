@@ -111,8 +111,12 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
 FROM cargo-build AS cargo-verify
 COPY scripts/prepare_rust_test_inputs.py /usr/src/myapp/scripts/prepare_rust_test_inputs.py
 COPY worker/adapters/deepstream/configs /usr/src/myapp/worker/adapters/deepstream/configs
-RUN --mount=type=secret,id=rust-test-inputs,required=true \
-    --mount=type=cache,target=/usr/local/cargo/registry \
+RUN install -d -o 65534 -g 65534 /tmp/seeon-cargo \
+    && chown -R 65534:65534 /usr/src/myapp
+ENV CARGO_HOME=/tmp/seeon-cargo
+USER 65534:65534
+RUN --mount=type=secret,id=rust-test-inputs,required=true,uid=65534,gid=65534 \
+    --mount=type=cache,id=seeon-rust-verification-registry,target=/tmp/seeon-cargo/registry,uid=65534,gid=65534 \
     python3 /usr/src/myapp/scripts/prepare_rust_test_inputs.py \
       --archive /run/secrets/rust-test-inputs \
     && cargo test --locked --workspace
