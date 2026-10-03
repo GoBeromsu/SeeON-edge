@@ -272,6 +272,50 @@ fn header_value_errors_drop_but_truncated_bodies_and_size_remain_faults() {
 }
 
 #[test]
+fn oversized_zone_refusal_precedes_malformed_header_classification() {
+    let root = scratch("oversized-headers");
+    let mut base = fs::read("/usr/share/zoneinfo/UTC").unwrap();
+    base.resize(MAX_TZIF_BYTES + 1, 0);
+    let mut bad_magic = base.clone();
+    bad_magic[..4].copy_from_slice(b"XXXX");
+    let mut corrupt_counts = base.clone();
+    corrupt_counts[20..24].copy_from_slice(&(-1_i32).to_be_bytes());
+    let mut absent_second = base;
+    absent_second[40..44].copy_from_slice(&i32::try_from(MAX_TZIF_BYTES).unwrap().to_be_bytes());
+    let mut observed = Vec::new();
+    for (name, bytes) in [
+        ("BadMagic", bad_magic),
+        ("CorruptCounts", corrupt_counts),
+        ("AbsentSecond", absent_second),
+    ] {
+        fs::write(root.join(name), bytes).unwrap();
+        let config = payload(json!({"fall":definition("00:00", "01:00", name)}));
+        for mode in [AdmissionMode::Startup, AdmissionMode::Poll] {
+            let outcome = admit(&config, &root, mode);
+            observed.push((name, mode, outcome.windows, outcome.drops));
+        }
+    }
+    assert!(
+        observed.iter().all(|(_, _, result, drops)| {
+            *result == Err(WindowError::TooLarge) && drops.is_empty()
+        }),
+        "oversized assets must never fall open or enter header parsing: {observed:#?}"
+    );
+}
+
+#[test]
+fn malformed_zone_at_exact_size_limit_retains_header_drop() {
+    let root = scratch("exact-size-header");
+    fs::write(root.join("BadMagic"), vec![0; MAX_TZIF_BYTES]).unwrap();
+    let config = payload(json!({"fall":definition("00:00", "01:00", "BadMagic")}));
+    for mode in [AdmissionMode::Startup, AdmissionMode::Poll] {
+        let outcome = admit(&config, &root, mode);
+        assert!(outcome.windows.unwrap().is_empty());
+        assert_eq!(outcome.drops, [("fall".into(), DropReason::Header)]);
+    }
+}
+
+#[test]
 fn unreadable_regular_file_is_io_and_fifo_is_a_bounded_missing_drop() {
     assert_ne!(
         fs::metadata("/proc/self").unwrap().uid(),

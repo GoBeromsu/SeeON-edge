@@ -170,13 +170,13 @@ fn admit_one(definition: &WindowDefinition, root: &Path) -> Result<One, WindowEr
         Captured::Missing => return Ok(One::Drop(DropReason::Missing)),
         Captured::Bytes(bytes) => bytes,
     };
+    if bytes.len() > MAX_TZIF_BYTES {
+        return Err(WindowError::TooLarge);
+    }
     match header_class(&bytes) {
         Header::Drop => return Ok(One::Drop(DropReason::Header)),
         Header::Corrupt => return Err(WindowError::CorruptTzif),
         Header::Present => {}
-    }
-    if bytes.len() > MAX_TZIF_BYTES {
-        return Err(WindowError::TooLarge);
     }
     let start_text = ascii_hhmm(start);
     let end_text = ascii_hhmm(end);
