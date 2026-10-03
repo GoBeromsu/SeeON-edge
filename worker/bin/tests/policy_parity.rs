@@ -374,7 +374,8 @@ fn fall_sequence_replays_the_python_lines() {
                 score: Ok(FallScore {
                     logit,
                     evidence: evidence(),
-                }),
+                }
+                .into()),
             };
             events.extend(
                 stage

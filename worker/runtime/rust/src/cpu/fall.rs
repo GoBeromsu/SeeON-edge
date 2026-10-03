@@ -1,7 +1,8 @@
 //! Synchronous pose-bbox56 GRU scoring on an already-open CPU model.
 //! Returns the raw logit; calibration, policy and event emission remain the caller's duty.
 
-use seeon_onnxruntime_native::{ErrorKind, Input, Model, Output};
+pub use seeon_onnxruntime_native::ErrorKind;
+use seeon_onnxruntime_native::{Input, Model, Output};
 use seeon_worker::pose_bbox56::{FALL_WINDOW_FRAMES, POSE_BBOX56_DIM, PoseBbox56Row};
 
 pub const WINDOW_VALUES: usize = FALL_WINDOW_FRAMES * POSE_BBOX56_DIM;

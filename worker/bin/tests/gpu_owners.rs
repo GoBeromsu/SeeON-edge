@@ -114,7 +114,11 @@ fn each_owner_is_ready_once_and_its_first_reply_follows_one_warmup() {
     assert_eq!(response.frame.sequence, 41);
     assert_eq!(response.track_id, 7);
     let score = response.score.expect("fall score");
-    assert_first_served_receipt(&score.evidence, fall_digest);
+    assert!(matches!(
+        score,
+        seeon_ml_worker::msg::FallScore::TensorRt(_)
+    ));
+    assert_first_served_receipt(score.accelerator().expect("GPU receipt"), fall_digest);
 
     let (reply, replies) = mpsc::sync_channel(ONESHOT_CAPACITY);
     let request = BedRequest {

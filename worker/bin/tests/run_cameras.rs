@@ -430,7 +430,8 @@ fn consume(stage: &mut FallStage, logit: f32) -> Vec<BusinessEvent> {
                 score: Ok(FallScore {
                     logit,
                     evidence: evidence(),
-                }),
+                }
+                .into()),
             },
             &mut |update| events.extend(update.events.iter().cloned()),
         )

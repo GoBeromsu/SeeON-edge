@@ -1,7 +1,10 @@
 //! Channel messages and capacities of design §2.3. Every channel is a
 //! `std::sync::mpsc::sync_channel` and every producer uses `try_send`.
-//! Native media payloads cross the media channels unchanged. Frozen at the
-//! end of stage 0; later stages ask the owner for any change.
+//! Native media payloads cross the media channels unchanged. The accepted
+//! mixed-provider slice (#647) tags fall results without changing capacities.
+
+mod fall;
+pub use fall::{FallInferenceError, FallScore};
 
 use std::sync::mpsc::SyncSender;
 
@@ -11,7 +14,6 @@ use seeon_worker::pose_bbox56::{FALL_WINDOW_FRAMES, PoseBbox56Row};
 use seeon_worker::stored_pose::PersonBox;
 use seeon_worker_runtime::bed_gpu::BedGpuError;
 use seeon_worker_runtime::evidence::AcceleratorEvidence;
-use seeon_worker_runtime::fall_gpu::{FallGpuError, FallScore};
 use seeon_worker_runtime::stored_pose::StoredPoseGpuError;
 
 use crate::exit::Exit;
@@ -37,7 +39,7 @@ pub const ANALYSIS_CAPACITY: usize = 1;
 /// One reply per request, and one readiness report per GPU owner thread.
 pub const ONESHOT_CAPACITY: usize = 1;
 
-/// One 30-frame pose-bbox56 window for one track, scored by `FallGpu`.
+/// One 30-frame pose-bbox56 window for one track, scored by the selected owner.
 pub struct FallRequest {
     pub frame: FrameIdentity,
     pub track_id: u64,
@@ -48,7 +50,7 @@ pub struct FallRequest {
 pub struct FallResponse {
     pub frame: FrameIdentity,
     pub track_id: u64,
-    pub score: Result<FallScore, FallGpuError>,
+    pub score: Result<FallScore, FallInferenceError>,
 }
 
 /// One RGB frame for a request/oneshot GPU owner; the owner answers once on

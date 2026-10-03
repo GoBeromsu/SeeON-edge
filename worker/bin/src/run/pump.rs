@@ -8,11 +8,10 @@ use std::sync::mpsc::SyncSender;
 
 use seeon_deepstream_native::FrameIdentity;
 use seeon_worker::detection_window::{AwareDateTime, DetectionWindow, DetectionWindowError};
-use seeon_worker_runtime::fall_gpu::FallScore;
 
 use super::policy::{FallResponseError, validate_fall_response};
 use crate::exit::Exit;
-use crate::msg::{FallRequest, FallResponse, PosePacket};
+use crate::msg::{FallRequest, FallResponse, FallScore, PosePacket};
 use crate::policy::fall::{DecisionUpdate, FallStage, FallStageError};
 use crate::policy::ingest::{IngestRefusal, ingest};
 use crate::seam::Clock;
@@ -362,7 +361,7 @@ mod exit_observation_tests {
                 crate::msg::FallResponse {
                     frame: seeon_deepstream_native::FrameIdentity::default(),
                     track_id: 1,
-                    score: Err(seeon_worker_runtime::fall_gpu::FallGpuError::Window),
+                    score: Err(seeon_worker_runtime::fall_gpu::FallGpuError::Window.into()),
                 },
                 &mut |_| panic!("a stale response must not decide"),
             )

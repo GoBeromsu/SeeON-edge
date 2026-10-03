@@ -10,7 +10,9 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use seeon_deepstream_native::{FrameIdentity, GpuMetrics, StateError, TrackedObject};
 use seeon_ml_worker::exit::Exit;
-use seeon_ml_worker::msg::{FALL_REQUEST_CAPACITY, FallRequest, FallResponse, PosePacket};
+use seeon_ml_worker::msg::{
+    FALL_REQUEST_CAPACITY, FallRequest, FallResponse, FallScore, PosePacket,
+};
 use seeon_ml_worker::policy::fall::{DecisionUpdate, FallStage, FallStageError};
 use seeon_ml_worker::policy::ingest::IngestRefusal;
 use seeon_ml_worker::run::policy::FallResponseError;
@@ -21,9 +23,10 @@ use seeon_worker::episode::BusinessEvent;
 use seeon_worker::fall::{FallCapacities, FallPolicy, FallPolicyDecider};
 use seeon_worker::trace::{
     DecisionTraceMissingReason, DecisionTraceReason, DecisionTraceSnapshot, DecisionTraceValueName,
+    NumericTraceValue,
 };
 use seeon_worker_runtime::evidence::{AcceleratorEvidence, EngineDigest, EvidenceError, Precision};
-use seeon_worker_runtime::fall_gpu::{FallGpuError, FallScore};
+use seeon_worker_runtime::fall_gpu::{FallGpuError, FallScore as GpuScore};
 
 #[derive(Debug)]
 struct Receipt {
@@ -156,6 +159,10 @@ fn inactive(source_id: u32) -> CameraPolicy {
 }
 
 fn camera(source_id: u32, capacity: usize) -> CameraPolicy {
+    calibrated_camera(source_id, capacity, 1.0)
+}
+
+fn calibrated_camera(source_id: u32, capacity: usize, temperature: f64) -> CameraPolicy {
     let decider = FallPolicyDecider::new(
         format!("camera-{source_id}"),
         "facility-1",
@@ -173,7 +180,7 @@ fn camera(source_id: u32, capacity: usize) -> CameraPolicy {
     .expect("valid test policy");
     CameraPolicy {
         source_id,
-        stage: Some(FallStage::new(decider, 1.0).expect("valid calibration")),
+        stage: Some(FallStage::new(decider, temperature).expect("valid calibration")),
     }
 }
 
@@ -247,11 +254,11 @@ fn refused(request: &FallRequest) -> FallResponse {
     FallResponse {
         frame: request.frame,
         track_id: request.track_id,
-        score: Err(FallGpuError::Window),
+        score: Err(FallGpuError::Window.into()),
     }
 }
 
-fn score() -> FallScore {
+fn score() -> GpuScore {
     let before = GpuMetrics {
         attempted: 6,
         succeeded: 5,
@@ -270,7 +277,7 @@ fn score() -> FallScore {
         elapsed_ns: 4789,
         device: 2,
     };
-    FallScore {
+    GpuScore {
         logit: 1.25,
         evidence: AcceleratorEvidence::from_delta(
             &before,
@@ -279,7 +286,7 @@ fn score() -> FallScore {
             EngineDigest::new(std::array::from_fn(|index| index as u8)),
             Precision::Fp32,
         )
-        .expect("public CPU test evidence"),
+        .expect("synthetic TensorRT channel evidence"),
     }
 }
 
@@ -416,7 +423,7 @@ fn all_fatal_variants_stop_before_unknown_source_routing_or_output() {
     ] {
         let mut response = refused(&requests[0]);
         response.frame.source_id = 3;
-        response.score = Err(cause);
+        response.score = Err(cause.into());
         let stop = AtomicBool::new(false);
         let mut sink = Sink::default();
         let error = pump.consume(response, &stop, &mut sink).unwrap_err();
@@ -508,7 +515,7 @@ fn real_score_frame_track_and_evidence_arrive_before_completion() {
         FallResponse {
             frame: request.frame,
             track_id: request.track_id,
-            score: Ok(expected),
+            score: Ok(expected.into()),
         },
         &stop,
         &mut sink,
@@ -516,8 +523,10 @@ fn real_score_frame_track_and_evidence_arrive_before_completion() {
     .unwrap();
     assert_eq!(
         sink.scores,
-        vec![(request.frame, request.track_id, expected)]
+        vec![(request.frame, request.track_id, expected.into())]
     );
+    assert_eq!(sink.scores[0].2.logit(), expected.logit);
+    assert_eq!(sink.scores[0].2.accelerator(), Some(&expected.evidence));
     assert_eq!(sink.order, vec![Kind::Score, Kind::Decision]);
     assert_eq!(sink.decisions[0].frame, request.frame);
     assert_eq!(sink.decisions[0].snapshots[0].track_id, Some(7));
@@ -531,7 +540,7 @@ fn real_score_frame_track_and_evidence_arrive_before_completion() {
         FallResponse {
             frame: request.frame,
             track_id: request.track_id,
-            score: Ok(expected),
+            score: Ok(expected.into()),
         },
         &stop,
         &mut sink,
@@ -539,10 +548,70 @@ fn real_score_frame_track_and_evidence_arrive_before_completion() {
     .unwrap();
     assert_eq!(
         sink.scores,
-        vec![(request.frame, request.track_id, expected)]
+        vec![(request.frame, request.track_id, expected.into())]
     );
     assert_eq!(sink.order, vec![Kind::Score, Kind::Decision]);
     assert!(!stop.load(Ordering::SeqCst));
+}
+
+#[test]
+fn cpu_scores_apply_calibration_without_accelerator_receipts() {
+    // Synthetic CPU-channel logits exercise the policy pump, not native execution.
+    for (logit, reason) in [
+        (20.0, DecisionTraceReason::EpisodeCandidate),
+        (-20.0, DecisionTraceReason::BelowThreshold),
+    ] {
+        let mut pump = open(vec![calibrated_camera(19, 1, 100.0)]);
+        let (sender, receiver) = mpsc::sync_channel(FALL_REQUEST_CAPACITY);
+        let requests = awaiting(&mut pump, 19, &[7], &sender, &receiver);
+        let request = &requests[0];
+        let stop = AtomicBool::new(false);
+        let mut sink = Sink::default();
+        pump.consume(
+            FallResponse {
+                frame: request.frame,
+                track_id: request.track_id,
+                score: Ok(FallScore::Cpu(logit)),
+            },
+            &stop,
+            &mut sink,
+        )
+        .expect("CPU score reaches the calibrated policy");
+        assert_eq!(
+            sink.scores,
+            vec![(request.frame, request.track_id, FallScore::Cpu(logit))]
+        );
+        assert_eq!(sink.scores[0].2.logit(), logit);
+        assert_eq!(sink.scores[0].2.accelerator(), None);
+        assert_eq!(sink.order, vec![Kind::Score, Kind::Decision]);
+        assert_eq!(sink.decisions.len(), 1);
+        let receipt = &sink.decisions[0];
+        assert_eq!(receipt.frame, request.frame);
+        assert_eq!(receipt.index, request.frame.sequence as i64);
+        assert_eq!(receipt.time, request.frame.pts_ns as f64 / 1e9);
+        assert_eq!(receipt.snapshots.len(), 1);
+        assert_eq!(receipt.generations.len(), 1);
+        assert!(receipt.generations[0].is_some());
+        let snapshot = &receipt.snapshots[0];
+        assert_eq!(snapshot.track_id, Some(request.track_id));
+        assert_eq!(snapshot.reason, reason);
+        let probability = match snapshot
+            .values()
+            .get(&DecisionTraceValueName::FallTransitionProbability)
+        {
+            Some(NumericTraceValue::Float(value)) => value.get(),
+            other => panic!("expected calibrated transition probability, got {other:?}"),
+        };
+        if logit > 0.0 {
+            assert!(probability > 0.5 && probability < 0.6);
+        } else {
+            assert!(probability > 0.4 && probability < 0.5);
+        }
+        assert!(snapshot.missing_values().is_empty());
+        assert!(receipt.events.is_empty());
+        assert_eq!(pump.pending_scores(), 0);
+        assert!(!stop.load(Ordering::SeqCst));
+    }
 }
 
 #[test]
@@ -550,7 +619,7 @@ fn nonfatal_unknown_response_is_a_routing_error_without_score_receipt() {
     let mut pump = PolicyPump::new(Vec::new(), None, idle_clock()).unwrap();
     let stop = AtomicBool::new(false);
     let mut sink = Sink::default();
-    for result in [Ok(score()), Err(FallGpuError::Window)] {
+    for result in [Ok(score().into()), Err(FallGpuError::Window.into())] {
         let error = pump
             .consume(
                 FallResponse {
@@ -654,13 +723,13 @@ fn stale_duplicate_and_unknown_frame_scores_are_not_admitted() {
     let mut stale = FallResponse {
         frame: requests[0].frame,
         track_id: requests[0].track_id,
-        score: Ok(expected),
+        score: Ok(expected.into()),
     };
     stale.frame.sequence += 1000;
     let mut unknown = FallResponse {
         frame: requests[0].frame,
         track_id: 99,
-        score: Ok(expected),
+        score: Ok(expected.into()),
     };
     unknown.frame.frame_number += 1;
     for response in [stale, unknown] {
@@ -673,7 +742,7 @@ fn stale_duplicate_and_unknown_frame_scores_are_not_admitted() {
         FallResponse {
             frame: requests[0].frame,
             track_id: requests[0].track_id,
-            score: Ok(expected),
+            score: Ok(expected.into()),
         },
         &stop,
         &mut sink,
@@ -685,7 +754,7 @@ fn stale_duplicate_and_unknown_frame_scores_are_not_admitted() {
         FallResponse {
             frame: requests[0].frame,
             track_id: requests[0].track_id,
-            score: Ok(expected),
+            score: Ok(expected.into()),
         },
         &stop,
         &mut sink,
@@ -693,7 +762,7 @@ fn stale_duplicate_and_unknown_frame_scores_are_not_admitted() {
     .unwrap();
     assert_eq!(
         sink.scores,
-        vec![(requests[0].frame, requests[0].track_id, expected)]
+        vec![(requests[0].frame, requests[0].track_id, expected.into())]
     );
     assert_eq!(sink.order, vec![Kind::Score]);
     assert_eq!(pump.pending_scores(), 1);
@@ -713,7 +782,7 @@ fn accepted_track_scores_notify_before_the_final_decision() {
             FallResponse {
                 frame: request.frame,
                 track_id: request.track_id,
-                score: Ok(expected),
+                score: Ok(expected.into()),
             },
             &stop,
             &mut sink,
@@ -724,7 +793,7 @@ fn accepted_track_scores_notify_before_the_final_decision() {
         sink.scores,
         requests
             .iter()
-            .map(|request| (request.frame, request.track_id, expected))
+            .map(|request| (request.frame, request.track_id, expected.into()))
             .collect::<Vec<_>>()
     );
     assert_eq!(sink.order, vec![Kind::Score, Kind::Score, Kind::Decision]);
@@ -786,7 +855,7 @@ fn inactive_source_validates_pose_without_requests_and_refuses_a_response() {
         FallResponse {
             frame: packet(19, 4, &[7]).frame,
             track_id: 7,
-            score: Ok(score()),
+            score: Ok(score().into()),
         },
         &stop,
         &mut sink,
@@ -797,7 +866,7 @@ fn inactive_source_validates_pose_without_requests_and_refuses_a_response() {
         FallResponse {
             frame: packet(19, 4, &[7]).frame,
             track_id: 7,
-            score: Err(FallGpuError::Window),
+            score: Err(FallGpuError::Window.into()),
         },
         &stop,
         &mut sink,
@@ -814,7 +883,7 @@ fn inactive_source_validates_pose_without_requests_and_refuses_a_response() {
             FallResponse {
                 frame: packet(19, 4, &[7]).frame,
                 track_id: 7,
-                score: Err(FallGpuError::Poisoned),
+                score: Err(FallGpuError::Poisoned.into()),
             },
             &stop,
             &mut sink,
@@ -848,7 +917,7 @@ fn disabled_domain_does_not_disturb_an_active_sources_pending_request() {
         FallResponse {
             frame: request.frame,
             track_id: request.track_id,
-            score: Ok(score()),
+            score: Ok(score().into()),
         },
         &stop,
         &mut sink,
@@ -1016,7 +1085,7 @@ fn clock_out_of_range_preserves_pending_and_outside_contains_no_request() {
         FallResponse {
             frame: pending,
             track_id: requests[0].track_id,
-            score: Err(FallGpuError::Window),
+            score: Err(FallGpuError::Window.into()),
         },
         &AtomicBool::new(false),
         &mut sink,

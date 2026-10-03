@@ -124,7 +124,7 @@ fn refused(request: &FallRequest) -> FallResponse {
     FallResponse {
         frame: request.frame,
         track_id: request.track_id,
-        score: Err(FallGpuError::Window),
+        score: Err(FallGpuError::Window.into()),
     }
 }
 

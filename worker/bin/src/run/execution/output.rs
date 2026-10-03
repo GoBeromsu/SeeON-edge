@@ -44,7 +44,7 @@ const OPEN_BUDGET_MS: u32 = 10_000;
 pub struct HeldScore {
     pub frame: seeon_deepstream_native::FrameIdentity,
     pub track_id: u64,
-    pub evidence: seeon_worker_runtime::evidence::AcceleratorEvidence,
+    pub evidence: Option<seeon_worker_runtime::evidence::AcceleratorEvidence>,
     pub logit: f32,
 }
 const MEDIA_READY_WAIT: Duration = Duration::from_secs(30);
@@ -682,7 +682,7 @@ pub(super) mod tests {
         let fault = crate::msg::FallResponse {
             frame: seeon_deepstream_native::FrameIdentity::default(),
             track_id: 7,
-            score: Err(seeon_worker_runtime::fall_gpu::FallGpuError::Poisoned),
+            score: Err(seeon_worker_runtime::fall_gpu::FallGpuError::Poisoned.into()),
         };
         let (_, _, classifier_stop) = session.queue_ends();
         let error =

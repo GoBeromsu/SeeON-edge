@@ -68,7 +68,10 @@ pub fn spawn_fall(
                 let response = FallResponse {
                     frame: request.frame,
                     track_id: request.track_id,
-                    score: fall.score(request.window.as_slice()),
+                    score: fall
+                        .score(request.window.as_slice())
+                        .map(Into::into)
+                        .map_err(Into::into),
                 };
                 // A full response queue drops this score; a gone policy ends the owner.
                 !matches!(

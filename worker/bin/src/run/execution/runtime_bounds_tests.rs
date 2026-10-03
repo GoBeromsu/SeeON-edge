@@ -6,9 +6,8 @@ use seeon_deepstream_native::{FrameIdentity, GpuMetrics, MediaBinding, TrackedOb
 use seeon_worker::episode::BusinessEvent;
 use seeon_worker::fall::{FallCapacities, FallPolicy, FallPolicyDecider};
 use seeon_worker_runtime::evidence::{AcceleratorEvidence, EngineDigest, Precision};
-use seeon_worker_runtime::fall_gpu::FallScore;
 
-use crate::msg::{FallRequest, FallResponse, PosePacket};
+use crate::msg::{FallRequest, FallResponse, FallScore, PosePacket};
 use crate::records::lanes::Lanes;
 use crate::run::execution::publication;
 use crate::run::pump::{CameraPolicy, PolicyPump, PolicySink};
@@ -116,7 +115,7 @@ fn score(logit: f32) -> FallScore {
         elapsed_ns: 4789,
         device: 2,
     };
-    FallScore {
+    seeon_worker_runtime::fall_gpu::FallScore {
         logit,
         evidence: AcceleratorEvidence::from_delta(
             &before,
@@ -127,6 +126,7 @@ fn score(logit: f32) -> FallScore {
         )
         .expect("public CPU test evidence"),
     }
+    .into()
 }
 
 fn answered(request: &FallRequest, logit: f32) -> FallResponse {
@@ -600,7 +600,7 @@ fn routing_and_accelerator_faults_never_become_frame_local_diagnostics() {
         .send(FallResponse {
             frame: packet(88, 0, &[7]).frame,
             track_id: 7,
-            score: Err(seeon_worker_runtime::fall_gpu::FallGpuError::Poisoned),
+            score: Err(seeon_worker_runtime::fall_gpu::FallGpuError::Poisoned.into()),
         })
         .unwrap();
     let error = pump_queue_turn(
@@ -719,7 +719,7 @@ fn failed_score_handoff_retains_pending_suffix_and_unrelated_events() {
         boot_id.to_owned(),
     );
     session.records = Some(Arc::clone(&lanes));
-    let evidence = score(1.0).evidence;
+    let evidence = score(1.0).accelerator().copied();
     let frame = |sequence, source_id| {
         let mut identity = packet(source_id, sequence, &[1]).frame;
         identity.binding = binding;

@@ -84,7 +84,7 @@ pub(super) struct TurnBudget {
 struct ReadyScore {
     track_id: u64,
     logit: f32,
-    evidence: seeon_worker_runtime::evidence::AcceleratorEvidence,
+    evidence: Option<seeon_worker_runtime::evidence::AcceleratorEvidence>,
     generation: Option<u64>,
 }
 
@@ -221,7 +221,7 @@ impl PolicySink for LiveSink {
         &mut self,
         frame: seeon_deepstream_native::FrameIdentity,
         track_id: u64,
-        score: &seeon_worker_runtime::fall_gpu::FallScore,
+        score: &crate::msg::FallScore,
     ) -> Result<(), crate::run::pump::PumpError> {
         if self.scores.len() == SCORE_RETENTION {
             return Err(crate::run::pump::PumpError::ScoreRetention);
@@ -229,8 +229,8 @@ impl PolicySink for LiveSink {
         self.scores.push(super::output::HeldScore {
             frame,
             track_id,
-            evidence: score.evidence,
-            logit: score.logit,
+            evidence: score.accelerator().copied(),
+            logit: score.logit(),
         });
         Ok(())
     }
@@ -661,7 +661,7 @@ fn score_record(
         record_frame,
         observed_at_ns,
         &emitted,
-        Some(evidence),
+        evidence.as_ref(),
     )
     .ok()
 }
@@ -698,9 +698,10 @@ fn poll_restart(booted: &Booted) -> Result<Option<RestartDirective>, RuntimeErro
 
 #[cfg(test)]
 mod tests {
-    use super::{ReadyScore, observed_frame, score_record};
+    use super::{LiveSink, ReadyScore, observed_frame, score_record};
     use crate::records::builder::Stream;
     use crate::records::id::canonical;
+    use crate::run::pump::PolicySink;
     use crate::seam::SystemClock;
     use seeon_deepstream_native::{FrameIdentity, GpuMetrics};
     use seeon_worker_runtime::evidence::{AcceleratorEvidence, EngineDigest, Precision};
@@ -721,6 +722,52 @@ mod tests {
         frame.pts_valid = 1;
         frame.pts_ns = 0;
         assert_eq!(observed_frame(&frame).unwrap().source_pts_ns, Some(0));
+    }
+
+    #[test]
+    fn cpu_channel_score_retains_no_accelerator_through_record_conversion() {
+        let stream = Stream {
+            camera_id: "cpu-camera".into(),
+            worker_boot_id: "cpu-boot".into(),
+            source_generation: 7,
+            stream_epoch: 9,
+        };
+        let frame = FrameIdentity {
+            sequence: 143,
+            pts_ns: 123_456,
+            pts_valid: 1,
+            ..FrameIdentity::default()
+        };
+        let mut sink = LiveSink::new();
+        sink.score(frame, 42, &crate::msg::FallScore::Cpu(2.0))
+            .expect("CPU score retained");
+        let held = sink.scores.pop().expect("one retained score");
+        assert_eq!(held.frame, frame);
+        assert_eq!(held.track_id, 42);
+        assert!(held.evidence.is_none());
+        let record = score_record(
+            &stream,
+            &held.frame,
+            &ReadyScore {
+                track_id: held.track_id,
+                logit: held.logit,
+                evidence: held.evidence,
+                generation: Some(13),
+            },
+            &SystemClock::new(),
+            2.0,
+        )
+        .expect("CPU score record");
+        let wire: serde_json::Value =
+            serde_json::from_str(&canonical(&record.to_json()).unwrap()).unwrap();
+        let payload = &wire["payload"];
+        assert!(payload.get("accelerator").is_none());
+        assert_eq!(wire["frame_seq"], 143);
+        assert_eq!(payload["track_id"], 42);
+        assert_eq!(payload["generation"], 13);
+        assert_eq!(payload["raw_logit"], 2.0);
+        assert_eq!(payload["applied_temperature"], 2.0);
+        assert!((payload["fall_transition"].as_f64().unwrap() - 0.731_058_6).abs() < 1e-7);
     }
 
     #[test]
@@ -769,7 +816,7 @@ mod tests {
             &ReadyScore {
                 track_id: 42,
                 logit: 2.0,
-                evidence,
+                evidence: Some(evidence),
                 generation: Some(13),
             },
             &SystemClock::new(),

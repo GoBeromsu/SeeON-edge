@@ -186,7 +186,7 @@ impl FallStage {
         let probabilities = response
             .score
             .ok()
-            .and_then(|score| probabilities(score.logit, temperature));
+            .and_then(|score| probabilities(score.logit(), temperature));
         match probabilities {
             Some(probabilities) => {
                 pending
