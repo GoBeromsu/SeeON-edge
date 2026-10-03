@@ -9,6 +9,7 @@
 
 pub mod diagnostics;
 pub mod owner;
+mod record_stop;
 mod release;
 pub mod shutdown;
 

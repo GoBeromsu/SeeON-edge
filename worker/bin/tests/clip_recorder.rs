@@ -63,13 +63,16 @@ impl Clock for ManualClock {
 struct PlaneCounts {
     starts: Cell<u32>,
     stops: Cell<u32>,
+    next_request: Cell<u64>,
+    session_id: Cell<u32>,
+    session_valid: Cell<u32>,
+    binding: Cell<MediaBinding>,
 }
 
 /// Counts every start the recorder asks for. Refuses while `refuse` is set so
 /// pending can be staged without a recording.
 struct CountingPlane {
     counts: Rc<PlaneCounts>,
-    next_session: Cell<u32>,
     refuse: Cell<bool>,
 }
 
@@ -77,7 +80,6 @@ impl CountingPlane {
     fn open(counts: Rc<PlaneCounts>, refuse: bool) -> Self {
         Self {
             counts,
-            next_session: Cell::new(1),
             refuse: Cell::new(refuse),
         }
     }
@@ -93,14 +95,14 @@ impl RecordPlane for CountingPlane {
         if self.refuse.get() {
             return Err(PlaneRefusal::Busy);
         }
-        let session_id = self.next_session.get();
-        self.next_session.set(session_id + 1);
+        let request_id = self.counts.next_request.get();
+        self.counts.next_request.set(request_id + 1);
         Ok(RecordTicket {
-            binding: BINDING,
-            request_id: u64::from(session_id),
+            binding: self.counts.binding.get(),
+            request_id,
             source_id: SOURCE_ID,
-            session_id,
-            session_valid: 1,
+            session_id: self.counts.session_id.get(),
+            session_valid: self.counts.session_valid.get(),
             coalesced: 0,
         })
     }
@@ -123,6 +125,10 @@ impl Harness {
         let counts = Rc::new(PlaneCounts {
             starts: Cell::new(0),
             stops: Cell::new(0),
+            next_request: Cell::new(1),
+            session_id: Cell::new(0),
+            session_valid: Cell::new(0),
+            binding: Cell::new(BINDING),
         });
         Self {
             recorder: Recorder::new(
@@ -140,6 +146,10 @@ impl Harness {
         let counts = Rc::new(PlaneCounts {
             starts: Cell::new(0),
             stops: Cell::new(0),
+            next_request: Cell::new(1),
+            session_id: Cell::new(0),
+            session_valid: Cell::new(0),
+            binding: Cell::new(BINDING),
         });
         Self {
             recorder: Recorder::new(
@@ -159,7 +169,11 @@ fn at(text: &str) -> Utc {
 
 fn receipt(ticket: RecordTicket) -> RecordReceipt {
     RecordReceipt {
-        ticket,
+        ticket: RecordTicket {
+            session_id: 7,
+            session_valid: 1,
+            ..ticket
+        },
         result: MediaResult::Ok,
         error: 0,
         duration_ms: 30_000,
@@ -170,6 +184,15 @@ fn receipt(ticket: RecordTicket) -> RecordReceipt {
         directory: "/tmp/sealed".into(),
         filename: "clip.mp4".into(),
     }
+}
+
+fn unchanged(recorder: &Recorder<CountingPlane>) -> (State, usize, Boundary, u64) {
+    (
+        recorder.state(),
+        recorder.pending(),
+        recorder.boundary(),
+        recorder.counters().sequence,
+    )
 }
 
 fn started(recorder: &mut Recorder<CountingPlane>, event_ref: &str, when: &str) -> RecordTicket {
@@ -252,7 +275,7 @@ fn normal_mode_start_extend_stop_and_errors_are_unchanged() {
     };
     assert!(matches!(
         recorder.on_receipt(&receipt(wrong), finalize_failed_without_publication),
-        Err(RecorderError::WrongCamera {
+        Err(RecorderError::WrongSource {
             expected: SOURCE_ID,
             received
         }) if received == SOURCE_ID + 1
@@ -336,7 +359,7 @@ fn quiesce_blocks_admit_tick_and_receipt_including_save_failure() {
     let failed = recorder.on_receipt(&receipt(active), |sealed| {
         saved += 1;
         contributors = sealed.contributors.clone();
-        assert_eq!(sealed.ticket, active);
+        assert_eq!(sealed.ticket, receipt(active).ticket);
         assert_eq!(sealed.duration_ms, 30_000);
         assert!(sealed.contains_video);
         Err(PublishError::Io(std::io::Error::other("volume full")))
@@ -419,7 +442,7 @@ fn active_contributors_save_once_and_are_not_drained_as_unstarted() {
     assert!(drained.is_empty());
     assert!(matches!(
         recorder.on_receipt(&receipt(active), |_| unreachable!("duplicate receipt must not save")),
-        Err(RecorderError::DuplicateSealed(session)) if session == active.session_id
+        Err(RecorderError::DuplicateRequest(request)) if request == active.request_id
     ));
 }
 
@@ -450,4 +473,273 @@ fn pending_full_still_applies_after_quiesce() {
     let drained = recorder.take_unstarted().expect("bounded drain");
     assert_eq!(drained.len(), MAX_PENDING_ALERTS);
     assert_eq!(drained[0].event_ref, "00000000-0000-4000-8000-000000000000");
+}
+
+#[test]
+fn reused_sdk_session_seals_each_new_request() {
+    let Harness { mut recorder, .. } = Harness::new();
+    let first = started(
+        &mut recorder,
+        "00000000-0000-4000-8000-00000000e0a1",
+        "2026-08-20T17:20:58Z",
+    );
+    let mut seen = Vec::new();
+    recorder
+        .on_receipt(&receipt(first), |sealed| {
+            seen.push(sealed.ticket);
+            Ok(SaveOutcome::FinalizeFailed(None))
+        })
+        .expect("first request");
+    let second = started(
+        &mut recorder,
+        "00000000-0000-4000-8000-00000000e0b2",
+        "2026-08-20T17:21:10Z",
+    );
+    assert_eq!(second.session_id, first.session_id);
+    assert_ne!(second.request_id, first.request_id);
+    recorder
+        .on_receipt(&receipt(second), |sealed| {
+            assert_eq!(sealed.ticket.request_id, second.request_id);
+            assert_eq!(sealed.ticket.session_id, 7);
+            assert_eq!(sealed.ticket.session_valid, 1);
+            seen.push(sealed.ticket);
+            Ok(SaveOutcome::FinalizeFailed(None))
+        })
+        .expect("reused session, new request");
+    assert_eq!(seen.len(), 2);
+}
+
+#[test]
+fn async_session_assignment_keeps_receipt_session() {
+    let Harness { mut recorder, .. } = Harness::new();
+    let active = started(
+        &mut recorder,
+        "00000000-0000-4000-8000-00000000e0a1",
+        "2026-08-20T17:20:58Z",
+    );
+    assert_eq!(active.session_valid, 0);
+    recorder
+        .on_receipt(&receipt(active), |sealed| {
+            assert_eq!(sealed.ticket.request_id, active.request_id);
+            assert_eq!(sealed.ticket.session_id, 7);
+            assert_eq!(sealed.ticket.session_valid, 1);
+            assert_ne!(sealed.ticket.session_id, active.session_id);
+            Ok(SaveOutcome::FinalizeFailed(None))
+        })
+        .expect("asynchronously assigned session");
+}
+
+#[test]
+fn duplicate_after_idle_and_new_binding_are_distinct() {
+    let Harness {
+        mut recorder,
+        counts,
+        ..
+    } = Harness::new();
+    let first = started(
+        &mut recorder,
+        "00000000-0000-4000-8000-00000000e0a1",
+        "2026-08-20T17:20:58Z",
+    );
+    recorder
+        .on_receipt(&receipt(first), |_| Ok(SaveOutcome::FinalizeFailed(None)))
+        .expect("first seal");
+    assert_eq!(recorder.state(), State::Idle);
+    let idle = unchanged(&recorder);
+    assert!(matches!(
+        recorder.on_receipt(&receipt(first), |_| unreachable!("duplicate after idle must not save")),
+        Err(RecorderError::DuplicateRequest(request)) if request == first.request_id
+    ));
+    assert_eq!(unchanged(&recorder), idle);
+    let second = started(
+        &mut recorder,
+        "00000000-0000-4000-8000-00000000e0b2",
+        "2026-08-20T17:21:10Z",
+    );
+    let active = unchanged(&recorder);
+    assert!(matches!(
+        recorder.on_receipt(&receipt(first), |_| unreachable!("old request must not save")),
+        Err(RecorderError::DuplicateRequest(request)) if request == first.request_id
+    ));
+    assert_eq!(unchanged(&recorder), active);
+    recorder
+        .on_receipt(&receipt(second), |_| Ok(SaveOutcome::FinalizeFailed(None)))
+        .expect("second request");
+    counts.next_request.set(first.request_id);
+    counts.binding.set(MediaBinding {
+        generation: BINDING.generation + 4,
+        ..BINDING
+    });
+    let rebound = started(
+        &mut recorder,
+        "00000000-0000-4000-8000-00000000e0c3",
+        "2026-08-20T17:21:20Z",
+    );
+    assert_eq!(rebound.request_id, first.request_id);
+    assert_ne!(rebound.binding, first.binding);
+    recorder
+        .on_receipt(&receipt(rebound), |sealed| {
+            assert_eq!(sealed.ticket.binding, rebound.binding);
+            Ok(SaveOutcome::FinalizeFailed(None))
+        })
+        .expect("same request under a new binding is not a duplicate");
+}
+
+#[test]
+fn known_session_must_be_valid_and_match_receipt() {
+    let Harness {
+        mut recorder,
+        counts,
+        ..
+    } = Harness::new();
+    counts.session_id.set(7);
+    counts.session_valid.set(1);
+    let active = started(
+        &mut recorder,
+        "00000000-0000-4000-8000-00000000e0a1",
+        "2026-08-20T17:20:58Z",
+    );
+    let before = unchanged(&recorder);
+    let contradicted = RecordReceipt {
+        ticket: RecordTicket {
+            session_id: 8,
+            session_valid: 1,
+            ..active
+        },
+        ..receipt(active)
+    };
+    assert!(matches!(
+        recorder.on_receipt(&contradicted, |_| unreachable!(
+            "contradiction must not save"
+        )),
+        Err(RecorderError::SessionContradiction {
+            admitted: 7,
+            received: 8
+        })
+    ));
+    assert_eq!(unchanged(&recorder), before);
+    for invalid in [
+        RecordTicket {
+            session_id: 0,
+            session_valid: 0,
+            ..active
+        },
+        RecordTicket {
+            session_id: u32::MAX,
+            session_valid: 1,
+            ..active
+        },
+    ] {
+        let receipt = RecordReceipt {
+            ticket: invalid,
+            ..receipt(active)
+        };
+        assert!(matches!(
+            recorder.on_receipt(&receipt, |_| unreachable!("invalid receipt must not save")),
+            Err(RecorderError::InvalidReceiptTicket)
+        ));
+        assert_eq!(unchanged(&recorder), before);
+    }
+    recorder
+        .on_receipt(&receipt(active), |sealed| {
+            assert_eq!(sealed.ticket, active);
+            assert_eq!(sealed.contributors.len(), 1);
+            Ok(SaveOutcome::FinalizeFailed(None))
+        })
+        .expect("matching known session");
+}
+
+#[test]
+fn receipt_refusals_preserve_pending_state_and_contributors() {
+    let Harness {
+        mut recorder,
+        clock,
+        ..
+    } = Harness::new();
+    let active = started(
+        &mut recorder,
+        "00000000-0000-4000-8000-00000000e0a1",
+        "2026-08-20T17:20:58Z",
+    );
+    assert!(matches!(
+        recorder.admit(
+            "00000000-0000-4000-8000-00000000e0b2",
+            at("2026-08-20T17:21:00Z")
+        ),
+        Ok(Admit::Extended)
+    ));
+    clock.advance(Duration::from_secs(u64::from(EXTENSION_SECONDS)));
+    assert_eq!(recorder.tick(), State::Stopping);
+    assert!(matches!(
+        recorder.admit(
+            "00000000-0000-4000-8000-00000000e0c3",
+            at("2026-08-20T17:21:50Z")
+        ),
+        Ok(Admit::Queued)
+    ));
+    let before = unchanged(&recorder);
+    let mut refused = |ticket: RecordTicket| {
+        let attempted = RecordReceipt {
+            ticket,
+            ..receipt(active)
+        };
+        let failed = recorder.on_receipt(&attempted, |_| unreachable!("refusal must not save"));
+        assert!(failed.is_err());
+        assert_eq!(unchanged(&recorder), before);
+    };
+    refused(RecordTicket {
+        request_id: active.request_id + 9,
+        ..active
+    });
+    refused(RecordTicket {
+        source_id: SOURCE_ID + 3,
+        ..active
+    });
+    refused(RecordTicket {
+        binding: MediaBinding {
+            generation: BINDING.generation + 1,
+            ..BINDING
+        },
+        ..active
+    });
+    refused(RecordTicket {
+        binding: MediaBinding {
+            epoch: BINDING.epoch + 1,
+            ..BINDING
+        },
+        ..active
+    });
+    refused(RecordTicket {
+        binding: MediaBinding {
+            token: BINDING.token + 1,
+            ..BINDING
+        },
+        ..active
+    });
+    refused(RecordTicket {
+        session_valid: 0,
+        ..active
+    });
+    recorder.quiesce();
+    recorder
+        .on_receipt(
+            &RecordReceipt {
+                ticket: RecordTicket {
+                    session_valid: 0,
+                    session_id: 0,
+                    ..active
+                },
+                result: MediaResult::Stale,
+                contains_video: false,
+                duration_ms: 0,
+                ..receipt(active)
+            },
+            |sealed| {
+                assert_eq!(sealed.ticket.session_valid, 0);
+                assert_eq!(sealed.contributors.len(), 2);
+                Ok(SaveOutcome::FinalizeFailed(None))
+            },
+        )
+        .expect("cancelled receipt may omit a session");
+    assert_eq!(recorder.pending(), 1);
 }

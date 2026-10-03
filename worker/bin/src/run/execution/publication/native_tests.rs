@@ -15,6 +15,8 @@ mod fixture;
 mod published;
 #[path = "native_tests/receipt.rs"]
 mod receipt;
+#[path = "native_tests/repeated.rs"]
+mod repeated;
 #[path = "native_tests/support.rs"]
 mod support;
 #[path = "native_tests/wait.rs"]

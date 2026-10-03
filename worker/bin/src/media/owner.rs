@@ -22,6 +22,7 @@ use std::time::Duration;
 use seeon_deepstream_native::{MediaConfig, MediaError, MediaOwner, MediaPoll, MediaResult};
 
 use super::diagnostics::Diagnostics;
+use super::record_stop;
 use super::release::{drain_records, release};
 use super::shutdown::ShutdownControl;
 use super::{COMMAND_CAPACITY, Command};
@@ -216,7 +217,7 @@ fn execute_commands(owner: &mut MediaOwner, params: &MediaParams) {
                 reply.try_send(started).is_ok()
             }
             Command::RecordStop { ticket, reply } => {
-                reply.try_send(owner.record_stop(&ticket)).is_ok()
+                reply.try_send(record_stop::stop(owner, &ticket)).is_ok()
             }
             Command::Preview {
                 source_id,

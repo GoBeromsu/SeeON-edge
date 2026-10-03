@@ -9,7 +9,7 @@ use serde_json::Value;
 
 use super::super::Publications;
 use super::assertions::{Admitted, GrownFile};
-use super::support::{BOOT_ID, EVENT_IDENTITY};
+use super::support::BOOT_ID;
 use crate::clips::durable;
 use crate::clips::publish::{MANIFEST_FILE, MEDIA_FILE};
 use crate::clips::time::Utc;
@@ -22,13 +22,37 @@ pub(super) fn assert_published(
     duration_ms: u64,
     sealed: &GrownFile,
 ) {
-    let clip_id = format!("{BOOT_ID}-{}-{}", ticket.source_id, ticket.session_id);
+    assert_clip(
+        publications,
+        record_dir,
+        admitted,
+        ticket,
+        duration_ms,
+        sealed,
+    );
+    let clip_id = format!("{BOOT_ID}-{}-{}", ticket.source_id, ticket.request_id);
     assert_eq!(sole_clip(publications), clip_id);
-    let clip_dir = publications.store.clip_dir(&clip_id);
+    assert_eq!(
+        clip_entries(publications).len(),
+        1,
+        "exactly one clip delivery entry"
+    );
     assert!(
         !mp4_left(record_dir),
         "native MP4 remained in the record directory"
     );
+}
+
+pub(super) fn assert_clip(
+    publications: &Publications,
+    record_dir: &Path,
+    admitted: &Admitted,
+    ticket: &RecordTicket,
+    duration_ms: u64,
+    sealed: &GrownFile,
+) {
+    let clip_id = format!("{BOOT_ID}-{}-{}", ticket.source_id, ticket.request_id);
+    let clip_dir = publications.store.clip_dir(&clip_id);
     let media_path = clip_dir.join(MEDIA_FILE);
     let published = fs::read(&media_path).expect("published MP4");
     assert!(published.len() >= 16 && &published[4..8] == b"ftyp");
@@ -45,7 +69,14 @@ pub(super) fn assert_published(
     let (sha, size) = durable::sha256_file(&media_path).expect("published hash");
     assert_eq!(size, u64::try_from(published.len()).expect("size"));
     assert_eq!(size, sealed.len);
-    assert_queue(publications, &sha, size, &clip_id, duration_ms);
+    assert_queue(
+        publications,
+        &sha,
+        size,
+        &clip_id,
+        duration_ms,
+        admitted.event_ref,
+    );
     assert_manifest(
         &clip_dir,
         &sha,
@@ -53,7 +84,18 @@ pub(super) fn assert_published(
         admitted.detected_at,
         &clip_id,
         duration_ms,
+        admitted.event_ref,
     );
+}
+
+fn clip_entries(publications: &Publications) -> Vec<Value> {
+    publications
+        .queue
+        .entries()
+        .expect("delivery queue")
+        .into_iter()
+        .filter(|entry| entry.get("kind").and_then(Value::as_str) == Some("CLIP"))
+        .collect()
 }
 
 fn assert_queue(
@@ -62,14 +104,15 @@ fn assert_queue(
     size: u64,
     clip_id: &str,
     duration_ms: u64,
+    event_ref: &str,
 ) {
-    let entries = publications.queue.entries().expect("delivery queue");
-    let clips: Vec<_> = entries
+    let clips = clip_entries(publications);
+    let matching: Vec<_> = clips
         .iter()
-        .filter(|entry| entry.get("kind").and_then(Value::as_str) == Some("CLIP"))
+        .filter(|entry| entry.get("clip_id").and_then(Value::as_str) == Some(clip_id))
         .collect();
-    assert_eq!(clips.len(), 1, "exactly one clip delivery entry");
-    let clip = clips[0];
+    assert_eq!(matching.len(), 1, "exactly one queue entry for {clip_id}");
+    let clip = matching[0];
     assert_eq!(clip.get("clip_id").and_then(Value::as_str), Some(clip_id));
     assert_eq!(
         clip.get("media_reference").and_then(Value::as_str),
@@ -90,7 +133,7 @@ fn assert_queue(
         .and_then(Value::as_array)
         .expect("event_ids");
     assert_eq!(ids.len(), 1);
-    assert_eq!(ids[0].as_str(), Some(EVENT_IDENTITY));
+    assert_eq!(ids[0].as_str(), Some(event_ref));
 }
 
 fn assert_manifest(
@@ -100,6 +143,7 @@ fn assert_manifest(
     detected_at: Utc,
     clip_id: &str,
     duration_ms: u64,
+    event_ref: &str,
 ) {
     let bytes = fs::read(clip_dir.join(MANIFEST_FILE)).expect("manifest");
     let manifest: Value = serde_json::from_slice(&bytes).expect("manifest json");
@@ -128,7 +172,7 @@ fn assert_manifest(
     );
     assert_eq!(
         manifest.get("event_ref").and_then(Value::as_str),
-        Some(EVENT_IDENTITY)
+        Some(event_ref)
     );
     assert_eq!(
         manifest

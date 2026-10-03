@@ -433,7 +433,7 @@ fn a_second_receipt_for_a_sealed_session_is_refused_without_saving() {
     });
 
     assert!(
-        matches!(second, Err(RecorderError::DuplicateSealed(session)) if session == ticket.session_id)
+        matches!(second, Err(RecorderError::DuplicateRequest(request)) if request == ticket.request_id)
     );
     assert!(!saved_again.get());
     assert_eq!(recorder.state(), State::Idle);

@@ -19,7 +19,7 @@ use std::collections::VecDeque;
 use std::sync::Arc;
 use std::time::Duration;
 
-use seeon_deepstream_native::RecordTicket;
+use seeon_deepstream_native::{MediaResult, RecordTicket};
 
 use super::entry::FLOW_LOOKBACK_MILLIS;
 use super::manifest::Contributor;
@@ -38,6 +38,8 @@ pub const EXTENSION_SECONDS: u32 = 45;
 pub const LOOKBACK_SECONDS: u32 = (FLOW_LOOKBACK_MILLIS / 1000) as u32;
 pub const MAX_PENDING_ALERTS: usize = 128;
 const SEALED_MEMORY: usize = 64;
+/// Native uses this sentinel for an unassigned SDK session. It is never a session.
+const NO_SESSION: u32 = u32::MAX;
 
 pub struct Recorder<P: RecordPlane> {
     source_id: u32,
@@ -50,7 +52,7 @@ pub struct Recorder<P: RecordPlane> {
     ticket: Option<RecordTicket>,
     hard_deadline: Duration,
     stop_due: Duration,
-    sealed: VecDeque<u32>,
+    sealed: VecDeque<RecordTicket>,
     counters: Counters,
     quiesced: bool,
 }
@@ -178,19 +180,7 @@ impl<P: RecordPlane> Recorder<P> {
         receipt: &RecordReceipt,
         save: impl FnOnce(&ClipSealed) -> Result<SaveOutcome, PublishError>,
     ) -> Result<SaveOutcome, RecorderError> {
-        let session = receipt.ticket.session_id;
-        if receipt.ticket.source_id != self.source_id {
-            return Err(RecorderError::WrongCamera {
-                expected: self.source_id,
-                received: receipt.ticket.source_id,
-            });
-        }
-        if self.sealed.contains(&session) {
-            return Err(RecorderError::DuplicateSealed(session));
-        }
-        let Some(ticket) = self.ticket.filter(|t| t.session_id == session) else {
-            return Err(RecorderError::UnexpectedSession(session));
-        };
+        let ticket = receipt_identity(self.source_id, &self.sealed, self.ticket, receipt)?;
         if self.state == State::Recording {
             self.boundary = Boundary::ExtensionBounded;
         }
@@ -211,7 +201,7 @@ impl<P: RecordPlane> Recorder<P> {
         if self.sealed.len() == SEALED_MEMORY {
             self.sealed.pop_front();
         }
-        self.sealed.push_back(session);
+        self.sealed.push_back(ticket);
         self.ticket = None;
         self.boundary = Boundary::None;
         self.state = State::Idle;
@@ -264,4 +254,87 @@ impl<P: RecordPlane> Recorder<P> {
 
 fn seconds(value: u32) -> Duration {
     Duration::from_secs(u64::from(value))
+}
+
+fn same_recording(left: &RecordTicket, right: &RecordTicket) -> bool {
+    left.source_id == right.source_id
+        && left.binding == right.binding
+        && left.request_id == right.request_id
+}
+
+fn receipt_identity(
+    source_id: u32,
+    sealed: &VecDeque<RecordTicket>,
+    admitted: Option<RecordTicket>,
+    receipt: &RecordReceipt,
+) -> Result<RecordTicket, RecorderError> {
+    let observed = receipt.ticket;
+    if observed.source_id != source_id {
+        return Err(RecorderError::WrongSource {
+            expected: source_id,
+            received: observed.source_id,
+        });
+    }
+    if let Some(previous) = sealed
+        .iter()
+        .find(|previous| same_recording(previous, &observed))
+    {
+        return Err(RecorderError::DuplicateRequest(previous.request_id));
+    }
+    let Some(admitted) = admitted.filter(|admitted| {
+        admitted.source_id == observed.source_id && admitted.request_id == observed.request_id
+    }) else {
+        return Err(RecorderError::UnexpectedRequest(observed.request_id));
+    };
+    if observed.binding.generation != admitted.binding.generation {
+        return Err(RecorderError::WrongGeneration {
+            expected: admitted.binding.generation,
+            received: observed.binding.generation,
+        });
+    }
+    if observed.binding.epoch != admitted.binding.epoch {
+        return Err(RecorderError::WrongEpoch {
+            expected: admitted.binding.epoch,
+            received: observed.binding.epoch,
+        });
+    }
+    if observed.binding.token != admitted.binding.token {
+        return Err(RecorderError::WrongBinding {
+            expected: admitted.binding,
+            received: observed.binding,
+        });
+    }
+    if observed.session_valid > 1 || admitted.session_valid > 1 {
+        return Err(RecorderError::InvalidReceiptTicket);
+    }
+    if (observed.session_valid == 1 && observed.session_id == NO_SESSION)
+        || (admitted.session_valid == 1 && admitted.session_id == NO_SESSION)
+    {
+        return Err(RecorderError::InvalidReceiptTicket);
+    }
+    if admitted.session_valid == 1
+        && (observed.session_valid != 1 || observed.session_id != admitted.session_id)
+    {
+        return Err(
+            if observed.session_valid == 1 && observed.session_id != admitted.session_id {
+                RecorderError::SessionContradiction {
+                    admitted: admitted.session_id,
+                    received: observed.session_id,
+                }
+            } else {
+                RecorderError::InvalidReceiptTicket
+            },
+        );
+    }
+    let omitted_session = observed.session_valid == 0;
+    let successful = receipt.result == MediaResult::Ok;
+    if successful && observed.session_valid != 1 {
+        return Err(RecorderError::InvalidReceiptTicket);
+    }
+    let negative_without_session =
+        matches!(receipt.result, MediaResult::Stale | MediaResult::Fatal) && omitted_session;
+    if !successful && !negative_without_session && observed.session_valid != 1 {
+        return Err(RecorderError::InvalidReceiptTicket);
+    }
+    Ok(observed)
 }

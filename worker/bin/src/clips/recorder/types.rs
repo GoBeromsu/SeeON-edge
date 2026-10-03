@@ -4,12 +4,11 @@
 use std::fmt;
 use std::path::PathBuf;
 
-use seeon_deepstream_native::{MediaResult, RecordTicket};
+use seeon_deepstream_native::{MediaBinding, MediaResult, RecordTicket};
 
 use super::PlaneRefusal;
 use crate::clips::manifest::{Contributor, Extension};
 use crate::clips::publish::PublishError;
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum State {
     Idle,
@@ -52,12 +51,29 @@ pub enum RecorderError {
     NotQuiesced,
     BlankEventRef,
     PendingFull,
-    WrongCamera {
+    DuplicateRequest(u64),
+    UnexpectedRequest(u64),
+    WrongSource {
         expected: u32,
         received: u32,
     },
-    DuplicateSealed(u32),
-    UnexpectedSession(u32),
+    WrongBinding {
+        expected: MediaBinding,
+        received: MediaBinding,
+    },
+    WrongGeneration {
+        expected: u64,
+        received: u64,
+    },
+    WrongEpoch {
+        expected: u64,
+        received: u64,
+    },
+    SessionContradiction {
+        admitted: u32,
+        received: u32,
+    },
+    InvalidReceiptTicket,
     Save(PublishError),
 }
 

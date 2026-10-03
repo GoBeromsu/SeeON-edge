@@ -232,6 +232,10 @@ impl Publications {
             let Some(index) = self.cameras.iter().position(|(source_id, binding, _, _)| {
                 *source_id == receipt.ticket.source_id && *binding == receipt.ticket.binding
             }) else {
+                eprintln!(
+                    "ml-worker: recording receipt refused source_id={} request={} binding={:?}: no admitted camera",
+                    receipt.ticket.source_id, receipt.ticket.request_id, receipt.ticket.binding
+                );
                 continue;
             };
             if receipt.result == seeon_deepstream_native::MediaResult::Ok
@@ -243,7 +247,7 @@ impl Publications {
             let now = Utc::from_system(clock.wall());
             let clip_id = format!(
                 "{}-{}-{}",
-                self.boot_id, receipt.ticket.source_id, receipt.ticket.session_id
+                self.boot_id, receipt.ticket.source_id, receipt.ticket.request_id
             );
             let events = std::mem::take(&mut self.events);
             let mut retired = Vec::new();
@@ -279,15 +283,27 @@ impl Publications {
             }
             match saved {
                 Ok(_) => {}
-                Err(crate::clips::recorder::RecorderError::WrongCamera { .. })
-                | Err(crate::clips::recorder::RecorderError::DuplicateSealed(_))
-                | Err(crate::clips::recorder::RecorderError::UnexpectedSession(_)) => {}
+                Err(
+                    error @ (RecorderError::WrongSource { .. }
+                    | RecorderError::WrongBinding { .. }
+                    | RecorderError::WrongGeneration { .. }
+                    | RecorderError::WrongEpoch { .. }
+                    | RecorderError::DuplicateRequest(_)
+                    | RecorderError::UnexpectedRequest(_)
+                    | RecorderError::SessionContradiction { .. }
+                    | RecorderError::InvalidReceiptTicket),
+                ) => {
+                    eprintln!(
+                        "ml-worker: recording receipt refused camera_id={} request={} result={:?} reason={error}",
+                        self.cameras[index].2, receipt.ticket.request_id, receipt.result
+                    );
+                }
                 Err(crate::clips::recorder::RecorderError::Save(error)) => {
                     return Err(PublicationError::Clip(
                         crate::run::clip_output::ClipOutputError::from(error),
                     ));
                 }
-                Err(_) => {}
+                Err(error) => return Err(PublicationError::Recorder(error)),
             }
         }
         Ok(published)
@@ -593,6 +609,30 @@ mod tests {
             output.recorders[1].state(),
             crate::clips::recorder::State::Recording
         );
+        let retained_events = output.events.len();
+        receipts
+            .send(RecordReceipt {
+                ticket: RecordTicket {
+                    request_id: 999,
+                    ..tickets[1]
+                },
+                result: MediaResult::Ok,
+                error: 0,
+                duration_ms: 0,
+                width: 0,
+                height: 0,
+                contains_video: false,
+                contains_audio: false,
+                directory: record_dir.clone(),
+                filename: "unmatched.mp4".into(),
+            })
+            .unwrap();
+        assert!(!output.drain_records(clock.as_ref()).unwrap());
+        assert_eq!(output.events.len(), retained_events);
+        assert_eq!(
+            output.recorders[1].state(),
+            crate::clips::recorder::State::Recording
+        );
         receipts
             .send(RecordReceipt {
                 ticket: tickets[1],
@@ -618,7 +658,7 @@ mod tests {
         );
         assert_eq!(output.recorders[0].pending(), 0);
         assert_eq!(output.recorders[1].pending(), 0);
-        let clip_id = "00000000-0000-4000-8000-000000000099-7-47";
+        let clip_id = "00000000-0000-4000-8000-000000000099-7-1";
         let manifest: serde_json::Value = serde_json::from_slice(
             &std::fs::read(output.store.clip_dir(clip_id).join("manifest.json")).unwrap(),
         )
@@ -626,5 +666,11 @@ mod tests {
         assert_eq!(manifest["clip_id"], clip_id);
         assert_eq!(manifest["camera_id"], "camera-b");
         assert!(!output.store.clip_dir("47").exists());
+        assert!(
+            !output
+                .store
+                .clip_dir("00000000-0000-4000-8000-000000000099-7-47")
+                .exists()
+        );
     }
 }

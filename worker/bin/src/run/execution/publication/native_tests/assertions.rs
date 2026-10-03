@@ -15,6 +15,7 @@ use crate::seam::Clock;
 pub(super) struct Admitted {
     pub ticket: RecordTicket,
     pub detected_at: Utc,
+    pub event_ref: &'static str,
 }
 
 pub(super) struct GrownFile {
@@ -24,10 +25,19 @@ pub(super) struct GrownFile {
 }
 
 pub(super) fn admit(started: &mut super::support::Started) -> Admitted {
+    let admitted = admit_event(started, EVENT_IDENTITY);
+    assert_eq!(admitted.ticket.request_id, 1);
+    admitted
+}
+
+pub(super) fn admit_event(
+    started: &mut super::support::Started,
+    event_ref: &'static str,
+) -> Admitted {
     let event = seeon_worker::episode::BusinessEvent {
         domain: "fall".to_owned(),
         event_type: "fall_detected".to_owned(),
-        identity: EVENT_IDENTITY.to_owned(),
+        identity: event_ref.to_owned(),
         camera_id: super::support::CAMERA_ID.to_owned(),
         facility_id: super::support::FACILITY_ID.to_owned(),
         time_sec: wall_seconds(started.clock.wall()),
@@ -71,12 +81,13 @@ pub(super) fn admit(started: &mut super::support::Started) -> Admitted {
         (ticket.source_id, ticket.binding.token, ticket.coalesced),
         (SOURCE_ID, 73, 0)
     );
-    assert_eq!(ticket.request_id, 1);
+    assert_ne!(ticket.request_id, 0);
     // record_start can return before the SDK assigns a session. Do not require
     // session_valid here and do not rewrite the ticket the plane returned.
     Admitted {
         ticket,
         detected_at,
+        event_ref,
     }
 }
 
