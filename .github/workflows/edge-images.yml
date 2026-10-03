@@ -214,6 +214,18 @@ jobs:
             echo "$var=$tags" >> "$GITHUB_ENV"
           done
 
+      - name: Prepare hosted runner disk for DeepStream
+        # The DeepStream layers exhaust the standard runner disk before boot
+        # smoke (#569). These preinstalled toolchains are unused by both
+        # container builds; do not touch the workspace, caches, or Docker data.
+        # This cleanup must never run on a self-hosted machine.
+        if: runner.environment == 'github-hosted' && runner.os == 'Linux'
+        run: |
+          set -euo pipefail
+          df -h /
+          sudo rm -rf -- /usr/local/lib/android /usr/share/dotnet
+          df -h /
+
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3.12.0
 

@@ -1529,6 +1529,7 @@ def test_pull_request_workflows_grant_no_write_scope_they_can_spend() -> None:
 _PUBLISH_STEP_SEQUENCE: tuple[tuple[str, str | None], ...] = (
     ("", "actions/checkout@"),
     ("Resolve deploy SHA", None),
+    ("Prepare hosted runner disk", None),
     ("Set up Docker Buildx", "docker/setup-buildx-action@"),
     ("Login to GitHub Container Registry", "docker/login-action@"),
     ("Decide, per image", None),
@@ -1556,6 +1557,59 @@ def test_edge_image_publish_step_sequence_is_pinned() -> None:
             assert "uses" not in step, (index, step.get("uses"))
         else:
             assert str(step.get("uses", "")).startswith(uses_prefix), (index, step.get("uses"))
+
+
+_HOSTED_RUNNER_DISK_STEP = {
+    "name": "Prepare hosted runner disk for DeepStream",
+    "if": "runner.environment == 'github-hosted' && runner.os == 'Linux'",
+    "run": (
+        "set -euo pipefail\n"
+        "df -h /\n"
+        "sudo rm -rf -- /usr/local/lib/android /usr/share/dotnet\n"
+        "df -h /\n"
+    ),
+}
+
+
+def _assert_bounded_hosted_runner_disk_preparation(workflow: dict[str, object]) -> None:
+    steps = _steps(_jobs(workflow)["publish"])
+    capacity = [step for step in steps if step.get("name") == _HOSTED_RUNNER_DISK_STEP["name"]]
+    # Closed-world equality rejects broader paths, interpolated targets, a
+    # weakened hosted/Linux guard, missing df evidence, and extra commands.
+    assert capacity == [_HOSTED_RUNNER_DISK_STEP], capacity
+    assert steps.index(capacity[0]) == 2
+
+
+def test_edge_image_runner_cleanup_is_hosted_only_and_path_bounded() -> None:
+    _assert_bounded_hosted_runner_disk_preparation(_workflow("edge-images.yml"))
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("if", "always()"),
+        ("if", "runner.environment == 'self-hosted'"),
+        ("if", "runner.os == 'Linux'"),
+        ("run", "sudo rm -rf -- /var/lib/docker\n"),
+        ("run", 'sudo rm -rf -- "$GITHUB_WORKSPACE"\n'),
+        ("run", 'sudo rm -rf -- "$HOME/.cache"\n'),
+        ("run", "sudo rm -rf -- /usr/local/lib/android /usr/share/dotnet\n"),
+    ],
+)
+def test_edge_image_runner_cleanup_rejects_unsafe_changes(field: str, value: str) -> None:
+    workflow = copy.deepcopy(_workflow("edge-images.yml"))
+    _jobs(workflow)["publish"]["steps"][2][field] = value
+
+    with pytest.raises(AssertionError):
+        _assert_bounded_hosted_runner_disk_preparation(workflow)
+
+
+def test_edge_image_runner_cleanup_cannot_be_dropped() -> None:
+    workflow = copy.deepcopy(_workflow("edge-images.yml"))
+    del _jobs(workflow)["publish"]["steps"][2]
+
+    with pytest.raises(AssertionError):
+        _assert_bounded_hosted_runner_disk_preparation(workflow)
 
 
 def test_the_required_edge_image_check_is_never_gated_off() -> None:
@@ -1604,12 +1658,12 @@ def test_edge_image_workflow_is_reachable_from_pull_request() -> None:
     [
         # A moved tag is a moved commit; both required checks run fork code.
         ("edge-images.yml", "publish", 0, "actions/checkout@v4"),
-        ("edge-images.yml", "publish", 2, "docker/setup-buildx-action@v3"),
-        ("edge-images.yml", "publish", 3, "docker/login-action@v3"),
-        ("edge-images.yml", "publish", 5, "docker/build-push-action@v6"),
+        ("edge-images.yml", "publish", 3, "docker/setup-buildx-action@v3"),
+        ("edge-images.yml", "publish", 4, "docker/login-action@v3"),
+        ("edge-images.yml", "publish", 6, "docker/build-push-action@v6"),
         # The fresh-build boot smoke is an action now, so it needs the same pin.
-        ("edge-images.yml", "publish", 7, "docker/build-push-action@v6"),
-        ("edge-images.yml", "publish", 13, "actions/upload-artifact@v4"),
+        ("edge-images.yml", "publish", 8, "docker/build-push-action@v6"),
+        ("edge-images.yml", "publish", 14, "actions/upload-artifact@v4"),
         # A branch ref is worse: it moves on every upstream push.
         ("edge-images.yml", "publish", 0, "actions/checkout@main"),
         # A 40-char string that is not hex must not pass for a commit.
@@ -1632,12 +1686,12 @@ def test_pull_request_pin_policy_rejects_an_unpinned_action(
     [
         # Ungated: a fork PR would export into the cross-branch BuildKit cache
         # that later trusted runs on main restore from.
-        (5, "type=gha,scope=edge-ml-api,mode=max"),
-        (6, "type=gha,scope=edge-ml-worker,mode=max"),
+        (6, "type=gha,scope=edge-ml-api,mode=max"),
+        (7, "type=gha,scope=edge-ml-worker,mode=max"),
         # Gated on the wrong side of the condition.
-        (6, "${{ env.PUSH_IMAGES == 'false' && 'type=gha,mode=max' || '' }}"),
+        (7, "${{ env.PUSH_IMAGES == 'false' && 'type=gha,mode=max' || '' }}"),
         # Right prefix, but the fallback exports anyway.
-        (6, "${{ env.PUSH_IMAGES == 'true' && 'type=gha,mode=max' || 'type=gha' }}"),
+        (7, "${{ env.PUSH_IMAGES == 'true' && 'type=gha,mode=max' || 'type=gha' }}"),
     ],
 )
 def test_edge_image_policy_rejects_an_ungated_cache_export(step_index: int, cache_to: str) -> None:
@@ -1688,16 +1742,16 @@ def test_edge_image_policy_rejects_a_write_scope_on_a_second_job() -> None:
     ("step_index", "field", "value"),
     [
         # Logging in to ghcr.io on a PR run is the whole thing the gate stops.
-        (3, "if", "always()"),
+        (4, "if", "always()"),
         # Pushing an image built from a PR's own Dockerfile.
-        (5, "push", "true"),
         (6, "push", "true"),
+        (7, "push", "true"),
         # Re-tagging a published digest is a registry write with no `push:`
         # input, so it needs the gate just as much as a build does.
-        (8, "if", "always()"),
-        (9, "if", "env.BUILD_ML_WORKER != 'true'"),
+        (9, "if", "always()"),
+        (10, "if", "env.BUILD_ML_WORKER != 'true'"),
         # An artifact upload on a PR run publishes an unpullable digest.
-        (13, "if", "always()"),
+        (14, "if", "always()"),
     ],
 )
 def test_edge_image_policy_rejects_an_ungated_token_consumer(
@@ -1719,10 +1773,10 @@ def test_edge_image_policy_rejects_an_ungated_token_consumer(
     [
         # Removing the login step rather than un-gating it must not read as "no
         # ungated consumer found, therefore safe".
-        (3, "registry login"),
+        (4, "registry login"),
         # Same for the boot smoke: deleting it is the required check silently
         # becoming a build-only gate again, which is the #195 failure mode.
-        (7, "boot smoke"),
+        (8, "boot smoke"),
     ],
 )
 def test_edge_image_policy_rejects_dropping_a_gated_step(step_index: int, why: str) -> None:
