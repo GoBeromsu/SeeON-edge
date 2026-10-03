@@ -1,20 +1,23 @@
-//! Ready sealed-replay composition: a persisted `Recovery` becomes one
-//! READY clip through the existing store, publisher and durable file
+//! Sealed-replay composition: reconcile a prior terminal before a persisted
+//! `Recovery` becomes a fresh READY clip through the store and publisher
 //! primitives. Sidecar retirement stays with the caller. Space exhaustion
 //! stays with `ReservePool`; this adapter never fabricates a ticket for it.
+
+mod terminal;
+
+pub use terminal::resume_terminal;
 
 use std::collections::BTreeMap;
 use std::path::Path;
 
-use crate::clips::durable::{self, Existing, PUBLIC_FILE};
+use crate::clips::durable::{self, PUBLIC_FILE};
 use crate::clips::entry::{ContributorEvent, FLOW_ENCODER, flow_metadata};
-use crate::clips::manifest::{Contributor, Extension, MAX_MANIFEST_BYTES, MediaFacts};
-use crate::clips::publish::{MANIFEST_FILE, MEDIA_FILE, PublishError, Published, Publisher};
+use crate::clips::manifest::{ClipMetadata, Contributor, Extension, MediaFacts};
+use crate::clips::publish::{MEDIA_FILE, PublishError, Published, Publisher};
 use crate::clips::sealed::{Recovery, SealedContributor};
 use crate::clips::store::{ClipStore, Reservation};
 use crate::clips::time::{TimeError, Utc};
 use crate::delivery::DeliveryQueue;
-use crate::json::{Json, JsonError};
 
 /// A sealed recovery that cannot become the clip it claims.
 #[derive(Debug)]
@@ -25,9 +28,9 @@ pub enum ClipOutputError {
     CameraMismatch,
     /// Flow metadata refused the contributors, span, or duration.
     Metadata(crate::clips::manifest::ManifestError),
-    /// The caller did not name the admitted codec.
+    /// A fresh READY publication did not name the admitted codec.
     BlankCodec,
-    /// An earlier manifest is unreadable, so its timestamp cannot be recovered.
+    /// An existing manifest is not a bounded canonical terminal snapshot.
     ManifestUnreadable,
     /// Publication, staging, or hashing failed. The sidecar is untouched.
     Publish(PublishError),
@@ -52,10 +55,8 @@ impl std::fmt::Display for ClipOutputError {
 
 impl std::error::Error for ClipOutputError {}
 
-/// Publishes one ready sealed recovery. `codec` is the admitted Smart Record
-/// codec (H.264 or H.265 as measured); it is not inferred from the bytes.
-/// `now` is the publication clock, except an earlier finalized manifest keeps
-/// its own `finalized_at`.
+/// Resumes a canonical terminal, or publishes one fresh ready sealed recovery.
+/// Only the fresh path uses `codec` (the measured Smart Record codec) and `now`.
 pub fn publish_recovery(
     recovery: &Recovery,
     store: &ClipStore,
@@ -63,24 +64,35 @@ pub fn publish_recovery(
     codec: &str,
     now: Utc,
 ) -> Result<Published, ClipOutputError> {
+    if let Some(published) = resume_terminal(recovery, store, queue)? {
+        return Ok(published);
+    }
     if codec.trim().is_empty() {
         return Err(ClipOutputError::BlankCodec);
     }
-    let events = contributor_events(recovery)?;
-    let extension = extension(recovery)?;
+    let meta = metadata(recovery, now)?;
     let reservation = store.reserve(&recovery.camera_id, &recovery.sealed.clip_id)?;
-    let finalized_at = recovered_finalized_at(&reservation)?;
-    let meta = flow_metadata(
-        &recovery.sealed.clip_id,
-        &events,
-        extension,
-        FLOW_ENCODER,
-        finalized_at.unwrap_or(now),
-    )
-    .map_err(ClipOutputError::Metadata)?;
     stage_source(&recovery.sealed.path, &reservation)?;
-    let facts = media_facts(&reservation, codec, meta.duration_ms)?;
+    let artifact = reservation.artifact_path();
+    let video = reservation.final_dir.join(MEDIA_FILE);
+    let path = if regular_file(&artifact) {
+        &artifact
+    } else {
+        &video
+    };
+    let facts = media_facts(path, codec, meta.duration_ms)?;
     Ok(Publisher::new(queue).publish_ready(&reservation, &meta, &facts)?)
+}
+
+fn metadata(recovery: &Recovery, finalized_at: Utc) -> Result<ClipMetadata, ClipOutputError> {
+    flow_metadata(
+        &recovery.sealed.clip_id,
+        &contributor_events(recovery)?,
+        extension(recovery)?,
+        FLOW_ENCODER,
+        finalized_at,
+    )
+    .map_err(ClipOutputError::Metadata)
 }
 
 fn contributor_events(
@@ -137,51 +149,6 @@ fn contributor_time(contributor: &SealedContributor) -> Result<Contributor, Clip
     })
 }
 
-/// Only a canonical object with a parseable `finalized_at` is a prior
-/// publication. Identity is not trusted here; byte equality still belongs
-/// to `Publisher`.
-fn recovered_finalized_at(reservation: &Reservation) -> Result<Option<Utc>, ClipOutputError> {
-    let path = reservation.final_dir.join(MANIFEST_FILE);
-    let bytes = match durable::read_bounded(&path, MAX_MANIFEST_BYTES as u64)? {
-        Existing::Missing => return Ok(None),
-        Existing::Unreadable => return Err(ClipOutputError::ManifestUnreadable),
-        Existing::Bytes(bytes) => bytes,
-    };
-    let text = std::str::from_utf8(&bytes).map_err(|_| ClipOutputError::ManifestUnreadable)?;
-    let (body, newline) = text
-        .split_once('\n')
-        .ok_or(ClipOutputError::ManifestUnreadable)?;
-    if !newline.is_empty() {
-        return Err(ClipOutputError::ManifestUnreadable);
-    }
-    let value: serde_json::Value =
-        serde_json::from_str(body).map_err(|_| ClipOutputError::ManifestUnreadable)?;
-    let model = Json::from(&value);
-    let canonical = crate::json::Serialiser::ModelSelection
-        .canonical(&model)
-        .map_err(manifest_json_error)?;
-    if canonical != body {
-        return Err(ClipOutputError::ManifestUnreadable);
-    }
-    let Json::Object(members) = model else {
-        return Err(ClipOutputError::ManifestUnreadable);
-    };
-    let Some(Json::Str(stamp)) = members
-        .iter()
-        .find(|(key, _)| key == "finalized_at")
-        .map(|(_, v)| v)
-    else {
-        return Err(ClipOutputError::ManifestUnreadable);
-    };
-    Utc::parse(stamp)
-        .map(Some)
-        .map_err(|_| ClipOutputError::ManifestUnreadable)
-}
-
-fn manifest_json_error(error: JsonError) -> ClipOutputError {
-    ClipOutputError::Metadata(crate::clips::manifest::ManifestError::Json(error))
-}
-
 /// Moves the source into the reservation artifact unless a crash already
 /// staged it or `publish_ready` already placed the final media.
 fn stage_source(source: &str, reservation: &Reservation) -> Result<(), ClipOutputError> {
@@ -198,18 +165,7 @@ fn stage_source(source: &str, reservation: &Reservation) -> Result<(), ClipOutpu
     Ok(())
 }
 
-fn media_facts(
-    reservation: &Reservation,
-    codec: &str,
-    duration_ms: i64,
-) -> Result<MediaFacts, ClipOutputError> {
-    let artifact = reservation.artifact_path();
-    let video = reservation.final_dir.join(MEDIA_FILE);
-    let path = if regular_file(&artifact) {
-        &artifact
-    } else {
-        &video
-    };
+fn media_facts(path: &Path, codec: &str, duration_ms: i64) -> Result<MediaFacts, ClipOutputError> {
     let (sha256, size) = durable::sha256_file(path)?;
     Ok(MediaFacts {
         sha256,

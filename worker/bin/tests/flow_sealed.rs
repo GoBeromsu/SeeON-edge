@@ -20,11 +20,14 @@ use serde_json::{Map, Value};
 use seeon_ml_worker::clips::durable::sha256_file;
 use seeon_ml_worker::clips::entry::{ContributorEvent, FLOW_ENCODER, flow_metadata};
 use seeon_ml_worker::clips::manifest::{Contributor, Extension, MediaFacts};
-use seeon_ml_worker::clips::publish::{PublishError, Published, Publisher};
-use seeon_ml_worker::clips::sealed::{
-    Recovery, ReplayReport, SealedClip, SealedContributor, SealedError, SealedEvent, SealedSidecars,
+use seeon_ml_worker::clips::publish::{
+    MANIFEST_FILE, MEDIA_FILE, PublishError, Published, Publisher, TERMINAL_MARKER,
 };
-use seeon_ml_worker::clips::store::ClipStore;
+use seeon_ml_worker::clips::sealed::{
+    Recovery, ReplayOutcome, ReplayReport, SealedClip, SealedContributor, SealedError, SealedEvent,
+    SealedSidecars,
+};
+use seeon_ml_worker::clips::store::{ARTIFACT_FILE, ClipStore};
 use seeon_ml_worker::clips::time::Utc;
 use seeon_ml_worker::delivery::DeliveryQueue;
 
@@ -336,7 +339,7 @@ fn replay_publishes_in_file_name_order_and_a_second_replay_does_nothing() {
                 "retired only after the PUT"
             );
             seen.borrow_mut().push(recovery.sealed.clip_id.clone());
-            Ok::<(), ()>(())
+            ReplayOutcome::<(), ()>::Published(())
         })
         .expect("replay");
     assert_eq!(*seen.borrow(), [A, B]);
@@ -349,23 +352,70 @@ fn replay_publishes_in_file_name_order_and_a_second_replay_does_nothing() {
 
     let again = bench
         .sidecars
-        .replay(&camera, |recovery| -> Result<(), ()> {
+        .replay(&camera, |recovery| -> ReplayOutcome<(), ()> {
             panic!("second replay issued a PUT for {}", recovery.sealed.clip_id)
         })
         .expect("second replay");
     assert_eq!(again, ReplayReport::default());
 }
 
+#[test]
+fn replay_one_invokes_the_publisher_without_original_media() {
+    let cases = cases();
+    for succeeds in [true, false] {
+        let bench = Bench::new(&format!("no-original-{succeeds}"));
+        let sidecar = bench.persist_with_media(&cases, "non-ascii", false);
+        let bytes = fs::read(&sidecar).expect("sidecar before replay");
+        let pending = bench
+            .sidecars
+            .pending(&bench.camera(&cases))
+            .expect("pending");
+        assert_eq!(pending.recoveries.len(), 1);
+        let recovery = &pending.recoveries[0];
+        assert!(!Path::new(&recovery.sealed.path).exists());
+        let mut invoked = false;
+        let outcome = bench
+            .sidecars
+            .replay_one(recovery, |recovery| {
+                invoked = true;
+                assert_eq!(recovery.sealed.clip_id, A);
+                assert!(!Path::new(&recovery.sealed.path).exists());
+                assert!(
+                    recovery.sidecar_path.is_file(),
+                    "owner still holds evidence"
+                );
+                if succeeds {
+                    ReplayOutcome::Published(())
+                } else {
+                    ReplayOutcome::Failed("publication refused")
+                }
+            })
+            .expect("replay one");
+        assert!(invoked, "absence of the original must not bypass the owner");
+        if succeeds {
+            assert_eq!(outcome, ReplayOutcome::Published(()));
+            assert!(!sidecar.exists());
+            assert!(bench.sidecar_names().is_empty());
+        } else {
+            assert_eq!(outcome, ReplayOutcome::Failed("publication refused"));
+            assert_eq!(bench.sidecar_names(), [format!("{A}.json")]);
+            assert_eq!(fs::read(&sidecar).expect("sidecar retained"), bytes);
+        }
+    }
+}
+
 fn now() -> Utc {
     Utc::parse("2026-08-17T10:00:00.000000+00:00").expect("now")
 }
 
-/// The flow publication a recovery stands for, through the T24 publisher.
+/// T35's READY-only publication owner, through the real T24 publisher. An
+/// existing terminal or manifest must be confirmed by that publisher; neither
+/// an incomplete terminal nor a publication error means `MissingMedia`.
 fn publish_recovery(
     store: &ClipStore,
     queue: &DeliveryQueue,
     recovery: &Recovery,
-) -> Result<Published, PublishError> {
+) -> ReplayOutcome<Published, PublishError> {
     let sealed = &recovery.sealed;
     let events: BTreeMap<String, ContributorEvent> = recovery
         .events
@@ -404,22 +454,75 @@ fn publish_recovery(
     assert_eq!(meta.facility_id, earliest.facility_id);
     assert_eq!(meta.domain, earliest.domain);
     assert_eq!(meta.event_type, earliest.event_type);
-    let reservation = store.reserve(&meta.camera_id, &meta.clip_id)?;
-    fs::copy(&sealed.path, reservation.artifact_path()).map_err(PublishError::Io)?;
-    let (sha256, size) = sha256_file(&reservation.artifact_path()).map_err(PublishError::Io)?;
+    let reservation = match store.reserve(&meta.camera_id, &meta.clip_id) {
+        Ok(reservation) => reservation,
+        Err(error) => return ReplayOutcome::Failed(error),
+    };
+    let mut terminal_present = false;
+    for name in [TERMINAL_MARKER, MANIFEST_FILE] {
+        match fs::symlink_metadata(reservation.final_dir.join(name)) {
+            Ok(_) => terminal_present = true,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return ReplayOutcome::Failed(PublishError::Io(error)),
+        }
+    }
+    let artifact = reservation.artifact_path();
+    let video = reservation.final_dir.join(MEDIA_FILE);
+    let original = Path::new(&sealed.path);
+    let locations = if terminal_present {
+        [video.as_path(), artifact.as_path(), original]
+    } else {
+        [artifact.as_path(), video.as_path(), original]
+    };
+    let mut media_path = None;
+    for path in locations {
+        match fs::symlink_metadata(path) {
+            Ok(metadata) if metadata.is_file() => {
+                media_path = Some(path);
+                break;
+            }
+            Ok(_) => return ReplayOutcome::Failed(PublishError::Conflict),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return ReplayOutcome::Failed(PublishError::Io(error)),
+        }
+    }
+    let Some(media_path) = media_path else {
+        return if terminal_present {
+            ReplayOutcome::Failed(PublishError::Conflict)
+        } else {
+            ReplayOutcome::MissingMedia
+        };
+    };
+    if terminal_present && media_path != video.as_path() {
+        return ReplayOutcome::Failed(PublishError::Conflict);
+    }
+    let (sha256, size) = match sha256_file(media_path) {
+        Ok(facts) => facts,
+        Err(error) => return ReplayOutcome::Failed(PublishError::Io(error)),
+    };
+    if media_path == original
+        && let Err(error) = fs::rename(original, &artifact)
+    {
+        return ReplayOutcome::Failed(PublishError::Io(error));
+    }
     let media = MediaFacts {
         sha256,
         size_bytes: i64::try_from(size).expect("size"),
         codec: "h264".to_owned(),
         duration_ms: sealed.duration_ms,
     };
-    Publisher::new(queue).publish_ready(&reservation, &meta, &media)
+    match Publisher::new(queue).publish_ready(&reservation, &meta, &media) {
+        Ok(published) => ReplayOutcome::Published(published),
+        Err(error) => ReplayOutcome::Failed(error),
+    }
 }
 
 #[derive(Clone, Copy, Debug)]
 enum Kill {
     AfterPersist,
     BeforePut,
+    AfterStage,
+    AfterMediaMove,
     AfterPutBeforeRetire,
 }
 
@@ -429,6 +532,8 @@ fn kill_between_persist_and_put_publishes_exactly_one_clip() {
     for kill in [
         Kill::AfterPersist,
         Kill::BeforePut,
+        Kill::AfterStage,
+        Kill::AfterMediaMove,
         Kill::AfterPutBeforeRetire,
     ] {
         let bench = Bench::new(&format!("kill-{kill:?}"));
@@ -436,21 +541,69 @@ fn kill_between_persist_and_put_publishes_exactly_one_clip() {
         let store = ClipStore::new(bench.work.join("store"));
         let queue_dir = bench.work.join("store/delivery-queue");
         fs::create_dir_all(&queue_dir).expect("queue dir");
-        bench.persist_with_media(&cases, "non-ascii", true);
+        let sidecar = bench.persist_with_media(&cases, "non-ascii", true);
+        let sidecar_bytes = fs::read(&sidecar).expect("sidecar before crash");
         if !matches!(kill, Kill::AfterPersist) {
             let queue = DeliveryQueue::open(&queue_dir, true).expect("queue");
             let killed = catch_unwind(AssertUnwindSafe(|| {
                 bench
                     .sidecars
-                    .replay(&camera, |recovery| -> Result<(), PublishError> {
-                        if let Kill::AfterPutBeforeRetire = kill {
-                            publish_recovery(&store, &queue, recovery)?;
-                            panic!("killed before the retire");
+                    .replay(&camera, |recovery| -> ReplayOutcome<(), PublishError> {
+                        match kill {
+                            Kill::AfterStage | Kill::AfterMediaMove => {
+                                let reservation = store
+                                    .reserve(&recovery.camera_id, &recovery.sealed.clip_id)
+                                    .expect("reservation");
+                                let target = if matches!(kill, Kill::AfterStage) {
+                                    reservation.artifact_path()
+                                } else {
+                                    fs::create_dir(&reservation.final_dir).expect("final dir");
+                                    reservation.final_dir.join(MEDIA_FILE)
+                                };
+                                fs::rename(&recovery.sealed.path, target).expect("move media");
+                                panic!("killed after the media move");
+                            }
+                            Kill::AfterPutBeforeRetire => {
+                                let outcome = publish_recovery(&store, &queue, recovery);
+                                assert!(
+                                    matches!(&outcome, ReplayOutcome::Published(_)),
+                                    "{outcome:?}"
+                                );
+                                panic!("killed before the retire");
+                            }
+                            Kill::BeforePut => panic!("killed before the PUT"),
+                            Kill::AfterPersist => unreachable!("no replay before restart"),
                         }
-                        panic!("killed before the PUT")
                     })
             }));
             assert!(killed.is_err(), "{kill:?}: the worker died");
+        }
+        assert_eq!(
+            fs::read(&sidecar).expect("sidecar after crash"),
+            sidecar_bytes
+        );
+        let pending = bench
+            .sidecars
+            .pending(&camera)
+            .expect("pending after crash");
+        assert_eq!(pending.recoveries.len(), 1);
+        let original = Path::new(&pending.recoveries[0].sealed.path);
+        match kill {
+            Kill::AfterPersist | Kill::BeforePut => assert!(original.is_file()),
+            Kill::AfterStage => {
+                assert!(!original.exists());
+                assert!(store.staging_dir(A).join(ARTIFACT_FILE).is_file());
+            }
+            Kill::AfterMediaMove => {
+                assert!(!original.exists());
+                assert!(store.clip_dir(A).join(MEDIA_FILE).is_file());
+                assert!(!store.clip_dir(A).join(TERMINAL_MARKER).exists());
+            }
+            Kill::AfterPutBeforeRetire => {
+                assert!(!original.exists());
+                assert!(store.clip_dir(A).join(MEDIA_FILE).is_file());
+                assert!(store.clip_dir(A).join(TERMINAL_MARKER).is_file());
+            }
         }
 
         let queue = DeliveryQueue::open(&queue_dir, true).expect("reopened queue");
@@ -460,7 +613,14 @@ fn kill_between_persist_and_put_publishes_exactly_one_clip() {
                 publish_recovery(&store, &queue, recovery)
             })
             .expect("replay after restart");
-        assert_eq!(report.published, 1, "{kill:?}: {report:?}");
+        assert_eq!(
+            report,
+            ReplayReport {
+                published: 1,
+                ..ReplayReport::default()
+            },
+            "{kill:?}"
+        );
         let clips: Vec<Value> = queue
             .entries()
             .expect("entries")
@@ -476,14 +636,141 @@ fn kill_between_persist_and_put_publishes_exactly_one_clip() {
 }
 
 #[test]
+fn completed_terminal_without_original_media_preserves_ack_and_retires_sidecar() {
+    let cases = cases();
+    let bench = Bench::new("marked-without-original");
+    let camera = bench.camera(&cases);
+    let store = ClipStore::new(bench.work.join("store"));
+    let queue_dir = bench.work.join("store/delivery-queue");
+    fs::create_dir_all(&queue_dir).expect("queue dir");
+    let queue = DeliveryQueue::open(&queue_dir, true).expect("queue");
+    let sidecar = bench.persist_with_media(&cases, "non-ascii", true);
+    let pending = bench.sidecars.pending(&camera).expect("pending");
+    let recovery = &pending.recoveries[0];
+    let first = match publish_recovery(&store, &queue, recovery) {
+        ReplayOutcome::Published(published) => published,
+        outcome => panic!("initial publication: {outcome:?}"),
+    };
+    assert!(!Path::new(&recovery.sealed.path).exists());
+    assert!(sidecar.is_file(), "crash window before retirement");
+    let marker = store.clip_dir(A).join(TERMINAL_MARKER);
+    let marker_bytes = fs::read(&marker).expect("marker");
+    let video = first.video_path.as_ref().expect("READY media");
+    let media_bytes = fs::read(video).expect("media");
+    assert!(
+        queue
+            .acknowledge_backend(first.entry.entry_id(), 204)
+            .expect("backend ACK")
+    );
+    assert!(queue.entries().expect("entries after ACK").is_empty());
+
+    let mut invoked = false;
+    let report = bench
+        .sidecars
+        .replay(&camera, |recovery| {
+            invoked = true;
+            let outcome = publish_recovery(&store, &queue, recovery);
+            if let ReplayOutcome::Published(published) = &outcome {
+                assert!(published.resumed && !published.admitted);
+            }
+            outcome
+        })
+        .expect("replay completed terminal");
+    assert!(invoked);
+    assert_eq!(
+        report,
+        ReplayReport {
+            published: 1,
+            ..ReplayReport::default()
+        }
+    );
+    assert!(queue.entries().expect("entries after replay").is_empty());
+    assert_eq!(
+        fs::read(&marker).expect("marker after replay"),
+        marker_bytes
+    );
+    assert_eq!(
+        fs::read(&first.manifest_path).expect("manifest after replay"),
+        first.manifest_bytes
+    );
+    assert_eq!(fs::read(video).expect("media after replay"), media_bytes);
+    assert!(!sidecar.exists());
+}
+
+#[test]
+fn malformed_terminal_without_original_media_keeps_the_sidecar() {
+    let cases = cases();
+    for with_media in [true, false] {
+        let bench = Bench::new(&format!("malformed-terminal-{with_media}"));
+        let camera = bench.camera(&cases);
+        let store = ClipStore::new(bench.work.join("store"));
+        let queue_dir = bench.work.join("store/delivery-queue");
+        fs::create_dir_all(&queue_dir).expect("queue dir");
+        let queue = DeliveryQueue::open(&queue_dir, true).expect("queue");
+        let sidecar = bench.persist_with_media(&cases, "non-ascii", true);
+        let sidecar_bytes = fs::read(&sidecar).expect("sidecar before replay");
+        let pending = bench.sidecars.pending(&camera).expect("pending");
+        let recovery = &pending.recoveries[0];
+        let first = match publish_recovery(&store, &queue, recovery) {
+            ReplayOutcome::Published(published) => published,
+            outcome => panic!("initial publication: {outcome:?}"),
+        };
+        assert!(!Path::new(&recovery.sealed.path).exists());
+        assert!(!store.staging_dir(A).join(ARTIFACT_FILE).exists());
+        let marker = store.clip_dir(A).join(TERMINAL_MARKER);
+        fs::write(&marker, b"{").expect("malformed marker");
+        if !with_media {
+            fs::remove_file(first.video_path.as_ref().expect("READY media"))
+                .expect("remove final media");
+        }
+        let entries = queue.entries().expect("entries before replay");
+        let mut invoked = false;
+        let report = bench
+            .sidecars
+            .replay(&camera, |recovery| {
+                invoked = true;
+                let outcome = publish_recovery(&store, &queue, recovery);
+                assert!(matches!(
+                    &outcome,
+                    ReplayOutcome::Failed(PublishError::Conflict)
+                ));
+                outcome
+            })
+            .expect("replay malformed terminal");
+        assert!(invoked);
+        assert_eq!(
+            report,
+            ReplayReport {
+                failed: 1,
+                ..ReplayReport::default()
+            }
+        );
+        assert_eq!(fs::read(&sidecar).expect("sidecar retained"), sidecar_bytes);
+        assert_eq!(bench.sidecar_names(), [format!("{A}.json")]);
+        assert_eq!(fs::read(&marker).expect("malformed marker retained"), b"{");
+        assert_eq!(
+            fs::read(&first.manifest_path).expect("manifest retained"),
+            first.manifest_bytes
+        );
+        assert_eq!(queue.entries().expect("entries after replay"), entries);
+    }
+}
+
+#[test]
 fn missing_media_removes_the_sidecar_and_counts_it() {
     let cases = cases();
     let bench = Bench::new("missing-media");
+    let store = ClipStore::new(bench.work.join("store"));
+    let queue_dir = bench.work.join("store/delivery-queue");
+    fs::create_dir_all(&queue_dir).expect("queue dir");
+    let queue = DeliveryQueue::open(&queue_dir, true).expect("queue");
     bench.persist_with_media(&cases, "non-ascii", false);
+    let mut invoked = false;
     let report = bench
         .sidecars
-        .replay(&bench.camera(&cases), |recovery| -> Result<(), ()> {
-            panic!("no PUT without media: {}", recovery.sealed.clip_id)
+        .replay(&bench.camera(&cases), |recovery| {
+            invoked = true;
+            publish_recovery(&store, &queue, recovery)
         })
         .expect("replay");
     let expected = ReplayReport {
@@ -491,6 +778,14 @@ fn missing_media_removes_the_sidecar_and_counts_it() {
         ..ReplayReport::default()
     };
     assert_eq!(report, expected);
+    assert!(invoked, "the owner must explicitly confirm missing media");
+    assert!(
+        queue.entries().expect("entries").is_empty(),
+        "no READY without media"
+    );
+    assert!(!store.staging_dir(A).join(ARTIFACT_FILE).exists());
+    assert!(!store.clip_dir(A).join(MANIFEST_FILE).exists());
+    assert!(!store.clip_dir(A).join(TERMINAL_MARKER).exists());
     assert!(bench.sidecar_names().is_empty(), "sidecar removed");
 }
 
@@ -506,9 +801,9 @@ fn failed_put_keeps_the_sidecar_and_continues() {
         .sidecars
         .replay(&camera, |recovery| {
             if recovery.sealed.clip_id == A {
-                Err("relay refused")
+                ReplayOutcome::Failed("relay refused")
             } else {
-                Ok(())
+                ReplayOutcome::Published(())
             }
         })
         .expect("replay");
@@ -526,7 +821,7 @@ fn failed_put_keeps_the_sidecar_and_continues() {
         .sidecars
         .replay(&camera, |recovery| {
             seen.borrow_mut().push(recovery.sealed.clip_id.clone());
-            Ok::<(), ()>(())
+            ReplayOutcome::<(), ()>::Published(())
         })
         .expect("later replay");
     assert_eq!(*seen.borrow(), [A]);
@@ -566,7 +861,7 @@ fn malformed_sidecars_are_kept_unchanged_and_counted() {
 
     let report = bench
         .sidecars
-        .replay(&camera, |_| Ok::<(), ()>(()))
+        .replay(&camera, |_| ReplayOutcome::<(), ()>::Published(()))
         .expect("replay");
     let expected = ReplayReport {
         published: 1,

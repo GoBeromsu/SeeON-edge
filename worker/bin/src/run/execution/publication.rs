@@ -1,5 +1,5 @@
 //! Sealed replay before source activation, then live queue and recorder owners.
-//! ENOSPC stays inside `ReservePool`: UNAVAILABLE, queue retained, worker continues.
+//! Completed ENOSPC fallback stays inside `ReservePool`; unresolved saves retain ownership.
 //! A missing runtime-manifest SHA is not invented here.
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -14,7 +14,7 @@ use seeon_deepstream_native::MediaBinding;
 use crate::clips::recorder::plane::CommandPlane;
 use crate::clips::recorder::{Admit, Recorder, RecorderError};
 use crate::clips::reserve::ReservePool;
-use crate::clips::sealed::{ReplayReport, SIDECAR_DIR, SealedSidecars};
+use crate::clips::sealed::{ReplayOutcome, ReplayReport, SIDECAR_DIR, SealedSidecars};
 use crate::clips::store::ClipStore;
 use crate::clips::time::Utc;
 use crate::delivery::DeliveryQueue;
@@ -95,7 +95,6 @@ pub fn replay_before_media(
     clock: &dyn Clock,
 ) -> Result<Replay, PublicationError> {
     let sidecars = SealedSidecars::new(state_dir.join(SIDECAR_DIR));
-    let now = Utc::from_system(clock.wall());
     let mut reports = Vec::with_capacity(camera_ids.len());
     let mut malformed = BTreeSet::new();
     for camera_id in camera_ids {
@@ -108,38 +107,38 @@ pub fn replay_before_media(
             ..ReplayReport::default()
         };
         for recovery in pending.recoveries {
-            // A crash can occur after ReservePool moved the source but before
-            // terminal publication. Those staged/final bytes still own this clip.
-            let media = [
-                PathBuf::from(&recovery.sealed.path),
-                store
-                    .staging_dir(&recovery.sealed.clip_id)
-                    .join(crate::clips::store::ARTIFACT_FILE),
-                store
-                    .clip_dir(&recovery.sealed.clip_id)
-                    .join(crate::clips::publish::MEDIA_FILE),
-            ]
-            .into_iter()
-            .find(|path| path.is_file());
-            let Some(media) = media else {
-                sidecars
-                    .remove(&recovery.sidecar_path)
-                    .map_err(|_| PublicationError::Sidecar)?;
-                report.missing_media += 1;
-                continue;
-            };
-            let published = super::recording::measured_codec(&media)
-                .map_err(ClipOutputError::from)
-                .and_then(|codec| {
-                    clip_output::publish_recovery(&recovery, store, queue, &codec, now)
-                });
-            if published.is_ok() {
-                sidecars
-                    .remove(&recovery.sidecar_path)
-                    .map_err(|_| PublicationError::Sidecar)?;
-                report.published += 1;
-            } else {
-                report.failed += 1;
+            let outcome = sidecars
+                .replay_one(&recovery, |recovery| {
+                    match clip_output::resume_terminal(recovery, store, queue) {
+                        Ok(Some(published)) => return ReplayOutcome::Published(published),
+                        Err(error) => return ReplayOutcome::Failed(error),
+                        Ok(None) => {}
+                    }
+                    let media = match recovery_media(recovery, store) {
+                        Ok(Some(media)) => media,
+                        Ok(None) => return ReplayOutcome::MissingMedia,
+                        Err(error) => return ReplayOutcome::Failed(error),
+                    };
+                    match super::recording::measured_codec(&media)
+                        .map_err(ClipOutputError::from)
+                        .and_then(|codec| {
+                            clip_output::publish_recovery(
+                                recovery,
+                                store,
+                                queue,
+                                &codec,
+                                Utc::from_system(clock.wall()),
+                            )
+                        }) {
+                        Ok(published) => ReplayOutcome::Published(published),
+                        Err(error) => ReplayOutcome::Failed(error),
+                    }
+                })
+                .map_err(|_| PublicationError::Sidecar)?;
+            match outcome {
+                ReplayOutcome::Published(_) => report.published += 1,
+                ReplayOutcome::MissingMedia => report.missing_media += 1,
+                ReplayOutcome::Failed(_) => report.failed += 1,
             }
         }
         reports.push(report);
@@ -148,6 +147,29 @@ pub fn replay_before_media(
         reports,
         malformed: malformed.len(),
     })
+}
+
+fn recovery_media(
+    recovery: &crate::clips::sealed::Recovery,
+    store: &ClipStore,
+) -> Result<Option<PathBuf>, ClipOutputError> {
+    for path in [
+        store
+            .staging_dir(&recovery.sealed.clip_id)
+            .join(crate::clips::store::ARTIFACT_FILE),
+        store
+            .clip_dir(&recovery.sealed.clip_id)
+            .join(crate::clips::publish::MEDIA_FILE),
+        PathBuf::from(&recovery.sealed.path),
+    ] {
+        match path.symlink_metadata() {
+            Ok(metadata) if metadata.is_file() => return Ok(Some(path)),
+            Ok(_) => return Err(crate::clips::publish::PublishError::Conflict.into()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error.into()),
+        }
+    }
+    Ok(None)
 }
 
 pub struct PublicationConfig<'a> {
@@ -439,9 +461,403 @@ mod native_tests;
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::clips::entry::{ContributorEvent, FLOW_ENCODER, flow_metadata};
+    use crate::clips::manifest::{ClipMetadata, Contributor, Extension, MediaFacts};
+    use crate::clips::publish::{MANIFEST_FILE, MEDIA_FILE, Published, Publisher, TERMINAL_MARKER};
+    use crate::clips::reserve::FINALIZE_FAILED;
+    use crate::clips::sealed::{Recovery, SealedClip, SealedContributor, SealedEvent};
     use crate::records::builder::{Frame, Stream};
     use crate::seam::{IdSource, RandomIds, SystemClock};
     use seeon_deepstream_native::{MediaPoll, MediaResult, RecordTicket};
+
+    struct NoReplayClock;
+
+    impl Clock for NoReplayClock {
+        fn monotonic(&self) -> Duration {
+            panic!("terminal recovery must not consult the clock")
+        }
+        fn wall(&self) -> std::time::SystemTime {
+            panic!("only fresh READY publication needs a clock")
+        }
+        fn pause(&self, _: Duration) {
+            panic!("startup recovery must not pause")
+        }
+    }
+
+    struct ReplayFixture {
+        root: PathBuf,
+        state: PathBuf,
+        store: ClipStore,
+        queue: DeliveryQueue,
+        recovery: Recovery,
+        meta: ClipMetadata,
+    }
+
+    impl Drop for ReplayFixture {
+        fn drop(&mut self) {
+            std::fs::remove_dir_all(&self.root).expect("owned replay fixture cleanup");
+        }
+    }
+
+    impl ReplayFixture {
+        fn new() -> Self {
+            let root = std::env::temp_dir().join(RandomIds.uuid4().unwrap());
+            std::fs::create_dir(&root).unwrap();
+            let state = root.join("state");
+            std::fs::create_dir(&state).unwrap();
+            let queue = DeliveryQueue::open(&state.join("delivery-queue"), true).unwrap();
+            let store = ClipStore::new(root.join("store"));
+            let detected = Utc::parse("2026-01-02T03:04:05.123456Z").unwrap();
+            let event = SealedEvent {
+                domain: "fall".into(),
+                event_type: "FALL_DETECTED".into(),
+                identity: "event-replay".into(),
+                camera_id: "camera-replay".into(),
+                facility_id: "facility-replay".into(),
+                time_sec: 12.0,
+                probability: Some(0.9),
+            };
+            let attributed = ContributorEvent {
+                camera_id: event.camera_id.clone(),
+                facility_id: event.facility_id.clone(),
+                domain: event.domain.clone(),
+                event_type: event.event_type.clone(),
+            };
+            let sealed = SealedClip {
+                clip_id: "clip-replay".into(),
+                path: root.join("original.mp4").to_str().unwrap().into(),
+                duration_ms: 4_000,
+                boundary: "end".into(),
+                contributors: vec![SealedContributor {
+                    event_ref: event.identity.clone(),
+                    detected_at: detected.iso_micros(),
+                }],
+            };
+            let events = BTreeMap::from([(event.identity.clone(), event)]);
+            let sidecars = SealedSidecars::new(state.join(SIDECAR_DIR));
+            sidecars.persist(&sealed, &events).unwrap();
+            let recovery = sidecars
+                .pending("camera-replay")
+                .unwrap()
+                .recoveries
+                .remove(0);
+            let meta = flow_metadata(
+                &sealed.clip_id,
+                &BTreeMap::from([("event-replay".into(), attributed)]),
+                Extension {
+                    boundary: sealed.boundary,
+                    duration_ms: sealed.duration_ms,
+                    contributors: vec![Contributor {
+                        event_ref: "event-replay".into(),
+                        detected_at: detected,
+                    }],
+                },
+                FLOW_ENCODER,
+                Utc::parse("2026-01-02T03:05:00.000Z").unwrap(),
+            )
+            .unwrap();
+            Self {
+                root,
+                state,
+                store,
+                queue,
+                recovery,
+                meta,
+            }
+        }
+
+        fn unavailable(&self) -> Published {
+            let reservation = self
+                .store
+                .reserve(&self.meta.camera_id, &self.meta.clip_id)
+                .unwrap();
+            Publisher::new(&self.queue)
+                .publish_unavailable(&reservation, &self.meta, FINALIZE_FAILED, None)
+                .unwrap()
+        }
+
+        fn replay(&self) -> Replay {
+            replay_before_media(
+                &self.state,
+                std::slice::from_ref(&self.recovery.camera_id),
+                &self.store,
+                &self.queue,
+                &NoReplayClock,
+            )
+            .unwrap()
+        }
+    }
+
+    #[test]
+    fn startup_orphan_terminal_marker_retains_attribution_without_readmission() {
+        let fixture = ReplayFixture::new();
+        let published = fixture.unavailable();
+        let marker = fixture
+            .store
+            .clip_dir(&published.clip_id)
+            .join(TERMINAL_MARKER);
+        let marker_bytes = std::fs::read(&marker).unwrap();
+        let sidecar_bytes = std::fs::read(&fixture.recovery.sidecar_path).unwrap();
+        assert!(
+            fixture
+                .queue
+                .acknowledge_backend(published.entry.entry_id(), 204)
+                .unwrap()
+        );
+        std::fs::remove_file(published.manifest_path).unwrap();
+        assert_eq!(
+            fixture.replay().reports,
+            vec![ReplayReport {
+                failed: 1,
+                ..ReplayReport::default()
+            }]
+        );
+        assert_eq!(std::fs::read(marker).unwrap(), marker_bytes);
+        assert_eq!(
+            std::fs::read(&fixture.recovery.sidecar_path).unwrap(),
+            sidecar_bytes
+        );
+        assert!(fixture.queue.entries().unwrap().is_empty());
+    }
+
+    #[test]
+    fn startup_probe_selects_the_same_owned_media_as_publication() {
+        for staged in [true, false] {
+            let fixture = ReplayFixture::new();
+            let original = Path::new(&fixture.recovery.sealed.path);
+            std::fs::write(original, b"different original bytes").unwrap();
+            let reservation = fixture
+                .store
+                .reserve(&fixture.meta.camera_id, &fixture.meta.clip_id)
+                .unwrap();
+            let selected = if staged {
+                reservation.artifact_path()
+            } else {
+                reservation.final_dir.join(MEDIA_FILE)
+            };
+            std::fs::create_dir_all(selected.parent().unwrap()).unwrap();
+            std::fs::write(&selected, b"owned publication bytes").unwrap();
+            assert_eq!(
+                recovery_media(&fixture.recovery, &fixture.store).unwrap(),
+                Some(selected)
+            );
+            // Synthetic bytes establish owner selection, not measured codec.
+            let published = clip_output::publish_recovery(
+                &fixture.recovery,
+                &fixture.store,
+                &fixture.queue,
+                "h264",
+                Utc::parse("2026-01-02T03:05:00.000Z").unwrap(),
+            )
+            .unwrap();
+            assert_eq!(
+                std::fs::read(published.video_path.unwrap()).unwrap(),
+                b"owned publication bytes"
+            );
+            assert_eq!(
+                std::fs::read(original).unwrap(),
+                b"different original bytes"
+            );
+        }
+    }
+
+    #[test]
+    fn startup_nonregular_media_is_not_missing_attribution() {
+        for symlink in [false, true] {
+            let fixture = ReplayFixture::new();
+            let path = Path::new(&fixture.recovery.sealed.path);
+            if symlink {
+                std::os::unix::fs::symlink(fixture.root.join("absent"), path).unwrap();
+            } else {
+                std::fs::create_dir(path).unwrap();
+            }
+            let bytes = std::fs::read(&fixture.recovery.sidecar_path).unwrap();
+            assert_eq!(
+                fixture.replay().reports,
+                vec![ReplayReport {
+                    failed: 1,
+                    ..ReplayReport::default()
+                }]
+            );
+            assert_eq!(
+                std::fs::read(&fixture.recovery.sidecar_path).unwrap(),
+                bytes
+            );
+            assert!(fixture.queue.entries().unwrap().is_empty());
+        }
+    }
+
+    #[test]
+    fn startup_reconciles_finalize_failed_without_media_clock_or_codec_probe() {
+        let fixture = ReplayFixture::new();
+        let first = fixture.unavailable();
+        let marker = fixture.store.clip_dir(&first.clip_id).join(TERMINAL_MARKER);
+        let marker_bytes = std::fs::read(&marker).unwrap();
+        std::fs::remove_file(&marker).unwrap();
+        assert!(
+            fixture
+                .queue
+                .acknowledge_backend(first.entry.entry_id(), 204)
+                .unwrap()
+        );
+        assert!(!Path::new(&fixture.recovery.sealed.path).exists());
+        assert!(
+            !fixture
+                .store
+                .staging_dir(&first.clip_id)
+                .join(crate::clips::store::ARTIFACT_FILE)
+                .exists()
+        );
+        assert!(
+            !fixture
+                .store
+                .clip_dir(&first.clip_id)
+                .join(MEDIA_FILE)
+                .exists()
+        );
+
+        let replay = fixture.replay();
+
+        assert_eq!(
+            replay.reports,
+            vec![ReplayReport {
+                published: 1,
+                ..ReplayReport::default()
+            }]
+        );
+        assert!(
+            !fixture.recovery.sidecar_path.exists(),
+            "terminal handoff retires attribution"
+        );
+        assert_eq!(
+            std::fs::read(first.manifest_path).unwrap(),
+            first.manifest_bytes
+        );
+        assert_eq!(std::fs::read(marker).unwrap(), marker_bytes);
+        let queued = fixture.queue.entries().unwrap();
+        assert_eq!(queued.len(), 1);
+        assert_eq!(queued[0]["entry_id"], first.entry.entry_id());
+        assert_eq!(queued[0]["finalized_at"], "2026-01-02T03:05:00.000Z");
+        assert_eq!(queued[0]["unavailable_reason"], FINALIZE_FAILED);
+    }
+
+    #[test]
+    fn startup_terminal_conflicts_keep_sidecar_manifest_marker_and_entry() {
+        for (field, replacement) in [("camera_id", "other-camera"), ("state", "UNKNOWN")] {
+            let fixture = ReplayFixture::new();
+            let first = fixture.unavailable();
+            let sidecar_bytes = std::fs::read(&fixture.recovery.sidecar_path).unwrap();
+            let marker = fixture.store.clip_dir(&first.clip_id).join(TERMINAL_MARKER);
+            let marker_bytes = std::fs::read(&marker).unwrap();
+            let queued = fixture.queue.entries().unwrap();
+            let mut value: serde_json::Value =
+                serde_json::from_slice(&first.manifest_bytes).unwrap();
+            value[field] = serde_json::json!(replacement);
+            let body = crate::json::Serialiser::ModelSelection
+                .canonical(&crate::json::Json::from(&value))
+                .unwrap();
+            let conflict = format!("{body}\n").into_bytes();
+            std::fs::write(&first.manifest_path, &conflict).unwrap();
+
+            let replay = fixture.replay();
+
+            assert_eq!(
+                replay.reports,
+                vec![ReplayReport {
+                    failed: 1,
+                    ..ReplayReport::default()
+                }]
+            );
+            assert_eq!(
+                std::fs::read(&fixture.recovery.sidecar_path).unwrap(),
+                sidecar_bytes
+            );
+            assert_eq!(std::fs::read(first.manifest_path).unwrap(), conflict);
+            assert_eq!(std::fs::read(marker).unwrap(), marker_bytes);
+            assert_eq!(fixture.queue.entries().unwrap(), queued);
+        }
+    }
+
+    #[test]
+    fn startup_ready_checks_actual_final_bytes_without_codec_probe() {
+        for change in ["unchanged", "changed", "missing"] {
+            let fixture = ReplayFixture::new();
+            let reservation = fixture
+                .store
+                .reserve(&fixture.meta.camera_id, &fixture.meta.clip_id)
+                .unwrap();
+            // Opaque bytes cannot pass a codec probe; an identical terminal must not try one.
+            let media = b"opaque sealed recording bytes";
+            std::fs::write(reservation.artifact_path(), media).unwrap();
+            let facts = MediaFacts {
+                sha256: crate::clips::durable::sha256_hex(media),
+                size_bytes: i64::try_from(media.len()).unwrap(),
+                codec: "h264".into(),
+                duration_ms: fixture.recovery.sealed.duration_ms,
+            };
+            let first = Publisher::new(&fixture.queue)
+                .publish_ready(&reservation, &fixture.meta, &facts)
+                .unwrap();
+            let video = first.video_path.as_ref().unwrap();
+            let sidecar_bytes = std::fs::read(&fixture.recovery.sidecar_path).unwrap();
+            match change {
+                "changed" => {
+                    let mut altered = media.to_vec();
+                    altered[0] ^= 1;
+                    std::fs::write(video, altered).unwrap();
+                }
+                "missing" => std::fs::remove_file(video).unwrap(),
+                _ => {}
+            }
+
+            let replay = fixture.replay();
+
+            let expected = if change == "unchanged" {
+                assert!(!fixture.recovery.sidecar_path.exists());
+                ReplayReport {
+                    published: 1,
+                    ..ReplayReport::default()
+                }
+            } else {
+                assert_eq!(
+                    std::fs::read(&fixture.recovery.sidecar_path).unwrap(),
+                    sidecar_bytes
+                );
+                ReplayReport {
+                    failed: 1,
+                    ..ReplayReport::default()
+                }
+            };
+            assert_eq!(replay.reports, vec![expected]);
+            assert_eq!(
+                std::fs::read(first.manifest_path).unwrap(),
+                first.manifest_bytes
+            );
+            assert_eq!(fixture.queue.entries().unwrap().len(), 1);
+        }
+    }
+
+    #[test]
+    fn startup_retires_truly_missing_ready_only_without_a_terminal() {
+        let fixture = ReplayFixture::new();
+        let replay = fixture.replay();
+        assert_eq!(
+            replay.reports,
+            vec![ReplayReport {
+                missing_media: 1,
+                ..ReplayReport::default()
+            }]
+        );
+        assert!(!fixture.recovery.sidecar_path.exists());
+        assert!(
+            !fixture
+                .store
+                .clip_dir(&fixture.recovery.sealed.clip_id)
+                .join(MANIFEST_FILE)
+                .exists()
+        );
+        assert!(fixture.queue.entries().unwrap().is_empty());
+    }
 
     #[test]
     fn recording_directory_is_prepared_without_replacing_existing_contents() {

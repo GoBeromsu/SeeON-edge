@@ -1,6 +1,6 @@
 //! Flow sealed-clip sidecars (`flow_sealed_sidecar.py`): a sealed Flow clip
 //! is written to `flow-sealed/` before it is published and retired only
-//! after publication succeeds, so a crash in between replays it once.
+//! after publication succeeds or its owner confirms missing media.
 
 mod payload;
 mod read;
@@ -96,9 +96,11 @@ impl std::error::Error for SealedError {}
 /// What replaying one sidecar did.
 #[derive(Debug, PartialEq)]
 pub enum ReplayOutcome<T, E> {
-    /// Published, then the sidecar was retired.
+    /// Publication succeeded (including a resumed terminal); retire the sidecar.
     Published(T),
-    /// The media file is gone; the sidecar was removed.
+    /// The caller confirmed absence after checking the terminal and all owned
+    /// media locations; retire the sidecar. A failed or malformed terminal
+    /// must be `Failed`, not `MissingMedia`.
     MissingMedia,
     /// Publication failed; the sidecar is kept for the next replay.
     Failed(E),
@@ -161,23 +163,24 @@ impl SealedSidecars {
         read::pending(&self.directory, camera_id)
     }
 
-    /// Replays one sidecar: missing media removes it; otherwise `publish`
-    /// runs and the sidecar is retired only when it succeeds.
+    /// Always calls the publication owner, which checks terminal state and all
+    /// owned media locations. `Published` and explicit `MissingMedia` retire
+    /// the sidecar; `Failed` keeps it unchanged.
     pub fn replay_one<T, E>(
         &self,
         recovery: &Recovery,
-        publish: impl FnOnce(&Recovery) -> Result<T, E>,
+        publish: impl FnOnce(&Recovery) -> ReplayOutcome<T, E>,
     ) -> Result<ReplayOutcome<T, E>, SealedError> {
-        if !Path::new(&recovery.sealed.path).is_file() {
-            self.remove(&recovery.sidecar_path)?;
-            return Ok(ReplayOutcome::MissingMedia);
-        }
         match publish(recovery) {
-            Ok(published) => {
+            ReplayOutcome::Published(published) => {
                 self.remove(&recovery.sidecar_path)?;
                 Ok(ReplayOutcome::Published(published))
             }
-            Err(error) => Ok(ReplayOutcome::Failed(error)),
+            ReplayOutcome::MissingMedia => {
+                self.remove(&recovery.sidecar_path)?;
+                Ok(ReplayOutcome::MissingMedia)
+            }
+            ReplayOutcome::Failed(error) => Ok(ReplayOutcome::Failed(error)),
         }
     }
 
@@ -186,7 +189,7 @@ impl SealedSidecars {
     pub fn replay<T, E>(
         &self,
         camera_id: &str,
-        mut publish: impl FnMut(&Recovery) -> Result<T, E>,
+        mut publish: impl FnMut(&Recovery) -> ReplayOutcome<T, E>,
     ) -> Result<ReplayReport, SealedError> {
         let pending = self.pending(camera_id)?;
         let mut report = ReplayReport {
