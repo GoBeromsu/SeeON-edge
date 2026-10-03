@@ -1661,8 +1661,8 @@ def test_edge_image_workflow_is_reachable_from_pull_request() -> None:
         ("edge-images.yml", "publish", 3, "docker/setup-buildx-action@v3"),
         ("edge-images.yml", "publish", 4, "docker/login-action@v3"),
         ("edge-images.yml", "publish", 6, "docker/build-push-action@v6"),
-        # The fresh-build boot smoke is an action now, so it needs the same pin.
-        ("edge-images.yml", "publish", 8, "docker/build-push-action@v6"),
+        # The ml-worker build action needs the same immutable pin as ml-api.
+        ("edge-images.yml", "publish", 7, "docker/build-push-action@v6"),
         ("edge-images.yml", "publish", 14, "actions/upload-artifact@v4"),
         # A branch ref is worse: it moves on every upstream push.
         ("edge-images.yml", "publish", 0, "actions/checkout@main"),
