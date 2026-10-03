@@ -661,7 +661,7 @@ fn score_record(
         record_frame,
         observed_at_ns,
         &emitted,
-        evidence,
+        Some(evidence),
     )
     .ok()
 }

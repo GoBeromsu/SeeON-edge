@@ -42,15 +42,16 @@ pub fn decision_record(
         .map_err(RecordError::Contract)
 }
 
-/// A scored record requires all three probabilities and the receipt of its
-/// actual accelerator call. Missing scores are not invented or zero-filled.
+/// A scored record requires all three probabilities. An accelerator receipt
+/// is included only for an actual accelerator call; CPU execution supplies none.
+/// Missing scores are not invented or zero-filled.
 /// `ModelEvidence` is calibration evidence, NOT an accelerator receipt.
 pub fn model_score_record(
     stream: &Stream,
     frame: Frame,
     observed_at_ns: u64,
     score: &ModelScore,
-    accelerator: &AcceleratorEvidence,
+    accelerator: Option<&AcceleratorEvidence>,
 ) -> Result<Record, RecordError> {
     let identity =
         |value, name| u64::try_from(value).map_err(|_| RecordError::NegativeIdentity(name));
@@ -74,7 +75,7 @@ pub fn model_score_record(
         fallen: probability(score.fallen, "fallen")?,
         evidence,
     };
-    builder::model_score_record(stream, frame, observed_at_ns, &score, Some(accelerator))
+    builder::model_score_record(stream, frame, observed_at_ns, &score, accelerator)
         .map_err(RecordError::Contract)
 }
 

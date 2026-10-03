@@ -198,7 +198,23 @@ fn accelerator(elapsed: u64) -> AcceleratorEvidence {
 }
 
 fn record() -> Record {
-    model_score_record(&stream(), frame(), WALL_NS, &score(), &accelerator(789)).unwrap()
+    model_score_record(
+        &stream(),
+        frame(),
+        WALL_NS,
+        &score(),
+        Some(&accelerator(789)),
+    )
+    .unwrap()
+}
+
+#[test]
+fn cpu_model_bridge_preserves_python_record_without_accelerator_fields() {
+    let expected = fixture("execution-records.model-evidence.json")["batch"]["records"][0].clone();
+    let cpu = model_score_record(&stream(), frame(), WALL_NS, &score(), None).unwrap();
+    assert_eq!(value(&cpu), expected);
+    assert!(value(&cpu)["payload"].get("accelerator").is_none());
+    assert_ne!(cpu.record_id(), record().record_id());
 }
 
 #[test]
@@ -220,14 +236,26 @@ fn model_bridge_binds_calibration_and_runtime_receipt_before_hashing() {
     expected["record_id"] = json!(expected_id);
     let first = record();
     assert_eq!(value(&first), expected);
-    let changed =
-        model_score_record(&stream(), frame(), WALL_NS, &score(), &accelerator(790)).unwrap();
+    let changed = model_score_record(
+        &stream(),
+        frame(),
+        WALL_NS,
+        &score(),
+        Some(&accelerator(790)),
+    )
+    .unwrap();
     assert_ne!(first.record_id(), changed.record_id());
     let mut next_stream = stream();
     next_stream.source_generation = 7;
     next_stream.stream_epoch = 9;
-    let changed =
-        model_score_record(&next_stream, frame(), WALL_NS, &score(), &accelerator(789)).unwrap();
+    let changed = model_score_record(
+        &next_stream,
+        frame(),
+        WALL_NS,
+        &score(),
+        Some(&accelerator(789)),
+    )
+    .unwrap();
     assert_eq!(changed.body().source_generation, 7);
     assert_eq!(changed.body().stream_epoch, 9);
     assert_ne!(first.record_id(), changed.record_id());
@@ -240,7 +268,7 @@ fn model_bridge_binds_calibration_and_runtime_receipt_before_hashing() {
             frame(),
             WALL_NS,
             &no_calibration,
-            &accelerator(789),
+            Some(&accelerator(789)),
         )
         .unwrap(),
     );
@@ -292,7 +320,11 @@ fn model_bridge_refuses_signed_id_loss_and_missing_probabilities() {
     ];
     for (score, error) in cases {
         assert_eq!(
-            model_score_record(&stream(), frame(), WALL_NS, &score, &accelerator(789)),
+            model_score_record(&stream(), frame(), WALL_NS, &score, Some(&accelerator(789))),
+            Err(error)
+        );
+        assert_eq!(
+            model_score_record(&stream(), frame(), WALL_NS, &score, None),
             Err(error)
         );
     }
