@@ -7,7 +7,8 @@ use serde_json::{Value, json};
 
 use super::super::EngineReceipt;
 use super::{
-    BuiltEngine, EngineSet, FlowArtifacts, IdentityError, IdentityRequest, publish_identity,
+    BuiltEngine, CpuModelBytes, EngineSet, FlowArtifacts, IdentityError, IdentityRequest,
+    publish_identity,
 };
 use crate::records::id::sha256_hex;
 use crate::seam::{IdSource, RandomIds};
@@ -122,7 +123,7 @@ impl FlowFiles {
 }
 
 fn set<'a>(built: &'a [(EngineReceipt, PathBuf); 4]) -> EngineSet<'a> {
-    EngineSet {
+    EngineSet::TensorRt {
         live_pose: BuiltEngine {
             receipt: &built[0].0,
             path: &built[0].1,
@@ -139,6 +140,25 @@ fn set<'a>(built: &'a [(EngineReceipt, PathBuf); 4]) -> EngineSet<'a> {
             receipt: &built[3].0,
             path: &built[3].1,
         },
+    }
+}
+
+fn gpu_role<'a, 's>(engines: &'s mut EngineSet<'a>, role: &str) -> &'s mut BuiltEngine<'a> {
+    let EngineSet::TensorRt {
+        live_pose,
+        stored_pose,
+        bed,
+        fall,
+    } = engines
+    else {
+        panic!("GPU mutation requires the TensorRT fixture");
+    };
+    match role {
+        "live_pose" => live_pose,
+        "stored_pose" => stored_pose,
+        "bed" => bed,
+        "fall" => fall,
+        _ => panic!("unknown GPU fixture role"),
     }
 }
 
@@ -163,6 +183,166 @@ fn request<'a>(
         batch_size: 2,
         destination,
     }
+}
+
+#[test]
+fn hybrid_publication_roundtrips_captured_sources_without_auxiliary_engines() {
+    // Synthetic file-contract fixture, not an inference or hardware receipt.
+    use crate::config::model_bundle::identity::{EnginePaths, IdentityInputs, verify_aggregate};
+    let scratch = Scratch::new();
+    let (mut live, live_path) = engine(&scratch.0, "live_pose.engine", b"live");
+    let models = CpuModelBytes {
+        stored_pose: b"captured pose ONNX fixture",
+        bed: b"captured bed ONNX fixture",
+        fall: b"captured fall ONNX fixture",
+    };
+    let pose_sha = sha256_hex(models.stored_pose);
+    let bed_sha = sha256_hex(models.bed);
+    let fall_sha = sha256_hex(models.fall);
+    live.document["onnx_sha256"] = json!(pose_sha);
+    let observer = scratch.0.join("observer.so");
+    fs::write(&observer, b"observer").unwrap();
+    live.document["observer_library_sha256"] = json!(sha256_hex(b"observer"));
+    let flow = FlowFiles::new(&scratch.0);
+    fs::write(
+        &flow.infer_config,
+        "[property]\nmodel-engine-file=live_pose.engine\n",
+    )
+    .unwrap();
+    let destination = scratch.0.join("hybrid.json");
+    let request = request(
+        EngineSet::OnnxRuntimeCpu {
+            live_pose: BuiltEngine {
+                receipt: &live,
+                path: &live_path,
+            },
+            models,
+        },
+        flow.artifacts(),
+        &destination,
+    );
+    publish_identity(request).unwrap();
+    let bytes = fs::read(&destination).unwrap();
+    let document: Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(document["schema_version"], 2);
+    assert_eq!(document["engines"].as_object().unwrap().len(), 1);
+    assert_eq!(
+        document["auxiliary"],
+        json!({
+            "runtime": "onnxruntime",
+            "provider": "cpu",
+            "models": {
+                "stored_pose": {"onnx_sha256": pose_sha},
+                "bed": {"onnx_sha256": bed_sha},
+                "fall": {"onnx_sha256": fall_sha},
+            },
+        })
+    );
+    let flow_inputs = [
+        ("parser_lib_sha256", flow.parser_lib.clone()),
+        ("infer_config_sha256", flow.infer_config.clone()),
+        ("tracker_config_sha256", flow.tracker_config.clone()),
+        ("tracker_library_sha256", flow.tracker_library.clone()),
+    ];
+    let verified = verify_aggregate(
+        &destination,
+        IdentityInputs {
+            engines: EnginePaths::OnnxRuntimeCpu {
+                live_pose: &live_path,
+            },
+            pose_onnx_sha256: &pose_sha,
+            bed_onnx_sha256: &bed_sha,
+            fall_onnx_sha256: &fall_sha,
+            flow: &flow_inputs,
+            observer_library: &observer,
+            image_digest: IMAGE,
+            configured_batch: Some(2),
+            deployed_batch: Some(2),
+        },
+    )
+    .unwrap();
+    assert_eq!(verified.get("onnx_sha256"), Some(&pose_sha));
+    for role in ["stored_pose", "bed", "fall"] {
+        assert!(!scratch.0.join(format!("{role}.engine")).exists());
+    }
+    assert!(matches!(publish_identity(request), Err(IdentityError::Io)));
+    assert_eq!(
+        fs::read(&destination).unwrap(),
+        bytes,
+        "publication never overwrites"
+    );
+}
+
+#[test]
+fn hybrid_writer_refuses_empty_or_contradictory_model_sources_before_publication() {
+    let scratch = Scratch::new();
+    let (mut live, live_path) = engine(&scratch.0, "live_pose.engine", b"live");
+    live.document["onnx_sha256"] = json!(sha256_hex(b"pose"));
+    let models = CpuModelBytes {
+        stored_pose: b"pose",
+        bed: b"bed",
+        fall: b"fall",
+    };
+    let flow = FlowFiles::new(&scratch.0);
+    let destination = scratch.0.join("refused.json");
+    for (invalid, mismatched) in [
+        (
+            CpuModelBytes {
+                stored_pose: b"",
+                ..models
+            },
+            false,
+        ),
+        (CpuModelBytes { bed: b"", ..models }, false),
+        (
+            CpuModelBytes {
+                fall: b"",
+                ..models
+            },
+            false,
+        ),
+        (
+            CpuModelBytes {
+                stored_pose: b"different pose",
+                ..models
+            },
+            true,
+        ),
+    ] {
+        let result = publish_identity(request(
+            EngineSet::OnnxRuntimeCpu {
+                live_pose: BuiltEngine {
+                    receipt: &live,
+                    path: &live_path,
+                },
+                models: invalid,
+            },
+            flow.artifacts(),
+            &destination,
+        ));
+        if mismatched {
+            assert!(matches!(result, Err(IdentityError::Receipt)));
+        } else {
+            assert!(matches!(result, Err(IdentityError::Model)));
+        }
+        assert!(!destination.exists());
+    }
+    fs::write(&live_path, b"tampered live engine").unwrap();
+    assert!(matches!(
+        publish_identity(request(
+            EngineSet::OnnxRuntimeCpu {
+                live_pose: BuiltEngine {
+                    receipt: &live,
+                    path: &live_path
+                },
+                models,
+            },
+            flow.artifacts(),
+            &destination,
+        )),
+        Err(IdentityError::Output)
+    ));
+    assert!(!destination.exists());
 }
 
 #[test]
@@ -221,11 +401,11 @@ fn swapped_roles_and_static_profile_mismatch_refuse() {
     let files = FlowFiles::new(&scratch.0);
     let artifacts = files.artifacts();
     let mut swapped = set(&built);
-    swapped.bed = BuiltEngine {
+    *gpu_role(&mut swapped, "bed") = BuiltEngine {
         receipt: &built[3].0,
         path: &built[3].1,
     };
-    swapped.fall = BuiltEngine {
+    *gpu_role(&mut swapped, "fall") = BuiltEngine {
         receipt: &built[2].0,
         path: &built[2].1,
     };
@@ -239,7 +419,7 @@ fn swapped_roles_and_static_profile_mismatch_refuse() {
     receipt["dimensions"] = json!([1, 3, 641, 640]);
     let wrong = EngineReceipt { document: receipt };
     let mut mismatched = set(&built);
-    mismatched.stored_pose.receipt = &wrong;
+    gpu_role(&mut mismatched, "stored_pose").receipt = &wrong;
     assert!(matches!(
         publish_identity(request(mismatched, artifacts, &destination)),
         Err(IdentityError::Receipt)
@@ -259,7 +439,7 @@ fn differing_source_image_and_hardware_refuse() {
         json!("cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc");
     let source = EngineReceipt { document: changed };
     let mut engines = set(&built);
-    engines.stored_pose.receipt = &source;
+    gpu_role(&mut engines, "stored_pose").receipt = &source;
     assert!(matches!(
         publish_identity(request(engines, artifacts, &destination)),
         Err(IdentityError::Receipt)
@@ -269,7 +449,7 @@ fn differing_source_image_and_hardware_refuse() {
         json!("sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd");
     let image = EngineReceipt { document: image };
     let mut engines = set(&built);
-    engines.bed.receipt = &image;
+    gpu_role(&mut engines, "bed").receipt = &image;
     assert!(matches!(
         publish_identity(request(engines, artifacts, &destination)),
         Err(IdentityError::Image)
@@ -278,7 +458,7 @@ fn differing_source_image_and_hardware_refuse() {
     device["device"] = json!(1);
     let device = EngineReceipt { document: device };
     let mut engines = set(&built);
-    engines.fall.receipt = &device;
+    gpu_role(&mut engines, "fall").receipt = &device;
     assert!(matches!(
         publish_identity(request(engines, artifacts, &destination)),
         Err(IdentityError::Receipt)
@@ -310,9 +490,9 @@ fn differing_valid_hardware_fields_refuse_separately() {
         let receipt = EngineReceipt { document };
         let mut engines = set(&built);
         match index {
-            1 => engines.stored_pose.receipt = &receipt,
-            2 => engines.bed.receipt = &receipt,
-            _ => engines.fall.receipt = &receipt,
+            1 => gpu_role(&mut engines, "stored_pose").receipt = &receipt,
+            2 => gpu_role(&mut engines, "bed").receipt = &receipt,
+            _ => gpu_role(&mut engines, "fall").receipt = &receipt,
         }
         assert!(matches!(
             publish_identity(request(engines, artifacts, &destination)),
@@ -337,8 +517,8 @@ fn malformed_sha_fields_refuse_even_when_pose_hashes_match() {
     let live = EngineReceipt { document: live };
     let stored = EngineReceipt { document: stored };
     let mut engines = set(&built);
-    engines.live_pose.receipt = &live;
-    engines.stored_pose.receipt = &stored;
+    gpu_role(&mut engines, "live_pose").receipt = &live;
+    gpu_role(&mut engines, "stored_pose").receipt = &stored;
     assert!(matches!(
         publish_identity(request(engines, artifacts, &destination)),
         Err(IdentityError::Receipt)
@@ -349,9 +529,9 @@ fn malformed_sha_fields_refuse_even_when_pose_hashes_match() {
         let receipt = EngineReceipt { document };
         let mut engines = set(&built);
         if index == 2 {
-            engines.bed.receipt = &receipt;
+            gpu_role(&mut engines, "bed").receipt = &receipt;
         } else {
-            engines.fall.receipt = &receipt;
+            gpu_role(&mut engines, "fall").receipt = &receipt;
         }
         assert!(matches!(
             publish_identity(request(engines, artifacts, &destination)),

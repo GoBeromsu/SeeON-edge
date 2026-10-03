@@ -183,7 +183,7 @@ fn publish_staged(
         files::write_exclusive(&layout.served, captured.served.as_bytes())?;
     }
     let destination = files::identity_staging(&flags.identity)?;
-    let engines = EngineSet {
+    let engines = EngineSet::TensorRt {
         live_pose: built_of(&built[0], &layout.live),
         stored_pose: built_of(&built[1], &layout.stored),
         bed: built_of(&built[2], &layout.bed),

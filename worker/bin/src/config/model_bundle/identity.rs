@@ -1,5 +1,6 @@
-//! Canonical four-engine identity admission. Runtime reads this artifact and
-//! never builds engines. Legacy flat identity documents are not accepted.
+//! Canonical provider-specific identity admission. TensorRT uses the unchanged
+//! four-engine schema1; hybrid ORT CPU uses schema2 with only the live GPU engine.
+//! Runtime reads this artifact and never builds engines or accepts legacy files.
 
 mod admission;
 mod environment;
@@ -9,7 +10,7 @@ mod schema;
 pub use admission::{EnginePaths, IdentityInputs, fingerprint, verify_aggregate};
 pub(crate) use environment::verify_environment;
 pub(crate) use infer::engine_only as engine_only_config;
-pub(crate) use schema::{SchemaError, native_profile, validate_entries};
+pub(crate) use schema::{SchemaError, native_profile, validate_entries, validate_hybrid_entries};
 
 /// Caller-declared deployment authority, not a measured container identity.
 pub fn deployment_image_digest(reference: &str) -> Option<&str> {
@@ -23,7 +24,7 @@ pub fn deployment_image_digest(reference: &str) -> Option<&str> {
 }
 
 /// Flow files retained in the aggregate's `flow` member. Pose ONNX identity
-/// belongs to the live/stored engine entries, not a duplicate Flow field.
+/// belongs to the live receipt and stored-pose source, not a duplicate Flow field.
 pub const FLOW_IDENTITY_FILES: [(&str, &str); 4] = [
     ("infer_config_sha256", "ML_WORKER_FLOW_INFER_CONFIG"),
     ("tracker_config_sha256", "ML_WORKER_FLOW_TRACKER_CONFIG"),

@@ -199,7 +199,7 @@ pub(super) fn identity_inputs<'a>(
     flow: &'a [(&'a str, PathBuf)],
 ) -> IdentityInputs<'a> {
     IdentityInputs {
-        engines: EnginePaths {
+        engines: EnginePaths::TensorRt {
             live_pose: &layout.final_live,
             stored_pose: &layout.final_stored,
             bed: &layout.final_bed,

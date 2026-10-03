@@ -8,7 +8,7 @@ use serde_json::{Map, Value};
 use crate::config::is_hex;
 use crate::run::ModelRole;
 
-/// Why four engine entries are not one canonical identity set.
+/// Why measured engine or CPU source entries violate their identity contract.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum SchemaError {
     Image,
@@ -31,18 +31,7 @@ pub(crate) fn validate_entries(
     image: &str,
     batch: u32,
 ) -> Result<(), SchemaError> {
-    if super::deployment_image_digest(image) != Some(image) {
-        return Err(SchemaError::Image);
-    }
-    if !(1..=16).contains(&batch) {
-        return Err(SchemaError::Receipt);
-    }
-    let Value::Object(entries) = engines else {
-        return Err(SchemaError::Receipt);
-    };
-    if entries.len() != 4 {
-        return Err(SchemaError::Receipt);
-    }
+    let entries = entries(engines, image, batch, 4)?;
     let checked = [
         entry(entries, "live_pose", Role::Live, image, batch)?,
         entry(entries, "stored_pose", Role::Stored, image, batch)?,
@@ -51,6 +40,73 @@ pub(crate) fn validate_entries(
     ];
     same_source(checked[0], checked[1])?;
     same_hardware(&checked)
+}
+
+/// Shared hybrid contract for the offline writer and runtime reader.
+pub(crate) fn validate_hybrid_entries(
+    engines: &Value,
+    auxiliary: &Value,
+    image: &str,
+    batch: u32,
+) -> Result<(), SchemaError> {
+    validate_live_entry(engines, image, batch)?;
+    validate_cpu_models(auxiliary, &engines["live_pose"])
+}
+
+/// Hybrid mode retains the unchanged live TensorRT receipt and no other engines.
+pub(crate) fn validate_live_entry(
+    engines: &Value,
+    image: &str,
+    batch: u32,
+) -> Result<(), SchemaError> {
+    let entries = entries(engines, image, batch, 1)?;
+    entry(entries, "live_pose", Role::Live, image, batch)?;
+    Ok(())
+}
+
+pub(crate) fn validate_cpu_models(auxiliary: &Value, live: &Value) -> Result<(), SchemaError> {
+    let auxiliary = exact_object(auxiliary, &["runtime", "provider", "models"])?;
+    if field_str(auxiliary, "runtime")? != "onnxruntime"
+        || field_str(auxiliary, "provider")? != "cpu"
+    {
+        return Err(SchemaError::Receipt);
+    }
+    let models = exact_object(&auxiliary["models"], &["stored_pose", "bed", "fall"])?;
+    for model in models.values() {
+        exact_object(model, &["onnx_sha256"])?;
+        sha_field(model, "onnx_sha256")?;
+    }
+    same_source(live, &models["stored_pose"])
+}
+
+fn entries<'a>(
+    engines: &'a Value,
+    image: &str,
+    batch: u32,
+    count: usize,
+) -> Result<&'a Map<String, Value>, SchemaError> {
+    if super::deployment_image_digest(image) != Some(image) {
+        return Err(SchemaError::Image);
+    }
+    if !(1..=16).contains(&batch) {
+        return Err(SchemaError::Receipt);
+    }
+    let fields = engines.as_object().ok_or(SchemaError::Receipt)?;
+    if fields.len() != count {
+        return Err(SchemaError::Receipt);
+    }
+    Ok(fields)
+}
+
+fn exact_object<'a>(
+    value: &'a Value,
+    keys: &[&str],
+) -> Result<&'a Map<String, Value>, SchemaError> {
+    let fields = value.as_object().ok_or(SchemaError::Receipt)?;
+    if fields.len() != keys.len() || !keys.iter().all(|key| fields.contains_key(*key)) {
+        return Err(SchemaError::Receipt);
+    }
+    Ok(fields)
 }
 
 fn entry<'a>(

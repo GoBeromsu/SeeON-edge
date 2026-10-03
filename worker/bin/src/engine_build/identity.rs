@@ -1,5 +1,5 @@
-//! Aggregate engine-identity publisher. One immutable document records four
-//! measured receipts and the current Flow artifact fingerprints. Those
+//! Aggregate inference-identity publisher. One immutable document records the
+//! selected engine receipts, CPU source hashes and current Flow fingerprints. Those
 //! fingerprints describe the files supplied here; they are not proof a child
 //! consumed those bytes. A late publication failure may leave the destination
 //! present. This module never overwrites or deletes an existing destination
@@ -16,7 +16,7 @@ use serde_json::Value;
 use super::{EngineReceipt, output_digest};
 use crate::config::is_hex;
 use crate::config::model_bundle::identity::{
-    SchemaError, deployment_image_digest, validate_entries,
+    SchemaError, deployment_image_digest, validate_entries, validate_hybrid_entries,
 };
 
 pub use store::publish_identity;
@@ -28,13 +28,27 @@ pub struct BuiltEngine<'a> {
     pub path: &'a Path,
 }
 
-/// The four engines of one offline identity. Roles are not interchangeable.
+/// Captured CPU ONNX bytes, not engines or accelerator execution receipts.
 #[derive(Clone, Copy)]
-pub struct EngineSet<'a> {
-    pub live_pose: BuiltEngine<'a>,
-    pub stored_pose: BuiltEngine<'a>,
-    pub bed: BuiltEngine<'a>,
-    pub fall: BuiltEngine<'a>,
+pub struct CpuModelBytes<'a> {
+    pub stored_pose: &'a [u8],
+    pub bed: &'a [u8],
+    pub fall: &'a [u8],
+}
+
+/// Explicit artifact variants; auxiliary ONNX never occupies an engine receipt.
+#[derive(Clone, Copy)]
+pub enum EngineSet<'a> {
+    TensorRt {
+        live_pose: BuiltEngine<'a>,
+        stored_pose: BuiltEngine<'a>,
+        bed: BuiltEngine<'a>,
+        fall: BuiltEngine<'a>,
+    },
+    OnnxRuntimeCpu {
+        live_pose: BuiltEngine<'a>,
+        models: CpuModelBytes<'a>,
+    },
 }
 
 /// Current Flow artifacts. Ordinary symlinks are followed, as the Flow
@@ -65,6 +79,7 @@ pub enum IdentityError {
     Image,
     Batch,
     Output,
+    Model,
     Flow,
     Io,
 }
@@ -76,6 +91,7 @@ impl std::fmt::Display for IdentityError {
             Self::Image => "deployment image digest is invalid or does not match",
             Self::Batch => "batch size is outside 1..=16",
             Self::Output => "engine file does not match its receipt",
+            Self::Model => "CPU ONNX source is empty or exceeds the capture bound",
             Self::Flow => "flow artifact is not a bounded readable regular file",
             Self::Io => "identity publication failed; destination may already exist",
         })
@@ -89,14 +105,45 @@ pub(super) fn document(request: IdentityRequest<'_>) -> Result<Vec<u8>, Identity
         return Err(IdentityError::Batch);
     }
     let image = deployment_image_digest(request.image_digest).ok_or(IdentityError::Image)?;
-    let engines = checked_engines(&request.engines, image, request.batch_size)?;
-    let mut bytes = serde_json::to_vec(&serde_json::json!({
-        "schema_version": 1,
-        "batch_size": request.batch_size,
-        "engines": engines,
-        "flow": store::flow_fingerprints(request.flow)?,
-    }))
-    .map_err(|_| IdentityError::Receipt)?;
+    let mut document = match request.engines {
+        EngineSet::TensorRt {
+            live_pose,
+            stored_pose,
+            bed,
+            fall,
+        } => {
+            let engines = checked_engines(
+                [
+                    ("live_pose", live_pose),
+                    ("stored_pose", stored_pose),
+                    ("bed", bed),
+                    ("fall", fall),
+                ],
+                image,
+                request.batch_size,
+            )?;
+            serde_json::json!({"schema_version": 1, "engines": engines})
+        }
+        EngineSet::OnnxRuntimeCpu { live_pose, models } => {
+            let engines = serde_json::json!({"live_pose": live_pose.receipt.document()});
+            let auxiliary = serde_json::json!({
+                "runtime": "onnxruntime",
+                "provider": "cpu",
+                "models": {
+                    "stored_pose": {"onnx_sha256": store::onnx_fingerprint(models.stored_pose)?},
+                    "bed": {"onnx_sha256": store::onnx_fingerprint(models.bed)?},
+                    "fall": {"onnx_sha256": store::onnx_fingerprint(models.fall)?},
+                },
+            });
+            validate_hybrid_entries(&engines, &auxiliary, image, request.batch_size)
+                .map_err(schema_error)?;
+            bound_output(live_pose.receipt.document(), live_pose.path)?;
+            serde_json::json!({"schema_version": 2, "engines": engines, "auxiliary": auxiliary})
+        }
+    };
+    document["batch_size"] = request.batch_size.into();
+    document["flow"] = store::flow_fingerprints(request.flow)?;
+    let mut bytes = serde_json::to_vec(&document).map_err(|_| IdentityError::Receipt)?;
     bytes.push(b'\n');
     if bytes.len() > 64 * 1024 {
         return Err(IdentityError::Receipt);
@@ -105,23 +152,18 @@ pub(super) fn document(request: IdentityRequest<'_>) -> Result<Vec<u8>, Identity
 }
 
 fn checked_engines(
-    engines: &EngineSet<'_>,
+    engines: [(&str, BuiltEngine<'_>); 4],
     image: &str,
     batch: u32,
 ) -> Result<Value, IdentityError> {
-    let assembled = serde_json::json!({
-        "live_pose": engines.live_pose.receipt.document().clone(),
-        "stored_pose": engines.stored_pose.receipt.document().clone(),
-        "bed": engines.bed.receipt.document().clone(),
-        "fall": engines.fall.receipt.document().clone(),
-    });
+    let assembled = Value::Object(
+        engines
+            .iter()
+            .map(|(key, built)| ((*key).to_owned(), built.receipt.document().clone()))
+            .collect(),
+    );
     validate_entries(&assembled, image, batch).map_err(schema_error)?;
-    for (built, key) in [
-        (engines.live_pose, "live_pose"),
-        (engines.stored_pose, "stored_pose"),
-        (engines.bed, "bed"),
-        (engines.fall, "fall"),
-    ] {
+    for (key, built) in engines {
         let document = assembled.get(key).ok_or(IdentityError::Receipt)?;
         bound_output(document, built.path)?;
     }

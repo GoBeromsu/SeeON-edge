@@ -104,6 +104,13 @@ environment with ONNX, NumPy, and ONNX Runtime 1.29.0.
 The image sets `ORT_DISABLE_TELEMETRY=1` before process startup to prevent
 vendor telemetry initialization; the CPU adapter refuses admission without it.
 
+The identity reader/publisher APIs distinguish schema 1 (four TensorRT engines)
+from schema 2 (one live-pose TensorRT engine and three explicitly tagged CPU
+ONNX source hashes). Hybrid admission retains the live engine, Flow, image and
+batch checks without requiring unused auxiliary engines. The `engine-build`
+CLI and Run startup still select schema 1; schema 2 API tests are not proof of
+an end-to-end mixed-provider worker.
+
 CPU reference values are recorded independently by
 `python tests_support/record_ort_cpu_outputs.py --models <models> --fixtures <gpu-v2a> --output <new-directory>`,
 using the pinned Python environment and `ORT_DISABLE_TELEMETRY=1`. Existing

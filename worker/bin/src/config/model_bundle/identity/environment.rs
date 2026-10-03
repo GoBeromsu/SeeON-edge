@@ -69,7 +69,7 @@ pub(crate) fn verify_environment(
     verify_aggregate(
         &identity,
         IdentityInputs {
-            engines: EnginePaths {
+            engines: EnginePaths::TensorRt {
                 live_pose: &live_pose,
                 stored_pose: &stored_pose,
                 bed: &bed,

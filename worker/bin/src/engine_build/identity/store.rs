@@ -24,6 +24,13 @@ pub fn publish_identity(request: IdentityRequest<'_>) -> Result<(), IdentityErro
     publish(request.destination, &bytes)
 }
 
+pub(super) fn onnx_fingerprint(bytes: &[u8]) -> Result<String, IdentityError> {
+    if bytes.is_empty() || bytes.len() as u64 > 512 * 1024 * 1024 {
+        return Err(IdentityError::Model);
+    }
+    encode_hex(Sha256::digest(bytes).as_slice())
+}
+
 pub(super) fn flow_fingerprints(
     flow: FlowArtifacts<'_>,
 ) -> Result<serde_json::Value, IdentityError> {

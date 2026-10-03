@@ -611,7 +611,7 @@ fn legacy_probe(dir: &Path, identity: &Path) -> Result<(), (IdentityKind, String
     verify_aggregate(
         identity,
         IdentityInputs {
-            engines: EnginePaths {
+            engines: EnginePaths::TensorRt {
                 live_pose: &engines[0],
                 stored_pose: &engines[1],
                 bed: &engines[2],

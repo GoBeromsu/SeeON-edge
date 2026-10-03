@@ -22,11 +22,16 @@ const FLOW_KEYS: [&str; 4] = [
     "parser_lib_sha256",
 ];
 
-pub struct EnginePaths<'a> {
-    pub live_pose: &'a Path,
-    pub stored_pose: &'a Path,
-    pub bed: &'a Path,
-    pub fall: &'a Path,
+pub enum EnginePaths<'a> {
+    TensorRt {
+        live_pose: &'a Path,
+        stored_pose: &'a Path,
+        bed: &'a Path,
+        fall: &'a Path,
+    },
+    OnnxRuntimeCpu {
+        live_pose: &'a Path,
+    },
 }
 
 pub struct IdentityInputs<'a> {
@@ -106,6 +111,21 @@ fn capture(path: &Path, subject: &str, retain: bool) -> Result<(String, Vec<u8>)
     Ok((result, raw))
 }
 
+fn verify_engine(
+    entry: &Value,
+    role: &str,
+    engine: &Path,
+    source: &str,
+) -> Result<(), IdentityError> {
+    if entry["onnx_sha256"].as_str() != Some(source)
+        || entry["engine"].as_str() != engine.file_name().and_then(|name| name.to_str())
+        || entry["engine_sha256"].as_str() != Some(fingerprint(engine, role)?.as_str())
+    {
+        return refuse(IdentityKind::DigestMismatch, role);
+    }
+    Ok(())
+}
+
 pub fn verify_aggregate(
     path: &Path,
     inputs: IdentityInputs<'_>,
@@ -124,11 +144,22 @@ pub fn verify_aggregate(
     let members = document
         .as_object()
         .ok_or_else(|| error(IdentityKind::NotObject, "identity"))?;
-    if members.len() != 4
-        || document["schema_version"].as_u64() != Some(1)
-        || !["schema_version", "engines", "flow", "batch_size"]
-            .iter()
-            .all(|key| members.contains_key(*key))
+    let (version, keys): (u64, &[&str]) = match &inputs.engines {
+        EnginePaths::TensorRt { .. } => (1, &["schema_version", "engines", "flow", "batch_size"]),
+        EnginePaths::OnnxRuntimeCpu { .. } => (
+            2,
+            &[
+                "schema_version",
+                "engines",
+                "flow",
+                "batch_size",
+                "auxiliary",
+            ],
+        ),
+    };
+    if members.len() != keys.len()
+        || document["schema_version"].as_u64() != Some(version)
+        || !keys.iter().all(|key| members.contains_key(*key))
     {
         return refuse(IdentityKind::Schema, "identity");
     }
@@ -153,35 +184,52 @@ pub fn verify_aggregate(
     }
     let image = deployment_image_digest(inputs.image_digest)
         .ok_or_else(|| error(IdentityKind::ImageDigest, "image_digest"))?;
-    schema::validate_entries(&document["engines"], image, batch).map_err(
-        |failure| match failure {
-            schema::SchemaError::Image => error(IdentityKind::ImageDigest, "image_digest"),
-            schema::SchemaError::Receipt => error(IdentityKind::Schema, "engines"),
-        },
-    )?;
-    for (role, engine, source) in [
-        (
-            "live_pose",
-            inputs.engines.live_pose,
-            inputs.pose_onnx_sha256,
-        ),
-        (
-            "stored_pose",
-            inputs.engines.stored_pose,
-            inputs.pose_onnx_sha256,
-        ),
-        ("bed", inputs.engines.bed, inputs.bed_onnx_sha256),
-        ("fall", inputs.engines.fall, inputs.fall_onnx_sha256),
-    ] {
-        let entry = &document["engines"][role];
-        if entry["onnx_sha256"].as_str() != Some(source) {
-            return refuse(IdentityKind::DigestMismatch, role);
+    let validation = match &inputs.engines {
+        EnginePaths::TensorRt { .. } => {
+            schema::validate_entries(&document["engines"], image, batch)
         }
-        if entry["engine"].as_str() != engine.file_name().and_then(|name| name.to_str()) {
-            return refuse(IdentityKind::DigestMismatch, role);
+        EnginePaths::OnnxRuntimeCpu { .. } => {
+            schema::validate_live_entry(&document["engines"], image, batch)
         }
-        if entry["engine_sha256"].as_str() != Some(fingerprint(engine, role)?.as_str()) {
-            return refuse(IdentityKind::DigestMismatch, role);
+    };
+    validation.map_err(|failure| match failure {
+        schema::SchemaError::Image => error(IdentityKind::ImageDigest, "image_digest"),
+        schema::SchemaError::Receipt => error(IdentityKind::Schema, "engines"),
+    })?;
+    match inputs.engines {
+        EnginePaths::TensorRt {
+            live_pose,
+            stored_pose,
+            bed,
+            fall,
+        } => {
+            for (role, engine, source) in [
+                ("live_pose", live_pose, inputs.pose_onnx_sha256),
+                ("stored_pose", stored_pose, inputs.pose_onnx_sha256),
+                ("bed", bed, inputs.bed_onnx_sha256),
+                ("fall", fall, inputs.fall_onnx_sha256),
+            ] {
+                verify_engine(&document["engines"][role], role, engine, source)?;
+            }
+        }
+        EnginePaths::OnnxRuntimeCpu { live_pose } => {
+            schema::validate_cpu_models(&document["auxiliary"], &document["engines"]["live_pose"])
+                .map_err(|_| error(IdentityKind::Schema, "auxiliary"))?;
+            verify_engine(
+                &document["engines"]["live_pose"],
+                "live_pose",
+                live_pose,
+                inputs.pose_onnx_sha256,
+            )?;
+            for (role, source) in [
+                ("stored_pose", inputs.pose_onnx_sha256),
+                ("bed", inputs.bed_onnx_sha256),
+                ("fall", inputs.fall_onnx_sha256),
+            ] {
+                if document["auxiliary"]["models"][role]["onnx_sha256"].as_str() != Some(source) {
+                    return refuse(IdentityKind::DigestMismatch, role);
+                }
+            }
         }
     }
     let flow = document["flow"]

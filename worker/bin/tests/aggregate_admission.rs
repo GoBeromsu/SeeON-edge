@@ -234,7 +234,7 @@ fn world(label: &str) -> World {
 
 fn inputs(world: &World) -> IdentityInputs<'_> {
     IdentityInputs {
-        engines: EnginePaths {
+        engines: EnginePaths::TensorRt {
             live_pose: &world.engines[0],
             stored_pose: &world.engines[1],
             bed: &world.engines[2],
@@ -547,7 +547,7 @@ fn identity_oversize_and_fifo_refuse_without_rewriting_or_blocking() {
             ("parser_lib_sha256", flow_paths[3].clone()),
         ];
         let request = IdentityInputs {
-            engines: EnginePaths {
+            engines: EnginePaths::TensorRt {
                 live_pose: &engines[0],
                 stored_pose: &engines[1],
                 bed: &engines[2],
