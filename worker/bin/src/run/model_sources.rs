@@ -1,4 +1,4 @@
-//! Captured ONNX bytes for an offline engine build. Selection and packaged
+//! Captured ONNX bytes shared by runtime composition and offline builds. Selection and packaged
 //! admission stay with their existing owners; this module only opens the
 //! admitted `model.onnx` and compares its digest. No ORT, CUDA, or network.
 

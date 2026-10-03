@@ -27,6 +27,7 @@ pub mod execution;
 pub mod exporter;
 pub mod fall_evidence;
 pub mod media_config;
+pub(crate) mod model_sources;
 pub mod models;
 pub mod policy;
 pub mod pump;

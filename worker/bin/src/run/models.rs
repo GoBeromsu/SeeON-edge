@@ -1,4 +1,12 @@
-//! Real model owners and bounded partial-start cleanup. No engine opens before admission.
+//! Real model owners and bounded partial-start cleanup. Inputs must already be admitted.
+
+#[path = "model_inputs.rs"]
+mod inputs;
+pub use inputs::{CpuModels, ModelInputs};
+
+#[cfg(test)]
+#[path = "model_cpu_tests.rs"]
+mod cpu_tests;
 
 #[cfg(test)]
 #[path = "model_state_tests.rs"]
@@ -10,12 +18,11 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::Receiver;
 use std::time::Duration;
 
+use super::ModelRole;
 use super::boot::startup::{close_one, cutoff, wait};
 use super::settings::BootPolicy;
-use super::{ModelEngines, ModelRole};
 use crate::exit::Exit;
 use crate::gpu::lease::GpuLease;
-use crate::gpu::owners;
 use crate::inference::{JoinError, Owner, Runtime, State};
 use crate::msg::{BedRequest, FallRequest, FallResponse, StoredPoseRequest};
 use crate::seam::Clock;
@@ -108,7 +115,7 @@ impl ModelOwners {
 
     pub(crate) fn start(
         &mut self,
-        engines: &ModelEngines,
+        inputs: ModelInputs<'_>,
         policy: BootPolicy,
         clock: &dyn Clock,
     ) -> Result<(), ModelStartError> {
@@ -118,13 +125,9 @@ impl ModelOwners {
             kind: StartKind::Spawn(error.kind()),
         };
         self.before_spawn(ModelRole::Fall, clock, deadline)?;
-        let (owner, responses) = owners::spawn_fall(
-            engines.fall.path.clone(),
-            policy.device_ordinal,
-            engines.fall.digest,
-            Arc::clone(&self.stop),
-        )
-        .map_err(|error| spawn_error(ModelRole::Fall, error))?;
+        let (owner, responses) = inputs
+            .spawn_fall(policy, Arc::clone(&self.stop))
+            .map_err(|error| spawn_error(ModelRole::Fall, error))?;
         self.states[0] = Some(Arc::clone(&owner.state));
         self.fall = Some(owner);
         self.fall_responses = Some(responses);
@@ -137,13 +140,9 @@ impl ModelOwners {
         )?;
         self.before_spawn(ModelRole::Bed, clock, deadline)?;
         self.bed = Some(
-            owners::spawn_bed(
-                engines.bed.path.clone(),
-                policy.device_ordinal,
-                engines.bed.digest,
-                Arc::clone(&self.stop),
-            )
-            .map_err(|error| spawn_error(ModelRole::Bed, error))?,
+            inputs
+                .spawn_bed(policy, Arc::clone(&self.stop))
+                .map_err(|error| spawn_error(ModelRole::Bed, error))?,
         );
         self.states[1] = self.bed.as_ref().map(|owner| Arc::clone(&owner.state));
         wait(
@@ -155,14 +154,9 @@ impl ModelOwners {
         )?;
         self.before_spawn(ModelRole::StoredPose, clock, deadline)?;
         self.stored_pose = Some(
-            owners::spawn_stored_pose(
-                engines.stored_pose.path.clone(),
-                policy.device_ordinal,
-                engines.stored_pose.digest,
-                policy.stored_pose_threshold,
-                Arc::clone(&self.stop),
-            )
-            .map_err(|error| spawn_error(ModelRole::StoredPose, error))?,
+            inputs
+                .spawn_stored_pose(policy, Arc::clone(&self.stop))
+                .map_err(|error| spawn_error(ModelRole::StoredPose, error))?,
         );
         self.states[2] = self
             .stored_pose

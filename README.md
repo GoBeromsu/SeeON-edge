@@ -108,8 +108,17 @@ The identity reader/publisher APIs distinguish schema 1 (four TensorRT engines)
 from schema 2 (one live-pose TensorRT engine and three explicitly tagged CPU
 ONNX source hashes). Hybrid admission retains the live engine, Flow, image and
 batch checks without requiring unused auxiliary engines. The `engine-build`
-CLI and Run startup still select schema 1; schema 2 API tests are not proof of
-an end-to-end mixed-provider worker.
+CLI selects schema 2 with `--auxiliary-runtime=onnxruntime-cpu`: it builds only
+the live-pose GPU engine and fingerprints captured pose, bed and admitted fall
+ONNX bytes. Omit `--stored-pose-engine`, `--bed-engine` and `--fall-engine` in
+this mode; supplying any of them is refused. All common Flow, model, image and
+batch inputs remain required. The default `--auxiliary-runtime=tensorrt`
+retains schema 1 and requires all three auxiliary engine outputs. Cache reuse
+must match the selected provider; neither mode falls back to the other.
+
+Run startup still selects TensorRT owners. The offline hybrid route does not
+establish an end-to-end mixed-provider worker, and native CPU shutdown
+qualification remains blocked by observed worker-thread execution stalls.
 
 CPU reference values are recorded independently by
 `python tests_support/record_ort_cpu_outputs.py --models <models> --fixtures <gpu-v2a> --output <new-directory>`,

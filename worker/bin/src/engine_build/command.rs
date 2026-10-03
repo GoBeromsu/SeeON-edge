@@ -17,16 +17,16 @@ mod tests;
 use std::path::{Path, PathBuf};
 
 use super::identity::publish_identity;
-use super::sources::{self, CapturedOnnx};
 use super::{
-    BuildRequest, BuiltEngine, EngineReceipt, EngineSet, FlowArtifacts, IdentityRequest,
-    LiveBuildRequest, build_fp32, build_live_pose,
+    BuildRequest, BuiltEngine, CpuModelBytes, EngineReceipt, EngineSet, FlowArtifacts,
+    IdentityRequest, LiveBuildRequest, build_fp32, build_live_pose,
 };
 use crate::config::env::Env;
 use crate::config::model_bundle::identity::{
     OBSERVER_LIBRARY, deployment_image_digest, hardware_matches,
 };
 use crate::run::ModelRole;
+use crate::run::model_sources::{self, CapturedOnnx};
 use seeon_deepstream_native::hardware_identity;
 
 pub use files::CommandError;
@@ -43,17 +43,24 @@ struct Captured {
     input_digests: Vec<(PathBuf, String)>,
 }
 
+enum AuxiliaryLayout {
+    TensorRt {
+        stored: PathBuf,
+        bed: PathBuf,
+        fall: PathBuf,
+        final_stored: PathBuf,
+        final_bed: PathBuf,
+        final_fall: PathBuf,
+    },
+    OnnxRuntimeCpu,
+}
+
 struct Layout {
     live: PathBuf,
-    stored: PathBuf,
-    bed: PathBuf,
-    fall: PathBuf,
+    auxiliary: AuxiliaryLayout,
     served: PathBuf,
     identity: PathBuf,
     final_live: PathBuf,
-    final_stored: PathBuf,
-    final_bed: PathBuf,
-    final_fall: PathBuf,
     final_served: PathBuf,
     parser_lib: PathBuf,
     tracker_config: PathBuf,
@@ -61,12 +68,47 @@ struct Layout {
     observer: PathBuf,
 }
 
+impl Layout {
+    /// GPU role, staging path and final path; CPU auxiliary models never enter
+    /// this iterator. Publication order remains live, stored pose, bed, fall.
+    fn engines(&self) -> impl Iterator<Item = (&'static str, &Path, &Path)> {
+        let auxiliary = match &self.auxiliary {
+            AuxiliaryLayout::TensorRt {
+                stored,
+                bed,
+                fall,
+                final_stored,
+                final_bed,
+                final_fall,
+            } => Some([
+                ("stored_pose", stored.as_path(), final_stored.as_path()),
+                ("bed", bed.as_path(), final_bed.as_path()),
+                ("fall", fall.as_path(), final_fall.as_path()),
+            ]),
+            AuxiliaryLayout::OnnxRuntimeCpu => None,
+        };
+        std::iter::once(("live_pose", self.live.as_path(), self.final_live.as_path()))
+            .chain(auxiliary.into_iter().flatten())
+    }
+
+    fn staging(&self) -> impl Iterator<Item = &Path> {
+        self.engines()
+            .map(|(_, staged, _)| staged)
+            .chain(std::iter::once(self.served.as_path()))
+    }
+}
+
 struct Planned {
     layout: Layout,
     token: String,
 }
 
-/// Builds or reuses the four requested engines and publishes identity last.
+enum BuiltEngines {
+    TensorRt([EngineReceipt; 4]),
+    OnnxRuntimeCpu(EngineReceipt),
+}
+
+/// Builds or reuses the selected GPU engines and publishes identity last.
 pub fn execute_engine_build(
     env: &Env,
     flags: crate::cli::EngineBuildFlags,
@@ -97,9 +139,10 @@ fn hardware() -> Result<seeon_deepstream_native::GpuHardwareIdentity, CommandErr
 }
 
 fn capture(env: &Env, flags: &crate::cli::EngineBuildFlags) -> Result<Captured, CommandError> {
-    let pose = sources::capture_image_onnx(&flags.onnx).map_err(|_| CommandError::Source)?;
-    let bed = sources::capture_image_onnx(&flags.bed_onnx).map_err(|_| CommandError::Source)?;
-    let fall = sources::capture_fall(env).map_err(|_| CommandError::Source)?;
+    let pose = model_sources::capture_image_onnx(&flags.onnx).map_err(|_| CommandError::Source)?;
+    let bed =
+        model_sources::capture_image_onnx(&flags.bed_onnx).map_err(|_| CommandError::Source)?;
+    let fall = model_sources::capture_fall(env).map_err(|_| CommandError::Source)?;
     let image = deployment_image_digest(&flags.image_digest)
         .map(str::to_owned)
         .ok_or(CommandError::Image)?;
@@ -128,7 +171,7 @@ fn build_all(
     captured: &Captured,
     layout: &Layout,
     batch: u32,
-) -> Result<[EngineReceipt; 4], CommandError> {
+) -> Result<BuiltEngines, CommandError> {
     let live = build_live_pose(LiveBuildRequest {
         onnx: &captured.pose.bytes,
         expected_onnx_sha256: &captured.pose.sha256,
@@ -138,22 +181,22 @@ fn build_all(
         batch_size: batch,
     })
     .map_err(CommandError::Live)?;
-    Ok([
-        live,
-        native(
-            ModelRole::StoredPose,
-            &captured.pose,
-            &layout.stored,
-            &captured.image,
-        )?,
-        native(ModelRole::Bed, &captured.bed, &layout.bed, &captured.image)?,
-        native(
-            ModelRole::Fall,
-            &captured.fall,
-            &layout.fall,
-            &captured.image,
-        )?,
-    ])
+    match &layout.auxiliary {
+        AuxiliaryLayout::TensorRt {
+            stored, bed, fall, ..
+        } => Ok(BuiltEngines::TensorRt([
+            live,
+            native(
+                ModelRole::StoredPose,
+                &captured.pose,
+                stored,
+                &captured.image,
+            )?,
+            native(ModelRole::Bed, &captured.bed, bed, &captured.image)?,
+            native(ModelRole::Fall, &captured.fall, fall, &captured.image)?,
+        ])),
+        AuxiliaryLayout::OnnxRuntimeCpu => Ok(BuiltEngines::OnnxRuntimeCpu(live)),
+    }
 }
 
 fn native(
@@ -174,7 +217,7 @@ fn native(
 }
 
 fn publish_staged(
-    built: &[EngineReceipt; 4],
+    built: &BuiltEngines,
     layout: &Layout,
     flags: &crate::cli::EngineBuildFlags,
     captured: &Captured,
@@ -183,12 +226,7 @@ fn publish_staged(
         files::write_exclusive(&layout.served, captured.served.as_bytes())?;
     }
     let destination = files::identity_staging(&flags.identity)?;
-    let engines = EngineSet::TensorRt {
-        live_pose: built_of(&built[0], &layout.live),
-        stored_pose: built_of(&built[1], &layout.stored),
-        bed: built_of(&built[2], &layout.bed),
-        fall: built_of(&built[3], &layout.fall),
-    };
+    let engines = engines_of(built, layout, captured)?;
     let infer = if captured.served_output {
         &layout.served
     } else {
@@ -208,6 +246,37 @@ fn publish_staged(
     })
     .map_err(CommandError::Identity)?;
     Ok(destination)
+}
+
+fn engines_of<'a>(
+    built: &'a BuiltEngines,
+    layout: &'a Layout,
+    captured: &'a Captured,
+) -> Result<EngineSet<'a>, CommandError> {
+    match (built, &layout.auxiliary) {
+        (
+            BuiltEngines::TensorRt(receipts),
+            AuxiliaryLayout::TensorRt {
+                stored, bed, fall, ..
+            },
+        ) => Ok(EngineSet::TensorRt {
+            live_pose: built_of(&receipts[0], &layout.live),
+            stored_pose: built_of(&receipts[1], stored),
+            bed: built_of(&receipts[2], bed),
+            fall: built_of(&receipts[3], fall),
+        }),
+        (BuiltEngines::OnnxRuntimeCpu(live), AuxiliaryLayout::OnnxRuntimeCpu) => {
+            Ok(EngineSet::OnnxRuntimeCpu {
+                live_pose: built_of(live, &layout.live),
+                models: CpuModelBytes {
+                    stored_pose: &captured.pose.bytes,
+                    bed: &captured.bed.bytes,
+                    fall: &captured.fall.bytes,
+                },
+            })
+        }
+        _ => Err(CommandError::Config),
+    }
 }
 
 fn built_of<'a>(receipt: &'a EngineReceipt, path: &'a Path) -> BuiltEngine<'a> {

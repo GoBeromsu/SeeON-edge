@@ -1,8 +1,10 @@
 //! Cache validity and ownership are different questions. A prior coherent
 //! identity may own an engine even when the requested model or image changes.
 
-use super::super::{Captured, Layout};
-use crate::config::model_bundle::identity::{fingerprint, validate_entries, verify_aggregate};
+use super::super::{AuxiliaryLayout, Captured, Layout};
+use crate::config::model_bundle::identity::{
+    fingerprint, validate_entries, validate_hybrid_entries, verify_aggregate,
+};
 use serde_json::Value;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -33,7 +35,7 @@ impl std::fmt::Display for CommandError {
             Self::Parser => "custom-lib-path does not identify the parser library",
             Self::Path => "engine-build path is not a replaceable regular file",
             Self::Collision => "engine-build input and output paths collide",
-            Self::Target => "existing target is not recorded by schema-1 identity",
+            Self::Target => "existing target is not recorded by the selected provider identity",
             Self::Hardware => "current GPU hardware could not be read",
             Self::Live(_) => "live pose engine build failed",
             Self::Native(_) => "native FP32 engine build failed",
@@ -79,13 +81,8 @@ pub(in crate::engine_build::command) fn authorize(
     if existing.is_empty() || force {
         return Ok(());
     }
-    let document = prior_document(&layout.identity).ok_or(CommandError::Target)?;
-    for (role, path) in [
-        ("live_pose", &layout.final_live),
-        ("stored_pose", &layout.final_stored),
-        ("bed", &layout.final_bed),
-        ("fall", &layout.final_fall),
-    ] {
+    let document = prior_document(layout).ok_or(CommandError::Target)?;
+    for (role, _, path) in layout.engines() {
         if !exists(path)? {
             continue;
         }
@@ -106,16 +103,27 @@ pub(in crate::engine_build::command) fn authorize(
     Ok(())
 }
 
-fn prior_document(path: &Path) -> Option<Value> {
-    let bytes = super::paths::read_bounded(path, 64 * 1024).ok()?;
+fn prior_document(layout: &Layout) -> Option<Value> {
+    let bytes = super::paths::read_bounded(&layout.identity, 64 * 1024).ok()?;
     let value: Value = serde_json::from_slice(&bytes).ok()?;
     let object = value.as_object()?;
-    if object.len() != 4 || value["schema_version"].as_u64() != Some(1) {
+    let (version, fields) = match &layout.auxiliary {
+        AuxiliaryLayout::TensorRt { .. } => (1, 4),
+        AuxiliaryLayout::OnnxRuntimeCpu => (2, 5),
+    };
+    if object.len() != fields || value["schema_version"].as_u64() != Some(version) {
         return None;
     }
     let batch = u32::try_from(value["batch_size"].as_u64()?).ok()?;
     let image = value["engines"]["live_pose"]["image_digest"].as_str()?;
-    validate_entries(&value["engines"], image, batch).ok()?;
+    match &layout.auxiliary {
+        AuxiliaryLayout::TensorRt { .. } => {
+            validate_entries(&value["engines"], image, batch).ok()?;
+        }
+        AuxiliaryLayout::OnnxRuntimeCpu => {
+            validate_hybrid_entries(&value["engines"], &value["auxiliary"], image, batch).ok()?;
+        }
+    }
     let flow = value["flow"].as_object()?;
     if flow.len() != 4
         || ![

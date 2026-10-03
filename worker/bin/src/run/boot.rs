@@ -4,7 +4,7 @@ use std::fmt;
 use std::io;
 use std::sync::Arc;
 
-use super::models::{CleanupError, ModelOwners, ModelStartError, StartKind};
+use super::models::{CleanupError, ModelInputs, ModelOwners, ModelStartError, StartKind};
 use super::settings::{self, Settings};
 use super::status::{BootReason, BootStatusContext, ReportOutcome};
 use super::{Admitted, IdentityError};
@@ -217,7 +217,7 @@ pub fn boot(
             shutdown,
         )));
     }
-    if let Err(error) = models.start(&admitted.engines, policy, clock) {
+    if let Err(error) = models.start(ModelInputs::TensorRt(&admitted.engines), policy, clock) {
         if error.kind == StartKind::Stopped {
             return Err(BootError::Stopped(startup::stopped(
                 Some(models),

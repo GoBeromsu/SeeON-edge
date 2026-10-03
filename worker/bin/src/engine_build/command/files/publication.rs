@@ -34,12 +34,7 @@ pub(in crate::engine_build::command) fn commit(
     staged_identity: &Path,
     write_served: bool,
 ) -> Result<(), CommandError> {
-    for (source, target) in [
-        (&layout.live, &layout.final_live),
-        (&layout.stored, &layout.final_stored),
-        (&layout.bed, &layout.final_bed),
-        (&layout.fall, &layout.final_fall),
-    ] {
+    for (_, source, target) in layout.engines() {
         rename_same(source, target)?;
         paths::sync_parent(target)?;
     }

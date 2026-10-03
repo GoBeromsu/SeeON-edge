@@ -1,13 +1,12 @@
-//! `engine-build` flags, matching `worker/tools/edge_engine_build.py` plus the
-//! approved required pose and bed/fall paths. Parsing only: this module never
-//! builds an engine.
+//! Offline `engine-build` flags with an explicit auxiliary runtime. Parsing
+//! only: this module never builds an engine or opens a model.
 
 use std::ffi::{OsStr, OsString};
 use std::os::unix::ffi::OsStrExt;
 use std::path::PathBuf;
 
-/// Required path flags, in declaration order.
-const REQUIRED_PATHS: [&str; 11] = [
+/// Common required path flags, in declaration order.
+const REQUIRED_PATHS: [&str; 8] = [
     "--onnx",
     "--engine",
     "--identity",
@@ -15,17 +14,33 @@ const REQUIRED_PATHS: [&str; 11] = [
     "--infer-config",
     "--tracker-config",
     "--tracker-library",
-    "--stored-pose-engine",
     "--bed-onnx",
-    "--bed-engine",
-    "--fall-engine",
 ];
 const REQUIRED_COUNT: usize = REQUIRED_PATHS.len();
+const AUXILIARY_PATHS: [&str; 3] = ["--stored-pose-engine", "--bed-engine", "--fall-engine"];
 
+const AUXILIARY_RUNTIME: &str = "--auxiliary-runtime";
 const IMAGE_DIGEST: &str = "--image-digest";
 const BATCH_SIZE: &str = "--batch-size";
 const SERVED_INFER_CONFIG: &str = "--served-infer-config";
 const FORCE: &str = "--force";
+
+/// Auxiliary artifacts selected for the offline build. CPU models use the
+/// captured original ONNX sources and have no auxiliary GPU output paths.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum AuxiliaryBuild {
+    TensorRt {
+        stored_pose_engine: PathBuf,
+        bed_engine: PathBuf,
+        fall_engine: PathBuf,
+    },
+    OnnxRuntimeCpu,
+}
+
+enum AuxiliaryRuntime {
+    TensorRt,
+    OnnxRuntimeCpu,
+}
 
 /// Parsed `engine-build` flags. Paths keep their `OsString`, including
 /// non-UTF-8 bytes.
@@ -38,10 +53,8 @@ pub struct EngineBuildFlags {
     pub infer_config: PathBuf,
     pub tracker_config: PathBuf,
     pub tracker_library: PathBuf,
-    pub stored_pose_engine: PathBuf,
+    pub auxiliary: AuxiliaryBuild,
     pub bed_onnx: PathBuf,
-    pub bed_engine: PathBuf,
-    pub fall_engine: PathBuf,
     pub served_infer_config: Option<PathBuf>,
     pub image_digest: String,
     pub batch_size: u32,
@@ -59,10 +72,14 @@ pub enum ParseError {
     MissingValue,
     /// `--force=<value>`: the flag takes no value.
     UnexpectedValue,
-    /// `--image-digest` or `--batch-size` was not UTF-8.
+    /// A non-path value was not UTF-8.
     NotUtf8,
     /// `--batch-size` was not a canonical positive ASCII decimal in `1..=16`.
     InvalidBatch,
+    /// `--auxiliary-runtime` was empty or not one of the two supported modes.
+    InvalidAuxiliaryRuntime,
+    /// An auxiliary GPU output was supplied with the CPU runtime.
+    ForbiddenAuxiliaryOutput,
 }
 
 /// Split the ASCII separator without decoding a possibly non-UTF-8 path.
@@ -75,23 +92,6 @@ fn split_flag(argument: &OsStr) -> (&OsStr, Option<&OsStr>) {
         ),
         None => (argument, None),
     }
-}
-
-fn path_slot<'a>(flags: &'a mut EngineBuildFlags, name: &str) -> Option<&'a mut PathBuf> {
-    Some(match name {
-        "--onnx" => &mut flags.onnx,
-        "--engine" => &mut flags.engine,
-        "--identity" => &mut flags.identity,
-        "--parser-lib" => &mut flags.parser_lib,
-        "--infer-config" => &mut flags.infer_config,
-        "--tracker-config" => &mut flags.tracker_config,
-        "--tracker-library" => &mut flags.tracker_library,
-        "--stored-pose-engine" => &mut flags.stored_pose_engine,
-        "--bed-onnx" => &mut flags.bed_onnx,
-        "--bed-engine" => &mut flags.bed_engine,
-        "--fall-engine" => &mut flags.fall_engine,
-        _ => return None,
-    })
 }
 
 fn take_value<'a>(
@@ -133,31 +133,27 @@ fn parse_batch(value: &OsStr) -> Result<u32, ParseError> {
     }
 }
 
+fn parse_auxiliary_runtime(value: &OsStr) -> Result<AuxiliaryRuntime, ParseError> {
+    match value.to_str().ok_or(ParseError::NotUtf8)? {
+        "tensorrt" => Ok(AuxiliaryRuntime::TensorRt),
+        "onnxruntime-cpu" => Ok(AuxiliaryRuntime::OnnxRuntimeCpu),
+        _ => Err(ParseError::InvalidAuxiliaryRuntime),
+    }
+}
+
 /// Parses `engine-build` arguments. A value is `--name=value` or the next
 /// argument, which must not start with `-`. A repeated flag keeps the last
-/// value. `--force` is boolean and rejects `--force=value`.
+/// value. TensorRT is the default and requires all auxiliary GPU outputs;
+/// CPU mode refuses any of them. `--force` rejects `--force=value`.
 pub fn parse(arguments: &[OsString]) -> Result<EngineBuildFlags, ParseError> {
-    let mut flags = EngineBuildFlags {
-        onnx: PathBuf::new(),
-        engine: PathBuf::new(),
-        identity: PathBuf::new(),
-        parser_lib: PathBuf::new(),
-        infer_config: PathBuf::new(),
-        tracker_config: PathBuf::new(),
-        tracker_library: PathBuf::new(),
-        stored_pose_engine: PathBuf::new(),
-        bed_onnx: PathBuf::new(),
-        bed_engine: PathBuf::new(),
-        fall_engine: PathBuf::new(),
-        served_infer_config: None,
-        image_digest: String::new(),
-        batch_size: 0,
-        force: false,
-    };
-    let mut saw_image = false;
-    let mut saw_path = [false; REQUIRED_COUNT];
+    let mut paths: [Option<PathBuf>; REQUIRED_COUNT] = std::array::from_fn(|_| None);
+    let mut image_digest = None;
+    let mut batch_size = None;
+    let mut served_infer_config = None;
+    let mut force = false;
+    let mut auxiliary_paths: [Option<PathBuf>; 3] = [None, None, None];
+    let mut auxiliary_runtime = AuxiliaryRuntime::TensorRt;
 
-    let mut saw_batch = false;
     let mut remaining = arguments.iter();
     while let Some(argument) = remaining.next() {
         let (flag, attached) = split_flag(argument);
@@ -165,33 +161,78 @@ pub fn parse(arguments: &[OsString]) -> Result<EngineBuildFlags, ParseError> {
             return Err(ParseError::UnknownFlag);
         };
         if let Some(index) = REQUIRED_PATHS.iter().position(|required| *required == name) {
-            let value = PathBuf::from(nonempty(take_value(attached, &mut remaining)?)?);
-            *path_slot(&mut flags, name).expect("required path") = value;
-            saw_path[index] = true;
+            paths[index] = Some(PathBuf::from(nonempty(take_value(
+                attached,
+                &mut remaining,
+            )?)?));
+        } else if let Some(index) = AUXILIARY_PATHS.iter().position(|output| *output == name) {
+            auxiliary_paths[index] = Some(PathBuf::from(nonempty(take_value(
+                attached,
+                &mut remaining,
+            )?)?));
+        } else if name == AUXILIARY_RUNTIME {
+            auxiliary_runtime = parse_auxiliary_runtime(take_value(attached, &mut remaining)?)?;
         } else if name == IMAGE_DIGEST {
             let value = nonempty(take_value(attached, &mut remaining)?)?;
-            flags.image_digest = value.to_str().ok_or(ParseError::NotUtf8)?.to_owned();
-            saw_image = true;
+            image_digest = Some(value.to_str().ok_or(ParseError::NotUtf8)?.to_owned());
         } else if name == BATCH_SIZE {
-            flags.batch_size = parse_batch(take_value(attached, &mut remaining)?)?;
-            saw_batch = true;
+            batch_size = Some(parse_batch(take_value(attached, &mut remaining)?)?);
         } else if name == SERVED_INFER_CONFIG {
             let value = nonempty(take_value(attached, &mut remaining)?)?;
-            flags.served_infer_config = Some(PathBuf::from(value));
+            served_infer_config = Some(PathBuf::from(value));
         } else if name == FORCE {
             if attached.is_some() {
                 return Err(ParseError::UnexpectedValue);
             }
-            flags.force = true;
+            force = true;
         } else {
             return Err(ParseError::UnknownFlag);
         }
     }
-    let paths_complete = saw_path.iter().all(|seen| *seen);
-    if !saw_image || !saw_batch || !paths_complete {
+    if image_digest.is_none() || batch_size.is_none() || paths.iter().any(Option::is_none) {
         return Err(ParseError::MissingRequired);
     }
-    Ok(flags)
+    let auxiliary = match auxiliary_runtime {
+        AuxiliaryRuntime::TensorRt => {
+            let [stored_pose_engine, bed_engine, fall_engine] = auxiliary_paths;
+            AuxiliaryBuild::TensorRt {
+                stored_pose_engine: stored_pose_engine.ok_or(ParseError::MissingRequired)?,
+                bed_engine: bed_engine.ok_or(ParseError::MissingRequired)?,
+                fall_engine: fall_engine.ok_or(ParseError::MissingRequired)?,
+            }
+        }
+        AuxiliaryRuntime::OnnxRuntimeCpu => {
+            if auxiliary_paths.iter().any(Option::is_some) {
+                return Err(ParseError::ForbiddenAuxiliaryOutput);
+            }
+            AuxiliaryBuild::OnnxRuntimeCpu
+        }
+    };
+    let [
+        onnx,
+        engine,
+        identity,
+        parser_lib,
+        infer_config,
+        tracker_config,
+        tracker_library,
+        bed_onnx,
+    ] = paths;
+    Ok(EngineBuildFlags {
+        onnx: onnx.ok_or(ParseError::MissingRequired)?,
+        engine: engine.ok_or(ParseError::MissingRequired)?,
+        identity: identity.ok_or(ParseError::MissingRequired)?,
+        parser_lib: parser_lib.ok_or(ParseError::MissingRequired)?,
+        infer_config: infer_config.ok_or(ParseError::MissingRequired)?,
+        tracker_config: tracker_config.ok_or(ParseError::MissingRequired)?,
+        tracker_library: tracker_library.ok_or(ParseError::MissingRequired)?,
+        auxiliary,
+        bed_onnx: bed_onnx.ok_or(ParseError::MissingRequired)?,
+        served_infer_config,
+        image_digest: image_digest.ok_or(ParseError::MissingRequired)?,
+        batch_size: batch_size.ok_or(ParseError::MissingRequired)?,
+        force,
+    })
 }
 
 #[cfg(test)]
@@ -200,7 +241,7 @@ mod tests {
     use std::os::unix::ffi::OsStringExt;
     use std::path::PathBuf;
 
-    use super::{EngineBuildFlags, ParseError, parse};
+    use super::{AuxiliaryBuild, EngineBuildFlags, ParseError, parse};
 
     fn arguments(texts: &[&str]) -> Vec<OsString> {
         texts.iter().copied().map(OsString::from).collect()
@@ -233,10 +274,12 @@ mod tests {
             infer_config: PathBuf::from("/opt/infer.txt"),
             tracker_config: PathBuf::from("/opt/tracker.txt"),
             tracker_library: PathBuf::from("/opt/libnvds_nvmultiobjecttracker.so"),
-            stored_pose_engine: PathBuf::from("/models/stored-pose.engine"),
+            auxiliary: AuxiliaryBuild::TensorRt {
+                stored_pose_engine: PathBuf::from("/models/stored-pose.engine"),
+                bed_engine: PathBuf::from("/models/bed.engine"),
+                fall_engine: PathBuf::from("/models/fall.engine"),
+            },
             bed_onnx: PathBuf::from("/models/bed.onnx"),
-            bed_engine: PathBuf::from("/models/bed.engine"),
-            fall_engine: PathBuf::from("/models/fall.engine"),
             served_infer_config: served.map(PathBuf::from),
             image_digest: "sha256:abc".to_owned(),
             batch_size: 4,
@@ -245,8 +288,19 @@ mod tests {
     }
 
     fn full(style: &str) -> Vec<OsString> {
+        path_arguments(style, true)
+    }
+
+    fn common(style: &str) -> Vec<OsString> {
+        path_arguments(style, false)
+    }
+
+    fn path_arguments(style: &str, auxiliary_outputs: bool) -> Vec<OsString> {
         let mut out = Vec::new();
         for (name, value) in required_pairs() {
+            if !auxiliary_outputs && super::AUXILIARY_PATHS.contains(&name) {
+                continue;
+            }
             match style {
                 "equals" => out.push(OsString::from(format!("{name}={value}"))),
                 "split" => {
@@ -257,6 +311,14 @@ mod tests {
             }
         }
         out
+    }
+
+    fn value_flag(style: &str, name: &str, value: &str) -> Vec<OsString> {
+        match style {
+            "equals" => vec![OsString::from(format!("{name}={value}"))],
+            "split" => arguments(&[name, value]),
+            _ => unreachable!(),
+        }
     }
 
     #[test]
@@ -301,12 +363,143 @@ mod tests {
             "--engine=/first.engine",
             "--engine",
             "/models/pose.engine",
+            "--stored-pose-engine=/first-stored.engine",
+            "--stored-pose-engine",
+            "/models/stored-pose.engine",
+            "--bed-engine=/first-bed.engine",
+            "--bed-engine",
+            "/models/bed.engine",
+            "--fall-engine=/first-fall.engine",
+            "--fall-engine",
+            "/models/fall.engine",
             "--force",
             "--force",
         ]));
         let mut expected = expected(None, true);
         expected.batch_size = 16;
         assert_eq!(parse(&values), Ok(expected));
+    }
+
+    #[test]
+    fn auxiliary_modes_accept_both_syntaxes_before_or_after_paths() {
+        for style in ["equals", "split"] {
+            for mode_first in [false, true] {
+                for mode in ["tensorrt", "onnxruntime-cpu"] {
+                    let paths = if mode == "tensorrt" {
+                        full(style)
+                    } else {
+                        common(style)
+                    };
+                    let runtime = value_flag(style, "--auxiliary-runtime", mode);
+                    let values: Vec<_> = if mode_first {
+                        runtime.into_iter().chain(paths).collect()
+                    } else {
+                        paths.into_iter().chain(runtime).collect()
+                    };
+                    let mut expected = expected(None, false);
+                    if mode == "onnxruntime-cpu" {
+                        expected.auxiliary = AuxiliaryBuild::OnnxRuntimeCpu;
+                    }
+                    assert_eq!(parse(&values), Ok(expected), "{style} {mode_first} {mode}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn cpu_refuses_each_auxiliary_gpu_output_in_either_order() {
+        for style in ["equals", "split"] {
+            for name in super::AUXILIARY_PATHS {
+                for output_first in [false, true] {
+                    let mut values = common(style);
+                    let runtime = value_flag(style, "--auxiliary-runtime", "onnxruntime-cpu");
+                    let output = value_flag(style, name, "/unused.engine");
+                    if output_first {
+                        values.extend(output);
+                        values.extend(runtime);
+                    } else {
+                        values.extend(runtime);
+                        values.extend(output);
+                    }
+                    assert_eq!(parse(&values), Err(ParseError::ForbiddenAuxiliaryOutput));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn auxiliary_runtime_duplicates_select_the_last_valid_value() {
+        let mut tensor_rt = full("equals");
+        tensor_rt.extend(arguments(&[
+            "--auxiliary-runtime=onnxruntime-cpu",
+            "--auxiliary-runtime",
+            "tensorrt",
+        ]));
+        assert_eq!(parse(&tensor_rt), Ok(expected(None, false)));
+
+        let mut cpu = common("split");
+        cpu.extend(arguments(&[
+            "--auxiliary-runtime=tensorrt",
+            "--auxiliary-runtime",
+            "onnxruntime-cpu",
+        ]));
+        let mut expected_cpu = expected(None, false);
+        expected_cpu.auxiliary = AuxiliaryBuild::OnnxRuntimeCpu;
+        assert_eq!(parse(&cpu), Ok(expected_cpu));
+
+        tensor_rt.push(OsString::from("--auxiliary-runtime=onnxruntime-cpu"));
+        assert_eq!(parse(&tensor_rt), Err(ParseError::ForbiddenAuxiliaryOutput));
+        cpu.push(OsString::from("--auxiliary-runtime=tensorrt"));
+        assert_eq!(parse(&cpu), Err(ParseError::MissingRequired));
+        assert_eq!(parse(&common("equals")), Err(ParseError::MissingRequired));
+    }
+
+    #[test]
+    fn auxiliary_runtime_unknown_empty_and_non_utf8_values_are_refused() {
+        for style in ["equals", "split"] {
+            for value in [
+                "",
+                "cpu",
+                "onnxruntime",
+                "TensorRt",
+                " tensorrt",
+                "tensorrt ",
+            ] {
+                let mut values = common(style);
+                values.extend(value_flag(style, "--auxiliary-runtime", value));
+                values.push(OsString::from("--auxiliary-runtime=onnxruntime-cpu"));
+                assert_eq!(parse(&values), Err(ParseError::InvalidAuxiliaryRuntime));
+            }
+        }
+        let mut split = common("split");
+        split.push(OsString::from("--auxiliary-runtime"));
+        split.push(OsString::from_vec(vec![0xff]));
+        assert_eq!(parse(&split), Err(ParseError::NotUtf8));
+        let mut attached = common("equals");
+        attached.push(OsString::from_vec(b"--auxiliary-runtime=\xff".to_vec()));
+        assert_eq!(parse(&attached), Err(ParseError::NotUtf8));
+    }
+
+    #[test]
+    fn cpu_still_requires_every_common_input_and_rejects_empty_gpu_paths() {
+        for omitted in super::REQUIRED_PATHS
+            .into_iter()
+            .chain(["--image-digest", "--batch-size"])
+        {
+            let kept: Vec<_> = required_pairs()
+                .into_iter()
+                .filter(|(name, _)| !super::AUXILIARY_PATHS.contains(name) && *name != omitted)
+                .flat_map(|(name, value)| [OsString::from(name), OsString::from(value)])
+                .chain([OsString::from("--auxiliary-runtime=onnxruntime-cpu")])
+                .collect();
+            assert_eq!(parse(&kept), Err(ParseError::MissingRequired), "{omitted}");
+        }
+        for name in super::AUXILIARY_PATHS {
+            let mut values = common("equals");
+            values.push(OsString::from("--auxiliary-runtime=onnxruntime-cpu"));
+            values.push(OsString::from(format!("{name}=")));
+            assert_eq!(parse(&values), Err(ParseError::MissingRequired));
+        }
     }
 
     #[test]
@@ -375,6 +568,10 @@ mod tests {
             "--served-infer-config",
             "--image-digest",
             "--batch-size",
+            "--auxiliary-runtime",
+            "--stored-pose-engine",
+            "--bed-engine",
+            "--fall-engine",
         ] {
             let mut arguments = full("equals");
             arguments.push(OsString::from(flag));

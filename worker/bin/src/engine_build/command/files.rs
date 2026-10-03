@@ -9,7 +9,8 @@ use std::path::{Path, PathBuf};
 
 use rustix::fs::{self, Mode};
 
-use super::{Captured, Layout, Planned};
+use super::{AuxiliaryLayout, Captured, Layout, Planned};
+use crate::cli::{AuxiliaryBuild, EngineBuildFlags};
 use crate::config::model_bundle::identity::{
     EnginePaths, IdentityInputs, OBSERVER_LIBRARY, fingerprint,
 };
@@ -23,18 +24,27 @@ pub(super) use publication::{commit, identity_staging, write_exclusive};
 const PRIVATE_DIR: Mode = Mode::RWXU;
 
 pub(super) fn prepare(
-    flags: &crate::cli::EngineBuildFlags,
+    flags: &EngineBuildFlags,
     captured: &Captured,
 ) -> Result<Planned, CommandError> {
     let served = served_output(flags);
-    let targets = [
-        flags.engine.as_path(),
-        flags.stored_pose_engine.as_path(),
-        flags.bed_engine.as_path(),
-        flags.fall_engine.as_path(),
-        served,
-        flags.identity.as_path(),
-    ];
+    let mut targets = vec![flags.engine.as_path()];
+    match &flags.auxiliary {
+        AuxiliaryBuild::TensorRt {
+            stored_pose_engine,
+            bed_engine,
+            fall_engine,
+        } => {
+            targets.extend([
+                stored_pose_engine.as_path(),
+                bed_engine.as_path(),
+                fall_engine.as_path(),
+            ]);
+        }
+        AuxiliaryBuild::OnnxRuntimeCpu => {}
+    }
+    let served_index = targets.len();
+    targets.extend([served, flags.identity.as_path()]);
     let inputs = [
         flags.onnx.as_path(),
         flags.bed_onnx.as_path(),
@@ -44,58 +54,51 @@ pub(super) fn prepare(
         flags.tracker_config.as_path(),
         flags.tracker_library.as_path(),
     ];
-    paths::reject_collisions(&targets, &inputs)?;
-    let parents = targets
-        .iter()
-        .copied()
-        .map(paths::parent_of)
-        .collect::<Result<Vec<_>, _>>()?;
+    paths::reject_collisions(&targets, &inputs, served_index)?;
     let token = RandomIds.uuid4().map_err(|_| CommandError::Io)?;
-    let roles = ["live", "stored", "bed", "fall", "served"];
-    let names = targets
-        .iter()
-        .map(|path| paths::basename(path))
-        .collect::<Result<Vec<_>, _>>()?;
-    let staged = [0, 1, 2, 3, 4].map(|index| {
-        parents[index]
-            .join(format!(".engine-stage-{}-{token}", roles[index]))
-            .join(names[index])
-    });
     Ok(Planned {
-        layout: layout_of(flags, served, staged),
+        layout: layout_of(flags, served, &token)?,
         token,
     })
 }
 
-fn layout_of(flags: &crate::cli::EngineBuildFlags, served: &Path, staged: [PathBuf; 5]) -> Layout {
-    let [live, stored, bed, fall, served_stage] = staged;
-    Layout {
-        live,
-        stored,
-        bed,
-        fall,
-        served: served_stage,
+fn layout_of(flags: &EngineBuildFlags, served: &Path, token: &str) -> Result<Layout, CommandError> {
+    let staged = |role: &str, path: &Path| -> Result<PathBuf, CommandError> {
+        Ok(paths::parent_of(path)?
+            .join(format!(".engine-stage-{role}-{token}"))
+            .join(paths::basename(path)?))
+    };
+    let auxiliary = match &flags.auxiliary {
+        AuxiliaryBuild::TensorRt {
+            stored_pose_engine,
+            bed_engine,
+            fall_engine,
+        } => AuxiliaryLayout::TensorRt {
+            stored: staged("stored", stored_pose_engine)?,
+            bed: staged("bed", bed_engine)?,
+            fall: staged("fall", fall_engine)?,
+            final_stored: stored_pose_engine.clone(),
+            final_bed: bed_engine.clone(),
+            final_fall: fall_engine.clone(),
+        },
+        AuxiliaryBuild::OnnxRuntimeCpu => AuxiliaryLayout::OnnxRuntimeCpu,
+    };
+    Ok(Layout {
+        live: staged("live", &flags.engine)?,
+        auxiliary,
+        served: staged("served", served)?,
         identity: flags.identity.clone(),
         final_live: flags.engine.clone(),
-        final_stored: flags.stored_pose_engine.clone(),
-        final_bed: flags.bed_engine.clone(),
-        final_fall: flags.fall_engine.clone(),
         final_served: served.to_path_buf(),
         parser_lib: flags.parser_lib.clone(),
         tracker_config: flags.tracker_config.clone(),
         tracker_library: flags.tracker_library.clone(),
         observer: PathBuf::from(OBSERVER_LIBRARY),
-    }
+    })
 }
 
 pub(super) fn materialize(planned: Planned) -> Result<Layout, CommandError> {
-    for path in [
-        &planned.layout.live,
-        &planned.layout.stored,
-        &planned.layout.bed,
-        &planned.layout.fall,
-        &planned.layout.served,
-    ] {
+    for path in planned.layout.staging() {
         let parent = path.parent().ok_or(CommandError::Path)?;
         let name = parent
             .file_name()
@@ -199,11 +202,21 @@ pub(super) fn identity_inputs<'a>(
     flow: &'a [(&'a str, PathBuf)],
 ) -> IdentityInputs<'a> {
     IdentityInputs {
-        engines: EnginePaths::TensorRt {
-            live_pose: &layout.final_live,
-            stored_pose: &layout.final_stored,
-            bed: &layout.final_bed,
-            fall: &layout.final_fall,
+        engines: match &layout.auxiliary {
+            AuxiliaryLayout::TensorRt {
+                final_stored,
+                final_bed,
+                final_fall,
+                ..
+            } => EnginePaths::TensorRt {
+                live_pose: &layout.final_live,
+                stored_pose: final_stored,
+                bed: final_bed,
+                fall: final_fall,
+            },
+            AuxiliaryLayout::OnnxRuntimeCpu => EnginePaths::OnnxRuntimeCpu {
+                live_pose: &layout.final_live,
+            },
         },
         pose_onnx_sha256: &captured.pose.sha256,
         bed_onnx_sha256: &captured.bed.sha256,
@@ -224,13 +237,9 @@ fn served_output(flags: &crate::cli::EngineBuildFlags) -> &Path {
 }
 
 fn finals(layout: &Layout, write_served: bool) -> impl Iterator<Item = &Path> {
-    [
-        layout.final_live.as_path(),
-        layout.final_stored.as_path(),
-        layout.final_bed.as_path(),
-        layout.final_fall.as_path(),
-    ]
-    .into_iter()
-    .chain(write_served.then_some(layout.final_served.as_path()))
-    .chain(Some(layout.identity.as_path()))
+    layout
+        .engines()
+        .map(|(_, _, target)| target)
+        .chain(write_served.then_some(layout.final_served.as_path()))
+        .chain(Some(layout.identity.as_path()))
 }

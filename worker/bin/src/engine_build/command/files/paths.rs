@@ -7,7 +7,11 @@ use std::io::Read;
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 
-pub(super) fn reject_collisions(targets: &[&Path], inputs: &[&Path]) -> Result<(), CommandError> {
+pub(super) fn reject_collisions(
+    targets: &[&Path],
+    inputs: &[&Path],
+    served_index: usize,
+) -> Result<(), CommandError> {
     let outputs = targets
         .iter()
         .map(|path| target_identity(path))
@@ -25,7 +29,7 @@ pub(super) fn reject_collisions(targets: &[&Path], inputs: &[&Path]) -> Result<(
         for (output_index, output) in outputs.iter().enumerate() {
             // The infer template is the served file when output is omitted,
             // and is the sole input the explicit served-output flag may replace.
-            if input_index == 4 && output_index == 4 {
+            if input_index == 4 && output_index == served_index {
                 continue;
             }
             if same_file(&resolved, output) {

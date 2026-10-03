@@ -9,7 +9,7 @@ use std::ffi::{OsStr, OsString};
 use std::path::PathBuf;
 
 use crate::exit::Exit;
-pub use engine_build::{EngineBuildFlags, ParseError as EngineBuildParseError};
+pub use engine_build::{AuxiliaryBuild, EngineBuildFlags, ParseError as EngineBuildParseError};
 
 const CHECK_CONFIG: &str = "check-config";
 const ENGINE_BUILD: &str = "engine-build";

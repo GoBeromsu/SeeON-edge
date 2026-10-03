@@ -5,6 +5,9 @@
 //! artifact for explicit owner cleanup; this module never deletes or overwrites.
 //! Live pose builds live in [`live`] and return this same private receipt.
 //! That path does not replace this factory or its FP32 profile.
+//! The offline command selects either four TensorRT receipts or one live GPU
+//! receipt plus immutable original ONNX bytes for auxiliary ORT CPU models.
+//! CPU model bytes are identity inputs, never engine or execution receipts.
 
 use std::fmt::Write as _;
 use std::fs::File;
@@ -24,10 +27,10 @@ use crate::run::ModelRole;
 mod command;
 mod identity;
 mod live;
-mod sources;
 pub use command::execute_engine_build;
 pub use identity::{
-    BuiltEngine, EngineSet, FlowArtifacts, IdentityError, IdentityRequest, publish_identity,
+    BuiltEngine, CpuModelBytes, EngineSet, FlowArtifacts, IdentityError, IdentityRequest,
+    publish_identity,
 };
 
 pub use live::{LiveBuildError, LiveBuildRequest, build_live_pose};
