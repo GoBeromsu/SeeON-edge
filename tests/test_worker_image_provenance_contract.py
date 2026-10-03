@@ -20,6 +20,15 @@ NATIVE_LIBRARIES = (
     "libseeon_gpu.so",
     "libseeon_media.so",
     "libseeon_clipdec.so",
+    "libseeon_ort.so",
+)
+BUILD_ONLY_TREES = (
+    "bin",
+    "rust",
+    "runtime/rust",
+    "adapters/deepstream/rust",
+    "adapters/model/onnxruntime",
+    "adapters/model/native",
 )
 DEEPSTREAM_CONFIGS = (
     "config_tracker_NvDCF_perf.yml",
@@ -283,15 +292,17 @@ def test_runtime_copies_filtered_worker_without_shipping_build_stage_layers() ->
         match.group(0) for match in _STAGE_HEADER.finditer(source) if match.group(1) == "runtime"
     )
     assert runtime_header.startswith("FROM nvcr.io/nvidia/deepstream@sha256:")
-    for tree in ("bin", "rust", "runtime/rust", "adapters/deepstream/rust"):
+    for stage in ("cargo-build", "runtime"):
+        assert "ORT_DISABLE_TELEMETRY=1" in stages[stage]
+    for tree in BUILD_ONLY_TREES:
         assert f"COPY worker/{tree} ./worker/{tree}" in stages["cargo-build"]
 
 
-def test_worker_payload_filter_removes_only_rust_trees_before_final_copy(tmp_path: Path) -> None:
+def test_worker_payload_filter_removes_only_build_trees_before_final_copy(tmp_path: Path) -> None:
     commands = _commands(_stages(_dockerfile())["worker-runtime-source"])
     assert len(commands) == 1
     tokens = shlex.split(commands[0])
-    removed = ("bin", "rust", "runtime/rust", "adapters/deepstream/rust")
+    removed = BUILD_ONLY_TREES
     assert tokens[:2] == ["rm", "-rf"]
     assert tokens[2:] == [f"/worker/{tree}" for tree in removed]
     root = tmp_path / "worker payload"
@@ -304,6 +315,7 @@ def test_worker_payload_filter_removes_only_rust_trees_before_final_copy(tmp_pat
         "runtime/worker.py": b"python composition",
         "adapters/deepstream/configs/labels.txt": b"person\n",
         "adapters/deepstream/metadata.py": b"python adapter",
+        "adapters/model/ort_bed_seg.py": b"existing CPU model adapter",
         "tools/edge_engine_build.py": b"offline builder",
     }
     for name, content in kept.items():

@@ -39,6 +39,15 @@ COPY worker/adapters/deepstream/native /src/native
 RUN make -C /src/native OUT=/opt/seeon/lib all \
     && sha256sum /opt/seeon/lib/libseeon_gpu.so /opt/seeon/lib/libseeon_media.so \
         /opt/seeon/lib/libseeon_clipdec.so
+ADD --checksum=sha256:acc0cf4b3f28d39339c76770d76164bb7a0637dc89f5fde764b4017b632f6743 \
+    https://raw.githubusercontent.com/microsoft/onnxruntime/2e2543fbe9fae542f921d47a72d21d5a4ef0b710/include/onnxruntime/core/session/onnxruntime_c_api.h /opt/seeon/ort-include/onnxruntime_c_api.h
+ADD --checksum=sha256:5ce3b054e798eced8d14f5b86e98692fd33470463f96194ce0700a2d53dd8721 \
+    https://raw.githubusercontent.com/microsoft/onnxruntime/2e2543fbe9fae542f921d47a72d21d5a4ef0b710/include/onnxruntime/core/session/onnxruntime_error_code.h /opt/seeon/ort-include/onnxruntime_error_code.h
+ADD --checksum=sha256:e6c986c9e98583f8113b2c6bc3864814883b806d501cf24da4d239c45753e235 \
+    https://raw.githubusercontent.com/microsoft/onnxruntime/2e2543fbe9fae542f921d47a72d21d5a4ef0b710/include/onnxruntime/core/session/onnxruntime_ep_c_api.h /opt/seeon/ort-include/onnxruntime_ep_c_api.h
+COPY worker/adapters/model/native /src/ort-native
+RUN make -C /src/ort-native OUT=/opt/seeon/lib ORT_INCLUDE_DIR=/opt/seeon/ort-include all \
+    && sha256sum /opt/seeon/lib/libseeon_ort.so
 
 # One validated source declaration for the release binary, image marker, label,
 # and runtime environment. This stage is not a shipping image.
@@ -87,6 +96,8 @@ ENV CARGO_HOME=/usr/local/cargo \
     SEEON_GPU_LIB_DIR=/opt/seeon/lib \
     SEEON_MEDIA_LIB_DIR=/opt/seeon/lib \
     SEEON_CLIPDEC_LIB_DIR=/opt/seeon/lib \
+    SEEON_ORT_LIB_DIR=/opt/seeon/lib \
+    ORT_DISABLE_TELEMETRY=1 \
     LD_LIBRARY_PATH=/opt/seeon/lib:/opt/nvidia/deepstream/deepstream/lib:${LD_LIBRARY_PATH}
 WORKDIR /usr/src/myapp
 COPY Cargo.toml Cargo.lock rust-toolchain.toml ./
@@ -94,6 +105,8 @@ COPY worker/rust ./worker/rust
 COPY worker/runtime/rust ./worker/runtime/rust
 COPY worker/adapters/deepstream/rust ./worker/adapters/deepstream/rust
 COPY worker/adapters/deepstream/native ./worker/adapters/deepstream/native
+COPY worker/adapters/model/onnxruntime ./worker/adapters/model/onnxruntime
+COPY worker/adapters/model/native ./worker/adapters/model/native
 COPY worker/bin ./worker/bin
 COPY --from=source-revision /opt/seeon/ml-worker-image-revision /tmp/.source-revision
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
@@ -128,7 +141,8 @@ FROM ghcr.io/astral-sh/uv:python3.12-bookworm-slim@sha256:e5b65587bce7de595f2998
 # cargo-build and cargo-verify retain their complete, independent source copies.
 FROM uv-bin AS worker-runtime-source
 COPY worker /worker
-RUN rm -rf /worker/bin /worker/rust /worker/runtime/rust /worker/adapters/deepstream/rust
+RUN rm -rf /worker/bin /worker/rust /worker/runtime/rust /worker/adapters/deepstream/rust \
+    /worker/adapters/model/onnxruntime /worker/adapters/model/native
 
 FROM nvcr.io/nvidia/deepstream@sha256:f6fa0247da9290979cbb05749e7da9435d089c93db7c4dcfe85ba2488b5f4994 AS runtime
 WORKDIR /app
@@ -156,11 +170,13 @@ COPY --from=cargo-build /usr/src/myapp/target/release/ml-worker /usr/local/bin/m
 COPY --from=native-build /opt/seeon/lib/libseeon_gpu.so /opt/seeon/lib/libseeon_gpu.so
 COPY --from=native-build /opt/seeon/lib/libseeon_media.so /opt/seeon/lib/libseeon_media.so
 COPY --from=native-build /opt/seeon/lib/libseeon_clipdec.so /opt/seeon/lib/libseeon_clipdec.so
+COPY --from=native-build /opt/seeon/lib/libseeon_ort.so /opt/seeon/lib/libseeon_ort.so
 COPY --from=source-revision /opt/seeon/ml-worker-image-revision /opt/seeon/ml-worker-image-revision
 COPY --from=source-revision /opt/seeon/edge-database-schema-version /opt/seeon/edge-database-schema-version
 
 ENV UV_PROJECT_ENVIRONMENT=/app/.venv \
     PATH=/app/.venv/bin:$PATH \
+    ORT_DISABLE_TELEMETRY=1 \
     PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     GST_PLUGIN_PATH=/opt/nvidia/deepstream/deepstream/lib/gst-plugins \

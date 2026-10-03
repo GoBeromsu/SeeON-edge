@@ -82,13 +82,34 @@ docker run --rm --network none --read-only \
   seeon-rust-builder:1.90.0-deepstream9.1 cargo clippy --version
 ```
 
-The builder workdir is `/usr/src/myapp`. The workspace contains the bounded
-numeric core and a thread-confined native GPU adapter, not a complete Rust
-Worker. The adapter requires `SEEON_GPU_LIB_DIR` to name the exact canonical
-directory containing the compiled `libseeon_gpu.so`; its runtime loader path
-must also be supplied. It refuses missing native libraries and has no CPU
-fallback. Ignored GPU integration tests require explicit engine/model inputs
-and actual GPU access. Compiler and component checks are not product acceptance.
+The builder workdir is `/usr/src/myapp`. Workspace builds require the exact
+canonical native-library directories in `SEEON_GPU_LIB_DIR`,
+`SEEON_MEDIA_LIB_DIR`, `SEEON_CLIPDEC_LIB_DIR`, and `SEEON_ORT_LIB_DIR`, plus
+their runtime loader paths. `Dockerfile.edge` prepares these libraries in its
+`native-build` stage. Missing libraries are refused; there is no automatic
+provider fallback.
+
+The separate `worker/adapters/model/onnxruntime` Rust owner executes captured
+ONNX bytes through the existing ONNX Runtime CPU library. It is not yet wired
+into the production worker loop. Its native Makefile requires `ORT_INCLUDE_DIR`
+with three digest-checked API-29 headers; their immutable source and hashes are
+listed in that Makefile. `make test-ort` additionally requires a Python
+environment with ONNX, NumPy, and ONNX Runtime 1.29.0.
+The image sets `ORT_DISABLE_TELEMETRY=1` before process startup to prevent
+vendor telemetry initialization; the CPU adapter refuses admission without it.
+
+CPU reference values are recorded independently by
+`python tests_support/record_ort_cpu_outputs.py --models <models> --fixtures <gpu-v2a> --output <new-directory>`,
+using the pinned Python environment and `ORT_DISABLE_TELEMETRY=1`. Existing
+references are never overwritten. The Rust `native_cpu` integration tests take
+explicit `SEEON_TEST_ORT_RUNTIME`, `SEEON_TEST_ORT_MODELS`,
+`SEEON_TEST_ORT_FIXTURES`, and `SEEON_TEST_ORT_CPU_RECEIPT` paths; select them with
+`cargo test -p seeon-onnxruntime-native --test native_cpu -- --include-ignored`.
+They compare every output element in order, including its float32 bits.
+
+Production remains `python -m worker`. Ignored GPU integration tests require
+explicit engine/model inputs and actual GPU access. CPU-adapter comparisons
+do not replace the GPU parity gate or qualify a complete Rust worker.
 
 ## Run
 

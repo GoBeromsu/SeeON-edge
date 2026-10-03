@@ -1,0 +1,15 @@
+[package]
+name = "seeon-onnxruntime-native"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.90"
+publish = false
+build = "build.rs"
+links = "seeon_ort"
+
+[lib]
+path = "src/lib.rs"
+
+[dev-dependencies]
+serde_json = "=1.0.151"
+sha2 = "=0.11.0"
