@@ -2,9 +2,10 @@
 //! can still record why a clip is missing (B13 option 2).
 //!
 //! `<root>/.reserve` holds preallocated slot files. When a save runs out of
-//! space the partial clip is removed, one slot is released and the clip is
-//! published UNAVAILABLE with `FINALIZE_FAILED` into the freed space. Its
-//! `ClipEntry` waits in the delivery queue on the state volume.
+//! space one slot is released and the clip is published UNAVAILABLE with
+//! `FINALIZE_FAILED` into the freed space. Media is retained until terminal
+//! publication completes. Its `ClipEntry` waits in the delivery queue on the
+//! state volume.
 
 use std::fs::File;
 use std::io::{self, Write};
@@ -16,7 +17,7 @@ use seeon_deepstream_native::MediaResult;
 
 use super::durable::{self, PRIVATE_FILE, PUBLIC_FILE};
 use super::manifest::{ClipMetadata, MediaFacts};
-use super::publish::{MANIFEST_FILE, MEDIA_FILE, PublishError, Published, Publisher};
+use super::publish::{MANIFEST_FILE, PublishError, Published, Publisher};
 use super::recorder::ClipSealed;
 use super::store::{ClipStore, DIRECTORY_MODE as STORE_MODE, Reservation, exists};
 
@@ -34,8 +35,9 @@ const RESERVE_MODE: u32 = 0o700;
 pub enum SaveOutcome {
     /// READY, or UNAVAILABLE as the media plane reported.
     Saved(Published),
-    /// The store ran out of space for the clip. `Some` holds the UNAVAILABLE `FINALIZE_FAILED`
-    /// publication; `None` means not even that fit.
+    /// The store ran out of space for the clip. `Some` holds the completed
+    /// UNAVAILABLE `FINALIZE_FAILED` publication. `None` has no completed
+    /// result; a partial terminal commit may exist and must be reconciled.
     FinalizeFailed(Option<Published>),
 }
 
@@ -164,11 +166,10 @@ impl ReservePool {
         error: io::Error,
     ) -> Result<SaveOutcome, PublishError> {
         if exists(&reservation.final_dir.join(MANIFEST_FILE)) {
-            // The manifest is durable; resuming the publication completes it.
+            // A manifest may belong to an incomplete publication. Preserve it
+            // and its media for an identical resume, not a different outcome.
             return Err(PublishError::Io(error));
         }
-        durable::remove_tree(&reservation.staging_dir)?;
-        durable::remove_durable(&reservation.final_dir.join(MEDIA_FILE))?;
         self.release()?;
         match publisher.publish_unavailable(reservation, meta, FINALIZE_FAILED, None) {
             Ok(published) => Ok(SaveOutcome::FinalizeFailed(Some(published))),

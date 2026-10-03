@@ -113,7 +113,10 @@ pub fn create_dir(path: &Path, mode: u32) -> io::Result<bool> {
             fsync_dir(parent_of(path))?;
             Ok(true)
         }
-        Err(error) if error.kind() == io::ErrorKind::AlreadyExists && path.is_dir() => Ok(false),
+        Err(error) if error.kind() == io::ErrorKind::AlreadyExists && path.is_dir() => {
+            fsync_dir(parent_of(path))?;
+            Ok(false)
+        }
         Err(error) => Err(error),
     }
 }

@@ -233,6 +233,9 @@ impl DeliveryQueue {
         let (count, bytes) = durable::scan_totals(&self.directory)?;
         if let Some(existing) = durable::read_if_exists(target)? {
             return Ok(if existing == payload {
+                // publish fsyncs the file before rename, but a previous attempt
+                // may have failed its directory sync after the entry appeared.
+                durable::fsync_directory(&self.directory)?;
                 AdmissionResult::admitted(true)
             } else {
                 AdmissionResult::refused(AdmissionFault::Conflict)

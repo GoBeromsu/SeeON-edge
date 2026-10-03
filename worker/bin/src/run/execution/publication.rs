@@ -228,6 +228,7 @@ impl Publications {
     /// Whether a completed save published work that can wake the sender.
     pub fn drain_records(&mut self, clock: &dyn Clock) -> Result<bool, PublicationError> {
         let mut published = false;
+        let mut failure = None;
         while let Ok(receipt) = self.records.try_recv() {
             let Some(index) = self.cameras.iter().position(|(source_id, binding, _, _)| {
                 *source_id == receipt.ticket.source_id && *binding == receipt.ticket.binding
@@ -242,7 +243,9 @@ impl Publications {
                 && receipt.contains_video
                 && !super::recording::admits_path(&self.record_dir, &receipt)
             {
-                return Err(PublicationError::MediaPath);
+                failure.get_or_insert(PublicationError::MediaPath);
+                self.quiesce();
+                continue;
             }
             let now = Utc::from_system(clock.wall());
             let clip_id = format!(
@@ -299,14 +302,21 @@ impl Publications {
                     );
                 }
                 Err(crate::clips::recorder::RecorderError::Save(error)) => {
-                    return Err(PublicationError::Clip(
+                    failure.get_or_insert(PublicationError::Clip(
                         crate::run::clip_output::ClipOutputError::from(error),
                     ));
+                    self.quiesce();
                 }
-                Err(error) => return Err(PublicationError::Recorder(error)),
+                Err(error) => {
+                    failure.get_or_insert(PublicationError::Recorder(error));
+                    self.quiesce();
+                }
             }
         }
-        Ok(published)
+        // A failed camera must not strand other genuine queued receipts during
+        // shutdown. Keep the first failure, and prevent any subsequent save
+        // from starting another recording while handing off the remaining seals.
+        failure.map_or(Ok(published), Err)
     }
 
     pub fn camera_for(

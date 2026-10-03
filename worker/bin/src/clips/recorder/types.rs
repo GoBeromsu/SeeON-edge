@@ -58,6 +58,11 @@ pub enum RecorderError {
     ReceiptOverdue {
         ticket: RecordTicket,
     },
+    /// The sealed recording could not publish even a FINALIZE_FAILED outcome.
+    /// Its original receipt and attribution stay owned until recorder teardown.
+    Unpublished {
+        ticket: RecordTicket,
+    },
     DuplicateRequest(u64),
     UnexpectedRequest(u64),
     WrongSource {

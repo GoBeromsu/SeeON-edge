@@ -1,21 +1,23 @@
 //! Terminal clip publication into the clip store: media first, then the
-//! manifest, then the delivery entry, then the terminal marker. Every write
-//! is durable (dot-temp, fsync, rename, parent fsync) and a rerun of the
-//! same publication is a resume, never a second announcement.
+//! manifest, then the delivery entry, then the terminal marker. A missing
+//! marker re-admits the stable entry, even if it was acknowledged meanwhile:
+//! publication is at least once across the ACK-before-marker window.
 
-use std::io;
+use std::fs::File;
+use std::io::{self, Read};
 use std::path::{Path, PathBuf};
+
+use rustix::fs::{Mode, OFlags};
+use rustix::io::Errno;
 
 use crate::delivery::{
     AdmissionFault, ClipEntry, DeliveryEntry, DeliveryQueue, EntryError, QueueError,
 };
 use crate::json::{Json, Serialiser};
 
-use super::durable::{self, Existing, PUBLIC_FILE};
+use super::durable::{self, PUBLIC_FILE};
 use super::entry::clip_entry;
-use super::manifest::{
-    ClipMetadata, MAX_MANIFEST_BYTES, ManifestError, MediaFacts, Terminal, manifest_bytes,
-};
+use super::manifest::{ClipMetadata, ManifestError, MediaFacts, Terminal, manifest_bytes};
 use super::store::{DIRECTORY_MODE, Reservation, exists};
 
 pub const MANIFEST_FILE: &str = "manifest.json";
@@ -28,7 +30,7 @@ pub enum PublishError {
     Io(io::Error),
     /// The reservation names an unsafe clip id, a blank camera, or another clip.
     Reservation(&'static str),
-    /// A different or unreadable manifest already occupies the clip.
+    /// A different or unreadable manifest or terminal marker occupies the clip.
     Conflict,
     /// A READY publication found neither the staged artifact nor the media.
     MissingMedia,
@@ -156,11 +158,10 @@ impl<'q> Publisher<'q> {
         let bytes = manifest_bytes(meta, terminal).map_err(PublishError::Manifest)?;
         let entry = clip_entry(meta, terminal).map_err(PublishError::Entry)?;
         let manifest_path = reservation.final_dir.join(MANIFEST_FILE);
-        let resumed = match durable::read_bounded(&manifest_path, MAX_MANIFEST_BYTES as u64)? {
-            Existing::Missing => false,
-            Existing::Bytes(existing) if existing == bytes => true,
-            Existing::Bytes(_) | Existing::Unreadable => return Err(PublishError::Conflict),
-        };
+        let resumed = confirm_existing(&manifest_path, &bytes)?;
+        let marker = reservation.final_dir.join(TERMINAL_MARKER);
+        let marker_payload = marker_bytes(&entry, &bytes)?;
+        let marked = confirm_existing(&marker, &marker_payload)?;
         let ready = matches!(terminal, Terminal::Ready(_));
         let video_path = reservation.final_dir.join(MEDIA_FILE);
         if !resumed {
@@ -170,8 +171,7 @@ impl<'q> Publisher<'q> {
             }
             durable::write_durable(&manifest_path, &bytes, PUBLIC_FILE)?;
         }
-        let marker = reservation.final_dir.join(TERMINAL_MARKER);
-        let admitted = !(resumed && exists(&marker));
+        let admitted = !(resumed && marked);
         if admitted {
             let result = self
                 .queue
@@ -180,7 +180,12 @@ impl<'q> Publisher<'q> {
             if !result.accepted {
                 return Err(PublishError::Refused(result.fault));
             }
-            durable::write_durable(&marker, &marker_bytes(&entry, &bytes)?, PUBLIC_FILE)?;
+            if !marked {
+                durable::write_durable(&marker, &marker_payload, PUBLIC_FILE)?;
+            }
+        }
+        if !ready {
+            durable::remove_durable(&video_path)?;
         }
         durable::remove_tree(&reservation.staging_dir)?;
         Ok(Published {
@@ -193,6 +198,34 @@ impl<'q> Publisher<'q> {
             admitted,
         })
     }
+}
+
+/// Validates bounded bytes and fsyncs the same open file, then its parent.
+/// Existing contradictory files are never replaced.
+fn confirm_existing(path: &Path, expected: &[u8]) -> Result<bool, PublishError> {
+    let flags = OFlags::CLOEXEC | OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::NONBLOCK;
+    let descriptor = match rustix::fs::open(path, flags, Mode::empty()) {
+        Ok(descriptor) => descriptor,
+        Err(Errno::NOENT) => return Ok(false),
+        Err(Errno::LOOP) => return Err(PublishError::Conflict),
+        Err(errno) => return Err(PublishError::Io(errno.into())),
+    };
+    let mut file = File::from(descriptor);
+    let metadata = file.metadata()?;
+    let bound = expected.len() as u64;
+    if !metadata.is_file() || metadata.len() != bound {
+        return Err(PublishError::Conflict);
+    }
+    let mut existing = Vec::new();
+    file.by_ref()
+        .take(bound.saturating_add(1))
+        .read_to_end(&mut existing)?;
+    if existing != expected {
+        return Err(PublishError::Conflict);
+    }
+    file.sync_all()?;
+    durable::fsync_dir(durable::parent_of(path))?;
+    Ok(true)
 }
 
 /// Moves the staged artifact to the final media path; a rerun after the move

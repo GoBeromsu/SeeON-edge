@@ -7,6 +7,8 @@ mod assertions;
 mod cutoff_tests;
 #[path = "runtime_receipt_tests/fixture.rs"]
 mod fixture;
+#[path = "runtime_receipt_tests/publication_failure_tests.rs"]
+mod publication_failure_tests;
 
 use seeon_deepstream_native::{MediaBinding, MediaResult, RecordTicket};
 

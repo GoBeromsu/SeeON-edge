@@ -24,7 +24,9 @@ use serde_json::Value;
 
 use seeon_deepstream_native::{MediaBinding, MediaPoll, MediaResult, RecordTicket};
 use seeon_ml_worker::clips::entry::{ContributorEvent, FLOW_ENCODER, flow_metadata};
-use seeon_ml_worker::clips::publish::{MANIFEST_FILE, MEDIA_FILE, PublishError, Publisher};
+use seeon_ml_worker::clips::publish::{
+    MANIFEST_FILE, MEDIA_FILE, PublishError, Publisher, TERMINAL_MARKER,
+};
 use seeon_ml_worker::clips::recorder::{
     Admit, ClipSealed, CommandPlane, PlaneRefusal, Recorder, RecorderError, State,
 };
@@ -348,7 +350,7 @@ fn same_volume_with_room_publishes_the_clip() {
 
 #[test]
 #[ignore = "requires SEEON_TEST_ENOSPC_DIR"]
-fn volume_full_before_arming_reports_without_a_manifest_and_stays_usable() {
+fn volume_full_before_arming_retains_unpublished_and_refuses_new_admission() {
     let (volume, _serial) = enospc_volume();
     let bench = Bench::new(&volume, "unarmed");
     fs::create_dir_all(bench.store.root()).expect("store root");
@@ -359,21 +361,25 @@ fn volume_full_before_arming_reports_without_a_manifest_and_stays_usable() {
     let mut recorder = recorder(commands);
     let ticket = started(&mut recorder, EVENTS[0]);
 
-    let outcome = recorder
-        .on_receipt(&receipt(ticket, &bench.sealed), |sealed| {
-            bench.save(&mut pool, sealed)
-        })
-        .expect("a full volume is a save outcome, not an error");
+    let result = recorder.on_receipt(&receipt(ticket, &bench.sealed), |sealed| {
+        bench.save(&mut pool, sealed)
+    });
 
     assert!(
-        matches!(outcome, SaveOutcome::FinalizeFailed(None)),
-        "{outcome:?}"
+        matches!(result, Err(RecorderError::Unpublished { ticket: retained }) if retained == ticket),
+        "{result:?}"
     );
     assert!(!bench.final_dir().join(MANIFEST_FILE).exists());
-    assert_eq!(recorder.state(), State::Idle);
+    assert!(!bench.final_dir().join(TERMINAL_MARKER).exists());
+    assert!(bench.queue.entries().expect("queue entries").is_empty());
+    assert_eq!(
+        fs::read(&bench.sealed).expect("unpublished media"),
+        vec![0x5a_u8; MEDIA_BYTES]
+    );
+    assert_eq!(recorder.state(), State::Finalizing);
     assert!(matches!(
         recorder.admit(EVENTS[1], at("2026-08-20T17:22:00Z")),
-        Ok(Admit::Started(_))
+        Err(RecorderError::Unpublished { ticket: retained }) if retained == ticket
     ));
     drop(recorder);
     media.join().expect("media stand-in");

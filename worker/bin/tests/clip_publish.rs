@@ -10,20 +10,25 @@
 
 use std::collections::BTreeMap;
 use std::fs;
+use std::os::unix::fs::{MetadataExt, symlink};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use serde_json::Value;
 
 use seeon_ml_worker::clips::entry::{ContributorEvent, FLOW_ENCODER, flow_metadata};
-use seeon_ml_worker::clips::manifest::{ClipMetadata, Contributor, Extension, MediaFacts};
+use seeon_ml_worker::clips::manifest::{
+    ClipMetadata, Contributor, Extension, MAX_MANIFEST_BYTES, MediaFacts,
+};
 use seeon_ml_worker::clips::publish::{
     MANIFEST_FILE, MEDIA_FILE, PublishError, Published, Publisher, TERMINAL_MARKER,
 };
 use seeon_ml_worker::clips::store::{ClipStore, Reservation};
 use seeon_ml_worker::clips::time::Utc;
 use seeon_ml_worker::delivery::sender::clip_request;
-use seeon_ml_worker::delivery::{ClipEntry, ClipFields, DeliveryQueue};
+use seeon_ml_worker::delivery::{
+    AdmissionFault, ClipEntry, ClipFields, DeliveryQueue, LOCK_FILE_NAME,
+};
 
 const MEDIA: &[u8] = b"opaque clip media bytes";
 const CASES: [&str; 5] = [
@@ -294,6 +299,39 @@ fn publish_case(bench: &Bench, name: &str, case: &Value) -> Result<Published, Pu
     }
 }
 
+fn retained_media(bench: &Bench, case: &Value) -> Reservation {
+    let meta = metadata(&case["inputs"]);
+    let reservation = bench.reserve(&meta.camera_id, &meta.clip_id, true);
+    fs::create_dir_all(&reservation.final_dir).expect("final directory");
+    fs::write(reservation.final_dir.join(MEDIA_FILE), MEDIA).expect("retained final media");
+    reservation
+}
+
+fn assert_retained_media(reservation: &Reservation) {
+    assert_eq!(
+        fs::read(reservation.artifact_path()).expect("staged media"),
+        MEDIA
+    );
+    assert_eq!(
+        fs::read(reservation.final_dir.join(MEDIA_FILE)).expect("final media"),
+        MEDIA
+    );
+}
+
+fn publish_reserved_unavailable(
+    bench: &Bench,
+    reservation: &Reservation,
+    case: &Value,
+) -> Result<Published, PublishError> {
+    let inputs = &case["inputs"];
+    Publisher::new(&bench.queue).publish_unavailable(
+        reservation,
+        &metadata(inputs),
+        &text(inputs, "reason_code"),
+        inputs["metadata"]["source_error_reason"].as_str(),
+    )
+}
+
 /// Store entries other than the delivery queue and Python's audit directory.
 fn listing(root: &Path) -> Vec<(String, String)> {
     fn walk(root: &Path, dir: &Path, out: &mut Vec<(String, String)>) {
@@ -459,6 +497,384 @@ fn crash_before_marker_readmits_without_a_second_entry() {
     let queued = bench.queued();
     assert_eq!(queued.len(), 1, "re-admission is idempotent");
     assert_eq!(queued[0]["entry_id"], Value::from(first.entry.entry_id()));
+}
+
+#[test]
+fn unavailable_queue_failure_retains_staged_and_final_media() {
+    let case = golden("unavailable");
+    let bench = Bench::new("unavailable-queue-failure", "unavailable");
+    let reservation = retained_media(&bench, &case);
+    let lock = bench.queue.directory().join(LOCK_FILE_NAME);
+    fs::remove_file(&lock).expect("remove queue lock");
+    fs::create_dir(&lock).expect("block queue admission");
+
+    let failed = publish_reserved_unavailable(&bench, &reservation, &case);
+
+    assert!(matches!(failed, Err(PublishError::Queue(_))), "{failed:?}");
+    assert_retained_media(&reservation);
+    assert_eq!(
+        fs::read(reservation.final_dir.join(MANIFEST_FILE)).expect("manifest"),
+        golden_manifest(&case)
+    );
+    assert!(!reservation.final_dir.join(TERMINAL_MARKER).exists());
+    fs::remove_dir(&lock).expect("unblock queue admission");
+    assert!(bench.queued().is_empty());
+
+    let resumed = publish_reserved_unavailable(&bench, &reservation, &case).expect("resume");
+    assert!(resumed.resumed && resumed.admitted);
+    assert_eq!(resumed.entry, entry_from(&port_entry(&case)));
+    assert!(reservation.final_dir.join(TERMINAL_MARKER).is_file());
+    assert!(!reservation.final_dir.join(MEDIA_FILE).exists());
+    assert!(!reservation.staging_dir.exists());
+}
+
+#[test]
+fn unavailable_queue_refusal_retains_staged_and_final_media() {
+    let case = golden("unavailable");
+    let bench = Bench::new("unavailable-queue-refusal", "unavailable");
+    let reservation = retained_media(&bench, &case);
+    let mut conflicting = port_entry(&case);
+    conflicting["unavailable_reason"] = Value::from("OTHER_REASON");
+    let entry = entry_from(&conflicting);
+    assert!(
+        bench
+            .queue
+            .try_admit(&entry.into())
+            .expect("conflicting entry")
+            .accepted
+    );
+    let queued = bench.queued();
+
+    let failed = publish_reserved_unavailable(&bench, &reservation, &case);
+
+    assert!(
+        matches!(
+            failed,
+            Err(PublishError::Refused(Some(AdmissionFault::Conflict)))
+        ),
+        "{failed:?}"
+    );
+    assert_retained_media(&reservation);
+    assert!(!reservation.final_dir.join(TERMINAL_MARKER).exists());
+    assert_eq!(bench.queued(), queued);
+}
+
+#[test]
+fn unavailable_marker_failure_retains_media_until_identical_resume() {
+    let case = golden("unavailable");
+    for acknowledged in [false, true] {
+        let bench = Bench::new(
+            &format!("unavailable-marker-failure-{acknowledged}"),
+            "unavailable",
+        );
+        let reservation = retained_media(&bench, &case);
+        let manifest = reservation.final_dir.join(MANIFEST_FILE);
+        let marker = reservation.final_dir.join(TERMINAL_MARKER);
+        let blocked = reservation
+            .final_dir
+            .join(format!(".{TERMINAL_MARKER}.tmp"));
+        fs::create_dir(&blocked).expect("block marker write after queue admission");
+
+        let failed = publish_reserved_unavailable(&bench, &reservation, &case);
+
+        assert!(matches!(failed, Err(PublishError::Io(_))), "{failed:?}");
+        assert_retained_media(&reservation);
+        assert_eq!(
+            fs::read(&manifest).expect("manifest"),
+            golden_manifest(&case)
+        );
+        assert!(!marker.exists());
+        let queued = bench.queued();
+        assert_eq!(queued.len(), 1);
+        let expected = entry_from(&port_entry(&case));
+        assert_eq!(queued[0]["entry_id"], expected.entry_id());
+        let manifest_inode = fs::metadata(&manifest).expect("manifest metadata").ino();
+        let queue_path = bench
+            .queue
+            .directory()
+            .join(format!("{}.json", expected.entry_id()));
+        let queue_bytes = fs::read(&queue_path).expect("queued bytes");
+        let queue_inode = fs::metadata(&queue_path).expect("queue metadata").ino();
+        if acknowledged {
+            assert!(
+                bench
+                    .queue
+                    .acknowledge_backend(expected.entry_id(), 204)
+                    .expect("ACK before marker")
+            );
+            assert!(bench.queued().is_empty());
+        }
+        fs::remove_dir(&blocked).expect("allow marker write");
+
+        let resumed = publish_reserved_unavailable(&bench, &reservation, &case).expect("resume");
+
+        assert!(resumed.resumed && resumed.admitted);
+        assert_eq!(resumed.entry, expected);
+        assert_eq!(resumed.manifest_bytes, golden_manifest(&case));
+        assert_eq!(
+            fs::metadata(&manifest).expect("manifest metadata").ino(),
+            manifest_inode
+        );
+        assert_eq!(bench.queued(), queued, "the same stable entry is admitted");
+        assert_eq!(fs::read(&queue_path).expect("queued bytes"), queue_bytes);
+        if !acknowledged {
+            assert_eq!(
+                fs::metadata(&queue_path).expect("queue metadata").ino(),
+                queue_inode
+            );
+        }
+        assert_eq!(read_json(&marker)["entry_id"], resumed.entry.entry_id());
+        assert_eq!(
+            read_json(&marker)["manifest_sha256"],
+            case["manifest"]["sha256"]
+        );
+        assert!(!reservation.final_dir.join(MEDIA_FILE).exists());
+        assert!(!reservation.staging_dir.exists());
+    }
+}
+
+#[test]
+fn unavailable_completed_resume_keeps_exact_marker_and_backend_ack() {
+    let case = golden("unavailable");
+    let bench = Bench::new("unavailable-marked-resume", "unavailable");
+    let first = publish_case(&bench, "unavailable", &case).expect("first publication");
+    let reservation = retained_media(&bench, &case);
+    let marker = reservation.final_dir.join(TERMINAL_MARKER);
+    let marker_bytes = fs::read(&marker).expect("marker");
+    let marker_inode = fs::metadata(&marker).expect("marker metadata").ino();
+    let manifest_inode = fs::metadata(&first.manifest_path)
+        .expect("manifest metadata")
+        .ino();
+    assert!(
+        bench
+            .queue
+            .acknowledge_backend(first.entry.entry_id(), 204)
+            .expect("backend ACK")
+    );
+
+    let resumed = publish_reserved_unavailable(&bench, &reservation, &case).expect("resume");
+
+    assert!(resumed.resumed && !resumed.admitted);
+    assert_eq!(resumed.entry, first.entry);
+    assert_eq!(fs::read(&marker).expect("marker"), marker_bytes);
+    assert_eq!(
+        fs::metadata(&marker).expect("marker metadata").ino(),
+        marker_inode
+    );
+    assert_eq!(
+        fs::metadata(&first.manifest_path)
+            .expect("manifest metadata")
+            .ino(),
+        manifest_inode
+    );
+    assert!(
+        bench.queued().is_empty(),
+        "a valid marker keeps the backend ACK"
+    );
+    assert!(!reservation.final_dir.join(MEDIA_FILE).exists());
+    assert!(!reservation.staging_dir.exists());
+}
+
+#[test]
+fn unavailable_conflicting_or_malformed_marker_refuses_cleanup() {
+    let case = golden("unavailable");
+    for corruption in [
+        "clip_id",
+        "entry_id",
+        "manifest_sha256",
+        "local_state",
+        "empty",
+        "malformed",
+        "extra-byte",
+        "oversized",
+        "directory",
+        "symlink",
+    ] {
+        let bench = Bench::new(&format!("unavailable-marker-{corruption}"), "unavailable");
+        let first = publish_case(&bench, "unavailable", &case).expect("first publication");
+        let reservation = retained_media(&bench, &case);
+        let marker = reservation.final_dir.join(TERMINAL_MARKER);
+        let expected = fs::read(&marker).expect("marker");
+        assert!(
+            bench
+                .queue
+                .acknowledge_backend(first.entry.entry_id(), 204)
+                .expect("backend ACK")
+        );
+        match corruption {
+            "directory" => {
+                fs::remove_file(&marker).expect("remove marker");
+                fs::create_dir(&marker).expect("directory in place of marker");
+            }
+            "symlink" => {
+                let target = bench.work.join("marker-target");
+                fs::write(&target, &expected).expect("symlink target");
+                fs::remove_file(&marker).expect("remove marker");
+                symlink(&target, &marker).expect("symlink in place of marker");
+            }
+            _ => {
+                let conflicting = match corruption {
+                    "empty" => Vec::new(),
+                    "malformed" => vec![b'{'; expected.len()],
+                    "extra-byte" => [expected.as_slice(), b"\n"].concat(),
+                    "oversized" => vec![b'x'; MAX_MANIFEST_BYTES + 1],
+                    field => {
+                        let mut value: Value =
+                            serde_json::from_slice(&expected).expect("marker JSON");
+                        value[field] = Value::from(
+                            "x".repeat(value[field].as_str().expect("marker field").len()),
+                        );
+                        let mut bytes = serde_json::to_vec(&value).expect("marker JSON");
+                        bytes.push(b'\n');
+                        assert_eq!(bytes.len(), expected.len(), "same-sized conflicting marker");
+                        bytes
+                    }
+                };
+                fs::write(&marker, conflicting).expect("contradictory marker");
+            }
+        }
+        let before = fs::symlink_metadata(&marker).expect("marker metadata");
+        let bytes_before = before
+            .is_file()
+            .then(|| fs::read(&marker).expect("marker bytes"));
+
+        let refused = publish_reserved_unavailable(&bench, &reservation, &case);
+
+        assert!(
+            matches!(refused, Err(PublishError::Conflict)),
+            "{corruption}: {refused:?}"
+        );
+        assert_retained_media(&reservation);
+        assert_eq!(
+            fs::read(&first.manifest_path).expect("manifest"),
+            first.manifest_bytes
+        );
+        let after = fs::symlink_metadata(&marker).expect("marker metadata");
+        assert_eq!(
+            after.ino(),
+            before.ino(),
+            "the contradictory marker is not replaced"
+        );
+        assert_eq!(after.file_type(), before.file_type());
+        if let Some(bytes) = bytes_before {
+            assert_eq!(fs::read(&marker).expect("marker bytes"), bytes);
+        }
+        assert!(bench.queued().is_empty());
+    }
+}
+
+#[test]
+fn ready_failures_keep_staged_or_final_media() {
+    let case = golden("ready");
+    for boundary in ["manifest", "queue", "marker", "conflicting-marker"] {
+        let bench = Bench::new(&format!("ready-failure-{boundary}"), "ready");
+        let meta = metadata(&case["inputs"]);
+        let reservation = bench.reserve(&meta.camera_id, &meta.clip_id, true);
+        fs::create_dir(&reservation.final_dir).expect("final directory");
+        let staged_copy = reservation.staging_dir.join("sealed-copy.mp4");
+        fs::write(&staged_copy, MEDIA).expect("retained staged copy");
+        let blocked = match boundary {
+            "manifest" => reservation.final_dir.join(format!(".{MANIFEST_FILE}.tmp")),
+            "queue" => {
+                let lock = bench.queue.directory().join(LOCK_FILE_NAME);
+                fs::remove_file(&lock).expect("remove queue lock");
+                lock
+            }
+            "marker" => reservation
+                .final_dir
+                .join(format!(".{TERMINAL_MARKER}.tmp")),
+            "conflicting-marker" => reservation.final_dir.join(TERMINAL_MARKER),
+            _ => unreachable!(),
+        };
+        if boundary == "conflicting-marker" {
+            fs::write(&blocked, b"contradictory marker").expect("conflicting marker");
+            fs::write(reservation.final_dir.join(MEDIA_FILE), MEDIA).expect("retained final copy");
+        } else {
+            fs::create_dir(&blocked).expect("block publication");
+        }
+
+        let failed = Publisher::new(&bench.queue).publish_ready(&reservation, &meta, &media(&case));
+
+        match boundary {
+            "queue" => assert!(matches!(failed, Err(PublishError::Queue(_))), "{failed:?}"),
+            "conflicting-marker" => {
+                assert!(matches!(failed, Err(PublishError::Conflict)), "{failed:?}")
+            }
+            _ => assert!(matches!(failed, Err(PublishError::Io(_))), "{failed:?}"),
+        }
+        assert_eq!(
+            fs::read(reservation.final_dir.join(MEDIA_FILE)).expect("final media"),
+            MEDIA
+        );
+        assert_eq!(fs::read(&staged_copy).expect("staged copy"), MEDIA);
+        if boundary == "conflicting-marker" {
+            assert_eq!(
+                fs::read(reservation.artifact_path()).expect("staged artifact"),
+                MEDIA
+            );
+            assert_eq!(fs::read(&blocked).expect("marker"), b"contradictory marker");
+        } else {
+            assert!(
+                !reservation.artifact_path().exists(),
+                "the artifact survives at its final path"
+            );
+            assert!(!reservation.final_dir.join(TERMINAL_MARKER).exists());
+            fs::remove_dir(&blocked).expect("remove publication obstacle");
+        }
+        let accepted_count = if boundary == "marker" { 1 } else { 0 };
+        assert_eq!(bench.queued().len(), accepted_count);
+    }
+}
+
+#[test]
+fn unavailable_cleanup_errors_are_returned_after_terminal_publication() {
+    let case = golden("unavailable");
+    for cleanup in ["media", "staging"] {
+        let bench = Bench::new(&format!("unavailable-cleanup-{cleanup}"), "unavailable");
+        let reservation = retained_media(&bench, &case);
+        let video = reservation.final_dir.join(MEDIA_FILE);
+        if cleanup == "media" {
+            fs::remove_file(&video).expect("remove final media");
+            fs::create_dir(&video).expect("block final-media unlink");
+        } else {
+            fs::remove_file(reservation.artifact_path()).expect("remove artifact");
+            fs::remove_dir(&reservation.staging_dir).expect("remove staging directory");
+            fs::write(&reservation.staging_dir, MEDIA).expect("block staging-tree removal");
+        }
+
+        let failed = publish_reserved_unavailable(&bench, &reservation, &case);
+
+        assert!(matches!(failed, Err(PublishError::Io(_))), "{failed:?}");
+        assert_eq!(
+            fs::read(reservation.final_dir.join(MANIFEST_FILE)).expect("manifest"),
+            golden_manifest(&case)
+        );
+        assert!(reservation.final_dir.join(TERMINAL_MARKER).is_file());
+        assert_eq!(bench.queued().len(), 1);
+        if cleanup == "media" {
+            assert!(video.is_dir());
+            assert_eq!(
+                fs::read(reservation.artifact_path()).expect("staged artifact"),
+                MEDIA
+            );
+            fs::remove_dir(&video).expect("allow final-media cleanup");
+        } else {
+            assert!(
+                !video.exists(),
+                "media cleanup followed terminal publication"
+            );
+            assert_eq!(
+                fs::read(&reservation.staging_dir).expect("staging bytes"),
+                MEDIA
+            );
+            fs::remove_file(&reservation.staging_dir).expect("allow staging cleanup");
+        }
+        let resumed =
+            publish_reserved_unavailable(&bench, &reservation, &case).expect("resume cleanup");
+        assert!(resumed.resumed && !resumed.admitted);
+        assert!(!video.exists());
+        assert!(!reservation.staging_dir.exists());
+    }
 }
 
 #[test]

@@ -7,20 +7,26 @@
 //! does not invent tickets, media, duration, codec, or terminal publications.
 
 use std::cell::Cell;
+use std::fs;
+use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::Arc;
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use seeon_deepstream_native::{MediaBinding, MediaResult, RecordTicket};
-use seeon_ml_worker::clips::manifest::Contributor;
-use seeon_ml_worker::clips::publish::PublishError;
+use seeon_ml_worker::clips::entry::FLOW_ENCODER;
+use seeon_ml_worker::clips::manifest::{ClipMetadata, Contributor};
+use seeon_ml_worker::clips::publish::{PublishError, Published, Publisher};
 use seeon_ml_worker::clips::recorder::{
-    Admit, Boundary, CAP_SECONDS, EXTENSION_SECONDS, MAX_PENDING_ALERTS,
+    Admit, Boundary, CAP_SECONDS, ClipSealed, EXTENSION_SECONDS, MAX_PENDING_ALERTS,
     NATIVE_COMPLETION_GRACE_SECONDS, PlaneRefusal, RecordPlane, Recorder, RecorderError, State,
 };
-use seeon_ml_worker::clips::reserve::SaveOutcome;
+use seeon_ml_worker::clips::reserve::{FINALIZE_FAILED, SaveOutcome};
+use seeon_ml_worker::clips::store::ClipStore;
 use seeon_ml_worker::clips::time::Utc;
+use seeon_ml_worker::delivery::DeliveryQueue;
 use seeon_ml_worker::msg::RecordReceipt;
 use seeon_ml_worker::seam::Clock;
 
@@ -221,6 +227,57 @@ fn started(recorder: &mut Recorder<CountingPlane>, event_ref: &str, when: &str) 
     }
 }
 
+/// Produces a real terminal publication, not a fabricated delivery receipt.
+/// The fixture only exercises recorder outcomes; it makes no SDK media claim.
+fn publication(sealed: &ClipSealed) -> Published {
+    static NEXT: AtomicU64 = AtomicU64::new(0);
+    let sequence = NEXT.fetch_add(1, Ordering::Relaxed);
+    let work = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(format!(
+        "clip_recorder-publication-{}-{sequence}",
+        std::process::id()
+    ));
+    fs::create_dir_all(&work).expect("publication scratch");
+    let store = ClipStore::new(work.join("store"));
+    let queue = DeliveryQueue::open(&work.join("delivery-queue"), true).expect("queue");
+    let detected_at = sealed.contributors[0].detected_at;
+    let started_at = detected_at.plus_millis(-15_000);
+    let ended_at = started_at.plus_millis(sealed.duration_ms as i64);
+    let meta = ClipMetadata {
+        clip_id: format!("recorder-{sequence}"),
+        camera_id: "recorder-camera".into(),
+        facility_id: "recorder-facility".into(),
+        domain: "fall".into(),
+        event_type: "fall_detected".into(),
+        event_refs: sealed
+            .contributors
+            .iter()
+            .map(|c| c.event_ref.clone())
+            .collect(),
+        detected_at,
+        started_at,
+        clip_start_at: started_at,
+        clip_end_at: ended_at,
+        finalized_at: ended_at,
+        duration_ms: sealed.duration_ms as i64,
+        encoder: FLOW_ENCODER.into(),
+        truncation_reasons: Vec::new(),
+        extension: Some(sealed.extension()),
+    };
+    let reservation = store
+        .reserve(&meta.camera_id, &meta.clip_id)
+        .expect("reserve");
+    let published = Publisher::new(&queue)
+        .publish_unavailable(&reservation, &meta, FINALIZE_FAILED, None)
+        .expect("terminal publication");
+    drop(queue);
+    fs::remove_dir_all(work).expect("remove publication scratch");
+    published
+}
+
+fn save_with_publication(sealed: &ClipSealed) -> Result<SaveOutcome, PublishError> {
+    Ok(SaveOutcome::Saved(publication(sealed)))
+}
+
 fn finalize_failed_without_publication(
     _: &seeon_ml_worker::clips::recorder::ClipSealed,
 ) -> Result<SaveOutcome, PublishError> {
@@ -232,6 +289,16 @@ fn assert_overdue<T: std::fmt::Debug>(outcome: Result<T, RecorderError>, admitte
     match outcome {
         Err(RecorderError::ReceiptOverdue { ticket }) => assert_eq!(ticket, admitted),
         other => panic!("expected receipt failure for {admitted:?}, got {other:?}"),
+    }
+}
+
+fn assert_unpublished<T: std::fmt::Debug>(
+    outcome: Result<T, RecorderError>,
+    original: RecordTicket,
+) {
+    match outcome {
+        Err(RecorderError::Unpublished { ticket }) => assert_eq!(ticket, original),
+        other => panic!("expected unpublished failure for {original:?}, got {other:?}"),
     }
 }
 
@@ -285,15 +352,24 @@ fn normal_mode_start_extend_stop_and_errors_are_unchanged() {
         .on_receipt(&receipt(first), |sealed| {
             saved += 1;
             seen = sealed.contributors.clone();
-            Ok(SaveOutcome::FinalizeFailed(None))
+            Ok(SaveOutcome::FinalizeFailed(Some(publication(sealed))))
         })
         .expect("save");
-    assert!(matches!(outcome, SaveOutcome::FinalizeFailed(None)));
+    assert!(matches!(outcome, SaveOutcome::FinalizeFailed(Some(_))));
     assert_eq!(saved, 1);
     assert_eq!(seen.len(), 2);
     assert_eq!(recorder.state(), State::Recording);
     assert_eq!(recorder.pending(), 0);
     assert_eq!(counts.starts.get(), 2, "queued alert starts after seal");
+    assert!(matches!(
+        recorder.admit("after-published-fallback", at("2026-08-20T17:21:51Z")),
+        Ok(Admit::Extended)
+    ));
+    assert_eq!(
+        counts.starts.get(),
+        2,
+        "published fallback does not latch refusal"
+    );
 
     let wrong = RecordTicket {
         source_id: SOURCE_ID + 1,
@@ -451,17 +527,17 @@ fn active_contributors_save_once_and_are_not_drained_as_unstarted() {
     );
     recorder.quiesce();
     let mut saves = 0_u32;
-    recorder
-        .on_receipt(&receipt(active), |sealed| {
-            saves += 1;
-            assert_eq!(sealed.contributors.len(), 1);
-            assert_eq!(
-                sealed.contributors[0].event_ref,
-                "00000000-0000-4000-8000-00000000e0a1"
-            );
-            Ok(SaveOutcome::FinalizeFailed(None))
-        })
-        .expect("active save");
+    let failed = recorder.on_receipt(&receipt(active), |sealed| {
+        saves += 1;
+        assert_eq!(sealed.contributors.len(), 1);
+        assert_eq!(
+            sealed.contributors[0].event_ref,
+            "00000000-0000-4000-8000-00000000e0a1"
+        );
+        Ok(SaveOutcome::FinalizeFailed(None))
+    });
+    assert_unpublished(failed, receipt(active).ticket);
+    assert_eq!(recorder.state(), State::Finalizing);
     assert_eq!(saves, 1);
     assert_eq!(counts.starts.get(), 1);
     let drained = recorder.take_unstarted().expect("nothing unstarted");
@@ -513,7 +589,7 @@ fn reused_sdk_session_seals_each_new_request() {
     recorder
         .on_receipt(&receipt(first), |sealed| {
             seen.push(sealed.ticket);
-            Ok(SaveOutcome::FinalizeFailed(None))
+            save_with_publication(sealed)
         })
         .expect("first request");
     let second = started(
@@ -529,7 +605,7 @@ fn reused_sdk_session_seals_each_new_request() {
             assert_eq!(sealed.ticket.session_id, 7);
             assert_eq!(sealed.ticket.session_valid, 1);
             seen.push(sealed.ticket);
-            Ok(SaveOutcome::FinalizeFailed(None))
+            save_with_publication(sealed)
         })
         .expect("reused session, new request");
     assert_eq!(seen.len(), 2);
@@ -550,7 +626,7 @@ fn async_session_assignment_keeps_receipt_session() {
             assert_eq!(sealed.ticket.session_id, 7);
             assert_eq!(sealed.ticket.session_valid, 1);
             assert_ne!(sealed.ticket.session_id, active.session_id);
-            Ok(SaveOutcome::FinalizeFailed(None))
+            save_with_publication(sealed)
         })
         .expect("asynchronously assigned session");
 }
@@ -568,7 +644,7 @@ fn duplicate_after_idle_and_new_binding_are_distinct() {
         "2026-08-20T17:20:58Z",
     );
     recorder
-        .on_receipt(&receipt(first), |_| Ok(SaveOutcome::FinalizeFailed(None)))
+        .on_receipt(&receipt(first), save_with_publication)
         .expect("first seal");
     assert_eq!(recorder.state(), State::Idle);
     let idle = unchanged(&recorder);
@@ -589,7 +665,7 @@ fn duplicate_after_idle_and_new_binding_are_distinct() {
     ));
     assert_eq!(unchanged(&recorder), active);
     recorder
-        .on_receipt(&receipt(second), |_| Ok(SaveOutcome::FinalizeFailed(None)))
+        .on_receipt(&receipt(second), save_with_publication)
         .expect("second request");
     counts.next_request.set(first.request_id);
     counts.binding.set(MediaBinding {
@@ -606,7 +682,7 @@ fn duplicate_after_idle_and_new_binding_are_distinct() {
     recorder
         .on_receipt(&receipt(rebound), |sealed| {
             assert_eq!(sealed.ticket.binding, rebound.binding);
-            Ok(SaveOutcome::FinalizeFailed(None))
+            save_with_publication(sealed)
         })
         .expect("same request under a new binding is not a duplicate");
 }
@@ -670,7 +746,7 @@ fn known_session_must_be_valid_and_match_receipt() {
         .on_receipt(&receipt(active), |sealed| {
             assert_eq!(sealed.ticket, active);
             assert_eq!(sealed.contributors.len(), 1);
-            Ok(SaveOutcome::FinalizeFailed(None))
+            save_with_publication(sealed)
         })
         .expect("matching known session");
 }
@@ -763,7 +839,7 @@ fn receipt_refusals_preserve_pending_state_and_contributors() {
             |sealed| {
                 assert_eq!(sealed.ticket.session_valid, 0);
                 assert_eq!(sealed.contributors.len(), 2);
-                Ok(SaveOutcome::FinalizeFailed(None))
+                save_with_publication(sealed)
             },
         )
         .expect("cancelled receipt may omit a session");
@@ -839,7 +915,7 @@ fn active_contributors_are_bounded_before_refusal_mutates_the_recording() {
                 accepted, expected,
                 "no accepted contributor may be discarded"
             );
-            Ok(SaveOutcome::FinalizeFailed(None))
+            save_with_publication(sealed)
         })
         .expect("all bounded active contributors save");
     assert_overdue(recorder.tick(), active);
@@ -916,7 +992,7 @@ fn refused_pending_batch_is_bounded_and_becomes_bounded_active_work() {
                 .map(|contributor| contributor.event_ref.clone())
                 .collect();
             assert_eq!(accepted, expected);
-            Ok(SaveOutcome::FinalizeFailed(None))
+            save_with_publication(sealed)
         })
         .expect("entire admitted batch saves");
 }
@@ -975,7 +1051,7 @@ fn admit_before_tick_extends_only_just_before_the_content_cap() {
                     .collect::<Vec<_>>(),
                 ["first", "just-before"]
             );
-            Ok(SaveOutcome::FinalizeFailed(None))
+            save_with_publication(sealed)
         })
         .expect("only pre-cap contributors save with the admitted request");
     assert_eq!(counts.starts.get(), 1);
@@ -1029,7 +1105,7 @@ fn post_cap_pending_is_bounded_and_admission_alone_latches_receipt_expiry() {
         .on_receipt(&receipt(active), |sealed| {
             assert_eq!(sealed.contributors.len(), 1);
             assert_eq!(sealed.contributors[0].event_ref, "active");
-            Ok(SaveOutcome::FinalizeFailed(None))
+            save_with_publication(sealed)
         })
         .expect("expiry did not discard active work");
     assert_overdue(recorder.tick(), active);
@@ -1130,7 +1206,7 @@ fn delayed_matching_receipt_before_deadline_saves_and_starts_pending() {
                 assert_eq!(sealed.contributors.len(), 1);
                 assert_eq!(sealed.contributors[0].event_ref, "active");
                 assert_eq!(sealed.duration_ms, receipt(active).duration_ms);
-                Ok(SaveOutcome::FinalizeFailed(None))
+                save_with_publication(sealed)
             })
             .expect("delayed receipt is still within its fixed window");
         assert_eq!(saves, 1);
@@ -1169,7 +1245,7 @@ fn delayed_matching_receipt_before_deadline_saves_and_starts_pending() {
             .on_receipt(&receipt(next), |sealed| {
                 assert_eq!(sealed.contributors.len(), 1);
                 assert_eq!(sealed.contributors[0].event_ref, "pending");
-                Ok(SaveOutcome::FinalizeFailed(None))
+                save_with_publication(sealed)
             })
             .expect("healthy next request saves");
     }
@@ -1184,7 +1260,7 @@ fn rejected_receipts_neither_renew_delivery_deadline_nor_latch_failure() {
     } = Harness::new();
     let previous = started(&mut recorder, "previous", "2026-08-20T17:20:57Z");
     recorder
-        .on_receipt(&receipt(previous), finalize_failed_without_publication)
+        .on_receipt(&receipt(previous), save_with_publication)
         .expect("previous request sealed");
     let active = started(&mut recorder, "active", "2026-08-20T17:20:58Z");
     clock.advance(
@@ -1249,7 +1325,7 @@ fn rejected_receipts_neither_renew_delivery_deadline_nor_latch_failure() {
 
 #[test]
 fn latched_failure_survives_late_save_without_starting_pending() {
-    for save_fails in [false, true] {
+    for save_mode in 0..3 {
         let Harness {
             mut recorder,
             clock,
@@ -1285,19 +1361,26 @@ fn latched_failure_survives_late_save_without_starting_pending() {
                     .collect::<Vec<_>>(),
                 ["first", "extended"]
             );
-            if save_fails {
-                Err(PublishError::Io(std::io::Error::other("volume full")))
-            } else {
-                Ok(SaveOutcome::FinalizeFailed(None))
+            match save_mode {
+                0 => save_with_publication(sealed),
+                1 => Err(PublishError::Io(std::io::Error::other("local save error"))),
+                _ => Ok(SaveOutcome::FinalizeFailed(None)),
             }
         });
-        if save_fails {
-            assert!(matches!(saved, Err(RecorderError::Save(_))));
-        } else {
-            assert!(matches!(saved, Ok(SaveOutcome::FinalizeFailed(None))));
+        match save_mode {
+            0 => assert!(matches!(saved, Ok(SaveOutcome::Saved(_)))),
+            1 => assert!(matches!(saved, Err(RecorderError::Save(_)))),
+            _ => assert_overdue(saved, active),
         }
         assert_eq!(saves, 1);
-        assert_eq!(recorder.state(), State::Idle);
+        assert_eq!(
+            recorder.state(),
+            if save_mode == 2 {
+                State::Finalizing
+            } else {
+                State::Idle
+            }
+        );
         assert_eq!(
             recorder.pending(),
             1,
@@ -1418,7 +1501,7 @@ fn quiesced_expiry_keeps_active_contributors_out_of_unstarted_work() {
                     .collect::<Vec<_>>(),
                 ["first", "extended"]
             );
-            Ok(SaveOutcome::FinalizeFailed(None))
+            save_with_publication(sealed)
         })
         .expect("quiesced native work still saves on its real matching receipt");
     assert!(
@@ -1453,7 +1536,7 @@ fn matching_receipt_drained_at_delivery_deadline_does_not_false_fail() {
             assert_eq!(sealed.ticket, receipt(active).ticket);
             assert_eq!(sealed.contributors.len(), 1);
             assert_eq!(sealed.contributors[0].event_ref, "active");
-            Ok(SaveOutcome::FinalizeFailed(None))
+            save_with_publication(sealed)
         })
         .expect("drain an actual matching receipt before evaluating expiry");
     assert_eq!(counts.starts.get(), 2);
@@ -1517,10 +1600,168 @@ fn refused_early_stop_preserves_native_identity_and_immutable_deadlines() {
             assert_eq!(sealed.contributors[0].event_ref, "first");
             assert_eq!(sealed.contributors[1].event_ref, "after-stop-refusal");
             assert_eq!(sealed.contributors[2].event_ref, "just-before-cap");
-            Ok(SaveOutcome::FinalizeFailed(None))
+            save_with_publication(sealed)
         })
         .expect("stop refusal and expiry did not discard accepted contributors");
     assert_overdue(recorder.tick(), active);
     assert_eq!(counts.starts.get(), 1);
     assert_eq!(counts.stops.get(), 1);
+}
+
+#[test]
+fn unpublished_seal_blocks_admission_without_changing_bounded_pending_work() {
+    for early_stop in [false, true] {
+        let Harness {
+            mut recorder,
+            clock,
+            counts,
+        } = Harness::new();
+        let active = started(&mut recorder, "active", "2026-08-20T17:20:58Z");
+        if early_stop {
+            clock.advance(Duration::from_secs(u64::from(EXTENSION_SECONDS)));
+            assert_eq!(recorder.tick().expect("early stop"), State::Stopping);
+        } else {
+            clock.advance(Duration::from_secs(u64::from(CAP_SECONDS)));
+        }
+        for index in 0..MAX_PENDING_ALERTS {
+            assert!(matches!(
+                recorder.admit(&format!("pending-{index}"), at("2026-08-20T17:22:58Z")),
+                Ok(Admit::Queued)
+            ));
+        }
+        let original = receipt(active);
+        let mut saves = 0;
+        assert_unpublished(
+            recorder.on_receipt(&original, |sealed| {
+                saves += 1;
+                assert_eq!(sealed.ticket, original.ticket);
+                assert_eq!(sealed.contributors.len(), 1);
+                assert_eq!(sealed.contributors[0].event_ref, "active");
+                Ok(SaveOutcome::FinalizeFailed(None))
+            }),
+            original.ticket,
+        );
+        assert_eq!(recorder.state(), State::Finalizing);
+        assert_eq!(recorder.pending(), MAX_PENDING_ALERTS);
+        assert_eq!(
+            counts.starts.get(),
+            1,
+            "pending cannot start after no publication"
+        );
+        let before = unchanged(&recorder);
+        let counters = recorder.counters();
+        counts.start_delay.set(Duration::from_secs(7));
+        clock.advance(Duration::from_secs(u64::from(
+            CAP_SECONDS + NATIVE_COMPLETION_GRACE_SECONDS,
+        )));
+        let now = clock.monotonic();
+        for event_ref in ["new-alert", " "] {
+            assert_unpublished(
+                recorder.admit(event_ref, at("2026-08-20T17:23:28Z")),
+                original.ticket,
+            );
+            assert_unpublished(recorder.tick(), original.ticket);
+            assert_eq!(unchanged(&recorder), before);
+            assert_eq!(recorder.counters(), counters);
+            assert_eq!(clock.monotonic(), now);
+            assert_eq!(counts.starts.get(), 1);
+            assert_eq!(counts.stops.get(), u32::from(early_stop));
+        }
+        let late = RecordReceipt {
+            result: MediaResult::Fatal,
+            ..receipt(active)
+        };
+        for repeated in [&original, &late] {
+            assert!(matches!(
+                recorder.on_receipt(repeated, |_| panic!("consumed receipt must not save")),
+                Err(RecorderError::DuplicateRequest(request)) if request == active.request_id
+            ));
+            assert_eq!(unchanged(&recorder), before);
+            assert_eq!(recorder.counters(), counters);
+        }
+        recorder.quiesce();
+        recorder.quiesce();
+        assert_unpublished(
+            recorder.admit("quiesced", at("2026-08-20T17:23:29Z")),
+            original.ticket,
+        );
+        assert_unpublished(recorder.tick(), original.ticket);
+        assert_eq!(unchanged(&recorder), before);
+        let pending = recorder
+            .take_unstarted()
+            .expect("only never-started alerts");
+        assert_eq!(pending.len(), MAX_PENDING_ALERTS);
+        for (index, contributor) in pending.iter().enumerate() {
+            assert_eq!(contributor.event_ref, format!("pending-{index}"));
+            assert_eq!(contributor.detected_at, at("2026-08-20T17:22:58Z"));
+        }
+        assert_eq!(recorder.state(), State::Finalizing);
+        assert_unpublished(recorder.tick(), original.ticket);
+        assert_eq!(saves, 1);
+        assert_eq!(counts.starts.get(), 1);
+        assert_eq!(counts.stops.get(), u32::from(early_stop));
+        assert_eq!(recorder.counters(), counters);
+        assert_eq!(clock.monotonic(), now);
+    }
+}
+
+#[test]
+fn ordinary_save_errors_wait_for_explicit_tick_before_restart() {
+    for storage_full in [false, true] {
+        let Harness {
+            mut recorder,
+            clock,
+            counts,
+        } = Harness::new();
+        let active = started(&mut recorder, "active", "2026-08-20T17:20:58Z");
+        clock.advance(Duration::from_secs(u64::from(EXTENSION_SECONDS)));
+        assert_eq!(recorder.tick().expect("early stop"), State::Stopping);
+        recorder
+            .admit("pending", at("2026-08-20T17:21:50Z"))
+            .expect("queue");
+        let mut saves = 0;
+        let error = if storage_full {
+            std::io::Error::from(std::io::ErrorKind::StorageFull)
+        } else {
+            std::io::Error::other("local save error")
+        };
+        let expected_kind = error.kind();
+        match recorder.on_receipt(&receipt(active), |_| {
+            saves += 1;
+            Err(PublishError::Io(error))
+        }) {
+            Err(RecorderError::Save(PublishError::Io(error))) => {
+                assert_eq!(error.kind(), expected_kind)
+            }
+            other => panic!("expected the original save error, got {other:?}"),
+        }
+        assert_eq!(saves, 1);
+        assert_eq!(recorder.state(), State::Idle);
+        assert_eq!(recorder.pending(), 1);
+        assert_eq!(
+            counts.starts.get(),
+            1,
+            "return failure before any new start"
+        );
+        assert!(matches!(
+            recorder.on_receipt(&receipt(active), |_| panic!("failed save consumed receipt")),
+            Err(RecorderError::DuplicateRequest(request)) if request == active.request_id
+        ));
+        assert_eq!(
+            recorder.tick().expect("no sticky unpublished refusal"),
+            State::Recording
+        );
+        assert_eq!(recorder.pending(), 0);
+        assert_eq!(counts.starts.get(), 2);
+        assert!(matches!(
+            recorder.admit("next-contributor", at("2026-08-20T17:21:51Z")),
+            Ok(Admit::Extended)
+        ));
+        assert_eq!(
+            recorder.tick().expect("no sticky unpublished refusal"),
+            State::Recording
+        );
+        assert_eq!(counts.starts.get(), 2);
+        assert_eq!(counts.stops.get(), 1);
+    }
 }

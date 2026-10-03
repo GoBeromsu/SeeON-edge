@@ -5,8 +5,10 @@
 //! alerts that race a stop or reach the cap wait for the next recording.
 //! A missing receipt latches a failure after the cap plus native completion
 //! grace, without stopping or forgetting native work. A matching receipt still
-//! saves once and returns to idle whatever the save returned (X18: the Python
-//! actor stays in FINALIZING when its sink raises), but cannot clear that failure.
+//! saves once, but cannot clear that failure. If even FINALIZE_FAILED could not
+//! publish, its seal stays owned in FINALIZING and blocks further admission.
+//! Other save outcomes return to idle (X18: the Python actor stays in FINALIZING
+//! when its sink raises).
 //!
 //! `quiesce` is a one-way admission guard for process shutdown. It does not
 //! stop, finalize, or close the native recording: the media owner still does
@@ -15,6 +17,9 @@
 
 pub mod plane;
 pub mod types;
+
+#[cfg(test)]
+mod failed_seal_tests;
 
 use std::collections::VecDeque;
 use std::sync::Arc;
@@ -59,6 +64,8 @@ pub struct Recorder<P: RecordPlane> {
     receipt_overdue: Option<RecordTicket>,
     stop_due: Duration,
     sealed: VecDeque<RecordTicket>,
+    /// One bounded in-memory refusal owner, not crash durability.
+    failed_seal: Option<ClipSealed>,
     counters: Counters,
     quiesced: bool,
 }
@@ -79,6 +86,7 @@ impl<P: RecordPlane> Recorder<P> {
             receipt_overdue: None,
             stop_due: Duration::ZERO,
             sealed: VecDeque::new(),
+            failed_seal: None,
             counters: Counters::default(),
             quiesced: false,
         }
@@ -142,6 +150,9 @@ impl<P: RecordPlane> Recorder<P> {
         detected_at: Utc,
         receipt_observation_cutoff: Option<Duration>,
     ) -> Result<Admit, RecorderError> {
+        if let Some(error) = self.latched_failure() {
+            return Err(error);
+        }
         if event_ref.trim().is_empty() {
             return Err(RecorderError::BlankEventRef);
         }
@@ -200,6 +211,9 @@ impl<P: RecordPlane> Recorder<P> {
         &mut self,
         receipt_observation_cutoff: Option<Duration>,
     ) -> Result<State, RecorderError> {
+        if let Some(error) = self.latched_failure() {
+            return Err(error);
+        }
         let now = self.clock.monotonic();
         self.check_receipt_deadline(receipt_observation_cutoff.unwrap_or(now))?;
         if self.quiesced {
@@ -227,10 +241,10 @@ impl<P: RecordPlane> Recorder<P> {
         Ok(self.state)
     }
 
-    /// Hands a sealed recording to `save`, then returns to idle. Waiting
-    /// alerts start only while the recorder has not quiesced. A save failure
-    /// is returned as-is. A latched receipt failure survives a valid late save
-    /// and prevents waiting alerts from starting.
+    /// Hands a sealed recording to `save` once. An unpublished FINALIZE_FAILED
+    /// retains the seal in Finalizing; other outcomes return to idle with their
+    /// existing local behavior. Waiting alerts cannot start after quiescence
+    /// or a latched failure. An earlier receipt failure keeps its priority.
     pub fn on_receipt(
         &mut self,
         receipt: &RecordReceipt,
@@ -259,12 +273,34 @@ impl<P: RecordPlane> Recorder<P> {
         }
         self.sealed.push_back(ticket);
         self.ticket = None;
+        if matches!(saved, Ok(SaveOutcome::FinalizeFailed(None))) {
+            self.failed_seal = Some(sealed);
+            return Err(match self.receipt_overdue {
+                Some(ticket) => RecorderError::ReceiptOverdue { ticket },
+                None => RecorderError::Unpublished { ticket },
+            });
+        }
         self.boundary = Boundary::None;
         self.state = State::Idle;
-        if !self.quiesced && self.receipt_overdue.is_none() && !self.pending.is_empty() {
+        if saved.is_ok()
+            && !self.quiesced
+            && self.receipt_overdue.is_none()
+            && !self.pending.is_empty()
+        {
             self.start_pending();
         }
         saved.map_err(RecorderError::Save)
+    }
+
+    fn latched_failure(&self) -> Option<RecorderError> {
+        if let Some(ticket) = self.receipt_overdue {
+            return Some(RecorderError::ReceiptOverdue { ticket });
+        }
+        self.failed_seal
+            .as_ref()
+            .map(|sealed| RecorderError::Unpublished {
+                ticket: sealed.ticket,
+            })
     }
 
     fn check_receipt_deadline(
@@ -307,7 +343,7 @@ impl<P: RecordPlane> Recorder<P> {
     }
 
     fn start_pending(&mut self) -> Admit {
-        if self.quiesced || self.receipt_overdue.is_some() {
+        if self.quiesced || self.receipt_overdue.is_some() || self.failed_seal.is_some() {
             return Admit::Queued;
         }
         let ticket = match self.plane.start(LOOKBACK_SECONDS, CAP_SECONDS) {
