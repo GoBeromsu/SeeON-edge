@@ -5,11 +5,13 @@
 //! serves requests until its stop flag is set or every request sender is gone.
 //! A model is opened only when its spawn is called.
 
+mod fall_reply;
+
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc::{self, Receiver, RecvTimeoutError, SyncSender, TrySendError};
+use std::sync::mpsc::{self, Receiver, RecvTimeoutError, SyncSender};
 use std::thread;
 
 use seeon_deepstream_native::GpuModel;
@@ -56,19 +58,8 @@ pub fn spawn_fall(
                 return;
             };
             serve(&stop, &queue, |request| {
-                let response = FallResponse {
-                    frame: request.frame,
-                    track_id: request.track_id,
-                    score: fall
-                        .score(request.window.as_slice())
-                        .map(Into::into)
-                        .map_err(Into::into),
-                };
-                // A full response queue drops this score; a gone policy ends the owner.
-                !matches!(
-                    responses.try_send(response),
-                    Err(TrySendError::Disconnected(_))
-                )
+                let score = fall.score(request.window.as_slice());
+                fall_reply::send(&request, score, &responses, &actor_state, &stop)
             });
         })?;
     Ok((
