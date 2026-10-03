@@ -282,6 +282,9 @@ _SYNTHETIC_RTSP_FIXTURES = {
     Path("tests/test_public_repository_privacy.py"): {
         "rtsps://operator:not-a-fixture@camera.example/stream",
         "rtsps://operator:secret@camera.example/stream",
+        # Negative scanner corpus, not approved for the media-assembly fixture.
+        "rtsp://viewer:changed-s3cret@camera-a.invalid:554/Streaming/Channels/101",
+        "rtsp://User:PaSS@camera-b.invalid/Live/Bed-2?token=changed-AbC",
     },
     # Native-frame grab tests prove the credentialed URL never reaches a log or
     # an error message; the fixture must therefore carry a (fake) credential.
@@ -290,6 +293,17 @@ _SYNTHETIC_RTSP_FIXTURES = {
     },
     Path("tests/test_deepstream_adapter_plane.py"): {
         "rtsp://user:secret@camera.example/native",
+    },
+    Path("worker/bin/tests/run_media_config.rs"): {
+        # camera-a.invalid / camera-b.invalid 은 RFC 2606 예약 도메인이고
+        # viewer:s3cret, User:PaSS, user:hidden-pass, token=AbC 는 고정 더미다.
+        # 대소문자 스킴 정규화 후에도 userinfo/path/query 가 그대로 남는지
+        # 증명하는 리터럴이라 허용 목록은 접힌 스펠링까지 정확히 적는다.
+        "rtsp://viewer:s3cret@camera-a.invalid:554/Streaming/Channels/101",
+        "RTSP://viewer:s3cret@camera-a.invalid:554/Streaming/Channels/101",
+        "Rtsp://User:PaSS@camera-b.invalid/Live/Bed-2?token=AbC",
+        "rtsp://User:PaSS@camera-b.invalid/Live/Bed-2?token=AbC",
+        "rtsp://user:hidden-pass@camera-b.invalid/live",
     },
 }
 _TEXT_PATTERNS = {
@@ -696,6 +710,39 @@ def test_text_scanner_rejects_encoded_payloads(text: str, expected_label: str) -
 
 def test_text_scanner_allows_short_encoded_looking_text() -> None:
     assert _text_violation_labels(Path("synthetic-input.txt"), "A" * 63) == set()
+
+
+_RUN_MEDIA_CONFIG = Path("worker/bin/tests/run_media_config.rs")
+_REVIEWED_RUN_MEDIA_RTSP = "rtsp://viewer:s3cret@camera-a.invalid:554/Streaming/Channels/101"
+
+
+def test_reviewed_run_media_config_rtsp_fixture_is_allowed() -> None:
+    assert _REVIEWED_RUN_MEDIA_RTSP in _SYNTHETIC_RTSP_FIXTURES[_RUN_MEDIA_CONFIG]
+    assert _text_violation_labels(_RUN_MEDIA_CONFIG, _REVIEWED_RUN_MEDIA_RTSP) == set()
+
+
+@pytest.mark.parametrize(
+    ("text", "expected_label"),
+    [
+        (
+            "rtsp://viewer:changed-s3cret@camera-a.invalid:554/Streaming/Channels/101",
+            "credentialed-rtsp",
+        ),
+        (
+            "rtsp://User:PaSS@camera-b.invalid/Live/Bed-2?token=changed-AbC",
+            "rtsp-query-secret",
+        ),
+    ],
+)
+def test_changed_run_media_config_rtsp_secret_is_rejected(text: str, expected_label: str) -> None:
+    labels = _text_violation_labels(_RUN_MEDIA_CONFIG, text)
+    assert expected_label in labels
+
+
+def test_reviewed_run_media_config_rtsp_is_rejected_outside_its_source() -> None:
+    other = Path("worker/bin/tests/other_media_config.rs")
+    labels = _text_violation_labels(other, _REVIEWED_RUN_MEDIA_RTSP)
+    assert "credentialed-rtsp" in labels
 
 
 @pytest.mark.parametrize(

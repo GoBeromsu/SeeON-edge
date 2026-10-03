@@ -60,9 +60,9 @@ fn roster() -> Vec<RuntimeCamera> {
     vec![
         camera(
             "cam-a",
-            "rtsp://viewer:s3cret@10.1.2.3:554/Streaming/Channels/101",
+            "rtsp://viewer:s3cret@camera-a.invalid:554/Streaming/Channels/101",
         ),
-        camera("cam-b", "rtsp://10.9.8.7/live/bed-2"),
+        camera("cam-b", "rtsp://camera-b.invalid/live/bed-2"),
     ]
 }
 
@@ -145,19 +145,20 @@ fn two_distinct_rtsp_sources_keep_admitted_fields_and_image_policy() {
 #[test]
 fn uppercase_rtsp_scheme_is_folded_without_touching_credentials_or_path() {
     let mut cameras = roster();
-    cameras[0].rtsp_url = "RTSP://viewer:s3cret@10.1.2.3:554/Streaming/Channels/101".to_owned();
-    cameras[1].rtsp_url = "Rtsp://User:PaSS@10.9.8.7/Live/Bed-2?token=AbC".to_owned();
+    cameras[0].rtsp_url =
+        "RTSP://viewer:s3cret@camera-a.invalid:554/Streaming/Channels/101".to_owned();
+    cameras[1].rtsp_url = "Rtsp://User:PaSS@camera-b.invalid/Live/Bed-2?token=AbC".to_owned();
     let MediaAssembly::Configured(config) = assemble(&flow(2), &cameras, BOOT).expect("configured")
     else {
         panic!("nonempty roster must not be idle");
     };
     assert_eq!(
         config.sources[0].uri,
-        "rtsp://viewer:s3cret@10.1.2.3:554/Streaming/Channels/101"
+        "rtsp://viewer:s3cret@camera-a.invalid:554/Streaming/Channels/101"
     );
     assert_eq!(
         config.sources[1].uri,
-        "rtsp://User:PaSS@10.9.8.7/Live/Bed-2?token=AbC"
+        "rtsp://User:PaSS@camera-b.invalid/Live/Bed-2?token=AbC"
     );
     assert!(config.sources[1].uri.contains("PaSS"));
     assert!(config.sources[1].uri.contains("Live/Bed-2"));
@@ -186,7 +187,7 @@ fn roster_above_sixteen_and_batch_mismatch_are_refused_without_wrapping() {
         .map(|index| {
             camera(
                 &format!("cam-{index}"),
-                &format!("rtsp://10.0.0.{index}/live"),
+                &format!("rtsp://camera-b.invalid/live/{index}"),
             )
         })
         .collect();
@@ -223,7 +224,7 @@ fn invalid_boot_id_and_non_rtsp_source_are_typed_refusals() {
     assert_eq!(error, MediaConfigError::BootId);
 
     let mut cameras = roster();
-    cameras[1].rtsp_url = "rtsp://user:hidden-pass@10.0.0.8/live".replace("rtsp", "file");
+    cameras[1].rtsp_url = "rtsp://user:hidden-pass@camera-b.invalid/live".replace("rtsp", "file");
     let error = assemble(&flow(2), &cameras, BOOT).err().expect("uri");
     assert_eq!(error, MediaConfigError::Uri { index: 1 });
 }
