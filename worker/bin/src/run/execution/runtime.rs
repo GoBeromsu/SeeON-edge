@@ -444,14 +444,7 @@ fn turn(
         .ok_or(RuntimeError::MediaFatal)?;
     let (pump, poses, stop) = session.queue_ends();
     pump_queue_turn(pump, poses, &owner.requests, responses, stop, sink, budget)?;
-    session.publications.tick_recorders();
-    let published = session
-        .publications
-        .drain_records(clock)
-        .map_err(RuntimeError::Publication)?;
-    if published && let Some(sender) = &session.sender {
-        sender.wake();
-    }
+    advance_recordings(session, clock)?;
     if let Some(media) = &session.media {
         let snapshot = media.diagnostics.snapshot();
         if let Some(exit) = snapshot.failure {
@@ -462,6 +455,26 @@ fn turn(
         }
     }
     Ok(())
+}
+
+fn drain_recordings(session: &mut Session, clock: &dyn Clock) -> Result<(), RuntimeError> {
+    let published = session
+        .publications
+        .drain_records(clock)
+        .map_err(RuntimeError::Publication)?;
+    if published && let Some(sender) = &session.sender {
+        sender.wake();
+    }
+    Ok(())
+}
+
+fn advance_recordings(session: &mut Session, clock: &dyn Clock) -> Result<(), RuntimeError> {
+    let receipt_observation_cutoff = clock.monotonic();
+    drain_recordings(session, clock)?;
+    session
+        .publications
+        .tick_recorders(receipt_observation_cutoff)
+        .map_err(RuntimeError::Publication)
 }
 
 fn deliver(
@@ -553,12 +566,18 @@ fn deliver(
                     sender.wake();
                 }
             }
+            // Staging can span the receipt deadline. Observe queued evidence
+            // before admission checks the immutable delivery budget, using a
+            // cutoff sampled before the drain rather than after its work.
+            let receipt_observation_cutoff = clock.monotonic();
+            drain_recordings(session, clock)?;
             let recording = session
                 .publications
                 .admit_recording(
                     stager,
                     &pending.event,
                     pending.staged.as_ref().ok_or(RuntimeError::Identity)?,
+                    receipt_observation_cutoff,
                 )
                 .map_err(RuntimeError::Publication)?;
             if let crate::clips::recorder::Admit::Refused(refusal) = &recording {

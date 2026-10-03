@@ -14,6 +14,8 @@ use crate::run::execution::publication;
 use crate::run::pump::{CameraPolicy, PolicyPump, PolicySink};
 use crate::seam::{IdSource, RandomIds, SystemClock};
 
+#[path = "runtime_receipt_tests.rs"]
+mod receipt_tests;
 #[path = "runtime_replay_tests.rs"]
 mod replay_tests;
 

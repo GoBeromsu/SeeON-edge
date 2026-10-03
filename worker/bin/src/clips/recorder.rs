@@ -2,10 +2,11 @@
 //!
 //! Recording is always on until `quiesce`: there is no toggle and no restart.
 //! Alerts start a recording or extend the running one up to `CAP_SECONDS`;
-//! alerts that race a stop wait for the next recording. A sealed recording is
-//! handed to a save callback and the recorder returns to idle whatever the
-//! save returned (X18: the Python actor stays in FINALIZING when its sink
-//! raises).
+//! alerts that race a stop or reach the cap wait for the next recording.
+//! A missing receipt latches a failure after the cap plus native completion
+//! grace, without stopping or forgetting native work. A matching receipt still
+//! saves once and returns to idle whatever the save returned (X18: the Python
+//! actor stays in FINALIZING when its sink raises), but cannot clear that failure.
 //!
 //! `quiesce` is a one-way admission guard for process shutdown. It does not
 //! stop, finalize, or close the native recording: the media owner still does
@@ -32,10 +33,13 @@ use crate::seam::Clock;
 pub use plane::{CommandPlane, PlaneRefusal, RecordPlane};
 pub use types::{Admit, Boundary, ClipSealed, Counters, RecorderError, State};
 
-/// The recording length the media plane is asked for, and the hard deadline.
+/// The recording length the media plane is asked for, and the content cap.
 pub const CAP_SECONDS: u32 = 120;
+/// Native's forward window plus this grace bounds receipt delivery, not content.
+pub const NATIVE_COMPLETION_GRACE_SECONDS: u32 = 30;
 pub const EXTENSION_SECONDS: u32 = 45;
 pub const LOOKBACK_SECONDS: u32 = (FLOW_LOOKBACK_MILLIS / 1000) as u32;
+/// The admission budget for each of the active and pending contributor sets.
 pub const MAX_PENDING_ALERTS: usize = 128;
 const SEALED_MEMORY: usize = 64;
 /// Native uses this sentinel for an unassigned SDK session. It is never a session.
@@ -51,6 +55,8 @@ pub struct Recorder<P: RecordPlane> {
     contributors: Vec<Contributor>,
     ticket: Option<RecordTicket>,
     hard_deadline: Duration,
+    receipt_deadline: Duration,
+    receipt_overdue: Option<RecordTicket>,
     stop_due: Duration,
     sealed: VecDeque<RecordTicket>,
     counters: Counters,
@@ -69,6 +75,8 @@ impl<P: RecordPlane> Recorder<P> {
             contributors: Vec::new(),
             ticket: None,
             hard_deadline: Duration::ZERO,
+            receipt_deadline: Duration::ZERO,
+            receipt_overdue: None,
             stop_due: Duration::ZERO,
             sealed: VecDeque::new(),
             counters: Counters::default(),
@@ -111,51 +119,98 @@ impl<P: RecordPlane> Recorder<P> {
         Ok(std::mem::take(&mut self.pending))
     }
 
+    /// Bounds active and pending admissions before retaining an alert. Drain
+    /// actual receipts first; neither alerts nor refusals renew receipt delivery.
     pub fn admit(&mut self, event_ref: &str, detected_at: Utc) -> Result<Admit, RecorderError> {
+        self.admit_observed(event_ref, detected_at, None)
+    }
+
+    /// Uses the queue owner's cutoff sampled before draining receipts. Content
+    /// scheduling still uses current time, not that observation cutoff.
+    pub(crate) fn admit_with_receipt_observation_cutoff(
+        &mut self,
+        event_ref: &str,
+        detected_at: Utc,
+        receipt_observation_cutoff: Duration,
+    ) -> Result<Admit, RecorderError> {
+        self.admit_observed(event_ref, detected_at, Some(receipt_observation_cutoff))
+    }
+
+    fn admit_observed(
+        &mut self,
+        event_ref: &str,
+        detected_at: Utc,
+        receipt_observation_cutoff: Option<Duration>,
+    ) -> Result<Admit, RecorderError> {
         if event_ref.trim().is_empty() {
             return Err(RecorderError::BlankEventRef);
         }
-        let alert = Contributor {
-            event_ref: event_ref.to_owned(),
-            detected_at,
-        };
+        let now = self.clock.monotonic();
+        self.check_receipt_deadline(receipt_observation_cutoff.unwrap_or(now))?;
         if self.quiesced {
             // Late alerts stay pending. They are not attributed to media that
             // is already stopping, and they are not started.
-            self.enqueue(alert)?;
+            self.enqueue(event_ref, detected_at)?;
             return Ok(Admit::Queued);
         }
         match self.state {
-            State::Recording => {
+            State::Recording if now < self.hard_deadline => {
+                if self.contributors.len() >= MAX_PENDING_ALERTS {
+                    return Err(RecorderError::ContributorsFull);
+                }
+                let alert = Contributor {
+                    event_ref: event_ref.to_owned(),
+                    detected_at,
+                };
                 self.counters.sequence += 1;
-                self.extend(alert);
+                self.extend(alert, now);
                 Ok(Admit::Extended)
             }
-            State::Stopping | State::Finalizing => {
-                self.enqueue(alert)?;
+            State::Recording | State::Stopping | State::Finalizing => {
+                self.enqueue(event_ref, detected_at)?;
                 self.boundary = Boundary::ExtensionRaced;
                 self.counters.raced += 1;
                 Ok(Admit::Queued)
             }
             State::Idle => {
-                self.enqueue(alert)?;
+                self.enqueue(event_ref, detected_at)?;
                 Ok(self.start_pending())
             }
         }
     }
 
     /// Starts waiting alerts when idle and stops a recording whose extension
-    /// window closed before the cap. After `quiesce`, starts nothing.
-    pub fn tick(&mut self) -> State {
+    /// window closed before the cap. Drain actual receipts before ticking.
+    /// Receipt expiry latches a failure even after `quiesce`, without changing
+    /// native ownership. After quiescence or failure, starts nothing.
+    pub fn tick(&mut self) -> Result<State, RecorderError> {
+        self.tick_observed(None)
+    }
+
+    /// Keeps receipt expiry at the queue owner's pre-drain cutoff throughout a
+    /// sweep, even when another recorder's native work delays this tick.
+    pub(crate) fn tick_with_receipt_observation_cutoff(
+        &mut self,
+        receipt_observation_cutoff: Duration,
+    ) -> Result<State, RecorderError> {
+        self.tick_observed(Some(receipt_observation_cutoff))
+    }
+
+    fn tick_observed(
+        &mut self,
+        receipt_observation_cutoff: Option<Duration>,
+    ) -> Result<State, RecorderError> {
+        let now = self.clock.monotonic();
+        self.check_receipt_deadline(receipt_observation_cutoff.unwrap_or(now))?;
         if self.quiesced {
-            return self.state;
+            return Ok(self.state);
         }
         match self.state {
             State::Idle if !self.pending.is_empty() => {
                 self.start_pending();
             }
-            State::Recording if self.clock.monotonic() >= self.stop_due => {
-                if self.stop_due >= self.hard_deadline {
+            State::Recording if now >= self.stop_due => {
+                if now >= self.hard_deadline {
                     self.boundary = Boundary::ExtensionBounded;
                 } else if let Some(ticket) = self.ticket {
                     self.state = State::Stopping;
@@ -169,12 +224,13 @@ impl<P: RecordPlane> Recorder<P> {
             }
             _ => {}
         }
-        self.state
+        Ok(self.state)
     }
 
     /// Hands a sealed recording to `save`, then returns to idle. Waiting
     /// alerts start only while the recorder has not quiesced. A save failure
-    /// is returned as-is and does not start a recording after quiescence.
+    /// is returned as-is. A latched receipt failure survives a valid late save
+    /// and prevents waiting alerts from starting.
     pub fn on_receipt(
         &mut self,
         receipt: &RecordReceipt,
@@ -205,24 +261,44 @@ impl<P: RecordPlane> Recorder<P> {
         self.ticket = None;
         self.boundary = Boundary::None;
         self.state = State::Idle;
-        if !self.quiesced && !self.pending.is_empty() {
+        if !self.quiesced && self.receipt_overdue.is_none() && !self.pending.is_empty() {
             self.start_pending();
         }
         saved.map_err(RecorderError::Save)
     }
 
-    fn enqueue(&mut self, alert: Contributor) -> Result<(), RecorderError> {
+    fn check_receipt_deadline(
+        &mut self,
+        receipt_observation_cutoff: Duration,
+    ) -> Result<(), RecorderError> {
+        if let Some(ticket) = self.receipt_overdue {
+            return Err(RecorderError::ReceiptOverdue { ticket });
+        }
+        if let Some(ticket) = self.ticket
+            && receipt_observation_cutoff >= self.receipt_deadline
+        {
+            self.receipt_overdue = Some(ticket);
+            return Err(RecorderError::ReceiptOverdue { ticket });
+        }
+        Ok(())
+    }
+
+    fn enqueue(&mut self, event_ref: &str, detected_at: Utc) -> Result<(), RecorderError> {
         if self.pending.len() >= MAX_PENDING_ALERTS {
             return Err(RecorderError::PendingFull);
         }
+        let alert = Contributor {
+            event_ref: event_ref.to_owned(),
+            detected_at,
+        };
         self.counters.sequence += 1;
         self.pending.push(alert);
         Ok(())
     }
 
-    fn extend(&mut self, alert: Contributor) {
+    fn extend(&mut self, alert: Contributor, now: Duration) {
         self.contributors.push(alert);
-        let desired = self.clock.monotonic() + seconds(EXTENSION_SECONDS);
+        let desired = now + seconds(EXTENSION_SECONDS);
         self.stop_due = desired.min(self.hard_deadline);
         if desired >= self.hard_deadline {
             self.boundary = Boundary::ExtensionBounded;
@@ -231,7 +307,7 @@ impl<P: RecordPlane> Recorder<P> {
     }
 
     fn start_pending(&mut self) -> Admit {
-        if self.quiesced {
+        if self.quiesced || self.receipt_overdue.is_some() {
             return Admit::Queued;
         }
         let ticket = match self.plane.start(LOOKBACK_SECONDS, CAP_SECONDS) {
@@ -241,11 +317,13 @@ impl<P: RecordPlane> Recorder<P> {
                 return Admit::Refused(refusal);
             }
         };
+        // Sample after the successful acknowledgement, never before native admission.
         let now = self.clock.monotonic();
         self.contributors.append(&mut self.pending);
         self.ticket = Some(ticket);
         self.boundary = Boundary::None;
         self.hard_deadline = now + seconds(CAP_SECONDS);
+        self.receipt_deadline = self.hard_deadline + seconds(NATIVE_COMPLETION_GRACE_SECONDS);
         self.stop_due = (now + seconds(EXTENSION_SECONDS)).min(self.hard_deadline);
         self.state = State::Recording;
         Admit::Started(ticket)

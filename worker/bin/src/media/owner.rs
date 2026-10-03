@@ -8,7 +8,8 @@
 //! Owner termination is sticky on `Snapshot.failure` before readiness is
 //! sent and before `release` publishes shutdown. That field is the actual
 //! Rust exit, not a native diagnostic or a native-close fact. An explicit
-//! stop leaves it `None`. A known `FatalAccelerator` is never replaced.
+//! stop without a receipt delivery failure leaves it `None`. A known
+//! `FatalAccelerator` is never replaced.
 
 use std::io;
 use std::mem::ManuallyDrop;
@@ -184,8 +185,8 @@ fn serve(owner: &mut MediaOwner, params: &MediaParams, sources: &[u32]) -> Resul
     Ok(())
 }
 
-/// Records the actual owner exit without replacing a known accelerator fault.
-fn record_failure(params: &MediaParams, exit: Exit) {
+/// Records the first owner failure; accelerator faults always take priority.
+pub(super) fn record_failure(params: &MediaParams, exit: Exit) {
     params.diagnostics.update(|snapshot| {
         if snapshot.failure.is_none() || exit == Exit::FatalAccelerator {
             snapshot.failure = Some(exit);

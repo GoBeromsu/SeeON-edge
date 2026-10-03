@@ -13,12 +13,15 @@ use std::time::Duration;
 
 use seeon_deepstream_native::{MediaError, MediaOwner, MediaPoll, MediaResult};
 
-use super::owner::MediaParams;
+use super::owner::{MediaParams, record_failure};
 use super::shutdown::ShutdownControl;
+use crate::exit::Exit;
+use crate::msg::RecordReceipt;
 use crate::poll::poll_until;
 use crate::seam::Clock;
-/// Reading a completion retires its native record slot. While time remains,
-/// read completions even when `record_tx` cannot take the receipt.
+/// Receipt consumption alone does not prove native SDK retirement. While time
+/// remains, keep draining even if delivery fails; release still requires native
+/// status showing no reserved slots before close.
 pub(super) fn drain_records(
     owner: &mut MediaOwner,
     params: &MediaParams,
@@ -30,11 +33,16 @@ pub(super) fn drain_records(
         let MediaPoll::Ready(receipt) = owner.poll_record()? else {
             return Ok(());
         };
-        if params.record_tx.try_send(receipt).is_err() {
-            params
-                .diagnostics
-                .update(|snapshot| snapshot.receipts_dropped += 1);
-        }
+        deliver_record(params, receipt);
+    }
+}
+
+fn deliver_record(params: &MediaParams, receipt: RecordReceipt) {
+    if params.record_tx.try_send(receipt).is_err() {
+        params
+            .diagnostics
+            .update(|snapshot| snapshot.receipts_dropped += 1);
+        record_failure(params, Exit::Runtime);
     }
 }
 
@@ -126,6 +134,9 @@ pub(super) fn release(mut owner: ManuallyDrop<MediaOwner>, params: &MediaParams)
         drop(ManuallyDrop::into_inner(owner));
     }
 }
+
+#[cfg(test)]
+mod record_tests;
 
 #[cfg(test)]
 mod tests {

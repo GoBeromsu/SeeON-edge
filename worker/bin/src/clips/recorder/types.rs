@@ -39,7 +39,7 @@ impl Boundary {
 pub enum Admit {
     Started(RecordTicket),
     Extended,
-    /// The alert waits for the recording after the one being stopped.
+    /// The alert stays pending without extending admitted native work.
     Queued,
     /// The media plane refused to start; the alert stays pending for `tick`.
     Refused(PlaneRefusal),
@@ -51,6 +51,13 @@ pub enum RecorderError {
     NotQuiesced,
     BlankEventRef,
     PendingFull,
+    /// The active recording already owns the admission budget's contributors.
+    ContributorsFull,
+    /// The acknowledged request did not deliver a receipt by its fixed deadline.
+    /// This retains the original admitted identity even after a valid late save.
+    ReceiptOverdue {
+        ticket: RecordTicket,
+    },
     DuplicateRequest(u64),
     UnexpectedRequest(u64),
     WrongSource {

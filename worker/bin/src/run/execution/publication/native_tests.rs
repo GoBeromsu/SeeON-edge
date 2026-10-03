@@ -11,6 +11,8 @@
 mod assertions;
 #[path = "native_tests/fixture.rs"]
 mod fixture;
+#[path = "native_tests/lost_receipt.rs"]
+mod lost_receipt;
 #[path = "native_tests/multi_camera.rs"]
 mod multi_camera;
 #[path = "native_tests/published.rs"]

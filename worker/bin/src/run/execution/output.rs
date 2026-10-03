@@ -716,7 +716,7 @@ pub(super) mod tests {
                 crate::clips::recorder::Admit::Queued
             );
             assert_eq!(recorder.pending(), 1);
-            recorder.tick();
+            recorder.tick().expect("quiesced unstarted recorder");
         }
         session.request_media_stop();
         assert!(

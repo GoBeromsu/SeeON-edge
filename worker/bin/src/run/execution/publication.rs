@@ -335,11 +335,13 @@ impl Publications {
             .position(|(_, _, id, _)| id == camera_id)
     }
 
+    /// The receipt cutoff must be sampled before the preceding receipt drain.
     pub fn admit_recording(
         &mut self,
         index: usize,
         event: &seeon_worker::episode::BusinessEvent,
         staged: &StagedEvent,
+        receipt_observation_cutoff: Duration,
     ) -> Result<Admit, PublicationError> {
         let (_, _, camera_id, facility_id) =
             self.cameras.get(index).ok_or(PublicationError::Identity)?;
@@ -352,7 +354,11 @@ impl Publications {
         let detected_at =
             Utc::parse(&staged.detected_at).map_err(|_| PublicationError::Timestamp)?;
         let outcome = self.recorders[index]
-            .admit(&staged.event_ref, detected_at)
+            .admit_with_receipt_observation_cutoff(
+                &staged.event_ref,
+                detected_at,
+                receipt_observation_cutoff,
+            )
             .map_err(PublicationError::Recorder)?;
         self.events.insert(
             event.identity.clone(),
@@ -369,10 +375,17 @@ impl Publications {
         Ok(outcome)
     }
 
-    pub fn tick_recorders(&mut self) {
+    /// One pre-drain cutoff covers all recorders, not their content scheduling.
+    pub fn tick_recorders(
+        &mut self,
+        receipt_observation_cutoff: Duration,
+    ) -> Result<(), PublicationError> {
         for recorder in &mut self.recorders {
-            recorder.tick();
+            recorder
+                .tick_with_receipt_observation_cutoff(receipt_observation_cutoff)
+                .map_err(PublicationError::Recorder)?;
         }
+        Ok(())
     }
 
     pub fn prepare(
@@ -574,7 +587,7 @@ mod tests {
             let mut prepared = prepared;
             let staged = output.stage(index, &mut prepared, &mut |_| {}).unwrap();
             assert!(matches!(
-                output.admit_recording(index, &event, &staged),
+                output.admit_recording(index, &event, &staged, clock.monotonic()),
                 Ok(Admit::Started(_))
             ));
         }

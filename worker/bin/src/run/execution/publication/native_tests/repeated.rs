@@ -17,6 +17,7 @@ use super::receipt;
 use super::support::{ACTUAL_MEDIA, BOOT_ID, Started};
 use super::wait::poll_until;
 use crate::msg::RecordReceipt;
+use crate::seam::Clock;
 
 const SECOND_EVENT: &str = "00000000-0000-4000-8000-000000000072";
 
@@ -123,12 +124,18 @@ fn publish_twice(overall: Instant) {
 
 fn running_receipt(started: &mut Started, deadline: Instant) -> RecordReceipt {
     poll_until(deadline, "scheduled native receipt deadline", || {
-        started.publications.tick_recorders();
         let status = started.diagnostics().snapshot();
         assert!(!status.fatal && status.failure.is_none(), "{status:?}");
+        let receipt_observation_cutoff = started.clock.monotonic();
         match started.publications.records.try_recv() {
             Ok(receipt) => Some(receipt),
-            Err(TryRecvError::Empty) => None,
+            Err(TryRecvError::Empty) => {
+                started
+                    .publications
+                    .tick_recorders(receipt_observation_cutoff)
+                    .unwrap();
+                None
+            }
             Err(TryRecvError::Disconnected) => panic!("recording channel disconnected"),
         }
     })

@@ -89,7 +89,7 @@ pub(super) fn admit_for_source(
     let detected_at = Utc::parse(&staged.detected_at).expect("staged detection time");
     let ticket = match started
         .publications
-        .admit_recording(source_index, &event, &staged)
+        .admit_recording(source_index, &event, &staged, started.clock.monotonic())
         .expect("admit recording")
     {
         crate::clips::recorder::Admit::Started(ticket) => ticket,
