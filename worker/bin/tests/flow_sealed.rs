@@ -34,6 +34,9 @@ use seeon_ml_worker::delivery::DeliveryQueue;
 const A: &str = "sealed-a-non-ascii";
 const B: &str = "sealed-b-out-of-order";
 
+#[path = "support/sealed_process_recovery.rs"]
+mod process_recovery;
+
 fn wire() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures/worker-wire")
 }
@@ -526,8 +529,10 @@ enum Kill {
     AfterPutBeforeRetire,
 }
 
+/// Models partial filesystem states using panic unwinding, not process death.
+/// The process_recovery module separately verifies actual SIGKILL boundaries.
 #[test]
-fn kill_between_persist_and_put_publishes_exactly_one_clip() {
+fn modelled_publication_interruptions_replay_to_one_clip() {
     let cases = cases();
     for kill in [
         Kill::AfterPersist,
@@ -576,7 +581,7 @@ fn kill_between_persist_and_put_publishes_exactly_one_clip() {
                         }
                     })
             }));
-            assert!(killed.is_err(), "{kill:?}: the worker died");
+            assert!(killed.is_err(), "{kill:?}: the callback panicked");
         }
         assert_eq!(
             fs::read(&sidecar).expect("sidecar after crash"),
