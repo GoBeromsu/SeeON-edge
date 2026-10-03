@@ -8,8 +8,8 @@ use std::process::{Child, ChildStdin, ChildStdout, Command, ExitStatus, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
 
+use super::worker::seam::{IdSource, RandomIds};
 use rustix::fs::{OFlags, fcntl_getfl, fcntl_setfl};
-use seeon_ml_worker::seam::{IdSource, RandomIds};
 use serde_json::{Value, json};
 
 pub const RELAY_TOKEN: &str = "relay-token";

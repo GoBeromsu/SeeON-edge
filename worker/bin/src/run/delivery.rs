@@ -18,6 +18,10 @@ use crate::shutdown::ShutdownDeadline;
 
 const WAKE_CAPACITY: usize = 1;
 
+#[cfg(test)]
+#[path = "delivery_backend_tests.rs"]
+mod backend_tests;
+
 /// Why the owner thread ended. Not evidence that entries were delivered.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum StopReason {
