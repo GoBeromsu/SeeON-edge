@@ -74,11 +74,19 @@ void complete_callback(SeeonMedia &m, RecordSlot &slot) noexcept {
     }
   }
 }
+// A started session is not finished until sr-done or proven NULL retirement.
+// Publishing Stale here would win first-writer-wins and discard that receipt.
+bool recording_started(const RecordSlot &slot) noexcept {
+  return slot.sdk_pending && slot.session.load() != kNoSession;
+}
 void expire(SeeonMedia &m, RecordSlot &slot) noexcept {
   const auto phase = slot.phase.load();
   if (phase == RecordPhase::Unused || phase == RecordPhase::Ready || phase == RecordPhase::Consumed) return;
   if (m.fatal.load()) {
     deliver(slot, SEEON_MEDIA_FATAL, SeeonMediaError(unpack(m.fatal.load()).code));
+  } else if (recording_started(slot) && Clock::now() < slot.deadline) {
+    if (m.stop_requested.load()) slot.stop_requested.store(true);
+    return; // Leave the vendor callback as the only genuine receipt writer.
   } else if (m.stop_requested.load() || (phase == RecordPhase::Queued && admission(m) != SEEON_MEDIA_OK)) {
     deliver(slot, SEEON_MEDIA_STALE, SEEON_MEDIA_ERROR_CANCELLED);
   } else if (Clock::now() >= slot.deadline) {
@@ -196,10 +204,23 @@ void recording_cancel(SeeonMedia &m) {
     auto &slot = m.records[index];
     if (slot.phase.load() == RecordPhase::Unused) continue;
     complete_callback(m, slot);
+    // stop-sr was accepted and sr-done never arrived before NULL. The Stale
+    // receipt stays empty; this warning is the only evidence of that miss.
+    if (slot.stop_sent && slot.sdk_pending) m.warn(SEEON_MEDIA_ERROR_RECORD_TIMEOUT);
     deliver(slot, SEEON_MEDIA_STALE, SEEON_MEDIA_ERROR_CANCELLED);
     slot.sdk_pending = false; slot.action_running = false;
     reap(m, index);
   }
+}
+bool recording_pending(SeeonMedia &m) {
+  std::lock_guard<std::mutex> lock(m.records_mutex);
+  for (uint32_t index = 0; index < m.config.record_capacity; ++index) {
+    const auto &slot = m.records[index];
+    const auto phase = slot.phase.load();
+    if (recording_started(slot) &&
+        (phase == RecordPhase::Starting || phase == RecordPhase::Active)) return true;
+  }
+  return false;
 }
 } // namespace seeon_media
 

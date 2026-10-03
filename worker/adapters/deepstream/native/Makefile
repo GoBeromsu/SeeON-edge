@@ -43,3 +43,20 @@ $(OUT)/libseeon_clipdec.so: clip_decode.cpp clip_decode.h | $(OUT)
 
 clean:
 	rm -f $(LIBRARIES)
+# Opt-in CPU state tests. Not a shipping library and not a dependency of all.
+# media_recording.cpp is included by its test TU; do not compile it again there.
+.PHONY: test-media-recording
+test-media-recording: media_recording_tests.cpp media_shutdown_tests.cpp \
+		media_runtime.cpp media_metadata.cpp media_recording.cpp \
+		media_runtime.h media_internal.h | $(OUT)
+	@$(PKG_CONFIG) --exists gstreamer-1.0 gstreamer-app-1.0
+	$(CXX) -std=c++17 -O2 -Wall -Wextra -Werror -o $(OUT)/media_recording_tests \
+		media_recording_tests.cpp media_runtime.cpp media_metadata.cpp \
+		$(DS_INCLUDES) $(GST_FLAGS) -L$(DEEPSTREAM)/lib -lnvdsgst_meta -lnvds_meta -lpthread \
+		-Wl,--no-undefined
+	$(CXX) -std=c++17 -O2 -Wall -Wextra -Werror -o $(OUT)/media_shutdown_tests \
+		media_shutdown_tests.cpp media_runtime.cpp media_metadata.cpp media_recording.cpp \
+		$(DS_INCLUDES) $(GST_FLAGS) -L$(DEEPSTREAM)/lib -lnvdsgst_meta -lnvds_meta -lpthread \
+		-Wl,--no-undefined
+	$(OUT)/media_recording_tests
+	$(OUT)/media_shutdown_tests

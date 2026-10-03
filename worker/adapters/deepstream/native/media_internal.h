@@ -26,6 +26,11 @@ using Clock = std::chrono::steady_clock;
 constexpr uint32_t kMaxUserMeta = 64, kMaxLayers = 32;
 constexpr uint32_t kProbeFailureThreshold = 3;
 constexpr uint64_t kNoSession = UINT64_MAX;
+// First stop call owns this split. Later calls must not move it: a repeated
+// stop with a longer deadline cannot reclaim time already reserved for NULL.
+constexpr uint32_t finalize_budget_ms(uint32_t deadline_ms) noexcept {
+  return deadline_ms / 2;
+}
 static_assert(std::atomic<uint64_t>::is_always_lock_free, "SDK counters must not block");
 struct Failure { SeeonMediaError code; };
 inline void require(bool ok, SeeonMediaError code) { if (!ok) throw Failure{code}; }
@@ -196,6 +201,11 @@ struct SeeonMedia {
   bool control_joined = false; // Serialized C owner only; Linux DeepStream.
   std::atomic<SeeonMediaState> state{SEEON_MEDIA_OPEN};
   std::atomic<bool> admitting{false}, stop_requested{false}, exited{false};
+  // API stop sets this once, at half the first deadline. Control reads it.
+  // Recording finalize runs after stop_requested and before this flag.
+  std::atomic<bool> teardown_requested{false};
+  seeon_media::Clock::time_point teardown_at{};
+  bool teardown_budget_set = false; // API owner only. First stop freezes teardown_at.
   std::atomic<bool> stop_timed_out{false};
   std::atomic<uint64_t> fatal{0}, warning{0}, warnings{0}, capacity_refusals{0};
   std::atomic<uint64_t> preview_dropped{0}, late_record_callbacks{0};
@@ -301,6 +311,8 @@ void preview_cancel(SeeonMedia &); // Control task, after callbacks disconnect.
 void record_done(GstElement *, gpointer, gpointer, gpointer) noexcept;
 void recording_tick(SeeonMedia &);
 void recording_cancel(SeeonMedia &);
+// True while a started session can still receive a genuine sr-done receipt.
+bool recording_pending(SeeonMedia &);
 void disconnect(SeeonMedia &) noexcept;
 void release_graph(SeeonMedia &) noexcept; // Only before start or after quiescence.
 } // namespace seeon_media

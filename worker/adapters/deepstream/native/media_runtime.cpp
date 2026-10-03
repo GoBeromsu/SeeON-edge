@@ -463,6 +463,22 @@ void *control_main(void *data) noexcept {
   }
   m->admitting.store(false);
   m->state.store(SEEON_MEDIA_STOPPING);
+  // stop-sr then sr-done, on the same context the SDK timers use, before NULL.
+  // The API thread ends this phase at the frozen half-budget; fatal does too.
+  // No pending started session means the first check adds no wait.
+  while (!m->teardown_requested.load() && !m->fatal.load()) {
+    try {
+      if (context.acquired) {
+        for (unsigned dispatched = 0; dispatched < 16; ++dispatched) {
+          if (!g_main_context_iteration(context.context, FALSE)) break;
+        }
+      }
+      recording_tick(*m);
+      if (!recording_pending(*m)) break;
+    } catch (const Failure &failure) { m->fail(failure.code); break; }
+    catch (...) { m->fail(SEEON_MEDIA_ERROR_EXCEPTION); break; }
+    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+  }
   try {
     // Close entry before shutdown. NULL may be needed to unblock an already
     // leased vendor call; retain its owner throughout, then disconnect and await
@@ -624,9 +640,20 @@ extern "C" SeeonMediaResult seeon_media_read_status(SeeonMedia *m, SeeonMediaSta
 }
 extern "C" SeeonMediaResult seeon_media_stop(SeeonMedia *m, uint32_t deadline_ms) {
   return api(m, [&]() -> SeeonMediaResult {
-    const auto deadline = Clock::now() + std::chrono::milliseconds(deadline_ms);
+    const auto now = Clock::now();
+    const auto deadline = now + std::chrono::milliseconds(deadline_ms);
+    // Freeze the split on the first call. A later stop observes the same
+    // instant, so a longer repeated deadline cannot extend recording finalize
+    // into the half reserved for NULL, disconnect, and callback drain.
+    if (!m->teardown_budget_set) {
+      m->teardown_at = now + std::chrono::milliseconds(finalize_budget_ms(deadline_ms));
+      m->teardown_budget_set = true;
+    }
+    const auto teardown_at = m->teardown_at;
     m->admitting.store(false); m->stop_requested.store(true);
+    if (Clock::now() >= teardown_at) m->teardown_requested.store(true);
     while (!m->control_joined) {
+      if (Clock::now() >= teardown_at) m->teardown_requested.store(true);
       if (m->exited.load()) {
         // A completion flag alone does not prove thread exit: vendor TLS
         // destructors may still be running. Never perform an unbounded join.

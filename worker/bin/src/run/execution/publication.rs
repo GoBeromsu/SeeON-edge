@@ -395,6 +395,9 @@ pub fn channels() -> (
     (commands.0, commands.1, records.0, records.1)
 }
 #[cfg(test)]
+#[path = "publication/native_tests.rs"]
+mod native_tests;
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::records::builder::{Frame, Stream};

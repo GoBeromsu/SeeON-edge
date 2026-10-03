@@ -1,5 +1,8 @@
-//! Release of the media owner (design §2.3). Stop cancels open recordings;
-//! their slots stay reserved until the completions are read. Native close
+//! Release of the media owner (design §2.3). Native stop finalizes a started
+//! recording through stop-sr within the first half of this call's remaining
+//! budget, then reserves the rest for graph teardown. A later stop cannot
+//! move that split. A queued recording that never started is cancelled, and
+//! its slot stays reserved until the completion is read. Native close
 //! over a reserved slot corrupts the process heap, so close runs only after
 //! a proven stop, a status read showing no slot reserved, and root permission
 //! before the shared deadline. Otherwise retain the handle until process exit.
