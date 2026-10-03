@@ -335,6 +335,7 @@ name = "seeon-worker-runtime"
 version = "0.1.0"
 dependencies = [
  "seeon-deepstream-native",
+ "seeon-onnxruntime-native",
  "seeon-worker",
  "serde_json",
  "sha2",

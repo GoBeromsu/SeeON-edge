@@ -11,8 +11,9 @@ path = "src/lib.rs"
 [dependencies]
 seeon-worker = { path = "../../rust" }
 seeon-deepstream-native = { path = "../../adapters/deepstream/rust" }
+seeon-onnxruntime-native = { path = "../../adapters/model/onnxruntime" }
 
 [dev-dependencies]
-# D3: fixture and manifest verification in the GPU parity lane only.
+# D3: fixture and manifest verification for the explicit inference providers.
 serde_json = "=1.0.151"
 sha2 = "=0.11.0"

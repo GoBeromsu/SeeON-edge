@@ -90,8 +90,10 @@ their runtime loader paths. `Dockerfile.edge` prepares these libraries in its
 provider fallback.
 
 The separate `worker/adapters/model/onnxruntime` Rust owner executes captured
-ONNX bytes through the existing ONNX Runtime CPU library. It is not yet wired
-into the production worker loop. Its native Makefile requires `ORT_INCLUDE_DIR`
+ONNX bytes through the existing ONNX Runtime CPU library. The role owners in
+`worker/runtime/rust/src/cpu` connect it to existing RGB preprocessing, ordered
+person-box decoding, bed tensors and fall windows. These are not yet wired into
+the production worker loop. The native Makefile requires `ORT_INCLUDE_DIR`
 with three digest-checked API-29 headers; their immutable source and hashes are
 listed in that Makefile. `make test-ort` additionally requires a Python
 environment with ONNX, NumPy, and ONNX Runtime 1.29.0.
