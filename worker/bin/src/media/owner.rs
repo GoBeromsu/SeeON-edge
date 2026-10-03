@@ -22,6 +22,7 @@ use std::time::Duration;
 use seeon_deepstream_native::{MediaConfig, MediaError, MediaOwner, MediaPoll, MediaResult};
 
 use super::diagnostics::Diagnostics;
+use super::record_start;
 use super::record_stop;
 use super::release::{drain_records, release};
 use super::shutdown::ShutdownControl;
@@ -156,8 +157,9 @@ fn run(params: &MediaParams, ready: &SyncSender<Readiness>) {
 /// failed status read, is `Runtime`. A successful status whose result is
 /// fatal is `FatalAccelerator`, matching the existing root media-fatal policy.
 fn serve(owner: &mut MediaOwner, params: &MediaParams, sources: &[u32]) -> Result<(), Exit> {
+    let mut record_requests = record_start::Sequence::new();
     while !params.stop.load(Ordering::SeqCst) {
-        execute_commands(owner, params);
+        execute_commands(owner, params, &mut record_requests);
         let polled = sources
             .iter()
             .enumerate()
@@ -193,7 +195,11 @@ fn record_failure(params: &MediaParams, exit: Exit) {
 
 /// Executes at most `COMMAND_CAPACITY` queued commands. A reply nobody
 /// waits for any more is counted; the command itself has already run.
-fn execute_commands(owner: &mut MediaOwner, params: &MediaParams) {
+fn execute_commands(
+    owner: &mut MediaOwner,
+    params: &MediaParams,
+    record_requests: &mut record_start::Sequence,
+) {
     for _ in 0..COMMAND_CAPACITY {
         let Ok(command) = params.commands.try_recv() else {
             return;
@@ -202,15 +208,15 @@ fn execute_commands(owner: &mut MediaOwner, params: &MediaParams) {
             Command::RecordStart {
                 source_id,
                 binding,
-                request_id,
                 lookback_seconds,
                 forward_seconds,
                 reply,
             } => {
-                let started = owner.record_start(
+                let started = record_start::start(
+                    owner,
+                    record_requests,
                     source_id,
                     binding,
-                    request_id,
                     lookback_seconds,
                     forward_seconds,
                 );

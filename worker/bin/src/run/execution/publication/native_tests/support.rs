@@ -12,7 +12,7 @@ use std::time::{Duration, Instant};
 use seeon_deepstream_native::MediaBinding;
 
 use super::super::{PublicationConfig, Publications, channels, open};
-use super::fixture::{evidence_dir, media_config, prepared_record_dir};
+use super::fixture::{evidence_dir, prepared_record_dir};
 use super::wait::poll_until;
 use crate::media::diagnostics::Diagnostics;
 use crate::media::owner::{self, MediaParams};
@@ -26,8 +26,45 @@ pub(super) const CAMERA_ID: &str = "cam-native-receipt";
 pub(super) const FACILITY_ID: &str = "fac-native-receipt";
 pub(super) const EVENT_IDENTITY: &str = "00000000-0000-4000-8000-000000000071";
 pub(super) const BOOT_ID: &str = "00000000-0000-4000-8000-000000000099";
+pub(super) const SECOND_EVENT_IDENTITY: &str = "00000000-0000-4000-8000-000000000073";
+pub(super) const SECOND_SOURCE_ID: u32 = 1;
+pub(super) const FIRST_RECORD_PREFIX: &str = "synthetic";
+pub(super) const SECOND_RECORD_PREFIX: &str = "synthetic-two";
 const STOP_MS: u32 = 5_000;
 const SHUTDOWN_BUDGET: Duration = Duration::from_secs(25);
+
+#[derive(Clone, Copy)]
+pub(super) struct Camera {
+    pub source_id: u32,
+    pub binding: MediaBinding,
+    pub camera_id: &'static str,
+    pub facility_id: &'static str,
+    pub record_prefix: &'static str,
+}
+
+pub(super) const CAMERA_ZERO: Camera = Camera {
+    source_id: SOURCE_ID,
+    binding: MediaBinding {
+        token: 73,
+        generation: 7,
+        epoch: 11,
+    },
+    camera_id: CAMERA_ID,
+    facility_id: FACILITY_ID,
+    record_prefix: FIRST_RECORD_PREFIX,
+};
+pub(super) const CAMERA_ONE: Camera = Camera {
+    source_id: SECOND_SOURCE_ID,
+    binding: MediaBinding {
+        token: 74,
+        generation: 8,
+        epoch: 12,
+    },
+    camera_id: "cam-native-receipt-two",
+    facility_id: "fac-native-receipt-two",
+    record_prefix: SECOND_RECORD_PREFIX,
+};
+pub(super) const CAMERAS: [Camera; 2] = [CAMERA_ZERO, CAMERA_ONE];
 
 pub(super) static ACTUAL_MEDIA: Mutex<()> = Mutex::new(());
 
@@ -44,6 +81,7 @@ pub(super) struct Started {
     pub receipt_tx: std::sync::mpsc::SyncSender<crate::msg::RecordReceipt>,
     pub record_dir: PathBuf,
     pub clock: Arc<SystemClock>,
+    pose_rx: Receiver<crate::msg::PosePacket>,
     _owned: Owned,
     media: Option<MediaGuard>,
 }
@@ -147,23 +185,40 @@ impl MediaGuard {
 
 impl Started {
     pub(super) fn open(overall: Instant) -> Self {
+        Self::open_cameras(overall, &[CAMERA_ZERO])
+    }
+
+    pub(super) fn open_two(overall: Instant) -> Self {
+        Self::open_cameras(overall, &CAMERAS)
+    }
+
+    fn open_cameras(overall: Instant, camera_specs: &[Camera]) -> Self {
         let record_dir = prepared_record_dir();
-        let owned = Owned(evidence_dir("native-publication"));
+        let evidence_name = if camera_specs.len() == 2 {
+            "native-multi-camera"
+        } else {
+            "native-publication"
+        };
+        let owned = Owned(evidence_dir(evidence_name));
         eprintln!("NATIVE_PUBLICATION_RETAINED={}", owned.0.display());
         let state_dir = owned.0.join("state");
         let store_root = owned.0.join("store");
         fs::create_dir(&state_dir).expect("owned state directory");
-        let binding = MediaBinding {
-            token: 73,
-            generation: 7,
-            epoch: 11,
-        };
-        let cameras = [(
-            SOURCE_ID,
-            binding,
-            CAMERA_ID.to_owned(),
-            FACILITY_ID.to_owned(),
-        )];
+        let cameras: Vec<_> = camera_specs
+            .iter()
+            .map(|camera| {
+                (
+                    camera.source_id,
+                    camera.binding,
+                    camera.camera_id.to_owned(),
+                    camera.facility_id.to_owned(),
+                )
+            })
+            .collect();
+        let media_sources: Vec<_> = camera_specs
+            .iter()
+            .map(|camera| (camera.source_id, camera.binding, camera.record_prefix))
+            .collect();
         let (command_tx, command_rx, record_tx, record_rx) = channels();
         let receipt_tx = record_tx.clone();
         let clock = Arc::new(SystemClock::new());
@@ -185,11 +240,17 @@ impl Started {
         let stop = Arc::new(AtomicBool::new(false));
         let deadline = Arc::new(ShutdownDeadline::new(SHUTDOWN_BUDGET).expect("budget"));
         let shutdown = Arc::new(ShutdownControl::new(Arc::clone(&deadline)));
-        let diagnostics = Arc::new(Diagnostics::new(1));
-        let (pose_tx, _pose_rx) = std::sync::mpsc::sync_channel(POSE_PER_CAMERA);
+        let diagnostics = Arc::new(Diagnostics::new(camera_specs.len()));
+        let (pose_tx, pose_rx) =
+            std::sync::mpsc::sync_channel(POSE_PER_CAMERA * camera_specs.len().max(1));
         let (preview_tx, _preview_rx) = std::sync::mpsc::sync_channel(PREVIEW_CAPACITY);
+        let media_config = if camera_specs.len() == 1 {
+            super::fixture::media_config(record_dir.clone(), camera_specs[0].binding)
+        } else {
+            super::fixture::media_config_sources(record_dir.clone(), &media_sources)
+        };
         let (thread, readiness) = owner::spawn(MediaParams {
-            config: media_config(record_dir.clone(), binding),
+            config: media_config,
             open_budget_ms: STOP_MS,
             shutdown: Arc::clone(&shutdown),
             stop: Arc::clone(&stop),
@@ -210,12 +271,13 @@ impl Started {
             clock: Arc::clone(&clock),
             requested: false,
         };
-        wait_ready(&readiness, &media, overall);
+        wait_ready(&readiness, &media, &pose_rx, camera_specs.len(), overall);
         Self {
             publications,
             receipt_tx,
             record_dir,
             clock,
+            pose_rx,
             media: Some(media),
             _owned: owned,
         }
@@ -237,6 +299,10 @@ impl Started {
     pub(super) fn diagnostics(&self) -> Arc<Diagnostics> {
         self.media.as_ref().expect("media").diagnostics()
     }
+
+    pub(super) fn drain_pose_packets(&self) {
+        while self.pose_rx.try_recv().is_ok() {}
+    }
 }
 
 impl Drop for Started {
@@ -246,7 +312,13 @@ impl Drop for Started {
     }
 }
 
-fn wait_ready(readiness: &Receiver<Readiness>, media: &MediaGuard, overall: Instant) {
+fn wait_ready(
+    readiness: &Receiver<Readiness>,
+    media: &MediaGuard,
+    pose_rx: &Receiver<crate::msg::PosePacket>,
+    camera_count: usize,
+    overall: Instant,
+) {
     let ready = poll_until(
         overall.min(Instant::now() + Duration::from_secs(15)),
         "media readiness deadline",
@@ -257,14 +329,17 @@ fn wait_ready(readiness: &Receiver<Readiness>, media: &MediaGuard, overall: Inst
         overall.min(Instant::now() + Duration::from_secs(15)),
         "actual linked video frame deadline",
         || {
+            while pose_rx.try_recv().is_ok() {}
             let snapshot = media.diagnostics.snapshot();
             assert!(
                 !snapshot.fatal && snapshot.failure.is_none(),
                 "{snapshot:?}"
             );
-            snapshot.cameras.first().and_then(|camera| {
-                (camera.video_linked == 1 && camera.published_frames > 0).then_some(())
-            })
+            (snapshot.cameras.len() >= camera_count
+                && snapshot.cameras[..camera_count]
+                    .iter()
+                    .all(|camera| camera.video_linked == 1 && camera.published_frames > 0))
+            .then_some(())
         },
     );
 }

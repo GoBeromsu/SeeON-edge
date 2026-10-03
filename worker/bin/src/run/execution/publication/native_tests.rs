@@ -11,6 +11,8 @@
 mod assertions;
 #[path = "native_tests/fixture.rs"]
 mod fixture;
+#[path = "native_tests/multi_camera.rs"]
+mod multi_camera;
 #[path = "native_tests/published.rs"]
 mod published;
 #[path = "native_tests/receipt.rs"]

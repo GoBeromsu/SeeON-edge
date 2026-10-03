@@ -186,7 +186,6 @@ struct Session {
     _previews: Receiver<PreviewPacket>,
     records: Receiver<RecordReceipt>,
     receipts: Vec<RecordReceipt>,
-    next_request: u64,
 }
 
 impl Session {
@@ -239,7 +238,6 @@ impl Session {
             _previews: previews,
             records,
             receipts: Vec::new(),
-            next_request: 1,
         };
         assert_eq!(readiness.recv_timeout(READY_WAIT), Ok(Ok(())));
         session
@@ -278,12 +276,9 @@ impl Session {
             || {
                 self.drain();
                 let (reply, answer) = mpsc::sync_channel(1);
-                let request_id = self.next_request;
-                self.next_request += 1;
                 let command = Command::RecordStart {
                     source_id: 0,
                     binding: BINDING,
-                    request_id,
                     lookback_seconds: 0,
                     forward_seconds,
                     reply,

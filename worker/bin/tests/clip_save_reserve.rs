@@ -62,15 +62,18 @@ fn media_stand_in() -> (SyncSender<Command>, JoinHandle<()>) {
     let (commands, inbox) = mpsc::sync_channel(COMMAND_CAPACITY);
     let thread = thread::spawn(move || {
         let mut session = 1_u32;
+        let mut request_id = 0_u64;
         while let Ok(command) = inbox.recv() {
             if let Command::RecordStart {
                 source_id,
                 binding,
-                request_id,
                 reply,
                 ..
             } = command
             {
+                request_id = request_id
+                    .checked_add(1)
+                    .expect("test media request sequence does not exhaust");
                 let ticket = RecordTicket {
                     binding,
                     request_id,

@@ -32,6 +32,13 @@ pub(super) fn evidence_dir(name: &str) -> PathBuf {
 }
 
 pub(super) fn media_config(record_directory: PathBuf, binding: MediaBinding) -> MediaConfig {
+    media_config_sources(record_directory, &[(SOURCE_ID, binding, "synthetic")])
+}
+
+pub(super) fn media_config_sources(
+    record_directory: PathBuf,
+    sources: &[(u32, MediaBinding, &'static str)],
+) -> MediaConfig {
     let uri = required("SEEON_TEST_RTSP_URI")
         .into_string()
         .unwrap_or_else(|_| panic!("RTSP test URI must be UTF-8"));
@@ -42,12 +49,15 @@ pub(super) fn media_config(record_directory: PathBuf, binding: MediaBinding) -> 
         assert!(fs::metadata(path).expect("config").is_file());
     }
     MediaConfig {
-        sources: vec![SourceConfig {
-            source_id: SOURCE_ID,
-            binding,
-            uri,
-            record_prefix: "synthetic".into(),
-        }],
+        sources: sources
+            .iter()
+            .map(|(source_id, binding, record_prefix)| SourceConfig {
+                source_id: *source_id,
+                binding: *binding,
+                uri: uri.clone(),
+                record_prefix: (*record_prefix).into(),
+            })
+            .collect(),
         infer_config_path: infer,
         tracker_config_path: tracker,
         tracker_library_path:

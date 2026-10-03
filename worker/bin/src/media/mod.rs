@@ -9,6 +9,7 @@
 
 pub mod diagnostics;
 pub mod owner;
+mod record_start;
 mod record_stop;
 mod release;
 pub mod shutdown;
@@ -25,11 +26,11 @@ pub type CallReply = Result<MediaCallStatus, MediaError>;
 
 pub enum Command {
     /// `MediaOwner::record_start`; a `Ready` ticket is what a later
-    /// `RecordStop` names.
+    /// `RecordStop` names. The owner assigns its request ID when this FIFO
+    /// command is consumed.
     RecordStart {
         source_id: u32,
         binding: MediaBinding,
-        request_id: u64,
         lookback_seconds: u32,
         forward_seconds: u32,
         reply: SyncSender<RecordStartReply>,

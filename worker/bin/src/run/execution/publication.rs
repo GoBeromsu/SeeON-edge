@@ -498,12 +498,11 @@ mod tests {
         let (commands, inbox, receipts, records) = channels();
         let worker = std::thread::spawn(move || {
             let mut tickets = Vec::new();
-            for expected in [3, 7] {
+            for (offset, expected) in [3, 7].into_iter().enumerate() {
                 let command = inbox.recv_timeout(Duration::from_secs(5)).unwrap();
                 let Command::RecordStart {
                     source_id,
                     binding,
-                    request_id,
                     reply,
                     ..
                 } = command
@@ -513,7 +512,7 @@ mod tests {
                 assert_eq!(source_id, expected);
                 let ticket = RecordTicket {
                     binding,
-                    request_id,
+                    request_id: u64::try_from(offset).unwrap() + 1,
                     source_id,
                     session_id: source_id + 40,
                     session_valid: 1,
@@ -658,7 +657,7 @@ mod tests {
         );
         assert_eq!(output.recorders[0].pending(), 0);
         assert_eq!(output.recorders[1].pending(), 0);
-        let clip_id = "00000000-0000-4000-8000-000000000099-7-1";
+        let clip_id = "00000000-0000-4000-8000-000000000099-7-2";
         let manifest: serde_json::Value = serde_json::from_slice(
             &std::fs::read(output.store.clip_dir(clip_id).join("manifest.json")).unwrap(),
         )

@@ -2,14 +2,74 @@
 
 use std::fs;
 use std::os::unix::fs::MetadataExt;
+use std::path::Path;
 use std::sync::mpsc::TryRecvError;
 use std::time::Instant;
 
 use seeon_deepstream_native::{MediaResult, RecordTicket};
 
-use super::assertions::GrownFile;
+use super::assertions::{Admitted, GrownFile};
 use super::support::Started;
 use super::wait::poll_until;
+use crate::msg::RecordReceipt;
+
+pub(super) struct Captured {
+    pub receipt: RecordReceipt,
+    pub sealed: GrownFile,
+    pub duration_ms: u64,
+    pub sha256: String,
+}
+
+pub(super) fn check_source_receipt(
+    record_dir: &Path,
+    admitted: &Admitted,
+    observed: RecordReceipt,
+    grown: &GrownFile,
+) -> Captured {
+    assert_eq!(
+        (observed.result, observed.error, observed.contains_video),
+        (MediaResult::Ok, 0, true)
+    );
+    assert!(observed.duration_ms > 0, "native duration is zero");
+    assert_ticket(&admitted.ticket, &observed.ticket);
+    assert_eq!(observed.directory.as_path(), record_dir);
+    let filename = observed.filename.to_str().expect("native filename");
+    assert!(
+        filename
+            .strip_prefix(admitted.record_prefix)
+            .is_some_and(|suffix| suffix.starts_with('_')),
+        "wrong source filename: {filename}"
+    );
+    let path = Path::new(filename);
+    assert_eq!(
+        path.file_name().and_then(|name| name.to_str()),
+        Some(filename)
+    );
+    assert!(path.extension().is_some_and(|extension| extension == "mp4"));
+    let sealed = file_identity(&observed);
+    assert_eq!((sealed.dev, sealed.ino), (grown.dev, grown.ino));
+    assert!(sealed.len >= grown.len, "native file shrank before sealing");
+    let (sha256, size) =
+        crate::clips::durable::sha256_file(&observed.directory.join(&observed.filename))
+            .expect("native MP4 hash");
+    assert_eq!(size, sealed.len);
+    eprintln!(
+        "TWO_CAMERA_NATIVE_RECEIPT camera_id={} ticket={:?} duration_ms={} filename={filename:?} dev={} ino={} len={} sha256={sha256}",
+        admitted.camera_id,
+        observed.ticket,
+        observed.duration_ms,
+        sealed.dev,
+        sealed.ino,
+        sealed.len
+    );
+    let duration_ms = observed.duration_ms;
+    Captured {
+        receipt: observed,
+        sealed,
+        duration_ms,
+        sha256,
+    }
+}
 
 pub(super) fn capture(
     started: &mut Started,

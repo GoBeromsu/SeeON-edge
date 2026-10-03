@@ -1,5 +1,6 @@
 //! READY manifest and queue tied to the captured native receipt.
 
+use std::collections::BTreeSet;
 use std::fs;
 use std::os::unix::fs::MetadataExt;
 use std::path::Path;
@@ -12,7 +13,14 @@ use super::assertions::{Admitted, GrownFile};
 use super::support::BOOT_ID;
 use crate::clips::durable;
 use crate::clips::publish::{MANIFEST_FILE, MEDIA_FILE};
-use crate::clips::time::Utc;
+
+#[derive(Debug, PartialEq, Eq)]
+pub(super) struct PublishedState {
+    pub media: Vec<u8>,
+    pub manifest: Vec<u8>,
+    pub queue_entry: Value,
+    pub sha256: String,
+}
 
 pub(super) fn assert_published(
     publications: &Publications,
@@ -50,7 +58,7 @@ pub(super) fn assert_clip(
     ticket: &RecordTicket,
     duration_ms: u64,
     sealed: &GrownFile,
-) {
+) -> PublishedState {
     let clip_id = format!("{BOOT_ID}-{}-{}", ticket.source_id, ticket.request_id);
     let clip_dir = publications.store.clip_dir(&clip_id);
     let media_path = clip_dir.join(MEDIA_FILE);
@@ -69,22 +77,64 @@ pub(super) fn assert_clip(
     let (sha, size) = durable::sha256_file(&media_path).expect("published hash");
     assert_eq!(size, u64::try_from(published.len()).expect("size"));
     assert_eq!(size, sealed.len);
-    assert_queue(
+    let queue_entry = assert_queue(
         publications,
         &sha,
         size,
         &clip_id,
         duration_ms,
         admitted.event_ref,
+        admitted.camera_id,
     );
-    assert_manifest(
-        &clip_dir,
-        &sha,
-        size,
-        admitted.detected_at,
-        &clip_id,
-        duration_ms,
-        admitted.event_ref,
+    let manifest = assert_manifest(&clip_dir, &sha, size, &clip_id, duration_ms, admitted);
+    PublishedState {
+        media: published,
+        manifest,
+        queue_entry,
+        sha256: sha,
+    }
+}
+
+pub(super) fn assert_exact_clips(publications: &Publications, tickets: &[RecordTicket]) {
+    let expected: BTreeSet<_> = tickets
+        .iter()
+        .map(|ticket| format!("{BOOT_ID}-{}-{}", ticket.source_id, ticket.request_id))
+        .collect();
+    assert_eq!(expected.len(), tickets.len());
+    let actual: BTreeSet<_> = fs::read_dir(publications.store.root().join("clips"))
+        .expect("clips")
+        .map(|entry| {
+            entry
+                .expect("clip entry")
+                .file_name()
+                .into_string()
+                .expect("clip name")
+        })
+        .filter(|name| !name.starts_with('.'))
+        .collect();
+    assert_eq!(actual, expected, "published clip directories differ");
+    let clips = clip_entries(publications);
+    let queued: BTreeSet<_> = clips
+        .iter()
+        .map(|entry| {
+            entry
+                .get("clip_id")
+                .and_then(Value::as_str)
+                .expect("clip id")
+                .to_owned()
+        })
+        .collect();
+    assert_eq!(clips.len(), tickets.len(), "unexpected CLIP queue entries");
+    assert_eq!(
+        queued, expected,
+        "queue clip IDs differ from published clips"
+    );
+}
+
+pub(super) fn assert_no_mp4(record_dir: &Path) {
+    assert!(
+        !mp4_left(record_dir),
+        "native MP4 remained in the record directory"
     );
 }
 
@@ -105,7 +155,8 @@ fn assert_queue(
     clip_id: &str,
     duration_ms: u64,
     event_ref: &str,
-) {
+    camera_id: &str,
+) -> Value {
     let clips = clip_entries(publications);
     let matching: Vec<_> = clips
         .iter()
@@ -134,17 +185,21 @@ fn assert_queue(
         .expect("event_ids");
     assert_eq!(ids.len(), 1);
     assert_eq!(ids[0].as_str(), Some(event_ref));
+    assert_eq!(
+        clip.get("camera_id").and_then(Value::as_str),
+        Some(camera_id)
+    );
+    clip.clone()
 }
 
 fn assert_manifest(
     clip_dir: &Path,
     sha: &str,
     size: u64,
-    detected_at: Utc,
     clip_id: &str,
     duration_ms: u64,
-    event_ref: &str,
-) {
+    admitted: &Admitted,
+) -> Vec<u8> {
     let bytes = fs::read(clip_dir.join(MANIFEST_FILE)).expect("manifest");
     let manifest: Value = serde_json::from_slice(&bytes).expect("manifest json");
     assert_eq!(manifest.get("state").and_then(Value::as_str), Some("READY"));
@@ -165,14 +220,18 @@ fn assert_manifest(
         manifest.get("duration_ms").and_then(Value::as_i64),
         Some(i64::try_from(duration_ms).expect("duration"))
     );
-    let detected = detected_at.iso_micros();
+    let detected = admitted.detected_at.iso_micros();
     assert_eq!(
         manifest.get("detected_at").and_then(Value::as_str),
         Some(detected.as_str())
     );
     assert_eq!(
         manifest.get("event_ref").and_then(Value::as_str),
-        Some(event_ref)
+        Some(admitted.event_ref)
+    );
+    assert_eq!(
+        manifest.get("camera_id").and_then(Value::as_str),
+        Some(admitted.camera_id)
     );
     assert_eq!(
         manifest
@@ -180,6 +239,7 @@ fn assert_manifest(
             .and_then(Value::as_str),
         Some(detected.as_str())
     );
+    bytes
 }
 
 fn sole_clip(publications: &Publications) -> String {

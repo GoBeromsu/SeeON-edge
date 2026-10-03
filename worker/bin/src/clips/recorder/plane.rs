@@ -40,7 +40,6 @@ pub struct CommandPlane {
     commands: SyncSender<Command>,
     source_id: u32,
     binding: MediaBinding,
-    next_request: u64,
     deadline: Duration,
 }
 
@@ -55,7 +54,6 @@ impl CommandPlane {
             commands,
             source_id,
             binding,
-            next_request: 0,
             deadline,
         }
     }
@@ -83,12 +81,10 @@ impl RecordPlane for CommandPlane {
         lookback_seconds: u32,
         forward_seconds: u32,
     ) -> Result<RecordTicket, PlaneRefusal> {
-        self.next_request += 1;
         let (reply, answer) = sync_channel(ONESHOT_CAPACITY);
         self.send(Command::RecordStart {
             source_id: self.source_id,
             binding: self.binding,
-            request_id: self.next_request,
             lookback_seconds,
             forward_seconds,
             reply,
