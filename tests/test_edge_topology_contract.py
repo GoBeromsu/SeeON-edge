@@ -350,21 +350,21 @@ def test_edge_image_workflow_never_pushes_from_pull_requests() -> None:
 
 
 def test_edge_worker_boot_smoke_runs_on_the_single_build() -> None:
-    """The shipped image is Dockerfile.edge's final stage and boots via carrier."""
+    """The shipped image is Dockerfile.edge's final stage and boots after direct load."""
     source = (REPO_ROOT / EDGE_IMAGES_WORKFLOW).read_text(encoding="utf-8")
     workflow = _workflow(EDGE_IMAGES_WORKFLOW)
     steps = workflow["jobs"]["publish"]["steps"]
     worker_step = next(s for s in steps if s.get("name") == "Build and push ml-worker image")
-    carrier_smoke = next(
+    local_smoke = next(
         s
         for s in steps
-        if "docker load --input /tmp/ml-worker-runtime.tar" in str(s.get("run", ""))
+        if 'SMOKE_REF="$IMAGE_NAMESPACE/ml-worker:$DEPLOY_SHA"' in str(s.get("run", ""))
     )
     pull_smoke = next(s for s in steps if "docker pull" in str(s.get("run", "")))
 
     assert not (REPO_ROOT / ".github/workflows/edge-worker-image.yml").exists()
-    assert "load" not in worker_step["with"]
-    assert worker_step["with"]["outputs"] == "type=docker,dest=/tmp/ml-worker-runtime.tar"
+    assert worker_step["with"]["load"] == "${{ env.RELEASE_BUILD != 'true' }}"
+    assert "outputs" not in worker_step["with"]
     # A release still pushes an OCI index, because a release's digest is the one
     # a later release may reuse and re-tagging only preserves a digest when the
     # manifest is an index. See docs/runbooks/edge-image-publish.md.
@@ -375,10 +375,12 @@ def test_edge_worker_boot_smoke_runs_on_the_single_build() -> None:
     )
 
     assert source.count("file: Dockerfile.edge") == 1
-    assert carrier_smoke["if"] == "env.BUILD_ML_WORKER == 'true' && env.RELEASE_BUILD != 'true'"
-    assert "docker run --rm --network none" in str(carrier_smoke["run"])
-    assert "python -m worker --check-config" in str(carrier_smoke["run"])
-    assert 'test "$status" -eq 0' in str(carrier_smoke["run"])
+    assert local_smoke["if"] == "env.BUILD_ML_WORKER == 'true' && env.RELEASE_BUILD != 'true'"
+    assert "docker run --pull never --rm --network none" in str(local_smoke["run"])
+    assert "docker image inspect" in str(local_smoke["run"])
+    assert 'test "$revision" = "$DEPLOY_SHA"' in str(local_smoke["run"])
+    assert "python -m worker --check-config" in str(local_smoke["run"])
+    assert 'test "$status" -eq 0' in str(local_smoke["run"])
 
     # The reuse/release path still pulls the published bytes and boots them, so
     # a seal never pins a worker digest that was not booted in this run.
