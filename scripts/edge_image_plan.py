@@ -16,8 +16,8 @@ the files that decide what the context *contains*
 (``.dockerignore``) or how it is built (the workflow). A path that belongs to an
 image but is missing from its set means the image is not rebuilt when it should
 be, and the release ships a stale digest under a new version.
-``tests/test_edge_image_isolation.py`` re-derives the ``COPY`` sources from both
-Dockerfiles and fails if anything here drifts from them.
+``tests/test_worker_image_provenance_contract.py`` proves the worker input
+classification and fails if a worker-owned path is treated as neutral.
 
 **What to compare against.** Not the previous release's commit -- the commit
 that actually built the digest being reused. Those differ as soon as an image is
@@ -86,6 +86,10 @@ _ML_WORKER_INPUTS = (
     "shared/",
     "uv.lock",
     "worker/",
+    "Cargo.toml",
+    "Cargo.lock",
+    "rust-toolchain.toml",
+    "scripts/prepare_rust_test_inputs.py",
 )
 
 #: Paths that can change *either* image without either Dockerfile naming them.

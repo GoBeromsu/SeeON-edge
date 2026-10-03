@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import re
+import shlex
 from pathlib import Path
 from typing import Final, TypeAlias
 
@@ -141,6 +142,92 @@ def _scalars(value: ComposeValue) -> list[str]:
     if isinstance(value, list):
         return [text for item in value for text in _scalars(item)]
     return [] if value is None else [str(value)]
+
+
+def _continued_shell_lines(text: str) -> list[str]:
+    logical: list[str] = []
+    pending = ""
+    for line in text.splitlines():
+        stripped = line.strip()
+        if pending:
+            pending = f"{pending} {stripped}"
+            if not stripped.endswith("\\"):
+                logical.append(pending)
+                pending = ""
+            else:
+                pending = pending.removesuffix("\\").rstrip()
+            continue
+        if stripped.endswith("\\"):
+            pending = stripped.removesuffix("\\").rstrip()
+            continue
+        logical.append(line)
+    if pending:
+        logical.append(pending)
+    return logical
+
+
+def _docker_build_tokens(command: str) -> list[str] | None:
+    if "docker build" not in command or "Dockerfile.edge" not in command:
+        return None
+    return shlex.split(command, posix=True)
+
+
+def _is_documented_cargo_verify(tokens: list[str]) -> bool:
+    target = None
+    secret = None
+    publishes = False
+    index = 0
+    while index < len(tokens):
+        token = tokens[index]
+        if token == "--target" and index + 1 < len(tokens):
+            target = tokens[index + 1]
+            index += 2
+            continue
+        if token.startswith("--target="):
+            target = token.split("=", 1)[1]
+        elif token == "--secret" and index + 1 < len(tokens):
+            secret = tokens[index + 1]
+            index += 2
+            continue
+        elif token.startswith("--secret="):
+            secret = token.split("=", 1)[1]
+        elif token in {"--tag", "push", "--push", "--load", "--output", "-o"} or token.startswith(
+            ("-t", "--tag=", "--push=", "--output=", "-o=")
+        ):
+            publishes = True
+        index += 1
+    return (
+        target == "cargo-verify"
+        and secret == "id=rust-test-inputs,src=$RUST_TEST_INPUT_ARCHIVE"
+        and not publishes
+    )
+
+
+@pytest.mark.parametrize(
+    "suffix",
+    [
+        "",
+        " --push",
+        " --push=true",
+        " -t local/ml-worker",
+        " -tlocal/ml-worker",
+        " --tag=local/ml-worker",
+        " --output=type=registry",
+    ],
+)
+def test_documented_verification_cannot_publish_an_image(suffix: str) -> None:
+    command = (
+        "docker buildx build -f=Dockerfile.edge --target cargo-verify "
+        '--secret "id=rust-test-inputs,src=$RUST_TEST_INPUT_ARCHIVE" .' + suffix
+    )
+    tokens = _docker_build_tokens(command)
+    assert tokens is not None
+    assert _is_documented_cargo_verify(tokens) == (suffix == "")
+    assert not _is_documented_cargo_verify(["--target", "runtime"])
+    assert not _is_documented_cargo_verify(["--target", "cargo-verify"])
+    assert not _is_documented_cargo_verify(
+        ["--target", "runtime", "--secret", "id=rust-test-inputs,src=$RUST_TEST_INPUT_ARCHIVE"]
+    )
 
 
 def test_edge_worker_runtime_status_environment_contract() -> None:
@@ -636,7 +723,7 @@ def test_edge_worker_boot_smoke_runs_on_the_single_build() -> None:
     assert "python -m worker --check-config" in str(pull_smoke["run"])
 
     dockerfile = (REPO_ROOT / "Dockerfile.edge").read_text(encoding="utf-8")
-    stages = re.findall(r"^FROM\s+\S+\s+AS\s+(\S+)", dockerfile, re.MULTILINE)
+    stages = re.findall(r"^FROM(?:\s+--\S+)*\s+\S+(?:\s+AS\s+(\S+))?\s*$", dockerfile, re.MULTILINE)
     assert stages[-1] == "runtime", stages
     assert "bootsmoke" not in dockerfile
     for retired in (
@@ -653,11 +740,18 @@ def test_edge_worker_boot_smoke_runs_on_the_single_build() -> None:
         assert retired not in dockerfile, retired
     dev_compose = (REPO_ROOT / "compose.edge.dev.yaml").read_text(encoding="utf-8")
     assert "target:" not in dev_compose
+    documented_verification = False
     for doc in ("AGENTS.md", "docs/runbooks/edge-image-publish.md"):
         text = (REPO_ROOT / doc).read_text(encoding="utf-8")
-        for line in text.splitlines():
-            if "docker build" in line and "Dockerfile.edge" in line:
-                assert "--target" not in line, (doc, line)
+        for line in _continued_shell_lines(text):
+            tokens = _docker_build_tokens(line)
+            if tokens is None:
+                continue
+            targeted = "--target" in line
+            if targeted:
+                assert _is_documented_cargo_verify(tokens), (doc, line)
+                documented_verification = True
+    assert documented_verification, "The non-shipping verification command must be documented"
 
 
 def test_a_publishing_run_never_records_an_empty_digest() -> None:

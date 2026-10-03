@@ -16,10 +16,11 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{TcpListener, TcpStream, ToSocketAddrs};
-use std::os::unix::fs::symlink;
+use std::os::unix::fs::{PermissionsExt, symlink};
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::sync::Arc;
+use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::thread::JoinHandle;
 use std::time::Duration;
@@ -50,7 +51,7 @@ const TRACKER_LIBRARY: &str =
 const PARSER_LIBRARY: &str =
     "/opt/nvidia/deepstream/deepstream/lib/libnvdsinfer_custom_yolo26_pose.so";
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct Request {
     pub method: String,
     pub path: String,
@@ -273,7 +274,7 @@ impl Fixture {
     }
 
     pub fn command(&self, subcommand: &str) -> Command {
-        let mut command = Command::new(env!("CARGO_BIN_EXE_ml-worker"));
+        let mut command = Command::new(worker_binary());
         command
             .arg(subcommand)
             .arg("--state-dir")
@@ -285,6 +286,7 @@ impl Fixture {
             "LD_LIBRARY_PATH",
             "NVIDIA_VISIBLE_DEVICES",
             "NVIDIA_DRIVER_CAPABILITIES",
+            "ML_WORKER_BUILD_REVISION",
         ] {
             if let Some(value) = std::env::var_os(name) {
                 command.env(name, value);
@@ -310,7 +312,8 @@ impl Fixture {
 }
 pub struct Server {
     stop: Arc<AtomicBool>,
-    thread: Option<JoinHandle<Vec<Request>>>,
+    thread: Option<JoinHandle<()>>,
+    requests: Arc<Mutex<Vec<Request>>>,
 }
 impl Server {
     pub fn start(config: Option<Value>, shutdown_started: Option<Arc<AtomicBool>>) -> Self {
@@ -329,11 +332,12 @@ impl Server {
         listener
             .set_nonblocking(true)
             .expect("nonblocking listener");
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let publishing = Arc::clone(&requests);
         let stop = Arc::new(AtomicBool::new(false));
         let stopped = Arc::clone(&stop);
         let thread = std::thread::spawn(move || {
             let clock = SystemClock::new();
-            let mut requests = Vec::new();
             loop {
                 let mut connection = None;
                 let deadline = clock.monotonic() + Duration::from_secs(180);
@@ -353,26 +357,36 @@ impl Server {
                     assert!(stopped.load(Ordering::SeqCst) || waited.is_err());
                     break;
                 };
-                requests.push(respond(
-                    stream,
-                    config.as_ref(),
-                    shutdown_started.as_deref(),
-                ));
+                let request = respond(stream, config.as_ref(), shutdown_started.as_deref());
+                publishing
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .push(request);
             }
-            requests
         });
         Self {
             stop,
             thread: Some(thread),
+            requests,
         }
     }
+    /// Requests already retained, in arrival order. Later `finish` returns
+    /// that same sequence plus anything accepted afterwards.
+    pub fn observed(&self) -> Vec<Request> {
+        self.requests
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+
     pub fn finish(mut self) -> Vec<Request> {
         self.stop.store(true, Ordering::SeqCst);
         self.thread
             .take()
             .expect("server handle")
             .join()
-            .expect("server completed")
+            .expect("server completed");
+        self.observed()
     }
 }
 impl Drop for Server {
@@ -479,6 +493,34 @@ fn respond(
     }
     Request { method, path, body }
 }
+const WORKER_BIN_OVERRIDE: &str = "SEEON_TEST_WORKER_BIN";
+
+/// Absent override keeps the Cargo test binary. A present override must already
+/// be an absolute regular executable; there is no path repair or fallback.
+fn worker_binary() -> PathBuf {
+    select_worker_binary(std::env::var_os(WORKER_BIN_OVERRIDE).as_deref())
+}
+
+fn select_worker_binary(raw: Option<&std::ffi::OsStr>) -> PathBuf {
+    let Some(raw) = raw else {
+        return PathBuf::from(env!("CARGO_BIN_EXE_ml-worker"));
+    };
+    let path = PathBuf::from(raw);
+    assert!(path.is_absolute(), "{WORKER_BIN_OVERRIDE} must be absolute");
+    let metadata = fs::symlink_metadata(&path).unwrap_or_else(|error| {
+        panic!(
+            "{WORKER_BIN_OVERRIDE}={:?} is not an absolute regular executable: {error}",
+            path
+        )
+    });
+    let executable = metadata.permissions().mode() & 0o111 != 0;
+    assert!(
+        path.is_absolute() && metadata.file_type().is_file() && executable,
+        "{WORKER_BIN_OVERRIDE}={:?} must be an absolute regular executable",
+        path
+    );
+    path
+}
 
 /// In-memory test relay ACK. `storage_state=committed` is the existing receipt
 /// protocol, never durable PostgreSQL proof.
@@ -509,7 +551,7 @@ fn execution_record_ack(body: &Value) -> Value {
     })
 }
 
-fn request_route(target: &str) -> &str {
+pub fn request_route(target: &str) -> &str {
     let without_query = target.split_once('?').map_or(target, |(path, _)| path);
     without_query
         .strip_prefix("http://ml-api:8000")
@@ -698,4 +740,44 @@ fn render_served(template: &str, engine: &str, batch: u32) -> String {
         "copied serving config omits legacy template ONNX; this is fixture relocation, not a fresh engine receipt"
     );
     rendered
+}
+
+#[cfg(test)]
+mod binary_selection_tests {
+    use super::*;
+
+    #[test]
+    fn explicit_binary_override_refuses_invalid_paths_without_fallback() {
+        let root = std::env::temp_dir().join(format!(
+            "seeon-binary-selection-{}-{}",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::SeqCst)
+        ));
+        fs::create_dir(&root).expect("new owned binary-selection directory");
+        let owned = OwnedDirectory(root);
+        let executable = owned.0.join("worker");
+        fs::write(&executable, b"test-only executable path; never executed").unwrap();
+        fs::set_permissions(&executable, fs::Permissions::from_mode(0o700)).unwrap();
+        assert_eq!(
+            select_worker_binary(Some(executable.as_os_str())),
+            executable
+        );
+        let link = owned.0.join("link");
+        symlink(&executable, &link).unwrap();
+        let not_executable = owned.0.join("not-executable");
+        fs::write(&not_executable, b"not executable").unwrap();
+        fs::set_permissions(&not_executable, fs::Permissions::from_mode(0o600)).unwrap();
+        for path in [
+            PathBuf::from("relative-worker"),
+            owned.0.join("missing"),
+            owned.0.clone(),
+            link,
+            not_executable,
+        ] {
+            assert!(
+                std::panic::catch_unwind(|| select_worker_binary(Some(path.as_os_str()))).is_err(),
+                "invalid explicit override must refuse, not use the Cargo binary: {path:?}"
+            );
+        }
+    }
 }

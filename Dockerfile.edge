@@ -1,5 +1,7 @@
 # syntax=docker/dockerfile:1.7
 
+ARG EDGE_DATABASE_SCHEMA_VERSION=19
+
 # ml-worker is the DeepStream Flow production image. Engines are prepared before
 # boot; the worker verifies them and never builds them at runtime (ADR-0002).
 FROM nvcr.io/nvidia/deepstream@sha256:f6fa0247da9290979cbb05749e7da9435d089c93db7c4dcfe85ba2488b5f4994 AS parser-build
@@ -38,12 +40,29 @@ RUN make -C /src/native OUT=/opt/seeon/lib all \
     && sha256sum /opt/seeon/lib/libseeon_gpu.so /opt/seeon/lib/libseeon_media.so \
         /opt/seeon/lib/libseeon_clipdec.so
 
+# One validated source declaration for the release binary, image marker, label,
+# and runtime environment. This stage is not a shipping image.
+FROM nvcr.io/nvidia/deepstream@sha256:f6fa0247da9290979cbb05749e7da9435d089c93db7c4dcfe85ba2488b5f4994 AS source-revision
+ARG EDGE_DATABASE_SCHEMA_VERSION
+ARG SOURCE_REVISION
+RUN if [ "$SOURCE_REVISION" = "0000000000000000000000000000000000000000" ] \
+      || [ "${#SOURCE_REVISION}" -ne 40 ] \
+      || printf '%s' "$SOURCE_REVISION" | grep -Eq '[^0123456789abcdef]'; then \
+      printf '%s\n' 'SOURCE_REVISION must be a non-zero 40-character lowercase hexadecimal revision' >&2; \
+      exit 1; \
+    fi; \
+    install -d -m 0755 /opt/seeon \
+    && printf '%s\n' "$SOURCE_REVISION" > /opt/seeon/ml-worker-image-revision \
+    && printf '%s\n' "$EDGE_DATABASE_SCHEMA_VERSION" > /opt/seeon/edge-database-schema-version \
+    && chmod 0444 /opt/seeon/ml-worker-image-revision /opt/seeon/edge-database-schema-version
+
 # Pin the official Rust 1.90.0 linux/amd64 manifest, as Dockerfile.rust-builder does.
 FROM docker.io/library/rust:1.90.0-bookworm@sha256:3f6e6f8d8725a65a2db964bb828850f888d430c68784d661f753144e5d787207 AS rust-toolchain
 RUN rustup component add --toolchain 1.90.0 clippy rustfmt
 
-# Links the Rust workspace against the native-build libraries and runs the CPU
-# test lane. GPU tests are ignored here; they run on a GPU host.
+# Links the Rust workspace against the native-build libraries and compiles the
+# release binary. CPU tests run in cargo-verify; GPU qualification runs
+# separately on a GPU host.
 FROM nvcr.io/nvidia/deepstream@sha256:f6fa0247da9290979cbb05749e7da9435d089c93db7c4dcfe85ba2488b5f4994 AS cargo-build
 # The clip decoder's test binaries load libav at run time. DeepStream ships no
 # libav and strips its codec runtimes; reinstall those as the runtime stage does.
@@ -75,11 +94,29 @@ COPY worker/rust ./worker/rust
 COPY worker/runtime/rust ./worker/runtime/rust
 COPY worker/adapters/deepstream/rust ./worker/adapters/deepstream/rust
 COPY worker/adapters/deepstream/native ./worker/adapters/deepstream/native
+COPY worker/bin ./worker/bin
+COPY --from=source-revision /opt/seeon/ml-worker-image-revision /tmp/.source-revision
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     test "$(rustc --version)" = "rustc 1.90.0 (1159e78c4 2025-09-14)" \
     && test "$(cargo --version)" = "cargo 1.90.0 (840b83a10 2025-07-30)" \
-    && cargo build --locked --release --workspace \
+    && test -s /tmp/.source-revision \
+    && build_revision="$(cat /tmp/.source-revision)" \
+    && ML_WORKER_BUILD_REVISION="$build_revision" cargo build --locked --release --workspace \
+    && test -x target/release/ml-worker \
+    && rm -f /tmp/.source-revision
+
+# Explicit verification target. It is not a shipping image and must not be the
+# final stage. CPU tests stay undeclared; only the release build above binds
+# the validated revision.
+FROM cargo-build AS cargo-verify
+COPY scripts/prepare_rust_test_inputs.py /usr/src/myapp/scripts/prepare_rust_test_inputs.py
+COPY worker/adapters/deepstream/configs /usr/src/myapp/worker/adapters/deepstream/configs
+RUN --mount=type=secret,id=rust-test-inputs,required=true \
+    --mount=type=cache,target=/usr/local/cargo/registry \
+    python3 /usr/src/myapp/scripts/prepare_rust_test_inputs.py \
+      --archive /run/secrets/rust-test-inputs \
     && cargo test --locked --workspace
+
 
 FROM ghcr.io/astral-sh/uv:python3.12-bookworm-slim@sha256:e5b65587bce7de595f299855d7385fe7fca39b8a74baa261ba1b7147afa78e58 AS uv-bin
 
@@ -105,13 +142,19 @@ COPY --from=sdk-observer-build /src/observer/build-result.json /opt/seeon/nvdsin
 COPY --from=sdk-observer-build /src/observer/source-recipe.json /opt/seeon/nvdsinfer-observer/source-recipe.json
 COPY --from=sdk-observer-build /src/observer/observation.patch /opt/seeon/nvdsinfer-observer/observation.patch
 COPY --from=sdk-observer-build /src/observer/compile.log /opt/seeon/nvdsinfer-observer/compile.log
+COPY --from=cargo-build /usr/src/myapp/target/release/ml-worker /usr/local/bin/ml-worker
+COPY --from=native-build /opt/seeon/lib/libseeon_gpu.so /opt/seeon/lib/libseeon_gpu.so
+COPY --from=native-build /opt/seeon/lib/libseeon_media.so /opt/seeon/lib/libseeon_media.so
+COPY --from=native-build /opt/seeon/lib/libseeon_clipdec.so /opt/seeon/lib/libseeon_clipdec.so
+COPY --from=source-revision /opt/seeon/ml-worker-image-revision /opt/seeon/ml-worker-image-revision
+COPY --from=source-revision /opt/seeon/edge-database-schema-version /opt/seeon/edge-database-schema-version
 
 ENV UV_PROJECT_ENVIRONMENT=/app/.venv \
     PATH=/app/.venv/bin:$PATH \
     PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     GST_PLUGIN_PATH=/opt/nvidia/deepstream/deepstream/lib/gst-plugins \
-    LD_LIBRARY_PATH=/opt/nvidia/deepstream/deepstream/lib:${LD_LIBRARY_PATH}
+    LD_LIBRARY_PATH=/opt/seeon/lib:/opt/nvidia/deepstream/deepstream/lib:${LD_LIBRARY_PATH}
 COPY pyproject.toml uv.lock ./
 RUN --mount=type=cache,target=/root/.cache/uv \
     uv venv --system-site-packages /app/.venv \
@@ -134,18 +177,8 @@ RUN mkdir -p \
         /var/cache/seeon/tensorrt \
         /var/lib/seeon-records
 
-ARG EDGE_DATABASE_SCHEMA_VERSION=19
+ARG EDGE_DATABASE_SCHEMA_VERSION
 ARG SOURCE_REVISION
-RUN if [ "$SOURCE_REVISION" = "0000000000000000000000000000000000000000" ] \
-      || [ "${#SOURCE_REVISION}" -ne 40 ] \
-      || printf '%s' "$SOURCE_REVISION" | grep -Eq '[^0123456789abcdef]'; then \
-      printf '%s\n' 'SOURCE_REVISION must be a non-zero 40-character lowercase hexadecimal revision' >&2; \
-      exit 1; \
-    fi; \
-    install -d -m 0755 /opt/seeon; \
-    printf '%s\n' "$SOURCE_REVISION" > /opt/seeon/ml-worker-image-revision; \
-    printf '%s\n' "$EDGE_DATABASE_SCHEMA_VERSION" > /opt/seeon/edge-database-schema-version; \
-    chmod 0444 /opt/seeon/ml-worker-image-revision /opt/seeon/edge-database-schema-version
 LABEL org.opencontainers.image.revision="${SOURCE_REVISION}" \
       org.opencontainers.image.source="SeniorAILab/eldercare-fall-ml-v2" \
       seeon.edge.database.schema-version="${EDGE_DATABASE_SCHEMA_VERSION}" \

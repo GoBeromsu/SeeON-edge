@@ -56,6 +56,32 @@ docker build --platform linux/amd64 -f Dockerfile.edge \
   -t "local/ml-worker:$SEALED_ML_SHA" .
 ```
 
+The worker image also packages the Rust qualification binary at
+`/usr/local/bin/ml-worker` and its native libraries. Its production command
+remains `python -m worker`; packaging the binary does not authorize cutover.
+Build from the frozen, clean source identified by `SEALED_ML_SHA`. The validated
+revision is captured during the release Cargo compilation and must agree with
+the runtime environment and image marker. This is a trusted-builder declaration,
+not a measured or signed source attestation.
+
+For **CPU verification only**, obtain the pinned archive from its owner and set
+`RUST_TEST_INPUT_ARCHIVE` to that local file. This target is not a shipping image:
+
+```sh
+docker build --platform linux/amd64 -f Dockerfile.edge --target cargo-verify \
+  --build-arg "SOURCE_REVISION=$SEALED_ML_SHA" \
+  --secret "id=rust-test-inputs,src=$RUST_TEST_INPUT_ARCHIVE" .
+```
+
+The required build secret is checked by `scripts/prepare_rust_test_inputs.py`
+before the ordinary workspace CPU tests run. The archive and restored fixtures
+are verification assets, not runtime configuration; they are not copied from
+that stage into the shipping image. CPU test binaries retain their undeclared
+build identity, while the release binary has the validated declaration.
+GPU, real-Python oracle, recording, final-image, and same-digest qualification
+remain separate required gates. Neither a successful build nor this CPU target
+proves those gates; retain failures and ignored-test counts explicitly.
+
 Neither image carries model weights. Models are a pinned external artifact:
 `worker/tools/fetch_models/manifest.json` names every file, its upstream
 (Hugging Face `Berom0227/seeon-model-v0.1.0-pose-bbox56-proxy-research` at a
@@ -214,12 +240,14 @@ build context, plus the Dockerfile, plus the files that shape the context:
 | image | inputs |
 |---|---|
 | `ml-api` | `Dockerfile.backend`, `backend/`, `contracts/`, `front/`, `shared/`, `scripts/ops/`, `pyproject.toml`, `uv.lock` |
-| `ml-worker` | `Dockerfile.edge`, `worker/` (incl. the pinned model manifest), `contracts/`, `shared/`, `pyproject.toml`, `uv.lock` |
+| `ml-worker` | `Dockerfile.edge`, `worker/` (incl. the pinned model manifest), `contracts/`, `shared/`, `pyproject.toml`, `uv.lock`, `Cargo.toml`, `Cargo.lock`, `rust-toolchain.toml`, `scripts/prepare_rust_test_inputs.py` |
 | both | `.dockerignore`, `.github/workflows/edge-images.yml` |
 
 `scripts/ops/` is an `ml-api` input because `Dockerfile.backend` copies it in —
-easy to forget, so `tests/test_edge_image_isolation.py` re-derives every `COPY`
-source from both Dockerfiles and fails if the sets drift.
+easy to forget. The Rust workspace inputs and verification-input preparer are
+classified explicitly for `ml-worker`; the preparer's specific rule overrides
+the otherwise neutral `scripts/` prefix. The Rust packaging and input
+classification contracts live in `tests/test_worker_image_provenance_contract.py`.
 
 Anything the classifier does not recognise **fails closed**: an unrecognised
 path is treated as affecting both images, so a new top-level directory costs a

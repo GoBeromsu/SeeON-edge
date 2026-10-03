@@ -8,6 +8,8 @@
 **/*.pyc
 **/coverage
 
+**/target
+**/.live-pose-*
 # Local runtime state, secrets, and logs
 .env
 .env.*

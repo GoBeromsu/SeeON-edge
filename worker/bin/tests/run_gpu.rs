@@ -21,6 +21,8 @@ use serde_json::{Value, json};
 
 #[path = "support/active_shutdown.rs"]
 mod active_shutdown;
+#[path = "support/build_revision_gpu.rs"]
+mod build_revision_gpu;
 #[path = "support/boot_fixture.rs"]
 mod fixture;
 #[path = "support/gpu_process.rs"]
@@ -28,9 +30,13 @@ mod gpu_process;
 #[path = "support/replay_gpu.rs"]
 mod replay_gpu;
 use active_shutdown::{OwnedProductStore, shutdown_during_active_recording};
+use build_revision_gpu::{
+    REQUIRED_SCORES, attributed_score_ids, parent_image, parent_revision, require_image_marker,
+    shutdown_after_actual_scores,
+};
 use fixture::{
     ALERTS_PATH, CLIPS_PATH_PREFIX, CONFIG_PATH, EXECUTION_RECORDS_PATH, Fixture, IDENTITY_PATH,
-    STATUS_PATH, Server, shutdown_config_write_cancelled,
+    STATUS_PATH, Server, request_route, shutdown_config_write_cancelled,
 };
 use gpu_process::{shutdown_after_policy_loop, spawn_gpu, wait_for_refusal};
 use replay_gpu::{assert_python_decodes, shutdown_after_accepted_trace, trace_path};
@@ -359,14 +365,167 @@ fn accepted_native_metadata_is_written_to_replay_trace_before_owned_sigterm() {
     fixture.assert_no_source_activation();
     let _requests = server.finish();
 }
-const ACTIVE_CAMERA_ID: &str = "11111111-1111-4111-8111-111111111111";
-fn request_route(target: &str) -> &str {
-    let without_query = target.split_once('?').map_or(target, |(path, _)| path);
-    without_query
-        .strip_prefix("http://ml-api:8000")
-        .unwrap_or(without_query)
+#[test]
+#[ignore = "G003 requires GPU lane 0, genuine schema-1 batch-1 aggregate via SEEON_TEST_ENGINE_IDENTITY and sibling engines, packaged ONNX, SEEON_TEST_MEDIA_INFER, SEEON_TEST_MEDIA_TRACKER, approved SEEON_TEST_RTSP_URI, isolated ml-api, parent ML_WORKER_BUILD_REVISION of 40 lowercase hex digits, parent ML_WORKER_IMAGE whose deployment digest equals the aggregate image digest, a pre-mounted regular /opt/seeon/ml-worker-image-revision matching that revision, parent-owned /var/lib/clip-store with SEEON_TEST_CLIP_STORE_OWNER matching /var/lib/clip-store/.seeon-test-owner, and optional absolute regular executable SEEON_TEST_WORKER_BIN; absent override uses CARGO_BIN_EXE_ml-worker; this is score transport, not T28 recording"]
+fn packaged_binary_exports_actual_model_scores_with_parent_revision_and_image_before_owned_sigterm()
+{
+    let shutdown_started = Arc::new(AtomicBool::new(false));
+    let _guard = relay_guard();
+    // Real events may reach the production clip store. Claim it; do not clean it.
+    let _store = OwnedProductStore::claim();
+    let fixture = Fixture::new("packaged-score-provenance");
+    require_single_camera_batch(&fixture);
+    let revision = parent_revision();
+    let image = parent_image(&fixture);
+    require_image_marker(&revision, false);
+    let uri = approved_rtsp_uri();
+    let server = Server::start(
+        Some(active_camera_config(&uri)),
+        Some(Arc::clone(&shutdown_started)),
+    );
+    let mut command = fixture.command("run");
+    command.env("CUDA_VISIBLE_DEVICES", "0");
+    command.env("ML_WORKER_EXECUTION_RECORDS_ENABLED", "true");
+    command.env("ML_WORKER_EXECUTION_RECORDS_LANE_CAPACITY", "4");
+    command.env("ML_WORKER_EXECUTION_RECORDS_BATCH_MAX", "1");
+    command.env("ML_WORKER_EXECUTION_RECORDS_FLUSH_MS", "50");
+    let mut child = spawn_gpu(command);
+    let shutdown = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        shutdown_after_actual_scores(
+            &mut child,
+            &server,
+            ACTIVE_CAMERA_ID,
+            &revision,
+            &image,
+            &shutdown_started,
+        )
+    })) {
+        Ok(shutdown) => shutdown,
+        Err(failure) => {
+            let requests = server.finish();
+            let batches: Vec<_> = requests
+                .iter()
+                .filter(|request| {
+                    request.method == "POST"
+                        && request_route(&request.path) == EXECUTION_RECORDS_PATH
+                })
+                .collect();
+            eprintln!(
+                "packaged score refusal: expected_revision={revision} expected_image={image} \
+                 batches={} first_provenance={:?} {}",
+                batches.len(),
+                batches.first().map(|request| &request.body["provenance"]),
+                model_score_summary(&requests, ACTIVE_CAMERA_ID)
+            );
+            std::panic::resume_unwind(failure);
+        }
+    };
+    let stderr = String::from_utf8_lossy(&shutdown.stderr);
+    assert_eq!(shutdown.status.code(), Some(0), "{stderr}");
+    assert!(
+        !stderr.contains("reason=cuda_unavailable")
+            && !stderr.contains("reason=engine_open")
+            && !stderr.contains("reason=gpu_lease")
+            && !stderr.contains("reason=engine_identity")
+            && !stderr.contains("boot refused")
+            && !stderr.contains("output startup refused")
+            && !stderr.contains("shutdown incomplete")
+            && !stderr.contains("applied manifest identity contradictory"),
+        "packaged score transport must reach actual records, not a boot refusal: {stderr}"
+    );
+    let requests = server.finish();
+    let scores = attributed_score_ids(&requests, ACTIVE_CAMERA_ID, &revision, &image);
+    assert!(
+        scores.len() >= REQUIRED_SCORES,
+        "retained receipts lost the observed actual score ids: {requests:?}"
+    );
+    println!(
+        "PACKAGED_RECORD_PROVENANCE revision={revision} image={image} count={} sample_ids={:?}",
+        scores.len(),
+        scores.iter().take(REQUIRED_SCORES).collect::<Vec<_>>()
+    );
+    println!("{}", model_score_summary(&requests, ACTIVE_CAMERA_ID));
+    drop(child);
+    lease::acquire(&fixture.state).expect("clean score shutdown must release the real lease");
+    fixture.assert_no_source_activation();
 }
+
+#[test]
+#[ignore = "G003 requires GPU lane 0, genuine schema-1 aggregate via SEEON_TEST_ENGINE_IDENTITY, packaged ONNX, SEEON_TEST_MEDIA_INFER, SEEON_TEST_MEDIA_TRACKER, isolated ml-api, parent ML_WORKER_BUILD_REVISION matching the selected binary, parent ML_WORKER_IMAGE whose deployment digest equals the aggregate digest, a pre-mounted regular /opt/seeon/ml-worker-image-revision matching that revision, and optional absolute regular executable SEEON_TEST_WORKER_BIN"]
+fn packaged_binary_refuses_runtime_revision_that_contradicts_compiled_declaration() {
+    let _guard = relay_guard();
+    let fixture = Fixture::new("packaged-runtime-mismatch");
+    let compiled = parent_revision();
+    let _image = parent_image(&fixture);
+    require_image_marker(&compiled, false);
+    let server = Server::start(Some(fixture.config(false)), None);
+    let mut command = fixture.command("run");
+    command.env("CUDA_VISIBLE_DEVICES", "0");
+    command.env("ML_WORKER_EXECUTION_RECORDS_ENABLED", "true");
+    command.env("ML_WORKER_EXECUTION_RECORDS_LANE_CAPACITY", "4");
+    command.env("ML_WORKER_EXECUTION_RECORDS_BATCH_MAX", "1");
+    command.env("ML_WORKER_EXECUTION_RECORDS_FLUSH_MS", "50");
+    command.env("ML_WORKER_BUILD_REVISION", contradict_revision(&compiled));
+    let mut child = spawn_gpu(command);
+    let refusal = wait_for_refusal(&mut child);
+    let stderr = String::from_utf8_lossy(&refusal.stderr);
+    assert_eq!(refusal.status.code(), Some(1), "{stderr}");
+    assert!(
+        stderr.contains("applied manifest identity contradictory: worker_build_revision"),
+        "{stderr}"
+    );
+    assert!(!stderr.contains("policy loop ready"), "{stderr}");
+    let requests = server.finish();
+    assert!(
+        requests.iter().all(|request| request.method == "GET"),
+        "contradictory revision must not export records or facility status: {requests:?}"
+    );
+    fixture.assert_no_source_activation();
+    drop(child);
+    lease::acquire(&fixture.state).expect("lease released after contradictory runtime revision");
+}
+
+#[test]
+#[ignore = "G003 requires GPU lane 0, genuine schema-1 aggregate via SEEON_TEST_ENGINE_IDENTITY, packaged ONNX, SEEON_TEST_MEDIA_INFER, SEEON_TEST_MEDIA_TRACKER, isolated ml-api, parent ML_WORKER_BUILD_REVISION matching the selected binary, parent ML_WORKER_IMAGE whose deployment digest equals the aggregate digest, a pre-mounted contradictory regular /opt/seeon/ml-worker-image-revision, and optional absolute regular executable SEEON_TEST_WORKER_BIN; tests must not write that marker"]
+fn packaged_binary_refuses_premounted_image_marker_that_contradicts_runtime_declaration() {
+    let _guard = relay_guard();
+    let fixture = Fixture::new("packaged-marker-mismatch");
+    let revision = parent_revision();
+    let _image = parent_image(&fixture);
+    require_image_marker(&revision, true);
+    let server = Server::start(Some(fixture.config(false)), None);
+    let mut command = fixture.command("run");
+    command.env("CUDA_VISIBLE_DEVICES", "0");
+    command.env("ML_WORKER_EXECUTION_RECORDS_ENABLED", "true");
+    command.env("ML_WORKER_EXECUTION_RECORDS_LANE_CAPACITY", "4");
+    command.env("ML_WORKER_EXECUTION_RECORDS_BATCH_MAX", "1");
+    command.env("ML_WORKER_EXECUTION_RECORDS_FLUSH_MS", "50");
+    let mut child = spawn_gpu(command);
+    let refusal = wait_for_refusal(&mut child);
+    let stderr = String::from_utf8_lossy(&refusal.stderr);
+    assert_eq!(refusal.status.code(), Some(1), "{stderr}");
+    assert!(
+        stderr.contains("applied manifest identity contradictory: worker_build_revision"),
+        "{stderr}"
+    );
+    assert!(!stderr.contains("policy loop ready"), "{stderr}");
+    let requests = server.finish();
+    assert!(
+        requests.iter().all(|request| request.method == "GET"),
+        "contradictory image marker must not export records or facility status: {requests:?}"
+    );
+    fixture.assert_no_source_activation();
+    drop(child);
+    lease::acquire(&fixture.state).expect("lease released after contradictory image marker");
+}
+const ACTIVE_CAMERA_ID: &str = "11111111-1111-4111-8111-111111111111";
 const MODEL_SCORE: &str = "model.score";
+
+fn contradict_revision(revision: &str) -> String {
+    let mut bytes = revision.as_bytes().to_vec();
+    bytes[0] = if bytes[0] == b'a' { b'b' } else { b'a' };
+    String::from_utf8(bytes).expect("contradictory lowercase hex revision")
+}
 
 fn model_score_summary(requests: &[fixture::Request], camera_id: &str) -> String {
     let mut ids = BTreeSet::new();
@@ -522,6 +681,81 @@ fn model_score_summary_reports_unique_finite_bounds_without_inventing_absent_fie
         empty.contains("fall_transition[absent]") && empty.contains("raw_logit[absent]"),
         "{empty}"
     );
+}
+#[test]
+fn identical_finite_scores_count_once_per_unique_record_id() {
+    let camera = ACTIVE_CAMERA_ID;
+    let revision = "a".repeat(40);
+    let image = format!("sha256:{}", "b".repeat(64));
+    let same = json!(0.25);
+    let requests = vec![
+        score_batch(
+            EXECUTION_RECORDS_PATH,
+            &revision,
+            &image,
+            vec![
+                score_record(&"ab".repeat(32), camera, same.clone()),
+                score_record(&"ab".repeat(32), camera, json!(9.0)),
+                score_record(&"cd".repeat(32), camera, same.clone()),
+            ],
+        ),
+        score_batch(
+            &format!("{EXECUTION_RECORDS_PATH}?cursor=1"),
+            &revision,
+            &image,
+            vec![score_record(&"ef".repeat(32), camera, same.clone())],
+        ),
+        score_batch(
+            EXECUTION_RECORDS_PATH,
+            "other-revision",
+            &image,
+            vec![score_record(&"11".repeat(32), camera, same.clone())],
+        ),
+        score_batch(
+            EXECUTION_RECORDS_PATH,
+            &revision,
+            "sha256:other",
+            vec![score_record(&"22".repeat(32), camera, same.clone())],
+        ),
+        score_batch(
+            EXECUTION_RECORDS_PATH,
+            &revision,
+            &image,
+            vec![
+                score_record(&"33".repeat(32), camera, Value::Null),
+                score_record(&"44".repeat(32), camera, json!(f64::NAN)),
+                score_record("short", camera, same),
+            ],
+        ),
+    ];
+    let ids = attributed_score_ids(&requests, camera, &revision, &image);
+    assert_eq!(
+        ids,
+        BTreeSet::from(["ab".repeat(32), "cd".repeat(32), "ef".repeat(32)])
+    );
+}
+
+fn score_record(record_id: &str, camera: &str, score: Value) -> Value {
+    json!({
+        "record_id": record_id,
+        "camera_id": camera,
+        "record_kind": MODEL_SCORE,
+        "payload": {"fall_transition": score}
+    })
+}
+
+fn score_batch(path: &str, revision: &str, image: &str, records: Vec<Value>) -> fixture::Request {
+    fixture::Request {
+        method: "POST".into(),
+        path: path.into(),
+        body: json!({
+            "provenance": {
+                "worker_build_revision": revision,
+                "worker_image_digest": image
+            },
+            "records": records
+        }),
+    }
 }
 
 fn require_single_camera_batch(fixture: &Fixture) {
