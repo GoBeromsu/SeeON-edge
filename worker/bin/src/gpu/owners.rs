@@ -10,8 +10,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, SyncSender, TrySendError};
-use std::thread::{self, JoinHandle};
-use std::time::Duration;
+use std::thread;
 
 use seeon_deepstream_native::GpuModel;
 use seeon_worker::pose_bbox56::{FALL_WINDOW_FRAMES, ZERO_ROW};
@@ -21,32 +20,18 @@ use seeon_worker_runtime::fall_gpu::FallGpu;
 use seeon_worker_runtime::stored_pose::StoredPoseGpu;
 
 use crate::exit::Exit;
+use crate::inference::{Owner, Runtime, State};
 use crate::msg::{
     BedOutput, BedRequest, FALL_REQUEST_CAPACITY, FALL_RESPONSE_CAPACITY, FallRequest,
     FallResponse, GPU_REQUEST_CAPACITY, ONESHOT_CAPACITY, Readiness, StoredPoseRequest,
 };
-use crate::poll::{POLL_INTERVAL, Timeout, poll_until};
-use crate::seam::Clock;
+use crate::poll::POLL_INTERVAL;
 
 /// Warm-up frame of the bed and stored-pose owners: one black 640x360 RGB
 /// frame, as the Python warm-up.
 const WARMUP_WIDTH: i64 = 640;
 const WARMUP_HEIGHT: i64 = 360;
 const WARMUP_RGB_BYTES: usize = 640 * 360 * 3;
-
-/// A spawned owner thread, its one readiness report and its request queue.
-pub struct Owner<R> {
-    pub thread: JoinHandle<()>,
-    pub readiness: Receiver<Readiness>,
-    pub requests: SyncSender<R>,
-}
-
-/// Why an owner thread did not end cleanly within its join deadline.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum JoinError {
-    Timeout(Timeout),
-    Panicked,
-}
 
 /// gpu-fall: scores pose-bbox56 windows; answers on the returned receiver.
 pub fn spawn_fall(
@@ -58,10 +43,16 @@ pub fn spawn_fall(
     let (requests, queue) = mpsc::sync_channel::<FallRequest>(FALL_REQUEST_CAPACITY);
     let (responses, answers) = mpsc::sync_channel(FALL_RESPONSE_CAPACITY);
     let (ready, readiness) = mpsc::sync_channel(ONESHOT_CAPACITY);
+    let state = Arc::new(State::default());
+    let actor_state = Arc::clone(&state);
     let thread = thread::Builder::new()
         .name("gpu-fall".to_owned())
         .spawn(move || {
-            let Some(mut fall) = report(ready, warm_fall(&engine, device_ordinal, digest)) else {
+            let Some(mut fall) = report(
+                ready,
+                warm_fall(&engine, device_ordinal, digest),
+                &actor_state,
+            ) else {
                 return;
             };
             serve(&stop, &queue, |request| {
@@ -85,6 +76,7 @@ pub fn spawn_fall(
             thread,
             readiness,
             requests,
+            state,
         },
         answers,
     ))
@@ -99,10 +91,16 @@ pub fn spawn_bed(
 ) -> io::Result<Owner<BedRequest>> {
     let (requests, queue) = mpsc::sync_channel::<BedRequest>(GPU_REQUEST_CAPACITY);
     let (ready, readiness) = mpsc::sync_channel(ONESHOT_CAPACITY);
+    let state = Arc::new(State::default());
+    let actor_state = Arc::clone(&state);
     let thread = thread::Builder::new()
         .name("gpu-bed".to_owned())
         .spawn(move || {
-            let Some(mut bed) = report(ready, warm_bed(&engine, device_ordinal, digest)) else {
+            let Some(mut bed) = report(
+                ready,
+                warm_bed(&engine, device_ordinal, digest),
+                &actor_state,
+            ) else {
                 return;
             };
             serve(&stop, &queue, |request| {
@@ -112,8 +110,9 @@ pub fn spawn_bed(
                         detections: raw.detections.to_vec(),
                         protos: raw.protos.to_vec(),
                         letterbox: raw.letterbox,
-                        evidence: raw.evidence,
-                    });
+                        evidence: Some(raw.evidence),
+                    })
+                    .map_err(Into::into);
                 // The requester may have given up; its reply is then dropped.
                 let _ = request.reply.try_send(output);
                 true
@@ -123,6 +122,7 @@ pub fn spawn_bed(
         thread,
         readiness,
         requests,
+        state,
     })
 }
 
@@ -136,15 +136,19 @@ pub fn spawn_stored_pose(
 ) -> io::Result<Owner<StoredPoseRequest>> {
     let (requests, queue) = mpsc::sync_channel::<StoredPoseRequest>(GPU_REQUEST_CAPACITY);
     let (ready, readiness) = mpsc::sync_channel(ONESHOT_CAPACITY);
+    let state = Arc::new(State::default());
+    let actor_state = Arc::clone(&state);
     let thread = thread::Builder::new()
         .name("gpu-stored-pose".to_owned())
         .spawn(move || {
             let warm = warm_stored_pose(&engine, device_ordinal, digest, threshold);
-            let Some(mut pose) = report(ready, warm) else {
+            let Some(mut pose) = report(ready, warm, &actor_state) else {
                 return;
             };
             serve(&stop, &queue, |request| {
-                let boxes = pose.infer(&request.rgb, request.width, request.height);
+                let boxes = pose
+                    .infer(&request.rgb, request.width, request.height)
+                    .map_err(Into::into);
                 // The requester may have given up; its reply is then dropped.
                 let _ = request.reply.try_send(boxes);
                 true
@@ -154,18 +158,8 @@ pub fn spawn_stored_pose(
         thread,
         readiness,
         requests,
+        state,
     })
-}
-
-/// Waits until `thread` has ended, up to the absolute monotonic `deadline`.
-pub fn join(
-    thread: JoinHandle<()>,
-    clock: &dyn Clock,
-    deadline: Duration,
-) -> Result<(), JoinError> {
-    poll_until(clock, deadline, "gpu owner exit", || thread.is_finished())
-        .map_err(JoinError::Timeout)?;
-    thread.join().map_err(|_| JoinError::Panicked)
 }
 
 fn warm_fall(engine: &Path, device_ordinal: i32, digest: EngineDigest) -> Option<FallGpu> {
@@ -213,9 +207,10 @@ fn receipt_matches(
 
 /// Sends the one readiness report and closes the channel. A warmed owner is
 /// served only when its report was delivered.
-fn report<T>(ready: SyncSender<Readiness>, owner: Option<T>) -> Option<T> {
+fn report<T>(ready: SyncSender<Readiness>, owner: Option<T>, state: &State) -> Option<T> {
     let readiness = match owner {
-        Some(_) => Ok(()),
+        Some(_) if state.started(Runtime::TensorRt) => Ok(()),
+        Some(_) => return None,
         None => Err(Exit::FatalAccelerator),
     };
     ready.try_send(readiness).ok()?;

@@ -900,7 +900,7 @@ pub(super) mod tests {
             readiness
         }
 
-        fn join_media(&mut self) -> Result<(), crate::gpu::owners::JoinError> {
+        fn join_media(&mut self) -> Result<(), crate::inference::JoinError> {
             if let Some(flag) = &self.release {
                 flag.store(true, Ordering::SeqCst);
             }

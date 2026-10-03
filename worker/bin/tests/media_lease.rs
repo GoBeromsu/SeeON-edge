@@ -31,7 +31,7 @@ use std::time::Duration;
 use seeon_deepstream_native::{
     MediaBinding, MediaConfig, MediaPoll, MediaResult, RecordTicket, SourceConfig,
 };
-use seeon_ml_worker::gpu::owners::JoinError;
+use seeon_ml_worker::inference::JoinError;
 use seeon_ml_worker::media::diagnostics::{Diagnostics, Snapshot};
 use seeon_ml_worker::media::owner::{self, MediaParams};
 use seeon_ml_worker::media::shutdown::ShutdownControl;
@@ -659,7 +659,7 @@ fn post_open_media_panic_finalizes_then_returns_typed_join_failure() {
         let thread = session.thread.take().expect("one media owner");
         assert_eq!(
             session.join_media(thread),
-            Err(seeon_ml_worker::gpu::owners::JoinError::Panicked)
+            Err(seeon_ml_worker::inference::JoinError::Panicked)
         );
         session.assert_shut_down();
         assert_eq!(session.diagnostics.snapshot().records_reserved, 0);

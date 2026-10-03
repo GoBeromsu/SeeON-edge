@@ -32,6 +32,7 @@ pub enum RuntimeError {
     Delivery,
     MediaFatal,
     MediaOwner(Exit),
+    ModelOwner(Exit),
     Identity,
     Configuration,
     WindowAsset(crate::config::windows::WindowError),
@@ -42,7 +43,7 @@ impl RuntimeError {
         match self {
             Self::Pump(error) => error.exit(),
             Self::MediaFatal => Exit::FatalAccelerator,
-            Self::MediaOwner(exit) => *exit,
+            Self::MediaOwner(exit) | Self::ModelOwner(exit) => *exit,
             Self::Identity | Self::Configuration | Self::WindowAsset(_) => Exit::Runtime,
             Self::Publication(_) | Self::Delivery => Exit::Runtime,
         }
@@ -58,6 +59,9 @@ impl fmt::Display for RuntimeError {
             Self::MediaFatal => formatter.write_str("media plane reported fatal"),
             Self::MediaOwner(exit) => {
                 write!(formatter, "media owner failed with exit {}", exit.code())
+            }
+            Self::ModelOwner(exit) => {
+                write!(formatter, "model owner failed with exit {}", exit.code())
             }
             Self::Identity => {
                 formatter.write_str("event identity does not match the trigger frame")
@@ -255,6 +259,11 @@ pub fn run(
     let mut sink = LiveSink::new();
     let mut announced_ready = false;
     loop {
+        if let Some(exit) = booted.models.failure() {
+            session.request_media_stop();
+            emit_pre_finalization_exit(session);
+            return (RunOutcome::Failed(RuntimeError::ModelOwner(exit)), sink);
+        }
         if shutdown.deadline().is_some() || session.stop.load(Ordering::SeqCst) {
             let failure = session
                 .media

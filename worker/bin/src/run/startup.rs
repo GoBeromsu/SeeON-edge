@@ -9,7 +9,7 @@ use std::time::Duration;
 use super::super::ModelRole;
 use super::super::models::{CleanupError, ModelOwners, ModelStartError, StartKind};
 use crate::exit::Exit;
-use crate::gpu::owners::{JoinError, Owner};
+use crate::inference::{JoinError, Owner};
 use crate::poll::poll_until;
 use crate::seam::Clock;
 use crate::shutdown::ShutdownDeadline;

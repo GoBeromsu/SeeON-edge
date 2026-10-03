@@ -1,10 +1,12 @@
 //! Channel messages and capacities of design §2.3. Every channel is a
 //! `std::sync::mpsc::sync_channel` and every producer uses `try_send`.
 //! Native media payloads cross the media channels unchanged. The accepted
-//! mixed-provider slice (#647) tags fall results without changing capacities.
+//! mixed-provider slice (#647) tags inference results without changing capacities.
 
 mod fall;
+mod image;
 pub use fall::{FallInferenceError, FallScore};
+pub use image::{BedInferenceError, StoredPoseInferenceError};
 
 use std::sync::mpsc::SyncSender;
 
@@ -12,9 +14,7 @@ use seeon_deepstream_native::FrameIdentity;
 use seeon_worker::bed_input::Letterbox;
 use seeon_worker::pose_bbox56::{FALL_WINDOW_FRAMES, PoseBbox56Row};
 use seeon_worker::stored_pose::PersonBox;
-use seeon_worker_runtime::bed_gpu::BedGpuError;
 use seeon_worker_runtime::evidence::AcceleratorEvidence;
-use seeon_worker_runtime::stored_pose::StoredPoseGpuError;
 
 use crate::exit::Exit;
 
@@ -26,17 +26,17 @@ pub const POSE_PER_CAMERA: usize = 4;
 pub const PREVIEW_CAPACITY: usize = 8;
 /// media → clip-publisher.
 pub const RECORD_CAPACITY: usize = 32;
-/// policy → gpu-fall.
+/// policy → fall owner.
 pub const FALL_REQUEST_CAPACITY: usize = 64;
-/// gpu-fall → policy.
+/// fall owner → policy.
 pub const FALL_RESPONSE_CAPACITY: usize = 64;
 /// policy → delivery.
 pub const EMIT_CAPACITY: usize = 256;
-/// Request queue of gpu-bed and gpu-stored-pose; full means 503.
+/// Request queue of bed and stored-pose owners; full means 503.
 pub const GPU_REQUEST_CAPACITY: usize = 2;
 /// Queued analysis jobs; busy means 409 or 503.
 pub const ANALYSIS_CAPACITY: usize = 1;
-/// One reply per request, and one readiness report per GPU owner thread.
+/// One reply per request, and one readiness report per native owner thread.
 pub const ONESHOT_CAPACITY: usize = 1;
 
 /// One 30-frame pose-bbox56 window for one track, scored by the selected owner.
@@ -53,7 +53,7 @@ pub struct FallResponse {
     pub score: Result<FallScore, FallInferenceError>,
 }
 
-/// One RGB frame for a request/oneshot GPU owner; the owner answers once on
+/// One RGB frame for a request/oneshot model owner; the owner answers once on
 /// `reply`.
 pub struct FrameRequest<T> {
     pub rgb: Vec<u8>,
@@ -62,18 +62,17 @@ pub struct FrameRequest<T> {
     pub reply: SyncSender<T>,
 }
 
-/// Owned copy of `BedRaw`, which borrows the owner's output buffers and so
-/// cannot leave the gpu-bed thread.
+/// Owned copy of raw bed outputs, which otherwise borrow the model's buffers.
 pub struct BedOutput {
     pub detections: Vec<f32>,
     pub protos: Vec<f32>,
     pub letterbox: Letterbox,
-    pub evidence: AcceleratorEvidence,
+    pub evidence: Option<AcceleratorEvidence>,
 }
 
-pub type BedRequest = FrameRequest<Result<BedOutput, BedGpuError>>;
-pub type StoredPoseRequest = FrameRequest<Result<Vec<PersonBox>, StoredPoseGpuError>>;
+pub type BedRequest = FrameRequest<Result<BedOutput, BedInferenceError>>;
+pub type StoredPoseRequest = FrameRequest<Result<Vec<PersonBox>, StoredPoseInferenceError>>;
 
-/// A GPU owner is built inside its own thread and reports once whether it
+/// A native owner is built inside its own thread and reports once whether it
 /// opened; `Err` carries the exit the process takes.
 pub type Readiness = Result<(), Exit>;

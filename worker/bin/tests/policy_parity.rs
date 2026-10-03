@@ -25,8 +25,8 @@ use std::time::{Duration, SystemTime};
 
 use seeon_deepstream_native::{FrameIdentity, GpuMetrics, TrackedObject};
 use seeon_ml_worker::msg::{
-    BedOutput, BedRequest, FALL_REQUEST_CAPACITY, FallRequest, FallResponse, GPU_REQUEST_CAPACITY,
-    PosePacket,
+    BedInferenceError, BedOutput, BedRequest, FALL_REQUEST_CAPACITY, FallRequest, FallResponse,
+    GPU_REQUEST_CAPACITY, PosePacket,
 };
 use seeon_ml_worker::policy::bed::{BedRefusal, BedReply, receive, submit};
 use seeon_ml_worker::policy::fall::{FallStage, score::transition_probability};
@@ -467,14 +467,16 @@ fn bed_output() -> BedOutput {
             pad_top: 140,
             pad_left: 0,
         },
-        evidence: evidence(),
+        evidence: Some(evidence()),
     }
 }
 
 fn classify(outcome: Result<BedReply, BedRefusal>) -> String {
     match outcome {
         Ok(Ok(_)) => "Ok(Ok(BedOutput))".to_owned(),
-        Ok(Err(BedGpuError::Output)) => "Ok(Err(BedGpuError::Output))".to_owned(),
+        Ok(Err(BedInferenceError::TensorRt(BedGpuError::Output))) => {
+            "Ok(Err(BedGpuError::Output))".to_owned()
+        }
         Ok(Err(other)) => format!("Ok(Err({other:?}))"),
         Err(refusal) => format!("Err(BedRefusal::{refusal:?})"),
     }
@@ -498,6 +500,29 @@ fn answered(answer: Option<BedReply>) -> Result<BedReply, BedRefusal> {
             drop(request);
             outcome
         }
+    }
+}
+
+#[test]
+fn cpu_bed_replies_preserve_payload_without_accelerator_claims() {
+    let mut output = bed_output();
+    output.evidence = None;
+    let received = answered(Some(Ok(output)))
+        .expect("reply transport")
+        .expect("CPU output");
+    assert_eq!(received.detections, vec![0.25, 0.5]);
+    assert_eq!(received.protos, vec![0.75]);
+    assert_eq!(received.letterbox, bed_output().letterbox);
+    assert!(received.evidence.is_none());
+}
+
+#[test]
+fn cpu_bed_failures_keep_their_provider_and_error_through_reply_transport() {
+    use seeon_worker_runtime::cpu::bed::BedCpuError;
+
+    for error in [BedCpuError::Output, BedCpuError::Poisoned] {
+        let received = answered(Some(Err(error.into()))).expect("reply transport");
+        assert!(matches!(received, Err(BedInferenceError::Cpu(actual)) if actual == error));
     }
 }
 
@@ -531,7 +556,7 @@ fn bed_outcomes_map_to_the_reviewed_classes() {
         let name = text(&case["case"]);
         let outcomes = match name {
             "ok" | "not_found" => vec![answered(Some(Ok(bed_output())))],
-            "runner_raises" => vec![answered(Some(Err(BedGpuError::Output)))],
+            "runner_raises" => vec![answered(Some(Err(BedGpuError::Output.into())))],
             "timeout" => vec![answered(None)],
             "unavailable" => unavailable(),
             "full" => vec![full()],

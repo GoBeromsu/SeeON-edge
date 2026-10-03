@@ -12,7 +12,8 @@ use std::time::Duration;
 
 use seeon_deepstream_native::FrameIdentity;
 use seeon_ml_worker::exit::Exit;
-use seeon_ml_worker::gpu::owners::{self, Owner};
+use seeon_ml_worker::gpu::owners;
+use seeon_ml_worker::inference::{self, Owner};
 use seeon_ml_worker::msg::{BedRequest, FallRequest, ONESHOT_CAPACITY, StoredPoseRequest};
 use seeon_ml_worker::seam::{Clock, SystemClock};
 use seeon_worker::pose_bbox56::{FALL_WINDOW_FRAMES, ZERO_ROW};
@@ -77,7 +78,7 @@ fn assert_first_served_receipt(evidence: &AcceleratorEvidence, digest: EngineDig
 fn join_before_deadline(thread: std::thread::JoinHandle<()>) {
     let clock = SystemClock::new();
     let deadline = clock.monotonic() + JOIN_BUDGET;
-    assert_eq!(owners::join(thread, &clock, deadline), Ok(()));
+    assert_eq!(inference::join(thread, &clock, deadline), Ok(()));
 }
 
 #[test]
@@ -132,7 +133,7 @@ fn each_owner_is_ready_once_and_its_first_reply_follows_one_warmup() {
         .recv_timeout(REPLY_WAIT)
         .expect("bed reply")
         .expect("bed output");
-    assert_first_served_receipt(&output.evidence, bed_digest);
+    assert_first_served_receipt(output.evidence.as_ref().expect("GPU receipt"), bed_digest);
 
     let (reply, replies) = mpsc::sync_channel(ONESHOT_CAPACITY);
     let request = StoredPoseRequest {

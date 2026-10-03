@@ -20,6 +20,8 @@ pub mod engine_build;
 pub mod exit;
 pub mod gpu;
 #[forbid(unsafe_code)]
+pub mod inference;
+#[forbid(unsafe_code)]
 pub mod json;
 #[forbid(unsafe_code)]
 pub mod media;

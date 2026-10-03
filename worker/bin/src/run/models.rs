@@ -1,5 +1,9 @@
 //! Real model owners and bounded partial-start cleanup. No engine opens before admission.
 
+#[cfg(test)]
+#[path = "model_state_tests.rs"]
+mod state_tests;
+
 use std::io;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -11,7 +15,8 @@ use super::settings::BootPolicy;
 use super::{ModelEngines, ModelRole};
 use crate::exit::Exit;
 use crate::gpu::lease::GpuLease;
-use crate::gpu::owners::{self, JoinError, Owner};
+use crate::gpu::owners;
+use crate::inference::{JoinError, Owner, Runtime, State};
 use crate::msg::{BedRequest, FallRequest, FallResponse, StoredPoseRequest};
 use crate::seam::Clock;
 use crate::shutdown::{DeadlineError, ShutdownDeadline};
@@ -48,6 +53,7 @@ pub struct ModelOwners {
     stop: Arc<AtomicBool>,
     shutdown: Arc<ShutdownDeadline>,
     lease: Option<GpuLease>,
+    states: [Option<Arc<State>>; 3],
 }
 
 impl ModelOwners {
@@ -60,6 +66,7 @@ impl ModelOwners {
             stop: Arc::new(AtomicBool::new(false)),
             shutdown,
             lease: Some(lease),
+            states: [None, None, None],
         }
     }
 
@@ -74,6 +81,29 @@ impl ModelOwners {
     }
     pub fn fall_responses(&self) -> Option<&Receiver<FallResponse>> {
         self.fall_responses.as_ref()
+    }
+
+    /// Retained after joins: shutdown must not erase a fault or loaded runtime identity.
+    pub fn failure(&self) -> Option<Exit> {
+        let mut first = None;
+        for state in self.states.iter().flatten() {
+            if let Some(exit) = state.failure() {
+                if exit == Exit::FatalAccelerator {
+                    return Some(exit);
+                }
+                first.get_or_insert(exit);
+            }
+        }
+        first
+    }
+
+    pub fn runtime(&self, role: ModelRole) -> Option<&Runtime> {
+        let index = match role {
+            ModelRole::Fall => 0,
+            ModelRole::Bed => 1,
+            ModelRole::StoredPose => 2,
+        };
+        self.states[index].as_ref()?.runtime()
     }
 
     pub(crate) fn start(
@@ -95,6 +125,7 @@ impl ModelOwners {
             Arc::clone(&self.stop),
         )
         .map_err(|error| spawn_error(ModelRole::Fall, error))?;
+        self.states[0] = Some(Arc::clone(&owner.state));
         self.fall = Some(owner);
         self.fall_responses = Some(responses);
         wait(
@@ -114,6 +145,7 @@ impl ModelOwners {
             )
             .map_err(|error| spawn_error(ModelRole::Bed, error))?,
         );
+        self.states[1] = self.bed.as_ref().map(|owner| Arc::clone(&owner.state));
         wait(
             self.bed.as_ref(),
             ModelRole::Bed,
@@ -132,6 +164,10 @@ impl ModelOwners {
             )
             .map_err(|error| spawn_error(ModelRole::StoredPose, error))?,
         );
+        self.states[2] = self
+            .stored_pose
+            .as_ref()
+            .map(|owner| Arc::clone(&owner.state));
         wait(
             self.stored_pose.as_ref(),
             ModelRole::StoredPose,

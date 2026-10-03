@@ -92,8 +92,12 @@ provider fallback.
 The separate `worker/adapters/model/onnxruntime` Rust owner executes captured
 ONNX bytes through the existing ONNX Runtime CPU library. The role owners in
 `worker/runtime/rust/src/cpu` connect it to existing RGB preprocessing, ordered
-person-box decoding, bed tensors and fall windows. These are not yet wired into
-the production worker loop. The native Makefile requires `ORT_INCLUDE_DIR`
+person-box decoding, bed tensors and fall windows. Thread-confined actors in
+`worker/bin/src/inference/cpu.rs` now warm and execute all three roles, retain
+the loaded ORT version and fatal failures independently of reply queues, and
+return CPU results without accelerator claims. Startup provider selection and
+model admission are not yet connected to these actors; the Rust camera loop
+still starts TensorRT owners. The native Makefile requires `ORT_INCLUDE_DIR`
 with three digest-checked API-29 headers; their immutable source and hashes are
 listed in that Makefile. `make test-ort` additionally requires a Python
 environment with ONNX, NumPy, and ONNX Runtime 1.29.0.
@@ -108,6 +112,13 @@ explicit `SEEON_TEST_ORT_RUNTIME`, `SEEON_TEST_ORT_MODELS`,
 `SEEON_TEST_ORT_FIXTURES`, and `SEEON_TEST_ORT_CPU_RECEIPT` paths; select them with
 `cargo test -p seeon-onnxruntime-native --test native_cpu -- --include-ignored`.
 They compare every output element in order, including its float32 bits.
+
+`cargo test -p seeon-ml-worker --test cpu_owners -- --include-ignored --test-threads=1`
+tests actual CPU actor readiness, input recovery, replies and shutdown. It uses
+`SEEON_TEST_ORT_RUNTIME`, `SEEON_TEST_ORT_MODELS`, `ORT_DISABLE_TELEMETRY=1`,
+and `SEEON_TEST_PYTHON` pointing to Python with ONNX installed. Its generated
+fault model tests terminal failure retention under full response queues, not
+product-model numerical parity.
 
 Production remains `python -m worker`. Ignored GPU integration tests require
 explicit engine/model inputs and actual GPU access. CPU-adapter comparisons

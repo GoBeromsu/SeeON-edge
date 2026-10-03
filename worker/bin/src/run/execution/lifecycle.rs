@@ -49,7 +49,7 @@ pub fn shutdown(
     session.request_media_stop();
     if deadline.request_at(clock.monotonic()).is_err() {
         booted.models.retain_lease_until_process_exit();
-        return unsafe_exit(&outcome, media_failure(&session));
+        return unsafe_exit(&outcome, owner_failure(&session, &booted));
     }
     let finalized = wait_finalized(&session, clock, deadline);
     let policy_drained = drain_policy(&mut session, clock, &mut sink);
@@ -71,11 +71,11 @@ pub fn shutdown(
         || !gpu_errors.is_empty();
     if !closed || overrun {
         booted.models.retain_lease_until_process_exit();
-        return unsafe_exit(&outcome, media_failure(&session));
+        return unsafe_exit(&outcome, owner_failure(&session, &booted));
     }
     // The owner can fail after the initial stop observation. Read its final
     // cause after the join; clean native release does not erase that failure.
-    terminal_exit(&outcome, media_failure(&session))
+    terminal_exit(&outcome, owner_failure(&session, &booted))
 }
 
 pub(super) fn drain_policy(
@@ -248,11 +248,16 @@ fn stop_outputs(
     error.map_or(Ok(()), Err)
 }
 
-fn media_failure(session: &Session) -> Option<Exit> {
-    session
+fn owner_failure(session: &Session, booted: &Booted) -> Option<Exit> {
+    let media = session
         .media
         .as_ref()
-        .and_then(|media| media.diagnostics.snapshot().failure)
+        .and_then(|media| media.diagnostics.snapshot().failure);
+    if media == Some(Exit::FatalAccelerator) {
+        media
+    } else {
+        booted.models.failure().or(media)
+    }
 }
 
 fn terminal_exit(outcome: &RunOutcome, media: Option<Exit>) -> RunExit {
@@ -286,7 +291,21 @@ fn unsafe_exit(outcome: &RunOutcome, media: Option<Exit>) -> RunExit {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::gpu::owners::JoinError;
+    use crate::inference::JoinError;
+
+    #[test]
+    fn model_faults_prevent_clean_exit_without_hiding_accelerator_failure() {
+        let failed = RunOutcome::Failed(runtime::RuntimeError::ModelOwner(Exit::Runtime));
+        assert_eq!(terminal_exit(&failed, None), RunExit::Runtime);
+        assert_eq!(
+            terminal_exit(&failed, Some(Exit::FatalAccelerator)),
+            RunExit::Fatal
+        );
+        assert_eq!(
+            terminal_exit(&RunOutcome::Stopped, Some(Exit::Runtime)),
+            RunExit::Runtime
+        );
+    }
 
     fn requested(clock: &dyn Clock) -> ShutdownDeadline {
         let deadline = ShutdownDeadline::new(Duration::from_secs(2)).unwrap();

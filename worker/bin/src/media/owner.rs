@@ -29,7 +29,7 @@ use super::release::{drain_records, release};
 use super::shutdown::ShutdownControl;
 use super::{COMMAND_CAPACITY, Command};
 use crate::exit::Exit;
-use crate::gpu::owners::JoinError;
+use crate::inference::JoinError;
 use crate::msg::{ONESHOT_CAPACITY, PosePacket, PreviewPacket, Readiness, RecordReceipt};
 use crate::poll::{POLL_INTERVAL, poll_until};
 use crate::seam::Clock;

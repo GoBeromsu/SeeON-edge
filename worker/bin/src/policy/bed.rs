@@ -1,29 +1,27 @@
-//! Bed request and response glue against the gpu-bed owner. The request
+//! Bed request and response glue against the selected bed owner. The request
 //! queue holds `GPU_REQUEST_CAPACITY` frames; a full queue is a typed
 //! refusal, never a wait. The reply comes on a per-request one-shot channel.
 
 use std::sync::mpsc::{self, Receiver, SyncSender, TryRecvError, TrySendError};
 use std::time::Duration;
 
-use seeon_worker_runtime::bed_gpu::BedGpuError;
-
-use crate::msg::{BedOutput, BedRequest, FrameRequest, ONESHOT_CAPACITY};
+use crate::msg::{BedInferenceError, BedOutput, BedRequest, FrameRequest, ONESHOT_CAPACITY};
 use crate::poll::poll_until;
 use crate::seam::Clock;
 
-pub type BedReply = Result<BedOutput, BedGpuError>;
+pub type BedReply = Result<BedOutput, BedInferenceError>;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum BedRefusal {
-    /// The gpu-bed queue already holds `GPU_REQUEST_CAPACITY` frames.
+    /// The bed queue already holds `GPU_REQUEST_CAPACITY` frames.
     Full,
-    /// The gpu-bed owner is gone.
+    /// The bed owner is gone.
     Disconnected,
     /// No reply before the deadline.
     Timeout,
 }
 
-/// Queues one RGB frame for the gpu-bed owner without blocking.
+/// Queues one RGB frame for the bed owner without blocking.
 pub fn submit(
     requests: &SyncSender<BedRequest>,
     rgb: Vec<u8>,
@@ -52,7 +50,7 @@ pub fn receive(
     replies: &Receiver<BedReply>,
 ) -> Result<BedReply, BedRefusal> {
     let mut received = None;
-    poll_until(clock, deadline, "gpu-bed reply", || {
+    poll_until(clock, deadline, "bed reply", || {
         match replies.try_recv() {
             Ok(reply) => received = Some(Ok(reply)),
             Err(TryRecvError::Disconnected) => received = Some(Err(BedRefusal::Disconnected)),
