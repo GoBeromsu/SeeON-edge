@@ -2,9 +2,8 @@
 //! comes from `tests_support/native_yolo_parity.py`; Rust output is never a
 //! golden. A missing input fails with its variable name instead of skipping.
 //!
-//! Detection rows are gated where the decider consumes them (score >= 0.25).
-//! Bed prototypes are gated on the masks, boxes and polygons production derives
-//! from them; raw prototype and full top-300 spreads are printed, not gated.
+//! Recorded decoded-decision checks use score >= 0.25. Independent raw-output
+//! checks compare every element in recorded order, including lower-score rows.
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::ffi::CStr;
@@ -32,9 +31,12 @@ use seeon_worker_runtime::fall_gpu::{FallGpu, FallGpuError, WINDOW_VALUES};
 use serde_json::{Map, Value, json};
 use sha2::{Digest, Sha256};
 
+#[path = "gpu_parity/ordered.rs"]
+mod ordered;
+
 const MAX_ABS: f64 = 1e-4;
-/// Bed rows also admit this many float32 ULP of the oracle value where that is
-/// wider than `MAX_ABS`, a disclosed deviation from the literal 1e-4.
+/// Bed outputs admit this many float32 ULP of the oracle value where that is
+/// wider than `MAX_ABS`; stored pose and fall retain the absolute limit.
 const ORACLE_ULP: u32 = 2;
 const DEVICE: i32 = 0;
 const MANIFEST: &str = include_str!("fixtures/gpu/manifest.json");
@@ -53,8 +55,8 @@ const PROTO_CHANNELS: usize = 32;
 const PROTO_SIDE: usize = 320;
 const MASK_THRESHOLD: f32 = 0.5;
 const BED_POLYGON_POINTS: [i64; 2] = [48, 16];
-/// The bed recognizer's configured confidence; rows below the gate it would
-/// still consume are counted in the output, not compared.
+/// The bed recognizer's configured confidence. This band is counted separately;
+/// raw comparisons include it, but decoded goldens still use the 0.25 gate.
 const RECOGNIZER_CONFIDENCE: f64 = 0.05;
 const DIAGNOSTIC_MAX_ABS: f64 = 1e-2;
 
@@ -820,6 +822,7 @@ fn bed_raw_outputs_match_the_ort_cuda_oracle() {
     );
     let mut sequence = None;
     let mut gated = 0;
+    let mut ordered = Vec::with_capacity(entries.len() * 2);
     for entry in entries {
         let id = text(entry, "id");
         let (width, height, rgb) = fixtures.rgb(text(entry, "frame"));
@@ -833,6 +836,26 @@ fn bed_raw_outputs_match_the_ort_cuda_oracle() {
         check_receipt(&raw.evidence, digest, bytes, &mut sequence);
         assert_eq!(raw.letterbox, letterbox, "bed {id} letterbox");
         let (detections, protos) = (raw.detections.to_vec(), raw.protos.to_vec());
+        let report = ordered::compare(
+            "bed output0",
+            id,
+            &detections,
+            &output0,
+            MAX_ABS,
+            Some(f64::from(ORACLE_ULP)),
+        );
+        println!("{report}");
+        ordered.push(report);
+        let report = ordered::compare(
+            "bed output1",
+            id,
+            &protos,
+            &output1,
+            MAX_ABS,
+            Some(f64::from(ORACLE_ULP)),
+        );
+        println!("{report}");
+        ordered.push(report);
         let (rows, worst) = compare_rows(&detections, &output0, BED_ROW, true)
             .unwrap_or_else(|error| panic!("bed {id} output0: {error}"));
         let decoded = decode_bed(&detections, &protos, &letterbox, ROWS_FROM_SCORE)
@@ -865,6 +888,15 @@ fn bed_raw_outputs_match_the_ort_cuda_oracle() {
         gated += rows;
     }
     assert!(gated > 0, "no bed row reaches the gate");
+    assert!(
+        ordered.iter().all(ordered::Report::passes),
+        "ordered raw bed outputs exceeded tolerance:\n{}",
+        ordered
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .join("\n")
+    );
 }
 
 #[test]
@@ -883,6 +915,7 @@ fn stored_pose_raw_output_matches_the_ort_cuda_oracle() {
     );
     let mut sequence = None;
     let mut gated = 0;
+    let mut ordered = Vec::with_capacity(entries.len());
     for entry in entries {
         let id = text(entry, "id");
         let (width, height, rgb) = fixtures.rgb(text(entry, "frame"));
@@ -915,6 +948,9 @@ fn stored_pose_raw_output_matches_the_ort_cuda_oracle() {
             AcceleratorEvidence::from_delta(&before, &after, DEVICE, digest, Precision::Fp32)
                 .unwrap_or_else(|error| panic!("stored pose {id} receipt: {error:?}"));
         check_receipt(&evidence, digest, bytes, &mut sequence);
+        let report = ordered::compare("stored pose output0", id, &output, &output0, MAX_ABS, None);
+        println!("{report}");
+        ordered.push(report);
         let (rows, worst) = compare_rows(&output, &output0, POSE_ROW, false)
             .unwrap_or_else(|error| panic!("stored pose {id} output0: {error}"));
         assert_eq!(
@@ -931,6 +967,15 @@ fn stored_pose_raw_output_matches_the_ort_cuda_oracle() {
         gated += rows;
     }
     assert!(gated > 0, "no pose row reaches the gate");
+    assert!(
+        ordered.iter().all(ordered::Report::passes),
+        "ordered raw stored pose outputs exceeded tolerance:\n{}",
+        ordered
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .join("\n")
+    );
 }
 
 #[test]
