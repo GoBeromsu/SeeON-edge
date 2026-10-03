@@ -9,6 +9,8 @@ mod cutoff_tests;
 mod fixture;
 #[path = "runtime_receipt_tests/publication_failure_tests.rs"]
 mod publication_failure_tests;
+#[path = "runtime_receipt_tests/shutdown_tests.rs"]
+mod shutdown_tests;
 
 use seeon_deepstream_native::{MediaBinding, MediaResult, RecordTicket};
 

@@ -12,7 +12,7 @@ use std::time::Duration;
 use seeon_deepstream_native::MediaBinding;
 
 use crate::clips::recorder::plane::CommandPlane;
-use crate::clips::recorder::{Admit, Recorder, RecorderError};
+use crate::clips::recorder::{Admit, Recorder, RecorderError, State};
 use crate::clips::reserve::ReservePool;
 use crate::clips::sealed::{ReplayOutcome, ReplayReport, SIDECAR_DIR, SealedSidecars};
 use crate::clips::store::ClipStore;
@@ -245,6 +245,16 @@ impl Publications {
         for recorder in &mut self.recorders {
             recorder.quiesce();
         }
+    }
+
+    /// Inspect ownership without retiring contributors or inferring a receipt.
+    /// Idle alone is insufficient: quiesced admissions remain pending.
+    pub(super) fn recordings_complete(&self) -> bool {
+        self.events.is_empty()
+            && self
+                .recorders
+                .iter()
+                .all(|recorder| recorder.state() == State::Idle && recorder.pending() == 0)
     }
 
     /// Whether a completed save published work that can wake the sender.

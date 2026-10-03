@@ -52,9 +52,7 @@ pub fn shutdown(
         return unsafe_exit(&outcome, media_failure(&session));
     }
     let finalized = wait_finalized(&session, clock, deadline);
-    let flushed = session.pump.flush(&mut sink);
-    let delivered = runtime::apply_sink(&mut session, clock, &mut sink);
-    let recorded = session.publications.drain_records(clock);
+    let policy_drained = drain_policy(&mut session, clock, &mut sink);
     let outputs = stop_outputs(
         session.exporter.as_mut(),
         [session.heartbeat.as_mut(), session.status.as_mut()],
@@ -67,9 +65,7 @@ pub fn shutdown(
         grant_and_join(&mut session, clock, deadline)
     });
     let overrun = !finalized
-        || flushed.is_err()
-        || delivered.is_err()
-        || recorded.is_err()
+        || !policy_drained
         || outputs.is_err()
         || cutoff(deadline, clock).is_err()
         || !gpu_errors.is_empty();
@@ -80,6 +76,23 @@ pub fn shutdown(
     // The owner can fail after the initial stop observation. Read its final
     // cause after the join; clean native release does not erase that failure.
     terminal_exit(&outcome, media_failure(&session))
+}
+
+pub(super) fn drain_policy(
+    session: &mut Session,
+    clock: &dyn Clock,
+    sink: &mut runtime::LiveSink,
+) -> bool {
+    let flushed = session.pump.flush(sink);
+    let delivered = runtime::apply_sink(session, clock, sink);
+    let recorded = session.publications.drain_records(clock);
+    // Finalization precedes this drain. Late or previously queued contributors
+    // cannot be declared complete merely because no further receipt arrived.
+    let recordings_complete = session.publications.recordings_complete();
+    if !recordings_complete {
+        eprintln!("ml-worker: shutdown refused: recording attribution remains unpublished");
+    }
+    flushed.is_ok() && delivered.is_ok() && recorded.is_ok() && recordings_complete
 }
 
 fn wait_finalized(session: &Session, clock: &dyn Clock, deadline: &ShutdownDeadline) -> bool {
