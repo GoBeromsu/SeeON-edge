@@ -3,9 +3,11 @@
 //! Candidate order is the relay's single walk. This owner reads one explicit
 //! zoneinfo root, compiles the captured TZif bytes, and never substitutes UTC.
 //! A reportable drop is not a typed fault: missing, non-regular, bad magic,
-//! a missing version byte, or a non-digit version fail open. IO after a
-//! regular file, a valid header with a bad body, an oversized file, and an
-//! invalid root stay typed. Startup strictness runs only after that walk.
+//! a missing version byte, or a non-digit version fail open. A proven invalid
+//! ASCII footer with a validated body is also reported and dropped. IO,
+//! structural or unclassified decode faults, oversize data, and an invalid root
+//! stay typed. Retained-but-unservable Python assets remain a parity blocker,
+//! not an approved exclusion. Startup strictness runs only after that walk.
 
 use std::collections::BTreeMap;
 use std::fmt;
@@ -48,7 +50,7 @@ pub enum WindowError {
     StrictClock,
     /// A regular file could not be opened or read.
     Io(ErrorKind),
-    /// Magic and version were Python-valid; the body was not.
+    /// Invalid or unsupported TZif data after header admission.
     CorruptTzif,
     /// Captured bytes exceed the primitive bound.
     TooLarge,
@@ -69,6 +71,8 @@ pub enum DropReason {
     Missing,
     /// The four-byte magic, version byte, or version class is not TZif.
     Header,
+    /// A valid body has a footer rejected by the canonical Python grammar.
+    Footer,
 }
 
 /// One dropped input. `definition` is absent when the value never shaped.
@@ -86,7 +90,7 @@ impl fmt::Display for WindowError {
                 .write_str("startup window time must use exactly two characters per HH:MM field"),
             Self::Io(kind) => write!(formatter, "zone file io failed: {kind}"),
             Self::CorruptTzif => {
-                formatter.write_str("zone file has a TZif header and a malformed body")
+                formatter.write_str("zone file has a TZif header but cannot be compiled")
             }
             Self::TooLarge => formatter.write_str("zone file exceeds the byte bound"),
             Self::Invariant(error) => write!(formatter, "window invariant refused: {error}"),
@@ -102,6 +106,7 @@ impl fmt::Display for DropReason {
             Self::ZoneName => "zone name is not a bounded relative IANA key",
             Self::Missing => "zone file is missing or not a regular file",
             Self::Header => "zone file magic or version is not TZif",
+            Self::Footer => "zone file timezone footer is invalid",
         })
     }
 }
@@ -182,6 +187,7 @@ fn admit_one(definition: &WindowDefinition, root: &Path) -> Result<One, WindowEr
     let end_text = ascii_hhmm(end);
     match DetectionWindow::from_tzif_bytes(&start_text, &end_text, &definition.tz, root, &bytes) {
         Ok(window) => Ok(One::Keep(window)),
+        Err(DetectionWindowError::InvalidZoneFooter) => Ok(One::Drop(DropReason::Footer)),
         Err(DetectionWindowError::InvalidZoneData) => Err(WindowError::CorruptTzif),
         Err(DetectionWindowError::ZoneDataTooLarge) => Err(WindowError::TooLarge),
         Err(error) => Err(WindowError::Invariant(error)),

@@ -33,6 +33,8 @@ pub use jiff::civil::DateTime;
 use jiff::civil::Time;
 use jiff::tz::{Offset, TimeZone};
 
+mod tzif_footer;
+
 pub const MAX_ZONE_NAME_BYTES: usize = 256;
 pub const MAX_ZONE_PATH_BYTES: usize = 4096;
 pub const MAX_TZIF_BYTES: usize = 1_048_576;
@@ -48,6 +50,8 @@ pub enum DetectionWindowError {
     ZoneDataUnavailable,
     ZoneDataTooLarge,
     InvalidZoneData,
+    /// A complete, independently valid body has a Python-invalid ASCII footer.
+    InvalidZoneFooter,
 }
 impl std::fmt::Display for DetectionWindowError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -69,6 +73,7 @@ impl std::fmt::Display for DetectionWindowError {
             }
             Self::ZoneDataTooLarge => "TZif file exceeds the byte bound",
             Self::InvalidZoneData => "named zone data is not valid TZif",
+            Self::InvalidZoneFooter => "named zone data has an invalid timezone footer",
         })
     }
 }
@@ -197,8 +202,9 @@ impl DetectionWindow {
     /// Compile exact captured TZif bytes. `zoneinfo_dir` and `tz` are checked
     /// with the same name/root/path rules as `from_zoneinfo_dir`, then used only
     /// as `source_path`. No file is opened or read. Bytes above 1 MiB are
-    /// `ZoneDataTooLarge` before decode; other non-TZif input is
-    /// `InvalidZoneData`.
+    /// `ZoneDataTooLarge` before decode. A proven Python-invalid ASCII footer
+    /// with a valid body is `InvalidZoneFooter`. Other invalid or unsupported
+    /// input remains `InvalidZoneData`; no alternative rules are admitted.
     pub fn from_tzif_bytes(
         start: &str,
         end: &str,
@@ -295,7 +301,13 @@ fn compile(
     if bytes.len() > MAX_TZIF_BYTES {
         return Err(DetectionWindowError::ZoneDataTooLarge);
     }
-    let zone = TimeZone::tzif(tz, bytes).map_err(|_| DetectionWindowError::InvalidZoneData)?;
+    let zone = TimeZone::tzif(tz, bytes).map_err(|_| {
+        if tzif_footer::invalid_footer(tz, bytes) {
+            DetectionWindowError::InvalidZoneFooter
+        } else {
+            DetectionWindowError::InvalidZoneData
+        }
+    })?;
     Ok(DetectionWindow {
         start,
         end,

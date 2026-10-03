@@ -392,6 +392,65 @@ fn public_errors_do_not_retain_zone_paths_or_configuration_text() {
     assert_eq!(captured, [secret]);
 }
 
+fn utc_with_footer(footer: &str) -> Vec<u8> {
+    let original = fs::read("/usr/share/zoneinfo/UTC").unwrap();
+    let mut bytes = original
+        .strip_suffix(b"\nUTC0\n")
+        .expect("system UTC footer")
+        .to_vec();
+    bytes.extend_from_slice(format!("\n{footer}\n").as_bytes());
+    bytes
+}
+
+#[test]
+fn accepted_footer_preserves_original_offset_and_future_dst_rules() {
+    let root = scratch("footer-rules");
+    for (name, footer, inside, outside) in [
+        ("Offset", "EST5", 2_209_012_200, 2_208_994_200),
+        (
+            "Dst",
+            "AAA0BBB,M3.2.0/2,M11.1.0/2",
+            2_224_715_400,
+            2_224_719_000,
+        ),
+    ] {
+        fs::write(root.join(name), utc_with_footer(footer)).unwrap();
+        let config = payload(json!({"fall":definition("01:00", "02:00", name)}));
+        for mode in [AdmissionMode::Startup, AdmissionMode::Poll] {
+            let outcome = admit(&config, &root, mode);
+            assert!(outcome.drops.is_empty());
+            let windows = outcome.windows.unwrap();
+            assert!(windows["fall"].window.contains(utc(inside)).unwrap());
+            assert!(!windows["fall"].window.contains(utc(outside)).unwrap());
+        }
+    }
+}
+
+#[test]
+fn footer_drop_is_reported_before_surviving_startup_clock_refusal() {
+    let root = scratch("footer-order");
+    copy_zone(&root, "UTC");
+    fs::write(root.join("InvalidFooter"), utc_with_footer("INVALID!!!")).unwrap();
+    let config = slots(vec![
+        ("bed_exit", definition("1:00", "02:00", "UTC")),
+        ("fall", definition("1:00", "02:00", "InvalidFooter")),
+    ]);
+    for mode in [AdmissionMode::Startup, AdmissionMode::Poll] {
+        let outcome = admit(&config, &root, mode);
+        assert_eq!(outcome.drops, [("fall".into(), DropReason::Footer)]);
+        match mode {
+            AdmissionMode::Startup => {
+                assert_eq!(outcome.windows, Err(WindowError::StrictClock));
+            }
+            AdmissionMode::Poll => {
+                let windows = outcome.windows.unwrap();
+                assert_eq!(windows.len(), 1);
+                assert!(windows.contains_key("bed_exit"));
+            }
+        }
+    }
+}
+
 #[test]
 #[ignore = "requires SEEON_TEST_PYTHON with canonical worker config models"]
 fn actual_python_startup_and_poll_match_window_admission() {
@@ -408,7 +467,7 @@ fn actual_python_startup_and_poll_match_window_admission() {
     fs::write(root.join("Truncated"), &real[..20]).unwrap();
     fs::write(root.join("Unreadable"), &real).unwrap();
     fs::set_permissions(root.join("Unreadable"), fs::Permissions::from_mode(0o000)).unwrap();
-    let cases = vec![
+    let mut cases = vec![
         definition("01:00", "02:00", "UTC"),
         definition("0１:00", "02:00", "UTC"),
         definition("1:00", "02:00", "UTC"),
@@ -424,7 +483,44 @@ fn actual_python_startup_and_poll_match_window_admission() {
         definition("01:00", "02:00", "Truncated"),
         definition("01:00", "02:00", "Unreadable"),
     ];
+    for (name, footer) in [
+        ("FooterShortName", "A0"),
+        ("FooterTwoLetter", "AB0"),
+        ("FooterQuotedShort", "<A>0"),
+        ("FooterCarryMinute", "ABC0:60"),
+        ("FooterCarrySecond", "ABC0:00:60"),
+        ("FooterNulValid", "EST5\0garbage"),
+        ("FooterNulInvalid", "INVALID!!!\0UTC0"),
+        ("FooterNulLeading", "\0UTC0"),
+        ("FooterNulShort", "A0\0garbage"),
+        ("FooterNulDst", "AAA0BBB,M3.2.0/2,M11.1.0/2\0garbage"),
+        ("FooterEmptyName", "<>0"),
+        ("FooterLargeCarry", "ABC24:99:99"),
+        ("FooterNegativeCarry", "ABC-24:99:99"),
+        (
+            "FooterTransitionCarry",
+            "AAA0BBB,M3.2.0/-167:99:99,M11.1.0/167",
+        ),
+        ("FooterInvalid", "INVALID!!!"),
+        ("FooterLargeOffset", "UTC25"),
+        ("FooterPunctuation", "UT!0"),
+        ("FooterEmpty", ""),
+        ("FooterUtc", "UTC0"),
+        ("FooterName", "ABC0"),
+        ("FooterOffset", "EST5"),
+        ("FooterDst", "AAA0BBB,M3.2.0/2,M11.1.0/2"),
+    ] {
+        fs::write(root.join(name), utc_with_footer(footer)).unwrap();
+        cases.push(definition("01:00", "02:00", name));
+    }
+    cases.push(definition("1:00", "02:00", "FooterInvalid"));
+    cases.push(definition("1:00", "02:00", "FooterUtc"));
+    let mut version_one = real;
+    version_one[4] = b'1';
+    fs::write(root.join("VersionOne"), version_one).unwrap();
+    cases.push(definition("01:00", "02:00", "VersionOne"));
     let expected = python_outcomes(&root, &cases);
+    let mut mismatches = Vec::new();
     for (index, window) in cases.into_iter().enumerate() {
         let config = payload(json!({"fall":window}));
         for (mode, name) in [
@@ -440,17 +536,19 @@ fn actual_python_startup_and_poll_match_window_admission() {
                 Err(WindowError::CorruptTzif) => "corrupt",
                 Err(error) => panic!("unexpected admission fault: {error}"),
             };
-            assert_eq!(
-                expected[index][name]["class"], class,
-                "case {index}, {name}"
-            );
-            assert_eq!(
-                expected[index][name]["drop"],
-                !outcome.drops.is_empty(),
-                "diagnostic case {index}, {name}"
-            );
+            let actual = json!({"class":class, "drop":!outcome.drops.is_empty()});
+            if expected[index][name] != actual {
+                mismatches.push(json!({
+                    "case":index, "mode":name,
+                    "python":expected[index][name], "rust":actual,
+                }));
+            }
         }
     }
+    assert!(
+        mismatches.is_empty(),
+        "window admission mismatches: {mismatches:#?}"
+    );
 }
 struct OracleChild(Option<Child>);
 
@@ -479,6 +577,7 @@ fn second_header_truncations_match_python_for_three_real_zones() {
             second + 5,
             second + 6,
             second + 43,
+            second + 44,
         ] {
             let name = format!("Probe-{zone_index}-{length}");
             fs::write(root.join(&name), &bytes[..length]).unwrap();
