@@ -16,16 +16,16 @@ name: Edge ML Images
 #
 # The boot smoke has two shapes, and exactly one runs per image build:
 #
-#   freshly built, not a release -> load the docker-format carrier and run it
+#   freshly built, not a release -> load directly into Docker and run it
 #     with networking disabled. This is every pull_request and every push to
 #     main.
 #   reused, or a release build   -> pull the published digest and `docker run`
 #     it, so the seal never carries a worker digest that was not booted in this
 #     run. Rare, and already logged in to the registry.
 #
-# The fresh-build carrier is written by BuildKit and loaded only for its smoke.
-# It keeps boot verification outside the shipped Dockerfile while ensuring the
-# exact locally built image is what starts.
+# Non-release builds load directly into Docker, avoiding a retained tar copy
+# beside BuildKit snapshots and Docker layers. The smoke checks the baked
+# revision and refuses registry pulls, so the exact locally built image starts.
 #
 # Publish policy:
 #   pull_request     -> build + boot smoke only. Never pushes, never logs in.
@@ -218,12 +218,15 @@ jobs:
         # The DeepStream layers exhaust the standard runner disk before boot
         # smoke (#569). These preinstalled toolchains are unused by both
         # container builds; do not touch the workspace, caches, or Docker data.
+        # Swift and GHC are also unused; remove only GHC compiler installations,
+        # leaving GHCup cache/config untouched (runner-images install scripts).
         # This cleanup must never run on a self-hosted machine.
         if: runner.environment == 'github-hosted' && runner.os == 'Linux'
         run: |
           set -euo pipefail
           df -h /
-          sudo rm -rf -- /usr/local/lib/android /usr/share/dotnet
+          sudo rm -rf -- /usr/local/lib/android /usr/share/dotnet \
+            /usr/share/swift /usr/local/.ghcup/ghc
           df -h /
 
       - name: Set up Docker Buildx
@@ -310,7 +313,10 @@ jobs:
           # which means attaching provenance.
           push: ${{ env.PUSH_IMAGES == 'true' }}
           provenance: ${{ env.RELEASE_BUILD == 'true' }}
-          outputs: type=docker,dest=/tmp/ml-worker-runtime.tar
+          # Releases still publish the attested index and smoke its digest.
+          # Only non-release builds load locally; no persistent tar duplicates
+          # the image while BuildKit and the Docker daemon also hold layers.
+          load: ${{ env.RELEASE_BUILD != 'true' }}
           build-args: |
             SOURCE_REVISION=${{ env.DEPLOY_SHA }}
           tags: ${{ env.ML_WORKER_TAGS }}
@@ -340,11 +346,14 @@ jobs:
         if: env.BUILD_ML_WORKER == 'true' && env.RELEASE_BUILD != 'true'
         run: |
           set -euo pipefail
-          docker load --input /tmp/ml-worker-runtime.tar
+          df -h /
+          SMOKE_REF="$IMAGE_NAMESPACE/ml-worker:$DEPLOY_SHA"
+          revision="$(docker image inspect --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}' "$SMOKE_REF")"
+          test "$revision" = "$DEPLOY_SHA"
           set +e
-          docker run --rm --network none \
+          docker run --pull never --rm --network none \
             -e RELAY_TOKEN=ci-boot-smoke-test \
-            "$IMAGE_NAMESPACE/ml-worker:$DEPLOY_SHA" \
+            "$SMOKE_REF" \
             python -m worker --check-config
           status=$?
           set -e
@@ -443,7 +452,7 @@ jobs:
         # URL is fixed in-code now (RELAY_URL is retired); only RELAY_TOKEN is
         # required and it only needs to be well-formed, not reachable.
         #
-        # The complement of the carrier smoke above: this is the path where
+        # The complement of the local-image smoke above: this is the path where
         # there is no fresh local build graph to smoke, because ml-worker was
         # either REUSED from a previous release or built on a release (which
         # pushes an OCI index and loads nothing). Both cases pull the exact

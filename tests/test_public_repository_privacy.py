@@ -1313,11 +1313,12 @@ _REGISTRY_WRITE_MARKERS = ("imagetools create", "edge_image_plan.py retag", "doc
 _EDGE_DOCKERFILE = "Dockerfile.edge"
 
 #: The two mutually exclusive boot-smoke shapes. A freshly built non-release
-#: image is loaded from its docker-format carrier; a reused or release digest is
+#: image is loaded directly into Docker; a reused or release digest is
 #: pulled and run. Their `if:` expressions must stay exact complements, or a run
 #: could skip both and the required check would pass having booted nothing.
 _SMOKE_STAGE_IF = "env.BUILD_ML_WORKER == 'true' && env.RELEASE_BUILD != 'true'"
 _SMOKE_PULL_IF = "env.BUILD_ML_WORKER != 'true' || env.RELEASE_BUILD == 'true'"
+_LOCAL_SMOKE_REF = 'SMOKE_REF="$IMAGE_NAMESPACE/ml-worker:$DEPLOY_SHA"'
 
 #: The only (workflow, job) pair permitted to hold a write scope while its
 #: workflow is reachable from `pull_request`, and the exact scopes it may hold.
@@ -1432,10 +1433,10 @@ def _assert_token_consumers_are_gated(name: str, job_name: str, job: dict[str, o
         if uses.startswith("actions/upload-artifact@"):
             uploads += 1
             assert step.get("if") == _PUSH_GATE, (name, step.get("name"), step.get("if"))
-        if "docker load --input /tmp/ml-worker-runtime.tar" in str(step.get("run", "")):
+        if _LOCAL_SMOKE_REF in str(step.get("run", "")):
             smokes += 1
             assert step.get("if") == _SMOKE_STAGE_IF, (name, step.get("name"), step.get("if"))
-            assert "docker run --rm --network none" in str(step["run"])
+            assert "docker run --pull never --rm --network none" in str(step["run"])
             assert "python -m worker --check-config" in str(step["run"])
         if "push" in with_:
             pushes += 1
@@ -1465,7 +1466,7 @@ def _assert_token_consumers_are_gated(name: str, job_name: str, job: dict[str, o
 
     # Non-vacuous: these are the shapes this job contains -- one registry login,
     # one artifact upload, two `push:` inputs, two `cache-to` exports, two
-    # digest re-tags, and one carrier boot smoke. Deleting a gate cannot pass by
+    # digest re-tags, and one local-image boot smoke. Deleting a gate cannot pass by
     # deleting its step, and deleting the smoke cannot pass by leaving nothing
     # to check.
     assert (logins, uploads, pushes, exports, retags, smokes) == (1, 1, 2, 2, 2, 1), (
@@ -1565,7 +1566,8 @@ _HOSTED_RUNNER_DISK_STEP = {
     "run": (
         "set -euo pipefail\n"
         "df -h /\n"
-        "sudo rm -rf -- /usr/local/lib/android /usr/share/dotnet\n"
+        "sudo rm -rf -- /usr/local/lib/android /usr/share/dotnet \\\n"
+        "  /usr/share/swift /usr/local/.ghcup/ghc\n"
         "df -h /\n"
     ),
 }
@@ -1788,31 +1790,74 @@ def test_edge_image_policy_rejects_dropping_a_gated_step(step_index: int, why: s
         _assert_write_permissions_stay_off_the_pull_request_path("edge-images.yml", workflow)
 
 
-def test_edge_image_boot_smoke_shapes_are_exact_complements() -> None:
-    """Every ml-worker build is smoked by exactly one of the two shapes.
-
-    A freshly built non-release image is smoked from the docker-format carrier;
-    a reused or release digest is pulled and run. If the two `if:` expressions
-    ever stopped being complements, a run could skip BOTH and the required check
-    would report green having booted nothing -- the #195 failure mode with an
-    extra step of indirection.
-    """
-    steps = _steps(_jobs(_workflow("edge-images.yml"))["publish"])
-    stage = [
-        s
-        for s in steps
-        if "docker load --input /tmp/ml-worker-runtime.tar" in str(s.get("run", ""))
-    ]
+def _assert_edge_image_boot_smoke_and_direct_load(workflow: dict[str, object]) -> None:
+    steps = _steps(_jobs(workflow)["publish"])
+    stage = [s for s in steps if _LOCAL_SMOKE_REF in str(s.get("run", ""))]
     pull = [s for s in steps if "docker pull" in str(s.get("run", ""))]
     assert len(stage) == 1, [s.get("name") for s in stage]
     assert len(pull) == 1, [s.get("name") for s in pull]
     assert stage[0]["if"] == _SMOKE_STAGE_IF, stage[0].get("if")
     assert pull[0]["if"] == _SMOKE_PULL_IF, pull[0].get("if")
-    # Both actually boot the worker, rather than merely existing.
-    assert "docker run --rm --network none" in str(stage[0]["run"])
+    local_run = str(stage[0]["run"])
+    assert "docker image inspect" in local_run
+    assert 'test "$revision" = "$DEPLOY_SHA"' in local_run
+    assert "org.opencontainers.image.revision" in local_run
+    assert "docker run --pull never --rm --network none" in local_run
+    assert "python -m worker --check-config" in local_run
+    assert "docker load" not in local_run
     assert "python -m worker --check-config" in str(pull[0]["run"])
     worker = next(s for s in steps if s.get("name") == "Build and push ml-worker image")
-    assert worker["with"]["outputs"] == "type=docker,dest=/tmp/ml-worker-runtime.tar"
+    assert worker["with"]["load"] == "${{ env.RELEASE_BUILD != 'true' }}"
+    assert "outputs" not in worker["with"]
+    # Release and reuse behavior stays digest-based; release builds still push
+    # an attested index, with no local-image exporter attached.
+    assert worker["with"]["provenance"] == "${{ env.RELEASE_BUILD == 'true' }}"
+    assert worker["with"]["push"] == _PUSH_GATE_EXPR
+    assert 'SMOKE_REF="$IMAGE_NAMESPACE/ml-worker@$ML_WORKER_DIGEST"' in str(pull[0]["run"])
+
+
+def test_edge_image_boot_smoke_shapes_are_exact_complements() -> None:
+    """Every build boots exactly once: direct local image or published digest."""
+    _assert_edge_image_boot_smoke_and_direct_load(_workflow("edge-images.yml"))
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("load", "false"),
+        ("load", "true"),
+        ("load", "${{ env.RELEASE_BUILD == 'true' }}"),
+        ("outputs", "type=docker,dest=/tmp/ml-worker-runtime.tar"),
+        ("provenance", "false"),
+    ],
+)
+def test_edge_image_direct_load_rejects_wrong_exporter(field: str, value: str) -> None:
+    workflow = copy.deepcopy(_workflow("edge-images.yml"))
+    steps = _steps(_jobs(workflow)["publish"])
+    worker = next(s for s in steps if s.get("id") == "build-worker")
+    worker["with"][field] = value
+
+    with pytest.raises(AssertionError):
+        _assert_edge_image_boot_smoke_and_direct_load(workflow)
+
+
+@pytest.mark.parametrize(
+    ("before", "after"),
+    [
+        ("--pull never ", ""),
+        ('test "$revision" = "$DEPLOY_SHA"', "true"),
+        ("python -m worker --check-config", "true"),
+        ("--network none", "--network host"),
+    ],
+)
+def test_edge_image_local_smoke_rejects_weakened_proof(before: str, after: str) -> None:
+    workflow = copy.deepcopy(_workflow("edge-images.yml"))
+    steps = _steps(_jobs(workflow)["publish"])
+    smoke = next(s for s in steps if _LOCAL_SMOKE_REF in str(s.get("run", "")))
+    smoke["run"] = str(smoke["run"]).replace(before, after)
+
+    with pytest.raises(AssertionError):
+        _assert_edge_image_boot_smoke_and_direct_load(workflow)
 
 
 def test_edge_image_policy_rejects_a_push_images_flag_that_is_true_on_a_pr() -> None:
