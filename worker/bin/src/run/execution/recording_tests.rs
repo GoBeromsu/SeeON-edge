@@ -40,6 +40,15 @@ fn media_receipt_accepts_regular_owned_file_but_not_traversal_or_symlink() {
 
 #[test]
 fn failed_codec_probe_retains_original_media_and_durable_attribution() {
+    assert_failed_save_retains_attribution(30_000);
+}
+
+#[test]
+fn zero_duration_ready_retains_observation_before_metadata_refusal() {
+    assert_failed_save_retains_attribution(0);
+}
+
+fn assert_failed_save_retains_attribution(duration_ms: u64) {
     let root = Scratch(std::env::temp_dir().join(RandomIds.uuid4().unwrap()));
     std::fs::create_dir(&root.0).unwrap();
     let store = ClipStore::new(root.0.join("store"));
@@ -65,7 +74,7 @@ fn failed_codec_probe_retains_original_media_and_durable_attribution() {
         ticket: RecordTicket::default(),
         result: MediaResult::Ok,
         contains_video: true,
-        duration_ms: 30_000,
+        duration_ms,
         boundary: Boundary::ExtensionRaced,
         contributors: vec![Contributor {
             event_ref: event_ref.into(),
@@ -82,6 +91,13 @@ fn failed_codec_probe_retains_original_media_and_durable_attribution() {
     }
     .save("boot-camera-session", &sealed, detected_at);
     assert!(result.is_err());
+    if duration_ms == 0 {
+        assert!(matches!(
+            result,
+            Err(PublishError::Reservation("sealed metadata"))
+        ));
+    }
+    assert!(queue.entries().unwrap().is_empty());
     assert_eq!(std::fs::read(&source).unwrap(), b"invalid encoded media");
     assert!(
         !store
@@ -96,6 +112,7 @@ fn failed_codec_probe_retains_original_media_and_durable_attribution() {
     assert_eq!(recovered.events[event_ref], event);
     assert_eq!(recovered.sealed.clip_id, "boot-camera-session");
     assert_eq!(recovered.sealed.path, source.to_str().unwrap());
+    assert_eq!(recovered.sealed.duration_ms, duration_ms as i64);
     assert_eq!(recovered.sealed.boundary, "extension_raced");
     assert_eq!(
         recovered.sealed.contributors[0].detected_at,

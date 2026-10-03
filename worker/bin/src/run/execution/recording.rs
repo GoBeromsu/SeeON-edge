@@ -47,8 +47,6 @@ impl RecordingPublisher<'_> {
                 },
             );
         }
-        let meta = flow_metadata(clip_id, &events, extension, FLOW_ENCODER, now)
-            .map_err(|_| PublishError::Reservation("sealed metadata"))?;
         let ready = sealed.result == MediaResult::Ok && sealed.contains_video;
         let sidecar = if ready {
             let durable = SealedClip {
@@ -78,6 +76,8 @@ impl RecordingPublisher<'_> {
         } else {
             None
         };
+        let meta = flow_metadata(clip_id, &events, extension, FLOW_ENCODER, now)
+            .map_err(|_| PublishError::Reservation("sealed metadata"))?;
         // Unavailable publications carry no media facts and therefore no codec claim.
         let codec = if ready {
             measured_codec(&sealed.path)?
