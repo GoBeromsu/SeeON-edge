@@ -27,7 +27,10 @@ DEEPSTREAM_CONFIGS = (
     "labels.txt",
     "nvinfer-yolo26-pose.txt",
 )
-_STAGE_HEADER = re.compile(r"^FROM(?:\s+--\S+)*\s+\S+(?:\s+AS\s+(\S+))?\s*$", re.MULTILINE)
+_STAGE_HEADER = re.compile(
+    r"^FROM(?:\s+--\S+)*\s+\S+(?:\s+AS\s+(\S+))?\s*$",
+    re.MULTILINE | re.IGNORECASE,
+)
 
 
 def _dockerfile() -> str:
@@ -82,7 +85,20 @@ def test_unnamed_final_stage_cannot_hide_from_packaging_assertions() -> None:
 
 @pytest.mark.parametrize(
     "revision",
-    [None, "", ZERO_REVISION, "1" * 39, "1" * 41, "A" * 40, "g" * 40, "1" * 39 + " ", "1" * 40],
+    [
+        None,
+        "",
+        ZERO_REVISION,
+        "1" * 39,
+        "1" * 41,
+        "A" * 40,
+        "g" * 40,
+        "1" * 39 + " ",
+        "1" * 20 + "\n" + "1" * 19,
+        "\n" + "1" * 39,
+        "1" * 39 + "\n",
+        "1" * 40,
+    ],
 )
 def test_revision_shell_guard_executes_without_writing_image_markers(
     revision: str | None,
@@ -116,13 +132,21 @@ def test_revision_shell_guard_executes_without_writing_image_markers(
         )
 
 
+def test_stage_parser_separates_case_insensitive_keywords() -> None:
+    stages = _stages("from base as builder\nRUN build\nFrOm base aS runtime\nRUN serve\n")
+    assert set(stages) == {"builder", "runtime"}
+    assert "RUN build" in stages["builder"]
+    assert "RUN serve" not in stages["builder"]
+    assert "RUN serve" in stages["runtime"]
+
+
 def test_edge_image_build_rejects_zero_and_malformed_source_revisions() -> None:
     owner = _stages(_dockerfile())["source-revision"]
     validation = owner[owner.index("ARG SOURCE_REVISION") : owner.index("chmod 0444")]
 
     assert f'[ "$SOURCE_REVISION" = "{ZERO_REVISION}" ]' in validation
     assert '"${#SOURCE_REVISION}" -ne 40' in validation
-    assert "[^0123456789abcdef]" in validation
+    assert "*[!0123456789abcdef]*" in validation
     assert "exit 1" in validation
     assert "LABEL " not in owner
 

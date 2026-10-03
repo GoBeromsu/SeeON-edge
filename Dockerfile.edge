@@ -47,7 +47,7 @@ ARG EDGE_DATABASE_SCHEMA_VERSION
 ARG SOURCE_REVISION
 RUN if [ "$SOURCE_REVISION" = "0000000000000000000000000000000000000000" ] \
       || [ "${#SOURCE_REVISION}" -ne 40 ] \
-      || printf '%s' "$SOURCE_REVISION" | grep -Eq '[^0123456789abcdef]'; then \
+      || case "$SOURCE_REVISION" in *[!0123456789abcdef]*) true ;; *) false ;; esac; then \
       printf '%s\n' 'SOURCE_REVISION must be a non-zero 40-character lowercase hexadecimal revision' >&2; \
       exit 1; \
     fi; \
