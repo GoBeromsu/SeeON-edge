@@ -126,9 +126,10 @@ build-level TensorRT fields are scoped as `media_inference_runtime` and
 `media_inference_runtime_version_encoded`; all-GPU manifests retain their
 existing fields. The image checks the pinned CPU loader library path at build.
 
-This wiring does not establish camera-to-PostgreSQL usability. Native CPU
-shutdown qualification remains blocked by observed worker-thread execution
-stalls; production remains the existing Python worker.
+This wiring does not establish camera-to-PostgreSQL usability. Ordinary CPU
+composition and actor shutdown checks passed in the frozen verification image;
+earlier worker-thread execution stalls remain unexplained. This is not final
+shipping-image qualification, and production remains the existing Python worker.
 
 CPU reference values are recorded independently by
 `python tests_support/record_ort_cpu_outputs.py --models <models> --fixtures <gpu-v2a> --output <new-directory>`,
