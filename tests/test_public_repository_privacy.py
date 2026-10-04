@@ -1226,7 +1226,7 @@ def test_untrusted_ci_has_no_private_repository_access() -> None:
         # Swapping a locked, audited toolchain for an ad-hoc resolve.
         ("lint", 3, "run", "uvx ruff check ."),
         # Silently widening what the shard actually runs.
-        ("test", 4, "run", "uv run pytest -q tests/"),
+        ("test", 5, "run", "uv run pytest -q tests/"),
         # The gate must not be turned into a no-op.
         ("ci-ok", 0, "run", "true"),
     ],
@@ -1241,6 +1241,8 @@ def test_untrusted_ci_policy_rejects_security_mutations(
     assert isinstance(target, dict)
     steps = target["steps"]
     assert isinstance(steps, list)
+    if job == "test" and value == "uv run pytest -q tests/":
+        assert steps[step_index]["name"] == "Run test shard ${{ matrix.shard }} of 4"
     steps[step_index][field] = value
 
     with pytest.raises(AssertionError):
