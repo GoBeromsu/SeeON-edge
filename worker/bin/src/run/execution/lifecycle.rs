@@ -289,6 +289,10 @@ fn unsafe_exit(outcome: &RunOutcome, media: Option<Exit>) -> RunExit {
 }
 
 #[cfg(test)]
+#[path = "lifecycle_n2_tests.rs"]
+mod n2_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::inference::JoinError;

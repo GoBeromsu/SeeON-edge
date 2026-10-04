@@ -1,7 +1,163 @@
 #include "media_internal.h"
 
+#ifdef SEEON_PRIVATE_N2_WITHHELD
+#include <cerrno>
+#include <cstdio>
+#include <fcntl.h>
+#include <sys/stat.h>
+#include <time.h>
+#include <unistd.h>
+#endif
+
 using namespace seeon_media;
 namespace {
+#ifdef SEEON_PRIVATE_N2_WITHHELD
+// Private publish-once protocol in the fixture's fresh, owned record directory.
+// No SDK pointers, native state writes, locks, or release controls belong here.
+struct PrivateN2Fd {
+  int value;
+  explicit PrivateN2Fd(int fd) noexcept : value(fd) {}
+  ~PrivateN2Fd() { if (value >= 0) ::close(value); }
+  bool close() noexcept {
+    const int fd = value;
+    value = -1;
+    return ::close(fd) == 0;
+  }
+  PrivateN2Fd(const PrivateN2Fd &) = delete;
+  PrivateN2Fd &operator=(const PrivateN2Fd &) = delete;
+};
+enum class PrivateN2Read { Absent, Invalid, Valid };
+template<size_t Fields>
+PrivateN2Read private_n2_read(int directory, const char *name, const char (&magic)[9],
+                            std::array<uint64_t, Fields> &fields) noexcept {
+  static_assert(Fields == 7 || Fields == 4, "Only bounded arm/query inputs");
+  constexpr size_t size = 8 + 8 * Fields;
+  PrivateN2Fd file(::openat(directory, name, O_RDONLY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK));
+  if (file.value < 0) return errno == ENOENT ? PrivateN2Read::Absent : PrivateN2Read::Invalid;
+  struct stat status{};
+  if (::fstat(file.value, &status) != 0 || !S_ISREG(status.st_mode) ||
+      status.st_uid != ::geteuid() || (status.st_mode & (S_IWGRP | S_IWOTH)) ||
+      status.st_size != static_cast<off_t>(size)) return PrivateN2Read::Invalid;
+  std::array<unsigned char, size + 1> bytes{};
+  size_t used = 0;
+  while (used < bytes.size()) {
+    const auto count = ::read(file.value, bytes.data() + used, bytes.size() - used);
+    if (count < 0) return PrivateN2Read::Invalid;
+    if (!count) break;
+    used += static_cast<size_t>(count);
+  }
+  if (used != size || std::memcmp(bytes.data(), magic, 8) != 0 || !file.close())
+    return PrivateN2Read::Invalid;
+  for (size_t index = 0; index < Fields; ++index) {
+    uint64_t value = 0;
+    for (size_t byte = 0; byte < 8; ++byte)
+      value |= uint64_t(bytes[8 + 8 * index + byte]) << (8 * byte);
+    fields[index] = value;
+  }
+  return PrivateN2Read::Valid;
+}
+template<size_t Fields>
+bool private_n2_publish(int directory, const char *temporary, const char *name,
+                        const char (&magic)[9], const std::array<uint64_t, Fields> &fields) noexcept {
+  static_assert(Fields == 13 || Fields == 20, "Only bounded entry/witness outputs");
+  std::array<unsigned char, 8 + 8 * Fields> bytes{};
+  std::memcpy(bytes.data(), magic, 8);
+  for (size_t index = 0; index < Fields; ++index) {
+    for (size_t byte = 0; byte < 8; ++byte)
+      bytes[8 + 8 * index + byte] = static_cast<unsigned char>(fields[index] >> (8 * byte));
+  }
+  PrivateN2Fd file(::openat(directory, temporary,
+      O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK, 0600));
+  if (file.value < 0) return false;
+  struct stat status{};
+  if (::fstat(file.value, &status) != 0 || !S_ISREG(status.st_mode) ||
+      status.st_uid != ::geteuid() || status.st_size != 0) return false;
+  size_t written = 0;
+  while (written < bytes.size()) {
+    const auto count = ::write(file.value, bytes.data() + written, bytes.size() - written);
+    if (count <= 0) return false;
+    written += static_cast<size_t>(count);
+  }
+  if (::fstat(file.value, &status) != 0 || status.st_size != static_cast<off_t>(bytes.size()) ||
+      ::fsync(file.value) != 0 || !file.close()) return false;
+  // Publication is the final fallible operation: never overwrite or truncate.
+  return ::renameat2(directory, temporary, directory, name, RENAME_NOREPLACE) == 0;
+}
+void private_n2_pause() noexcept {
+  const struct timespec pacing{0, 10000000};
+  (void)::nanosleep(&pacing, nullptr);
+}
+[[noreturn]] void private_n2_park() noexcept {
+  for (;;) private_n2_pause();
+}
+[[noreturn]] void private_n2_hold(int directory, const std::array<uint64_t, 13> &entry,
+                                const SeeonMedia &m, const RecordSlot &slot,
+                                const CallbackGuard &guard, const RecordLease &lease) noexcept {
+  // Entry is irrevocable even if I/O fails. The caller's real stack guards and
+  // retained directory FD stay alive; missing evidence makes the fixture fail.
+  try {
+    if (!private_n2_publish(directory, ".n2-entry.tmp", ".n2-entry.bin", "N2ENT001", entry))
+      private_n2_park();
+    std::array<uint64_t, 4> query{};
+    for (;;) {
+      const auto read = private_n2_read(directory, ".n2-query.bin", "N2QRY001", query);
+      if (read == PrivateN2Read::Absent) { private_n2_pause(); continue; }
+      if (read != PrivateN2Read::Valid || query[0] != entry[0] || query[1] != entry[1] ||
+          !(query[2] || query[3]) || (query[2] == entry[0] && query[3] == entry[1]))
+        private_n2_park();
+      break;
+    }
+    std::array<uint64_t, 20> witness{};
+    for (size_t index = 0; index < entry.size(); ++index) witness[index] = entry[index];
+    witness[13] = query[2];
+    witness[14] = query[3];
+    // Bounded atomic observations, not a simultaneous transactional snapshot.
+    witness[15] = m.records_used.load(std::memory_order_acquire);
+    witness[16] = slot.callback_done.load(std::memory_order_acquire);
+    witness[17] = guard.registration->entries.state.load(std::memory_order_acquire) & ~LeaseGate::retired;
+    witness[18] = lease.registration->entries.state.load(std::memory_order_acquire) & ~LeaseGate::retired;
+    witness[19] = guard.registration->lifetime->entries.state.load(std::memory_order_acquire) & ~LeaseGate::retired;
+    (void)private_n2_publish(directory, ".n2-witness.tmp", ".n2-witness.bin", "N2WIT001", witness);
+  } catch (...) {
+    // No exception may reach record_done's ordinary diagnostic/release path.
+  }
+  private_n2_park();
+}
+void private_n2_withhold(const SeeonMedia &m, const RecordSlot &slot,
+                         const CallbackGuard &guard, const RecordLease &lease) noexcept {
+  const auto &result = slot.callback_result; // Already copied genuine SDK data only.
+  const auto session = slot.session.load(std::memory_order_acquire);
+  if (result.result != SEEON_MEDIA_OK || result.error != SEEON_MEDIA_ERROR_NONE ||
+      result.ticket.session_valid != 1 || session == kNoSession ||
+      session != result.ticket.session_id || !result.duration_ms || !result.width || !result.height ||
+      result.contains_video != 1 || result.contains_audio > 1) return;
+  PrivateN2Fd directory(::open(m.record_directory.c_str(),
+      O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK));
+  if (directory.value < 0) return;
+  struct stat status{};
+  if (::fstat(directory.value, &status) != 0 || !S_ISDIR(status.st_mode) ||
+      status.st_uid != ::geteuid() || (status.st_mode & (S_IWGRP | S_IWOTH))) return;
+  std::array<uint64_t, 7> arm{};
+  if (private_n2_read(directory.value, ".n2-arm.bin", "N2ARM001", arm) != PrivateN2Read::Valid ||
+      !(arm[0] || arm[1]) || arm[2] != result.ticket.source_id ||
+      arm[3] != result.ticket.binding.token || arm[4] != result.ticket.binding.generation ||
+      arm[5] != result.ticket.binding.epoch || arm[6] != result.ticket.request_id) return;
+  // Freshness is the fixture's exclusively created directory plus absence of
+  // all later fixed protocol names. No scans or nonce history are retained.
+  constexpr const char *later_names[] = {".n2-entry.tmp", ".n2-entry.bin", ".n2-query.tmp",
+      ".n2-query.bin", ".n2-witness.tmp", ".n2-witness.bin"};
+  for (const auto *name : later_names) {
+    if (::fstatat(directory.value, name, &status, AT_SYMLINK_NOFOLLOW) == 0 || errno != ENOENT) return;
+  }
+  const std::array<uint64_t, 13> entry{arm[0], arm[1], result.ticket.source_id,
+      result.ticket.binding.token, result.ticket.binding.generation, result.ticket.binding.epoch,
+      result.ticket.request_id, session, result.duration_ms, result.width, result.height,
+      result.contains_video, result.contains_audio};
+  // Never wait for an arm or session. Past this boundary there is no return.
+  private_n2_hold(directory.value, entry, m, slot, guard, lease);
+}
+#endif
+
 // This DSO stays linked for the Worker process lifetime. Tokens are pointer-width
 // opaque integers, never addresses or dereferenced pointers; no tombstone map is
 // retained. Refuse exhaustion before arithmetic can wrap back to a used value.
@@ -150,6 +306,9 @@ void record_done(GstElement *element, gpointer info_pointer, gpointer request_da
     // start-sr may complete synchronously. Session validation is deferred until
     // the action returns; a late writer never mutates the delivered result.
     slot.callback_completed = completed;
+#ifdef SEEON_PRIVATE_N2_WITHHELD
+    private_n2_withhold(m, slot, guard, lease);
+#endif
     slot.callback_done.store(true, std::memory_order_release);
   } catch (...) { m.fail(SEEON_MEDIA_ERROR_EXCEPTION); }
 }
