@@ -215,6 +215,10 @@ fn verify(record: &Directory, run: [u64; 2], receipt: &Receipt) {
         "unchanged shared 25s budget"
     );
     assert!(t[7] >= t[6] && t[7] >= t[4] && t[8] >= t[7] && t[9] >= t[8]);
+    assert!(
+        control::expected_withheld_timeout(&witness),
+        "fresh native first failure must be the completed held-owner STOP_TIMEOUT"
+    );
     for snapshot in [receipt.returned, receipt.collected] {
         assert!(
             [0, 3, 9, 10, 11, 12, 13]
@@ -223,8 +227,8 @@ fn verify(record: &Directory, run: [u64; 2], receipt: &Receipt) {
             "diagnostic booleans"
         );
         assert!(
-            snapshot[0] == 0 && snapshot[1] == 0 && snapshot[3] == 0,
-            "no refused open or unrelated owner/fatal failure"
+            snapshot[0] == 0 && snapshot[1] == 0,
+            "no refused open or unrelated Rust owner failure"
         );
         assert!(
             snapshot[14] == 1

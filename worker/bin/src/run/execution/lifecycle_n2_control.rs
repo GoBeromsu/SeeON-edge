@@ -163,3 +163,30 @@ pub(super) fn nonce() -> [u64; 2] {
 pub(super) fn ns(at: Duration) -> u64 {
     u64::try_from(at.as_nanos()).expect("representable real monotonic time")
 }
+
+pub(super) fn expected_withheld_timeout(witness: &[u64; 25]) -> bool {
+    // Public native diagnostic vocabulary: fatal severity2, STOP_TIMEOUT18,
+    // no SDK domain/code, and the actual completed stop timeout.
+    witness[20..25] == [2, 18, 0, 0, 1]
+}
+
+#[test]
+fn withheld_timeout_rejects_missing_or_unrelated_native_causes() {
+    let mut witness = [0; 25];
+    witness[20..25].copy_from_slice(&[2, 18, 0, 0, 1]);
+    assert!(expected_withheld_timeout(&witness));
+    for (field, value) in [
+        (20, 0),
+        (20, 1),
+        (21, 0),
+        (21, 5),  // BUS is not an expected held-owner timeout.
+        (21, 17), // RECORD_TIMEOUT is not STOP_TIMEOUT.
+        (22, 4),
+        (23, u64::MAX), // Sign-extended negative SDK error.
+        (24, 0),
+    ] {
+        let mut unrelated = witness;
+        unrelated[field] = value;
+        assert!(!expected_withheld_timeout(&unrelated), "field {field}");
+    }
+}
