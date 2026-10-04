@@ -1,8 +1,9 @@
-//! Owned binary boot fixtures. The one schema-1 aggregate is the actual
-//! four-engine document produced once by the GPU build/CLI union. This fixture
-//! does not retrofit a stored-pose FP32 engine as the live engine, invent image
-//! or hardware facts, or construct a production identity. Copying the four
-//! engines preserves each entry's basename and every recorded receipt field.
+//! Owned binary boot fixtures. TensorRT requires the actual schema-1 four-engine
+//! aggregate; explicit CPU auxiliaries require a supplied schema-2 aggregate
+//! with the unchanged live GPU receipt and CPU ONNX hashes. This fixture never
+//! converts or constructs a qualification identity, invents image or hardware
+//! facts, or substitutes a stored-pose engine for the live engine. Copying only
+//! the selected engines preserves their basenames and recorded receipt fields.
 //!
 //! Current Flow relocation is not a new engine-build receipt and is not
 //! final-image attestation. Only the aggregate `flow` fingerprints are updated
@@ -25,8 +26,9 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::thread::JoinHandle;
 use std::time::Duration;
 
+use seeon_ml_worker::config::model_bundle::identity::AuxiliaryRuntime;
 use seeon_ml_worker::poll::poll_until;
-use seeon_ml_worker::records::id::sha256_hex;
+use seeon_ml_worker::records::id::{sha256_hex, sha256_hex_field};
 use seeon_ml_worker::seam::{Clock, SystemClock};
 use serde_json::{Value, json};
 
@@ -39,6 +41,11 @@ pub const ALERTS_PATH: &str = "/api/v1/relay/alerts";
 pub const CLIPS_PATH_PREFIX: &str = "/api/v1/relay/clips/";
 pub const EXECUTION_RECORDS_PATH: &str = "/api/v1/relay/execution-records";
 const ROLES: [&str; 4] = ["live_pose", "stored_pose", "bed", "fall"];
+const AUXILIARY_ENGINES: [(&str, &str); 3] = [
+    ("stored_pose", "ML_WORKER_STORED_POSE_ENGINE_PATH"),
+    ("bed", "ML_WORKER_BED_ENGINE_PATH"),
+    ("fall", "ML_WORKER_FALL_ENGINE_PATH"),
+];
 const FLOW_KEYS: [&str; 4] = [
     "infer_config_sha256",
     "tracker_config_sha256",
@@ -60,6 +67,7 @@ pub struct Request {
 
 pub struct Fixture {
     owned: OwnedDirectory,
+    auxiliary_runtime: AuxiliaryRuntime,
     pub state: PathBuf,
     pub env: BTreeMap<String, String>,
     source: TcpListener,
@@ -93,6 +101,10 @@ impl Drop for OwnedDirectory {
 
 impl Fixture {
     pub fn new(label: &str) -> Self {
+        Self::with_provider(label, AuxiliaryRuntime::TensorRt)
+    }
+
+    pub fn with_provider(label: &str, auxiliary_runtime: AuxiliaryRuntime) -> Self {
         let root = std::env::temp_dir().join(format!(
             "seeon-boot-{label}-{}-{}",
             std::process::id(),
@@ -102,7 +114,7 @@ impl Fixture {
         let owned = OwnedDirectory(root.clone());
         let state = root.join("state");
         fs::create_dir(&state).expect("state");
-        let aggregate = load_aggregate();
+        let aggregate = load_aggregate(auxiliary_runtime);
         let fall_onnx = required("SEEON_TEST_FALL_ONNX");
         let pose_onnx = required("SEEON_TEST_STORED_POSE_ONNX");
         let bed_onnx = required("SEEON_TEST_BED_ONNX");
@@ -117,26 +129,17 @@ impl Fixture {
             .expect("read-only published package reference");
         symlink(&bed_onnx, root.join("models/bed/yolo26l-seg.onnx"))
             .expect("canonical bed ONNX reference");
-        assert_eq!(
-            sha256_file(&pose_onnx),
-            entry_str(&aggregate.engines, "live_pose", "onnx_sha256")
-        );
-        assert_eq!(
-            sha256_file(&pose_onnx),
-            entry_str(&aggregate.engines, "stored_pose", "onnx_sha256")
-        );
-        assert_eq!(
-            sha256_file(&bed_onnx),
-            entry_str(&aggregate.engines, "bed", "onnx_sha256")
-        );
-        assert_eq!(
-            sha256_file(&fall_onnx),
-            entry_str(&aggregate.engines, "fall", "onnx_sha256")
+        verify_model_sources(
+            &aggregate,
+            auxiliary_runtime,
+            &pose_onnx,
+            &bed_onnx,
+            &fall_onnx,
         );
         let engine_dir = root.join("engines");
         fs::create_dir(&engine_dir).expect("owned engines");
         let mut owned_engines = BTreeMap::new();
-        for role in ROLES {
+        for &role in engine_roles(auxiliary_runtime) {
             let basename = entry_str(&aggregate.engines, role, "engine");
             assert!(
                 !basename.contains('/')
@@ -201,18 +204,6 @@ impl Fixture {
                     .into_owned(),
             ),
             (
-                "ML_WORKER_FALL_ENGINE_PATH",
-                owned_engines["fall"].to_string_lossy().into_owned(),
-            ),
-            (
-                "ML_WORKER_BED_ENGINE_PATH",
-                owned_engines["bed"].to_string_lossy().into_owned(),
-            ),
-            (
-                "ML_WORKER_STORED_POSE_ENGINE_PATH",
-                owned_engines["stored_pose"].to_string_lossy().into_owned(),
-            ),
-            (
                 "ML_WORKER_FLOW_ENGINE_PATH",
                 owned_engines["live_pose"].to_string_lossy().into_owned(),
             ),
@@ -252,11 +243,13 @@ impl Fixture {
         .into_iter()
         .map(|(key, value)| (key.to_owned(), value))
         .collect();
+        wire_auxiliary_engines(&mut env, &owned_engines, auxiliary_runtime);
         env.insert("HOME".into(), root.to_string_lossy().into_owned());
         let source = TcpListener::bind("127.0.0.1:0").expect("source activation trap");
         source.set_nonblocking(true).expect("nonblocking trap");
         Self {
             owned,
+            auxiliary_runtime,
             state,
             env,
             source,
@@ -297,6 +290,7 @@ impl Fixture {
             .env("CUDA_VISIBLE_DEVICES", "")
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
+        select_auxiliary_command(&mut command, self.auxiliary_runtime);
         command
     }
 
@@ -581,37 +575,114 @@ struct Aggregate {
     batch: u32,
 }
 
-fn load_aggregate() -> Aggregate {
+fn engine_roles(auxiliary_runtime: AuxiliaryRuntime) -> &'static [&'static str] {
+    match auxiliary_runtime {
+        AuxiliaryRuntime::TensorRt => &ROLES,
+        AuxiliaryRuntime::OnnxRuntimeCpu => &["live_pose"],
+    }
+}
+
+fn wire_auxiliary_engines(
+    env: &mut BTreeMap<String, String>,
+    engines: &BTreeMap<&str, PathBuf>,
+    auxiliary_runtime: AuxiliaryRuntime,
+) {
+    if auxiliary_runtime == AuxiliaryRuntime::TensorRt {
+        for (role, name) in AUXILIARY_ENGINES {
+            env.insert(
+                name.to_owned(),
+                engines[role].to_string_lossy().into_owned(),
+            );
+        }
+    }
+}
+
+fn select_auxiliary_command(command: &mut Command, auxiliary_runtime: AuxiliaryRuntime) {
+    if auxiliary_runtime == AuxiliaryRuntime::OnnxRuntimeCpu {
+        command
+            .arg("--auxiliary-runtime=onnxruntime-cpu")
+            .env("ORT_DISABLE_TELEMETRY", "1");
+    }
+}
+
+fn load_aggregate(auxiliary_runtime: AuxiliaryRuntime) -> Aggregate {
     let path = required("SEEON_TEST_ENGINE_IDENTITY");
     let document: Value =
-        serde_json::from_slice(&fs::read(&path).expect("actual four-engine aggregate"))
+        serde_json::from_slice(&fs::read(&path).expect("actual provider-specific aggregate"))
             .expect("aggregate JSON");
-    let members = document.as_object().expect("schema-1 aggregate object");
-    assert_eq!(
-        members.len(),
-        4,
-        "one schema-1 aggregate, not a flat receipt"
-    );
-    assert_eq!(document["schema_version"], 1);
-    for key in ["schema_version", "engines", "flow", "batch_size"] {
-        assert!(members.contains_key(key), "aggregate missing {key}");
-    }
-    let engines = document["engines"]
+    aggregate_from_document(
+        path.parent().expect("aggregate directory").to_path_buf(),
+        document,
+        auxiliary_runtime,
+    )
+}
+
+fn exact_members<'a>(
+    document: &'a Value,
+    keys: &[&str],
+    subject: &str,
+) -> &'a serde_json::Map<String, Value> {
+    let members = document
         .as_object()
-        .expect("four engine receipts")
-        .clone();
-    assert_eq!(engines.len(), ROLES.len(), "exactly four roles");
-    for role in ROLES {
-        assert!(engines.contains_key(role), "aggregate missing {role}");
+        .unwrap_or_else(|| panic!("{subject} must be an object"));
+    assert_eq!(members.len(), keys.len(), "{subject} exact members");
+    for key in keys {
+        assert!(members.contains_key(*key), "{subject} missing {key}");
     }
-    let flow = document["flow"].as_object().expect("flow fingerprints");
-    assert_eq!(
-        flow.len(),
-        FLOW_KEYS.len(),
-        "exactly four current flow fingerprints"
-    );
-    for key in FLOW_KEYS {
-        assert!(flow.contains_key(key), "aggregate flow missing {key}");
+    members
+}
+
+fn aggregate_from_document(
+    directory: PathBuf,
+    document: Value,
+    auxiliary_runtime: AuxiliaryRuntime,
+) -> Aggregate {
+    let (version, keys): (u64, &[&str]) = match auxiliary_runtime {
+        AuxiliaryRuntime::TensorRt => (1, &["schema_version", "engines", "flow", "batch_size"]),
+        AuxiliaryRuntime::OnnxRuntimeCpu => (
+            2,
+            &[
+                "schema_version",
+                "engines",
+                "flow",
+                "batch_size",
+                "auxiliary",
+            ],
+        ),
+    };
+    exact_members(&document, keys, "provider-specific aggregate");
+    assert_eq!(document["schema_version"].as_u64(), Some(version));
+    let roles = engine_roles(auxiliary_runtime);
+    let engines = exact_members(&document["engines"], roles, "engine receipts").clone();
+    if auxiliary_runtime == AuxiliaryRuntime::OnnxRuntimeCpu {
+        let auxiliary = exact_members(
+            &document["auxiliary"],
+            &["runtime", "provider", "models"],
+            "CPU auxiliary declaration",
+        );
+        assert_eq!(auxiliary["runtime"], "onnxruntime");
+        assert_eq!(auxiliary["provider"], "cpu");
+        let models = exact_members(&auxiliary["models"], &ROLES[1..], "CPU models");
+        for role in &ROLES[1..] {
+            exact_members(&models[*role], &["onnx_sha256"], role);
+            cpu_source_hash(&document, role);
+        }
+        assert_eq!(
+            cpu_source_hash(&document, "stored_pose"),
+            entry_str(&engines, "live_pose", "onnx_sha256"),
+            "CPU stored pose must retain the live receipt's ONNX source"
+        );
+    }
+    let flow = exact_members(&document["flow"], &FLOW_KEYS, "flow fingerprints");
+    if auxiliary_runtime == AuxiliaryRuntime::OnnxRuntimeCpu {
+        for key in FLOW_KEYS {
+            assert!(
+                flow[key]
+                    .as_str()
+                    .is_some_and(|value| sha256_hex_field(value, key).is_ok()),
+                "CPU aggregate must supply the recorded flow SHA-256 for {key}"
+            );
+        }
     }
     let batch = document["batch_size"]
         .as_u64()
@@ -629,14 +700,14 @@ fn load_aggregate() -> Aggregate {
         })
         .expect("recorded caller image digest from the live receipt")
         .to_owned();
-    for role in ROLES {
+    for &role in roles {
         assert_eq!(
             engines[role]["image_digest"], image,
             "{role} image must match the recorded caller digest"
         );
     }
     Aggregate {
-        directory: path.parent().expect("aggregate directory").to_path_buf(),
+        directory,
         document,
         engines,
         image,
@@ -650,48 +721,74 @@ fn entry_str<'a>(engines: &'a serde_json::Map<String, Value>, role: &str, key: &
         .unwrap_or_else(|| panic!("{role}.{key} required"))
 }
 
+fn cpu_source_hash<'a>(document: &'a Value, role: &str) -> &'a str {
+    document["auxiliary"]["models"][role]["onnx_sha256"]
+        .as_str()
+        .filter(|value| sha256_hex_field(value, "onnx_sha256").is_ok())
+        .unwrap_or_else(|| panic!("CPU {role}.onnx_sha256 must be a recorded SHA-256"))
+}
+
+fn verify_model_sources(
+    aggregate: &Aggregate,
+    auxiliary_runtime: AuxiliaryRuntime,
+    pose: &std::path::Path,
+    bed: &std::path::Path,
+    fall: &std::path::Path,
+) {
+    let pose_sha = sha256_file(pose);
+    assert_eq!(
+        pose_sha,
+        entry_str(&aggregate.engines, "live_pose", "onnx_sha256"),
+        "supplied pose source must match the unchanged live GPU receipt"
+    );
+    for (role, sha) in [
+        ("stored_pose", pose_sha),
+        ("bed", sha256_file(bed)),
+        ("fall", sha256_file(fall)),
+    ] {
+        let recorded = match auxiliary_runtime {
+            AuxiliaryRuntime::TensorRt => entry_str(&aggregate.engines, role, "onnx_sha256"),
+            AuxiliaryRuntime::OnnxRuntimeCpu => cpu_source_hash(&aggregate.document, role),
+        };
+        assert_eq!(
+            sha, recorded,
+            "{role} supplied ONNX must match its recorded hash"
+        );
+    }
+}
+
 fn write_relocated(
     aggregate: &Aggregate,
     destination: &std::path::Path,
     flow_files: &[(&str, &std::path::Path)],
 ) {
     let mut relocated = aggregate.document.clone();
-    let native = ["stored_pose", "bed", "fall"];
-    for role in native {
-        assert_eq!(relocated["engines"][role], aggregate.engines[role]);
-    }
     let flow = relocated["flow"].as_object_mut().expect("flow object");
     assert_eq!(flow_files.len(), FLOW_KEYS.len());
-    for (key, path) in flow_files {
-        assert!(flow.contains_key(*key), "recorded flow missing {key}");
-        flow.insert((*key).to_owned(), Value::String(sha256_file(path)));
+    for key in FLOW_KEYS {
+        assert!(flow.contains_key(key), "recorded flow missing {key}");
+        let mut matches = flow_files.iter().filter(|(provided, _)| *provided == key);
+        let (_, path) = matches.next().expect("relocation requires each flow file");
+        assert!(matches.next().is_none(), "duplicate flow relocation {key}");
+        flow.insert(key.to_owned(), Value::String(sha256_file(path)));
     }
-    for role in native {
+    for (key, value) in aggregate.document.as_object().expect("aggregate object") {
+        if key == "flow" {
+            continue;
+        }
         assert_eq!(
-            relocated["engines"][role], aggregate.engines[role],
-            "{role} receipt must stay byte-semantically equal"
+            &relocated[key], value,
+            "{key} must stay byte-semantically equal; only four Flow hashes relocate"
         );
     }
-    assert_eq!(
-        relocated["engines"]["live_pose"],
-        aggregate.engines["live_pose"]
-    );
-    assert_eq!(
-        relocated["schema_version"],
-        aggregate.document["schema_version"]
-    );
-    assert_eq!(relocated["batch_size"], aggregate.document["batch_size"]);
     let mut encoded = serde_json::to_vec(&relocated).expect("relocated aggregate");
     encoded.push(b'\n');
     fs::write(destination, encoded).expect("owned aggregate");
     let reread: Value =
         serde_json::from_slice(&fs::read(destination).expect("written aggregate")).expect("JSON");
-    for role in native {
-        assert_eq!(reread["engines"][role], aggregate.engines[role]);
-    }
     assert_eq!(
-        reread["engines"]["live_pose"],
-        aggregate.engines["live_pose"]
+        reread, relocated,
+        "persisted relocation preserves every receipt and CPU fact"
     );
 }
 
@@ -740,6 +837,357 @@ fn render_served(template: &str, engine: &str, batch: u32) -> String {
         "copied serving config omits legacy template ONNX; this is fixture relocation, not a fresh engine receipt"
     );
     rendered
+}
+
+#[cfg(test)]
+mod provider_selection_tests {
+    use super::*;
+
+    const POSE: &[u8] = b"unit-private pose bytes, not a genuine ONNX model";
+    const BED: &[u8] = b"unit-private bed bytes, not a genuine ONNX model";
+    const FALL: &[u8] = b"unit-private fall bytes, not a genuine ONNX model";
+
+    // Synthetic documents are confined to these private helpers. They never
+    // enter Fixture::new/new_cpu, load_aggregate, or an executed worker command.
+    fn unit_document(auxiliary_runtime: AuxiliaryRuntime) -> Value {
+        let image = format!("sha256:{}", sha256_hex(b"unit-private image"));
+        let live = json!({
+            "engine": "unit-live.engine",
+            "engine_sha256": sha256_hex(b"unit-private live engine"),
+            "onnx_sha256": sha256_hex(POSE),
+            "image_digest": image,
+            "device": 0,
+            "device_name": "unit-private device, not observed hardware",
+            "compute_capability": "8.9",
+            "trt_version": 10000,
+            "observer_library_sha256": sha256_hex(b"unit-private observer"),
+            "precision": "fp16",
+            "tf32_enabled": true,
+            "input": "images",
+            "min_dimensions": [1, 3, 640, 640],
+            "opt_dimensions": [2, 3, 640, 640],
+            "max_dimensions": [2, 3, 640, 640],
+        });
+        let mut engines = serde_json::Map::new();
+        engines.insert("live_pose".to_owned(), live.clone());
+        if auxiliary_runtime == AuxiliaryRuntime::TensorRt {
+            for (role, source) in [("stored_pose", POSE), ("bed", BED), ("fall", FALL)] {
+                let mut receipt = live.clone();
+                receipt["engine"] = json!(format!("unit-{role}.engine"));
+                receipt["engine_sha256"] = json!(sha256_hex(role.as_bytes()));
+                receipt["onnx_sha256"] = json!(sha256_hex(source));
+                engines.insert(role.to_owned(), receipt);
+            }
+        }
+        let flow: serde_json::Map<String, Value> = FLOW_KEYS
+            .into_iter()
+            .map(|key| (key.to_owned(), json!(sha256_hex(key.as_bytes()))))
+            .collect();
+        let mut document = json!({
+            "schema_version": if auxiliary_runtime == AuxiliaryRuntime::TensorRt { 1 } else { 2 },
+            "engines": engines,
+            "flow": flow,
+            "batch_size": 2,
+        });
+        if auxiliary_runtime == AuxiliaryRuntime::OnnxRuntimeCpu {
+            document["auxiliary"] = json!({
+                "runtime": "onnxruntime",
+                "provider": "cpu",
+                "models": {
+                    "stored_pose": {"onnx_sha256": sha256_hex(POSE)},
+                    "bed": {"onnx_sha256": sha256_hex(BED)},
+                    "fall": {"onnx_sha256": sha256_hex(FALL)},
+                },
+            });
+        }
+        document
+    }
+
+    fn unit_directory(label: &str) -> OwnedDirectory {
+        let path = std::env::temp_dir().join(format!(
+            "seeon-unit-provider-{label}-{}-{}",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::SeqCst)
+        ));
+        fs::create_dir(&path).expect("new unit-private directory");
+        OwnedDirectory(path)
+    }
+
+    fn refuse(document: Value, auxiliary_runtime: AuxiliaryRuntime) {
+        assert!(
+            std::panic::catch_unwind(|| {
+                aggregate_from_document(PathBuf::new(), document, auxiliary_runtime)
+            })
+            .is_err(),
+            "malformed or mismatched provider declaration must fail closed"
+        );
+    }
+
+    #[test]
+    fn providers_require_their_own_schema_and_exact_selected_engine_roles() {
+        for provider in [AuxiliaryRuntime::TensorRt, AuxiliaryRuntime::OnnxRuntimeCpu] {
+            let document = unit_document(provider);
+            let aggregate = aggregate_from_document(PathBuf::new(), document.clone(), provider);
+            let expected: &[&str] = match provider {
+                AuxiliaryRuntime::TensorRt => &["live_pose", "stored_pose", "bed", "fall"],
+                AuxiliaryRuntime::OnnxRuntimeCpu => &["live_pose"],
+            };
+            assert_eq!(engine_roles(provider), expected);
+            assert_eq!(aggregate.engines.len(), expected.len());
+            assert!(
+                expected
+                    .iter()
+                    .all(|role| aggregate.engines.contains_key(*role))
+            );
+            assert_eq!(
+                aggregate.document, document,
+                "selection never rewrites identity"
+            );
+            let other = match provider {
+                AuxiliaryRuntime::TensorRt => AuxiliaryRuntime::OnnxRuntimeCpu,
+                AuxiliaryRuntime::OnnxRuntimeCpu => AuxiliaryRuntime::TensorRt,
+            };
+            refuse(document.clone(), other);
+            let mut changed_version = document.clone();
+            changed_version["schema_version"] = json!(3);
+            refuse(changed_version, provider);
+            let mut missing_role = document.clone();
+            missing_role["engines"]
+                .as_object_mut()
+                .unwrap()
+                .remove("live_pose");
+            refuse(missing_role, provider);
+            let mut renamed_role = document.clone();
+            let engines = renamed_role["engines"].as_object_mut().unwrap();
+            let live = engines.remove("live_pose").unwrap();
+            engines.insert("unexpected".to_owned(), live);
+            refuse(renamed_role, provider);
+            let mut extra_role = document;
+            extra_role["engines"]["unexpected"] = json!({});
+            refuse(extra_role, provider);
+        }
+    }
+
+    #[test]
+    fn cpu_refuses_malformed_provider_model_hash_and_batch_declarations() {
+        let provider = AuxiliaryRuntime::OnnxRuntimeCpu;
+        let original = unit_document(provider);
+        for (pointer, value) in [
+            ("/schema_version", json!("2")),
+            ("/auxiliary", Value::Null),
+            ("/auxiliary/runtime", json!("onnxruntime-cpu")),
+            ("/auxiliary/runtime", json!("tensorrt")),
+            ("/auxiliary/provider", json!("cuda")),
+            ("/auxiliary/provider", json!("CPU")),
+            ("/auxiliary/models", json!([])),
+            ("/auxiliary/models/fall", json!("not a hash entry")),
+            ("/auxiliary/models/bed/onnx_sha256", json!("a".repeat(63))),
+            ("/auxiliary/models/bed/onnx_sha256", json!("A".repeat(64))),
+            ("/auxiliary/models/bed/onnx_sha256", json!(7)),
+            (
+                "/auxiliary/models/stored_pose/onnx_sha256",
+                json!("0".repeat(64)),
+            ),
+            ("/engines/live_pose/onnx_sha256", json!("0".repeat(64))),
+            (
+                "/engines/live_pose/image_digest",
+                json!("not an image digest"),
+            ),
+            ("/flow/infer_config_sha256", Value::Null),
+            (
+                "/flow/tracker_config_sha256",
+                json!("bad recorded fingerprint"),
+            ),
+            ("/batch_size", json!(0)),
+            ("/batch_size", json!(17)),
+            ("/batch_size", json!(1.5)),
+        ] {
+            let mut malformed = original.clone();
+            *malformed.pointer_mut(pointer).expect("unit document field") = value;
+            refuse(malformed, provider);
+        }
+        for pointer in [
+            "",
+            "/auxiliary",
+            "/auxiliary/models",
+            "/auxiliary/models/fall",
+            "/engines",
+            "/flow",
+        ] {
+            let mut extra = original.clone();
+            extra
+                .pointer_mut(pointer)
+                .unwrap()
+                .as_object_mut()
+                .unwrap()
+                .insert("unexpected".to_owned(), json!(true));
+            refuse(extra, provider);
+            let mut missing = original.clone();
+            let members = missing
+                .pointer_mut(pointer)
+                .unwrap()
+                .as_object_mut()
+                .unwrap();
+            let key = members.keys().next().unwrap().clone();
+            members.remove(&key);
+            refuse(missing, provider);
+        }
+    }
+
+    #[test]
+    fn cpu_sources_must_match_each_supplied_model_without_repairing_hashes() {
+        let provider = AuxiliaryRuntime::OnnxRuntimeCpu;
+        let owned = unit_directory("model-hashes");
+        let pose = owned.0.join("pose.onnx");
+        let bed = owned.0.join("bed.onnx");
+        let fall = owned.0.join("fall.onnx");
+        for (path, bytes) in [(&pose, POSE), (&bed, BED), (&fall, FALL)] {
+            fs::write(path, bytes).unwrap();
+        }
+        let original = unit_document(provider);
+        let aggregate = aggregate_from_document(owned.0.clone(), original.clone(), provider);
+        verify_model_sources(&aggregate, provider, &pose, &bed, &fall);
+        for (path, bytes) in [(&pose, POSE), (&bed, BED), (&fall, FALL)] {
+            fs::write(path, b"unit-private changed source").unwrap();
+            assert!(
+                std::panic::catch_unwind(|| {
+                    verify_model_sources(&aggregate, provider, &pose, &bed, &fall)
+                })
+                .is_err(),
+                "{} must remain bound to its recorded hash",
+                path.display()
+            );
+            assert_eq!(aggregate.document, original, "no hash repair on refusal");
+            fs::write(path, bytes).unwrap();
+        }
+        for role in ["stored_pose", "bed", "fall"] {
+            let mut changed = original.clone();
+            changed["auxiliary"]["models"][role]["onnx_sha256"] = json!("0".repeat(64));
+            if role == "stored_pose" {
+                // Even mutually consistent live/CPU declarations must match real bytes.
+                changed["engines"]["live_pose"]["onnx_sha256"] = json!("0".repeat(64));
+            }
+            let aggregate = aggregate_from_document(owned.0.clone(), changed.clone(), provider);
+            assert!(
+                std::panic::catch_unwind(|| {
+                    verify_model_sources(&aggregate, provider, &pose, &bed, &fall)
+                })
+                .is_err()
+            );
+            assert_eq!(aggregate.document, changed);
+        }
+    }
+
+    #[test]
+    fn provider_command_selects_cpu_and_omits_unused_auxiliary_gpu_wiring() {
+        for provider in [AuxiliaryRuntime::TensorRt, AuxiliaryRuntime::OnnxRuntimeCpu] {
+            let engines: BTreeMap<_, _> = engine_roles(provider)
+                .iter()
+                .map(|&role| (role, PathBuf::from(format!("/unit-private/{role}.engine"))))
+                .collect();
+            let mut env = BTreeMap::new();
+            wire_auxiliary_engines(&mut env, &engines, provider);
+            let mut command = Command::new("/unit-private/not-executed-worker");
+            command
+                .arg("run")
+                .arg("--state-dir=/unit-private/state")
+                .env(
+                    "ORT_DISABLE_TELEMETRY",
+                    "image-setting-cleared-before-start",
+                )
+                .env_clear()
+                .envs(&env)
+                .env("CUDA_VISIBLE_DEVICES", "");
+            select_auxiliary_command(&mut command, provider);
+            let arguments = command
+                .get_args()
+                .map(std::ffi::OsString::from)
+                .collect::<Vec<_>>();
+            let seeon_ml_worker::cli::Command::Run(flags) =
+                seeon_ml_worker::cli::parse(&arguments).expect("provider command contract")
+            else {
+                panic!("provider selection must stay on the run command");
+            };
+            assert_eq!(flags.auxiliary_runtime, provider);
+            let command_env: BTreeMap<_, _> = command.get_envs().collect();
+            let cpu = provider == AuxiliaryRuntime::OnnxRuntimeCpu;
+            for (role, name) in AUXILIARY_ENGINES {
+                let actual = command_env
+                    .get(std::ffi::OsStr::new(name))
+                    .copied()
+                    .flatten();
+                let expected = (!cpu).then(|| engines[role].as_os_str());
+                assert_eq!(actual, expected, "provider-specific {name} wiring");
+            }
+            assert_eq!(
+                command_env
+                    .get(std::ffi::OsStr::new("ORT_DISABLE_TELEMETRY"))
+                    .copied()
+                    .flatten(),
+                cpu.then(|| std::ffi::OsStr::new("1")),
+                "CPU child restores telemetry opt-out after env_clear"
+            );
+            assert_eq!(
+                command_env
+                    .get(std::ffi::OsStr::new("CUDA_VISIBLE_DEVICES"))
+                    .copied()
+                    .flatten(),
+                Some(std::ffi::OsStr::new("")),
+                "negative fixture must never force device 0"
+            );
+        }
+    }
+
+    #[test]
+    fn relocation_changes_only_four_flow_fingerprints_for_each_provider() {
+        let owned = unit_directory("relocation");
+        let files: Vec<_> = FLOW_KEYS
+            .into_iter()
+            .map(|key| {
+                let path = owned.0.join(key);
+                fs::write(&path, format!("unit-private relocated {key}")).unwrap();
+                (key, path)
+            })
+            .collect();
+        let flow_files: Vec<_> = files
+            .iter()
+            .map(|(key, path)| (*key, path.as_path()))
+            .collect();
+        let destination = owned.0.join("unit-relocated.json");
+        for provider in [AuxiliaryRuntime::TensorRt, AuxiliaryRuntime::OnnxRuntimeCpu] {
+            let original = unit_document(provider);
+            let aggregate = aggregate_from_document(owned.0.clone(), original.clone(), provider);
+            write_relocated(&aggregate, &destination, &flow_files);
+            let relocated: Value =
+                serde_json::from_slice(&fs::read(&destination).unwrap()).unwrap();
+            let mut expected = original.clone();
+            for (key, path) in &flow_files {
+                expected["flow"][*key] = json!(sha256_file(path));
+            }
+            assert_eq!(
+                relocated, expected,
+                "all native, image, batch and CPU facts stay intact"
+            );
+            assert_eq!(
+                aggregate.document, original,
+                "source document is never mutated"
+            );
+            for bad_key in [FLOW_KEYS[1], "onnx_sha256"] {
+                let mut invalid = flow_files.clone();
+                invalid[0].0 = bad_key;
+                assert!(
+                    std::panic::catch_unwind(|| {
+                        write_relocated(&aggregate, &destination, &invalid)
+                    })
+                    .is_err(),
+                    "duplicate or non-Flow relocation must refuse"
+                );
+                let reread: Value =
+                    serde_json::from_slice(&fs::read(&destination).unwrap()).unwrap();
+                assert_eq!(reread, relocated, "refused relocation must not write");
+            }
+        }
+    }
 }
 
 #[cfg(test)]

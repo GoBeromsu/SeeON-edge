@@ -1,5 +1,7 @@
 //! Actual executable gates, not helper substitutes. GPU fields are never normalized.
-//! Identity admission uses the one schema-1 aggregate. Tampering changes the
+//! TensorRT uses the schema-1 aggregate; explicit CPU auxiliaries require the
+//! supplied schema-2 identity, never a converted or retagged GPU receipt.
+//! TensorRT tampering changes the
 //! owned live-pose engine bytes or removes `engines.live_pose.onnx_sha256`.
 //! It does not remove a legacy flat field or skip a missing prerequisite.
 //! The golden refusal requires genuinely unavailable NVML and hidden CUDA devices.
@@ -10,6 +12,7 @@ use std::process::{Child, Command, ExitStatus};
 use std::sync::Mutex;
 use std::time::Duration;
 
+use seeon_ml_worker::config::model_bundle::identity::AuxiliaryRuntime;
 use seeon_ml_worker::gpu::lease;
 use seeon_ml_worker::poll::poll_until;
 use seeon_ml_worker::records::id::sha256_hex;
@@ -96,6 +99,19 @@ fn assert_identity_failure(body: &Value) {
 fn configured_cuda_refusal_matches_fixed_golden_through_binary_even_when_report_is_503() {
     let _guard = relay_guard();
     let fixture = Fixture::new("configured");
+    assert_configured_cuda_refusal(&fixture);
+}
+
+#[test]
+#[ignore = "requires genuine schema-2 identity via SEEON_TEST_ENGINE_IDENTITY with only live_pose and CPU ONNX hashes, real supplied model/engine inputs, no CUDA devices or NVML utility capability, and isolated ml-api loopback alias"]
+fn configured_cuda_refusal_matches_fixed_golden_through_binary_with_cpu_auxiliaries_even_when_report_is_503()
+ {
+    let _guard = relay_guard();
+    let fixture = Fixture::with_provider("configured-cpu", AuxiliaryRuntime::OnnxRuntimeCpu);
+    assert_configured_cuda_refusal(&fixture);
+}
+
+fn assert_configured_cuda_refusal(fixture: &Fixture) {
     let server = Server::start(Some(fixture.config(true)), None);
     let (status, stderr) = run(fixture.command("run"));
     assert_eq!(
@@ -114,6 +130,18 @@ fn configured_cuda_refusal_matches_fixed_golden_through_binary_even_when_report_
 fn empty_roster_reaches_cuda_gate_without_fabricating_a_facility_post() {
     let _guard = relay_guard();
     let fixture = Fixture::new("empty");
+    assert_empty_roster_cuda_refusal(&fixture);
+}
+
+#[test]
+#[ignore = "requires genuine schema-2 identity via SEEON_TEST_ENGINE_IDENTITY with only live_pose and CPU ONNX hashes, real supplied model/engine inputs, no CUDA devices or NVML utility capability, and isolated ml-api loopback alias"]
+fn empty_roster_reaches_cuda_gate_with_cpu_auxiliaries_without_fabricating_a_facility_post() {
+    let _guard = relay_guard();
+    let fixture = Fixture::with_provider("empty-cpu", AuxiliaryRuntime::OnnxRuntimeCpu);
+    assert_empty_roster_cuda_refusal(&fixture);
+}
+
+fn assert_empty_roster_cuda_refusal(fixture: &Fixture) {
     let server = Server::start(Some(fixture.config(false)), None);
     let (status, stderr) = run(fixture.command("run"));
     assert_eq!(
