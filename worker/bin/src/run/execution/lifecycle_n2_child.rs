@@ -154,6 +154,13 @@ pub(super) fn child(
     } {
         clock.pause(Duration::from_millis(20));
     }
+    crate::poll::poll_until(
+        clock.as_ref(),
+        clock.monotonic() + Duration::from_secs(8),
+        "actual completed finalization attempt",
+        || diagnostics_owner.snapshot().finalization_complete,
+    )
+    .expect("actual completed media finalization attempt");
     let query = nonce();
     assert_ne!(
         query, run,
@@ -165,17 +172,10 @@ pub(super) fn child(
         &[run[0], run[1], query[0], query[1]],
     );
     let query_publication = ns(clock.monotonic());
-    let witness: [u64; 20] = record.wait(".n2-witness", b"N2WIT001", Duration::from_secs(8));
+    let witness: [u64; 25] = record.wait(".n2-witness", b"N2WIT002", Duration::from_secs(8));
     let witness_collection = ns(clock.monotonic());
     assert_eq!(&witness[..13], &entered.entry);
     assert_eq!(&witness[13..15], &query);
-    crate::poll::poll_until(
-        clock.as_ref(),
-        clock.monotonic() + Duration::from_secs(8),
-        "actual completed finalization attempt",
-        || diagnostics_owner.snapshot().finalization_complete,
-    )
-    .expect("actual completed media finalization attempt");
     let collected = diagnostics(&diagnostics_owner.snapshot());
     let receipt = Receipt {
         actual,
@@ -204,7 +204,7 @@ pub(super) fn child(
         model_failures: model_states
             .map(|state| state.failure().map_or(0, |exit| u64::from(exit.code()) + 1)),
     };
-    record.publish(".n2-return", b"N2RET001", &receipt.fields());
+    record.publish(".n2-return", b"N2RET002", &receipt.fields());
     let parent: [u64; 6] = record.wait(".n2-parent", b"N2ACK001", Duration::from_secs(15));
     assert_eq!(
         parent,

@@ -83,7 +83,7 @@ impl Directory {
     }
 
     pub(super) fn read<const N: usize>(&self, stem: &str, magic: &[u8; 8]) -> Option<[u64; N]> {
-        assert!(N <= 80, "bounded binary control");
+        assert!(N <= 85, "bounded binary control");
         let file = self.regular(&format!("{stem}.bin"))?;
         let length = 8 + N * 8;
         assert_eq!(
@@ -102,7 +102,7 @@ impl Directory {
     }
 
     pub(super) fn publish(&self, stem: &str, magic: &[u8; 8], fields: &[u64]) {
-        assert!(fields.len() <= 80 && !stem.contains('/') && stem.starts_with(".n2-"));
+        assert!(fields.len() <= 85 && !stem.contains('/') && stem.starts_with(".n2-"));
         let temporary = format!("{stem}.tmp");
         let flags = OFlags::WRONLY
             | OFlags::CREATE

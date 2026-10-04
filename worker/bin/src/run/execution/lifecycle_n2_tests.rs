@@ -178,8 +178,8 @@ fn verify(record: &Directory, run: [u64; 2], receipt: &Receipt) {
     let query: [u64; 4] = record
         .read(".n2-query", b"N2QRY001")
         .expect("fresh post-return query");
-    let witness: [u64; 20] = record
-        .read(".n2-witness", b"N2WIT001")
+    let witness: [u64; 25] = record
+        .read(".n2-witness", b"N2WIT002")
         .expect("live native witness");
     assert_eq!(&arm[..2], &run);
     assert_eq!(&entry[..7], &arm);

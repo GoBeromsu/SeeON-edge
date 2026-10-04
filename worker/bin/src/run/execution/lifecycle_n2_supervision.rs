@@ -22,13 +22,15 @@ pub(super) struct Receipt {
     pub(super) ack: [u64; 3],
     pub(super) returned: [u64; 20],
     pub(super) collected: [u64; 20],
-    pub(super) witness: [u64; 20],
+    // Native witness: existing 20 fields, then first fatal severity/code/domain,
+    // sign-extended SDK code bits, and the actual stop_timed_out boolean.
+    pub(super) witness: [u64; 25],
     pub(super) model_failures: [u64; 3],
 }
 
 impl Receipt {
-    pub(super) fn fields(&self) -> [u64; 80] {
-        let mut fields = [0; 80];
+    pub(super) fn fields(&self) -> [u64; 85] {
+        let mut fields = [0; 85];
         fields[0] = match self.actual {
             RunExit::Clean => 0,
             RunExit::Runtime => 1,
@@ -41,12 +43,12 @@ impl Receipt {
         fields[14..17].copy_from_slice(&self.ack);
         fields[17..37].copy_from_slice(&self.returned);
         fields[37..57].copy_from_slice(&self.collected);
-        fields[57..77].copy_from_slice(&self.witness);
-        fields[77..80].copy_from_slice(&self.model_failures);
+        fields[57..82].copy_from_slice(&self.witness);
+        fields[82..85].copy_from_slice(&self.model_failures);
         fields
     }
 
-    fn decode(fields: [u64; 80]) -> Self {
+    fn decode(fields: [u64; 85]) -> Self {
         Self {
             actual: match fields[0] {
                 0 => RunExit::Clean,
@@ -61,8 +63,8 @@ impl Receipt {
             ack: fields[14..17].try_into().unwrap(),
             returned: fields[17..37].try_into().unwrap(),
             collected: fields[37..57].try_into().unwrap(),
-            witness: fields[57..77].try_into().unwrap(),
-            model_failures: fields[77..80].try_into().unwrap(),
+            witness: fields[57..82].try_into().unwrap(),
+            model_failures: fields[82..85].try_into().unwrap(),
         }
     }
 }
@@ -148,7 +150,7 @@ pub(super) fn supervise(
             child.0.try_wait().expect("child status").is_none(),
             "child exited without live post-return evidence"
         );
-        if let Some(fields) = record.read(".n2-return", b"N2RET001") {
+        if let Some(fields) = record.read(".n2-return", b"N2RET002") {
             break Receipt::decode(fields);
         }
         assert!(

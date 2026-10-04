@@ -59,7 +59,7 @@ PrivateN2Read private_n2_read(int directory, const char *name, const char (&magi
 template<size_t Fields>
 bool private_n2_publish(int directory, const char *temporary, const char *name,
                         const char (&magic)[9], const std::array<uint64_t, Fields> &fields) noexcept {
-  static_assert(Fields == 13 || Fields == 20, "Only bounded entry/witness outputs");
+  static_assert(Fields == 13 || Fields == 25, "Only bounded entry/witness outputs");
   std::array<unsigned char, 8 + 8 * Fields> bytes{};
   std::memcpy(bytes.data(), magic, 8);
   for (size_t index = 0; index < Fields; ++index) {
@@ -107,7 +107,7 @@ void private_n2_pause() noexcept {
         private_n2_park();
       break;
     }
-    std::array<uint64_t, 20> witness{};
+    std::array<uint64_t, 25> witness{};
     for (size_t index = 0; index < entry.size(); ++index) witness[index] = entry[index];
     witness[13] = query[2];
     witness[14] = query[3];
@@ -117,7 +117,13 @@ void private_n2_pause() noexcept {
     witness[17] = guard.registration->entries.state.load(std::memory_order_acquire) & ~LeaseGate::retired;
     witness[18] = lease.registration->entries.state.load(std::memory_order_acquire) & ~LeaseGate::retired;
     witness[19] = guard.registration->lifetime->entries.state.load(std::memory_order_acquire) & ~LeaseGate::retired;
-    (void)private_n2_publish(directory, ".n2-witness.tmp", ".n2-witness.bin", "N2WIT001", witness);
+    const auto fatal = unpack(m.fatal.load(std::memory_order_acquire));
+    witness[20] = fatal.severity;
+    witness[21] = fatal.code;
+    witness[22] = fatal.sdk_domain;
+    witness[23] = static_cast<uint64_t>(static_cast<int64_t>(fatal.sdk_code));
+    witness[24] = m.stop_timed_out.load(std::memory_order_acquire);
+    (void)private_n2_publish(directory, ".n2-witness.tmp", ".n2-witness.bin", "N2WIT002", witness);
   } catch (...) {
     // No exception may reach record_done's ordinary diagnostic/release path.
   }
