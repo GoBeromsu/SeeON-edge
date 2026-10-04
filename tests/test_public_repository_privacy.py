@@ -1005,14 +1005,32 @@ _TEST_STEPS = [
     _CHECKOUT_STEP,
     _SETUP_UV_STEP,
     {
-        "name": "Install FFmpeg and packaged CJK overlay font",
+        "name": "Install media and native CPU test prerequisites",
         "run": (
             "sudo apt-get update && "
             "sudo apt-get install -y --no-install-recommends "
-            "ffmpeg fonts-noto-cjk"
+            "ffmpeg fonts-noto-cjk g++ make curl ca-certificates"
         ),
     },
     {"run": "uv sync --frozen --group lint"},
+    {
+        "name": "Provision real native ORT CPU adapter",
+        "run": (
+            "set -euo pipefail\n"
+            'include_dir="$RUNNER_TEMP/seeon-ort-1.29.0/include"\n'
+            'out_dir="$RUNNER_TEMP/seeon-ort-1.29.0/build"\n'
+            'header_base="https://raw.githubusercontent.com/microsoft/onnxruntime/'
+            '2e2543fbe9fae542f921d47a72d21d5a4ef0b710/include/onnxruntime/core/session"\n'
+            'mkdir -p "$include_dir"\n'
+            "for header in onnxruntime_c_api.h onnxruntime_error_code.h "
+            "onnxruntime_ep_c_api.h; do\n"
+            "  curl --fail --silent --show-error --location --retry 3 \\\n"
+            '    "$header_base/$header" --output "$include_dir/$header"\n'
+            "done\n"
+            "make -C worker/adapters/model/native \\\n"
+            '  ORT_INCLUDE_DIR="$include_dir" OUT="$out_dir" all\n'
+        ),
+    },
     {
         "name": "Run test shard ${{ matrix.shard }} of 4",
         # The matrix value is passed through `env:` and read back as `$SHARD`.
@@ -1023,6 +1041,8 @@ _TEST_STEPS = [
         "env": {
             "SHARD": "${{ matrix.shard }}",
             "SEEON_TEST_POSTGRES_DSN": "postgresql://postgres@127.0.0.1:5432/seeon_test",
+            "SEEON_TEST_ORT_ADAPTER": ("${{ runner.temp }}/seeon-ort-1.29.0/build/libseeon_ort.so"),
+            "ORT_DISABLE_TELEMETRY": "1",
         },
         "run": _SHARD_DISCOVERY
         + (

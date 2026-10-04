@@ -143,10 +143,24 @@ jobs:
       # The overlay renderer fails closed via OverlayFontUnavailable when no real
       # CJK font is discoverable, so the CJK render tests can only pass once the
       # runner carries the packaged font -- exactly as production does.
-      - name: Install FFmpeg and packaged CJK overlay font
-        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends ffmpeg fonts-noto-cjk
+      - name: Install media and native CPU test prerequisites
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends ffmpeg fonts-noto-cjk g++ make curl ca-certificates
 
       - run: uv sync --frozen --group lint
+
+      - name: Provision real native ORT CPU adapter
+        run: |
+          set -euo pipefail
+          include_dir="$RUNNER_TEMP/seeon-ort-1.29.0/include"
+          out_dir="$RUNNER_TEMP/seeon-ort-1.29.0/build"
+          header_base="https://raw.githubusercontent.com/microsoft/onnxruntime/2e2543fbe9fae542f921d47a72d21d5a4ef0b710/include/onnxruntime/core/session"
+          mkdir -p "$include_dir"
+          for header in onnxruntime_c_api.h onnxruntime_error_code.h onnxruntime_ep_c_api.h; do
+            curl --fail --silent --show-error --location --retry 3 \
+              "$header_base/$header" --output "$include_dir/$header"
+          done
+          make -C worker/adapters/model/native \
+            ORT_INCLUDE_DIR="$include_dir" OUT="$out_dir" all
 
       # CI downloads no model weights. Tests that read the private fall bundle
       # carry the `private_bundle` marker (tests_support/private_bundle.py) and
@@ -185,6 +199,8 @@ jobs:
         env:
           SHARD: ${{ matrix.shard }}
           SEEON_TEST_POSTGRES_DSN: postgresql://postgres@127.0.0.1:5432/seeon_test
+          SEEON_TEST_ORT_ADAPTER: ${{ runner.temp }}/seeon-ort-1.29.0/build/libseeon_ort.so
+          ORT_DISABLE_TELEMETRY: "1"
         run: |
           mapfile -t shard_files < <(
             git ls-files -- '*.py' |
