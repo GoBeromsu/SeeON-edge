@@ -9,6 +9,9 @@ __pycache__/
 .coverage
 htmlcov/
 
+# Rust workspace build output
+/target/
+
 # Explicitly prepared Rust transition test-input cache (never runtime inputs).
 /tests/fixtures/worker-wire/**/*.json
 /tests/fixtures/worker-wire/**/*.sha256
