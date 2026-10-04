@@ -76,7 +76,7 @@ impl Backend {
         );
         let child = Command::new(python)
             .arg("-u")
-            .arg(repo_root().join("worker/bin/tests/support/backend_relay_server.py"))
+            .arg(repo_root().join("tests_support/backend_relay_server.py"))
             .arg(alert_fixture)
             .arg(entry_path)
             .env("PYTHONPATH", repo_root())
