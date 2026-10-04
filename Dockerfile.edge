@@ -123,6 +123,7 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
 # the validated revision.
 FROM cargo-build AS cargo-verify
 COPY scripts/prepare_rust_test_inputs.py /usr/src/myapp/scripts/prepare_rust_test_inputs.py
+COPY tests_support/detection_window_footer_oracle.py /usr/src/myapp/tests_support/detection_window_footer_oracle.py
 COPY worker/adapters/deepstream/configs /usr/src/myapp/worker/adapters/deepstream/configs
 RUN install -d -o 65534 -g 65534 /tmp/seeon-cargo \
     && chown -R 65534:65534 /usr/src/myapp

@@ -90,6 +90,7 @@ _ML_WORKER_INPUTS = (
     "Cargo.lock",
     "rust-toolchain.toml",
     "scripts/prepare_rust_test_inputs.py",
+    "tests_support/detection_window_footer_oracle.py",
 )
 
 #: Paths that can change *either* image without either Dockerfile naming them.

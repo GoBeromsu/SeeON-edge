@@ -282,6 +282,7 @@ def test_runtime_packages_release_binary_and_native_libraries_without_verificati
     assert "COPY --from=cargo-verify" not in runtime
     assert "--mount=type=secret,id=rust-test-inputs" not in runtime
     assert "prepare_rust_test_inputs.py" not in runtime
+    assert "tests_support" not in runtime
     assert (
         "COPY --from=cargo-build /usr/src/myapp/target/release/ml-worker /usr/local/bin/ml-worker"
         in runtime
@@ -401,6 +402,19 @@ def test_dockerignore_excludes_cargo_targets_and_live_pose_scratch() -> None:
     assert "tests" in ignored
     assert "worker/rust/tests/fixtures/**/*.json" in ignored
     assert "worker/runtime/rust/tests/fixtures/gpu/*.json" in ignored
+
+
+def test_compile_time_footer_oracle_is_available_only_in_verification_stage() -> None:
+    stages = _stages(_dockerfile())
+    oracle = "tests_support/detection_window_footer_oracle.py"
+
+    assert (ROOT / oracle).is_file()
+    assert f"COPY {oracle} /usr/src/myapp/{oracle}" in stages["cargo-verify"]
+    for name, stage in stages.items():
+        if name != "cargo-verify":
+            assert oracle not in stage
+    assert affected_images(oracle) == frozenset({ML_WORKER})
+    assert affected_images("tests_support/postgres_sandbox.py") == frozenset()
 
 
 def test_worker_input_classifier_prefers_specific_rust_inputs_over_neutral_scripts() -> None:
