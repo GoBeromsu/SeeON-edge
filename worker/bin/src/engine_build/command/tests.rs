@@ -70,6 +70,28 @@ fn tensor_rt_paths(flags: &mut EngineBuildFlags) -> (&mut PathBuf, &mut PathBuf,
     }
 }
 
+fn observer_alias(root: &Path, observer: &Path, alias: &str) -> PathBuf {
+    use std::os::unix::fs::symlink;
+    match alias {
+        "direct" => observer.to_path_buf(),
+        "parent-symlink" => {
+            let parent = root.join("observer-parent");
+            symlink(observer.parent().unwrap(), &parent).unwrap();
+            parent.join(observer.file_name().unwrap())
+        }
+        "symlink" | "hardlink" => {
+            let path = root.join(format!("observer-{alias}.so"));
+            if alias == "symlink" {
+                symlink(observer, &path).unwrap();
+            } else {
+                fs::hard_link(observer, &path).unwrap();
+            }
+            path
+        }
+        _ => panic!("unrecognized observer alias"),
+    }
+}
+
 fn template(parser: &Path) -> String {
     format!(
         "[property]\nkeep=1\nmodel-engine-file=old.engine\nbatch-size=9\ncustom-lib-path={}\nparse-bbox-func-name=kept\n",
@@ -86,6 +108,7 @@ fn onnx(path: &Path, sha: &str) -> CapturedOnnx {
 }
 
 fn captured(root: &Path, served: String, output: bool) -> Captured {
+    let observer_path = root.join("observer.so");
     Captured {
         pose: onnx(&root.join("pose.onnx"), SOURCE),
         bed: onnx(&root.join("bed.onnx"), BED),
@@ -93,7 +116,8 @@ fn captured(root: &Path, served: String, output: bool) -> Captured {
         served,
         served_output: output,
         image: IMAGE.to_owned(),
-        observer: SOURCE.to_owned(),
+        observer: files::fingerprint_of(&observer_path).expect("observer"),
+        observer_path,
         input_digests: Vec::new(),
     }
 }
@@ -107,6 +131,7 @@ fn cpu_flags(root: &Path, served: Option<&str>, force: bool) -> EngineBuildFlags
 fn captured_cpu_sources(root: &Path, requested: &EngineBuildFlags) -> Captured {
     use crate::run::model_sources::capture_image_onnx;
     let (served, served_output) = files::served_text(requested).unwrap();
+    let observer_path = root.join("observer.so");
     Captured {
         pose: capture_image_onnx(&requested.onnx).unwrap(),
         bed: capture_image_onnx(&requested.bed_onnx).unwrap(),
@@ -116,7 +141,8 @@ fn captured_cpu_sources(root: &Path, requested: &EngineBuildFlags) -> Captured {
         served,
         served_output,
         image: requested.image_digest.clone(),
-        observer: crate::records::id::sha256_hex(b"synthetic observer"),
+        observer: files::fingerprint_of(&observer_path).expect("observer"),
+        observer_path,
         input_digests: files::capture_inputs(requested).unwrap(),
     }
 }
@@ -144,9 +170,7 @@ fn staged_cpu_fixture(root: &Path) -> (EngineBuildFlags, Captured, Layout, Built
     write_inputs(root);
     let requested = cpu_flags(root, Some("served.txt"), false);
     let sample = captured_cpu_sources(root, &requested);
-    let mut planned = files::prepare(&requested, &sample).unwrap();
-    planned.layout.observer = root.join("observer.so");
-    fs::write(&planned.layout.observer, b"synthetic observer").unwrap();
+    let planned = files::prepare(&requested, &sample).unwrap();
     let layout = files::materialize(planned).unwrap();
     let built = BuiltEngines::OnnxRuntimeCpu(synthetic_live_receipt(&layout.live, &sample));
     (requested, sample, layout, built)
@@ -204,6 +228,95 @@ fn colliding_outputs_are_refused_and_explicit_template_output_is_allowed() {
     ));
     let explicit = flags(&scratch.0, Some("infer.txt"), false);
     assert!(files::prepare(&explicit, &sample).is_ok());
+}
+
+#[test]
+fn observer_aliases_are_refused_for_every_selected_output_even_with_force() {
+    for cpu in [false, true] {
+        let outputs: &[&str] = if cpu {
+            &["live_pose", "served", "identity"]
+        } else {
+            &[
+                "live_pose",
+                "stored_pose",
+                "bed",
+                "fall",
+                "served",
+                "identity",
+            ]
+        };
+        for force in [false, true] {
+            for &output in outputs {
+                for alias in ["direct", "parent-symlink", "symlink", "hardlink"] {
+                    let scratch = Scratch::new();
+                    write_inputs(&scratch.0);
+                    let mut requested = if cpu {
+                        cpu_flags(&scratch.0, Some("served.txt"), force)
+                    } else {
+                        flags(&scratch.0, Some("served.txt"), force)
+                    };
+                    let path = observer_alias(&scratch.0, &scratch.0.join("observer.so"), alias);
+                    match output {
+                        "live_pose" => requested.engine = path,
+                        "stored_pose" => *tensor_rt_paths(&mut requested).0 = path,
+                        "bed" => *tensor_rt_paths(&mut requested).1 = path,
+                        "fall" => *tensor_rt_paths(&mut requested).2 = path,
+                        "served" => requested.served_infer_config = Some(path),
+                        "identity" => requested.identity = path,
+                        _ => panic!("unrecognized fixture output"),
+                    }
+                    let (served, served_output) = files::served_text(&requested).unwrap();
+                    let sample = captured(&scratch.0, served, served_output);
+                    let original = fs::read(&sample.observer_path).unwrap();
+                    assert!(
+                        matches!(
+                            files::prepare(&requested, &sample),
+                            Err(CommandError::Collision)
+                        ),
+                        "cpu={cpu}, force={force}, output={output}, alias={alias}"
+                    );
+                    assert_eq!(fs::read(&sample.observer_path).unwrap(), original);
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn infer_template_served_exception_never_admits_observer_aliases() {
+    for cpu in [false, true] {
+        for force in [false, true] {
+            for explicit in [false, true] {
+                let scratch = Scratch::new();
+                write_inputs(&scratch.0);
+                let mut requested = if cpu {
+                    cpu_flags(&scratch.0, None, force)
+                } else {
+                    flags(&scratch.0, None, force)
+                };
+                requested.served_infer_config = explicit.then(|| requested.infer_config.clone());
+                let (served, served_output) = files::served_text(&requested).unwrap();
+                let sample = captured(&scratch.0, served, served_output);
+                let original = fs::read(&sample.observer_path).unwrap();
+                let planned = files::prepare(&requested, &sample).expect("distinct observer");
+                assert_eq!(planned.layout.observer, sample.observer_path);
+                files::recheck_inputs(&planned.layout, &sample).expect("captured observer");
+                for alias in ["direct", "parent-symlink", "symlink", "hardlink"] {
+                    let mut aliased = requested.clone();
+                    aliased.infer_config = observer_alias(&scratch.0, &sample.observer_path, alias);
+                    aliased.served_infer_config = explicit.then(|| aliased.infer_config.clone());
+                    assert!(
+                        matches!(
+                            files::prepare(&aliased, &sample),
+                            Err(CommandError::Collision)
+                        ),
+                        "cpu={cpu}, force={force}, explicit={explicit}, alias={alias}"
+                    );
+                    assert_eq!(fs::read(&sample.observer_path).unwrap(), original);
+                }
+            }
+        }
+    }
 }
 
 #[test]
@@ -280,8 +393,8 @@ fn changed_image_source_and_batch_are_misses_but_owned_outputs_can_be_rebuilt() 
     write_inputs(&scratch.0);
     let requested = flags(&scratch.0, Some("served.txt"), false);
     let mut sample = captured(&scratch.0, "served".to_owned(), true);
-    let mut planned = files::prepare(&requested, &sample).unwrap();
-    synthetic_cache(&mut planned.layout, &mut sample);
+    let planned = files::prepare(&requested, &sample).unwrap();
+    synthetic_cache(&planned.layout, &sample);
     let layout = &planned.layout;
     assert!(files::cache_candidate(layout, &sample, 2).is_some());
     files::authorize(layout, false, &sample).expect("recorded outputs");
@@ -313,8 +426,8 @@ fn flow_input_replacement_is_detected_before_publication() {
     write_inputs(&scratch.0);
     let requested = flags(&scratch.0, Some("served.txt"), false);
     let mut sample = captured(&scratch.0, "served".to_owned(), true);
-    let mut planned = files::prepare(&requested, &sample).unwrap();
-    synthetic_cache(&mut planned.layout, &mut sample);
+    let planned = files::prepare(&requested, &sample).unwrap();
+    synthetic_cache(&planned.layout, &sample);
     sample.input_digests = files::capture_inputs(&requested).unwrap();
     files::recheck_inputs(&planned.layout, &sample).expect("unchanged captures");
     fs::write(&requested.parser_lib, "changed parser").unwrap();
@@ -329,9 +442,9 @@ fn partial_file_commit_never_publishes_the_new_identity() {
     let scratch = Scratch::new();
     write_inputs(&scratch.0);
     let requested = flags(&scratch.0, Some("served.txt"), false);
-    let mut sample = captured(&scratch.0, "served".to_owned(), true);
-    let mut planned = files::prepare(&requested, &sample).unwrap();
-    synthetic_cache(&mut planned.layout, &mut sample);
+    let sample = captured(&scratch.0, "served".to_owned(), true);
+    let planned = files::prepare(&requested, &sample).unwrap();
+    synthetic_cache(&planned.layout, &sample);
     let layout = files::materialize(planned).unwrap();
     for path in layout.staging() {
         fs::write(path, "new staged bytes").unwrap();
@@ -596,9 +709,9 @@ fn cpu_cache_requires_exact_schema_and_provider_and_tensor_rt_cannot_reuse_it() 
     let other = Scratch::new();
     write_inputs(&other.0);
     let tensor_rt = flags(&other.0, Some("served.txt"), false);
-    let mut tensor_sample = captured(&other.0, "served".to_owned(), true);
-    let mut prior = files::prepare(&tensor_rt, &tensor_sample).unwrap();
-    synthetic_cache(&mut prior.layout, &mut tensor_sample);
+    let tensor_sample = captured(&other.0, "served".to_owned(), true);
+    let prior = files::prepare(&tensor_rt, &tensor_sample).unwrap();
+    synthetic_cache(&prior.layout, &tensor_sample);
     let cpu = cpu_flags(&other.0, Some("served.txt"), false);
     let planned = files::prepare(&cpu, &tensor_sample).unwrap();
     assert!(files::cache_candidate(&planned.layout, &tensor_sample, 2).is_none());
@@ -708,9 +821,7 @@ fn cpu_readonly_infer_config_is_verified_without_becoming_an_output() {
     let sample = captured_cpu_sources(&scratch.0, &requested);
     assert!(!sample.served_output);
     files::verify_existing_served(&sample.served, &requested.engine, 2).unwrap();
-    let mut planned = files::prepare(&requested, &sample).unwrap();
-    planned.layout.observer = scratch.0.join("observer.so");
-    fs::write(&planned.layout.observer, b"synthetic observer").unwrap();
+    let planned = files::prepare(&requested, &sample).unwrap();
     files::require_replaceable(&planned.layout, false).unwrap();
     files::authorize(&planned.layout, false, &sample).unwrap();
     let layout = files::materialize(planned).unwrap();
@@ -754,12 +865,9 @@ fn engine_receipt_variant_must_match_the_provider_layout() {
 }
 
 // Synthetic contract data only: these bytes are not engines or native build receipts.
-fn synthetic_cache(layout: &mut super::Layout, sample: &mut Captured) {
+fn synthetic_cache(layout: &super::Layout, sample: &Captured) {
     use crate::records::id::sha256_hex;
     use serde_json::json;
-    layout.observer = layout.identity.parent().unwrap().join("observer.so");
-    fs::write(&layout.observer, "synthetic observer").unwrap();
-    sample.observer = sha256_hex(b"synthetic observer");
     fs::write(&layout.final_served, &sample.served).unwrap();
     let mut engines = serde_json::Map::new();
     assert!(matches!(
@@ -815,6 +923,7 @@ fn synthetic_cache(layout: &mut super::Layout, sample: &mut Captured) {
 fn write_inputs(root: &Path) {
     fs::create_dir_all(root.join("out")).expect("out");
     fs::create_dir_all(root.join("fall")).expect("fall input");
+    fs::write(root.join("observer.so"), b"synthetic observer").expect("observer");
     fs::write(root.join("fall/model.onnx"), "fall").expect("fall source");
     for name in [
         "pose.onnx",

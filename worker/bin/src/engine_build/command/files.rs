@@ -11,9 +11,7 @@ use rustix::fs::{self, Mode};
 
 use super::{AuxiliaryLayout, Captured, Layout, Planned};
 use crate::cli::{AuxiliaryBuild, EngineBuildFlags};
-use crate::config::model_bundle::identity::{
-    EnginePaths, IdentityInputs, OBSERVER_LIBRARY, fingerprint,
-};
+use crate::config::model_bundle::identity::{EnginePaths, IdentityInputs, fingerprint};
 use crate::seam::{IdSource, RandomIds};
 
 pub use cache::CommandError;
@@ -53,16 +51,22 @@ pub(super) fn prepare(
         flags.infer_config.as_path(),
         flags.tracker_config.as_path(),
         flags.tracker_library.as_path(),
+        captured.observer_path.as_path(),
     ];
     paths::reject_collisions(&targets, &inputs, served_index)?;
     let token = RandomIds.uuid4().map_err(|_| CommandError::Io)?;
     Ok(Planned {
-        layout: layout_of(flags, served, &token)?,
+        layout: layout_of(flags, served, &captured.observer_path, &token)?,
         token,
     })
 }
 
-fn layout_of(flags: &EngineBuildFlags, served: &Path, token: &str) -> Result<Layout, CommandError> {
+fn layout_of(
+    flags: &EngineBuildFlags,
+    served: &Path,
+    observer_path: &Path,
+    token: &str,
+) -> Result<Layout, CommandError> {
     let staged = |role: &str, path: &Path| -> Result<PathBuf, CommandError> {
         Ok(paths::parent_of(path)?
             .join(format!(".engine-stage-{role}-{token}"))
@@ -93,7 +97,7 @@ fn layout_of(flags: &EngineBuildFlags, served: &Path, token: &str) -> Result<Lay
         parser_lib: flags.parser_lib.clone(),
         tracker_config: flags.tracker_config.clone(),
         tracker_library: flags.tracker_library.clone(),
-        observer: PathBuf::from(OBSERVER_LIBRARY),
+        observer: observer_path.to_path_buf(),
     })
 }
 

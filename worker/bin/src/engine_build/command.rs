@@ -40,6 +40,7 @@ struct Captured {
     served_output: bool,
     image: String,
     observer: String,
+    observer_path: PathBuf,
     input_digests: Vec<(PathBuf, String)>,
 }
 
@@ -154,7 +155,8 @@ fn capture(env: &Env, flags: &crate::cli::EngineBuildFlags) -> Result<Captured, 
     if !served_output {
         files::verify_existing_served(&served, &flags.engine, flags.batch_size)?;
     }
-    let observer = files::fingerprint_of(Path::new(OBSERVER_LIBRARY))?;
+    let observer_path = PathBuf::from(OBSERVER_LIBRARY);
+    let observer = files::fingerprint_of(&observer_path)?;
     let input_digests = files::capture_inputs(flags)?;
     Ok(Captured {
         pose,
@@ -164,6 +166,7 @@ fn capture(env: &Env, flags: &crate::cli::EngineBuildFlags) -> Result<Captured, 
         served_output,
         image,
         observer,
+        observer_path,
         input_digests,
     })
 }
