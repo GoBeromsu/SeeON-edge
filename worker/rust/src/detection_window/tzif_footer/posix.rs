@@ -1,10 +1,47 @@
 //! Admission grammar from CPython 3.12.3 Modules/_zoneinfo.c:
 //! parse_tz_str, parse_abbr, parse_tz_delta, parse_transition_rule/time.
-//! This recognizes a footer; it never constructs or substitutes timezone rules.
 //! Unlike the POSIX specification, that C parser permits short abbreviations
 //! and two-digit minute/second values above 59. Its input is a C string.
 
-pub(super) fn accepts(bytes: &[u8]) -> bool {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum FooterRule {
+    Fixed {
+        std_seconds: i32,
+    },
+    Alternate {
+        std_seconds: i32,
+        dst_seconds: i32,
+        start: TransitionRule,
+        end: TransitionRule,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct TransitionRule {
+    pub(super) day: RuleDay,
+    pub(super) time_seconds: i32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum RuleDay {
+    MonthWeekDay { month: u8, week: u8, weekday: u8 },
+    Day { day: u16, julian: bool },
+}
+
+impl FooterRule {
+    pub(super) fn requires_python_evaluator(self) -> bool {
+        // Jiff accepts both day forms, but uses different day indexing and
+        // leap-day semantics from the pinned CPython C evaluator.
+        match self {
+            Self::Fixed { .. } => false,
+            Self::Alternate { start, end, .. } => {
+                matches!(start.day, RuleDay::Day { .. }) || matches!(end.day, RuleDay::Day { .. })
+            }
+        }
+    }
+}
+
+pub(super) fn parse(bytes: &[u8]) -> Option<FooterRule> {
     let end = bytes
         .iter()
         .position(|&byte| byte == 0)
@@ -13,7 +50,6 @@ pub(super) fn accepts(bytes: &[u8]) -> bool {
         rest: &bytes[..end],
     }
     .zone()
-    .is_some()
 }
 
 struct Parser<'a> {
@@ -68,67 +104,95 @@ impl Parser<'_> {
         Some(())
     }
 
-    fn time(&mut self, max_hour: u16) -> Option<()> {
-        if matches!(self.rest.first(), Some(b'+' | b'-')) {
-            self.rest = &self.rest[1..];
-        }
-        if self.digits(1, 3)? > max_hour {
+    fn time(&mut self, max_hour: u16) -> Option<i32> {
+        let sign = if self.eat(b'-') {
+            -1
+        } else {
+            self.eat(b'+');
+            1
+        };
+        let hour = self.digits(1, 3)?;
+        if hour > max_hour {
             return None;
         }
+        let mut minute = 0;
+        let mut second = 0;
         if self.eat(b':') {
-            self.digits(2, 2)?;
+            minute = self.digits(2, 2)?;
             if self.eat(b':') {
-                self.digits(2, 2)?;
+                second = self.digits(2, 2)?;
             }
         }
-        Some(())
+        Some(sign * (i32::from(hour) * 3600 + i32::from(minute) * 60 + i32::from(second)))
     }
 
-    fn rule(&mut self) -> Option<()> {
-        if self.eat(b'M') {
+    fn rule(&mut self) -> Option<TransitionRule> {
+        let day = if self.eat(b'M') {
             let month = self.digits(1, 2)?;
             if !(1..=12).contains(&month) || !self.eat(b'.') {
                 return None;
             }
             let week = self.digits(1, 1)?;
-            if !(1..=5).contains(&week) || !self.eat(b'.') || self.digits(1, 1)? > 6 {
+            if !(1..=5).contains(&week) || !self.eat(b'.') {
                 return None;
+            }
+            let weekday = self.digits(1, 1)?;
+            if weekday > 6 {
+                return None;
+            }
+            RuleDay::MonthWeekDay {
+                month: month as u8,
+                week: week as u8,
+                weekday: weekday as u8,
             }
         } else {
-            let minimum = u16::from(self.eat(b'J'));
-            if !(minimum..=365).contains(&self.digits(1, 3)?) {
+            let julian = self.eat(b'J');
+            let day = self.digits(1, 3)?;
+            if !(u16::from(julian)..=365).contains(&day) {
                 return None;
             }
-        }
-        if self.eat(b'/') {
-            self.time(167)?;
-        }
-        Some(())
+            RuleDay::Day { day, julian }
+        };
+        let time_seconds = if self.eat(b'/') {
+            self.time(167)?
+        } else {
+            7200
+        };
+        Some(TransitionRule { day, time_seconds })
     }
 
-    fn zone(&mut self) -> Option<()> {
+    fn zone(&mut self) -> Option<FooterRule> {
         self.abbreviation()?;
-        self.time(24)?;
+        let std_seconds = -self.time(24)?;
         if self.rest.is_empty() {
-            return Some(());
+            return Some(FooterRule::Fixed { std_seconds });
         }
         self.abbreviation()?;
-        if self.rest.first() != Some(&b',') {
-            self.time(24)?;
+        let dst_seconds = if self.rest.first() == Some(&b',') {
+            std_seconds + 3600
+        } else {
+            -self.time(24)?
+        };
+        if !self.eat(b',') {
+            return None;
         }
-        for _ in 0..2 {
-            if !self.eat(b',') {
-                return None;
-            }
-            self.rule()?;
+        let start = self.rule()?;
+        if !self.eat(b',') {
+            return None;
         }
-        self.rest.is_empty().then_some(())
+        let end = self.rule()?;
+        self.rest.is_empty().then_some(FooterRule::Alternate {
+            std_seconds,
+            dst_seconds,
+            start,
+            end,
+        })
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::accepts;
+    use super::*;
 
     #[test]
     fn preserves_c_parser_acceptance_instead_of_jiff_or_python_alternate_grammar() {
@@ -146,7 +210,7 @@ mod tests {
             "AAA0BBB,0,365",
             "EST5\0garbage",
         ] {
-            assert!(accepts(text.as_bytes()), "{text:?}");
+            assert!(parse(text.as_bytes()).is_some(), "{text:?}");
         }
     }
 
@@ -172,7 +236,42 @@ mod tests {
             "<AB!>0",
             "\0UTC0",
         ] {
-            assert!(!accepts(text.as_bytes()), "{text:?}");
+            assert!(parse(text.as_bytes()).is_none(), "{text:?}");
         }
+    }
+
+    #[test]
+    fn retains_signed_carries_posix_sign_and_default_dst() {
+        for (text, std_seconds) in [
+            ("A-0:00:60", 60),
+            ("A+0:99:99", -6039),
+            ("A24:99:99", -92439),
+        ] {
+            assert_eq!(
+                parse(text.as_bytes()),
+                Some(FooterRule::Fixed { std_seconds })
+            );
+        }
+        assert_eq!(
+            parse(b"A-24:99:99B,J59/-0:99:99,0"),
+            Some(FooterRule::Alternate {
+                std_seconds: 92439,
+                dst_seconds: 96039,
+                start: TransitionRule {
+                    day: RuleDay::Day {
+                        day: 59,
+                        julian: true
+                    },
+                    time_seconds: -6039
+                },
+                end: TransitionRule {
+                    day: RuleDay::Day {
+                        day: 0,
+                        julian: false
+                    },
+                    time_seconds: 7200
+                },
+            })
+        );
     }
 }

@@ -19,8 +19,9 @@
 //! Admission limits are explicit: 256-byte zone names, 4096-byte paths, 1 MiB
 //! TZif files, ASCII one/two-digit HH:MM components (Python also accepts some
 //! Unicode decimal digits), Python years 1..=9999, microsecond civil precision,
-//! and integral-second UTC offsets strictly inside +/-24 hours. External clocks
-//! also require Python-range intermediate UTC time and Jiff's checked timestamp
+//! and supplied integral-second clock offsets strictly inside +/-24 hours.
+//! Parsed target footer offsets can exceed that bound. External clocks also
+//! require Python-range intermediate UTC time and Jiff's checked timestamp
 //! range (which reserves headroom at the upper bound). Same-target clocks never
 //! enter that instant domain. No clamping of out-of-range dates is accepted.
 use std::fs::File;
@@ -31,7 +32,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use jiff::Timestamp;
 pub use jiff::civil::DateTime;
 use jiff::civil::Time;
-use jiff::tz::{Offset, TimeZone};
+use jiff::tz::Offset;
 
 mod tzif_footer;
 
@@ -175,7 +176,7 @@ impl AwareDateTime {
 pub struct DetectionWindow {
     start: Time,
     end: Time,
-    zone: TimeZone,
+    zone: tzif_footer::CompiledZone,
     source_path: PathBuf,
 }
 impl DetectionWindow {
@@ -203,8 +204,9 @@ impl DetectionWindow {
     /// with the same name/root/path rules as `from_zoneinfo_dir`, then used only
     /// as `source_path`. No file is opened or read. Bytes above 1 MiB are
     /// `ZoneDataTooLarge` before decode. A proven Python-invalid ASCII footer
-    /// with a valid body is `InvalidZoneFooter`. Other invalid or unsupported
-    /// input remains `InvalidZoneData`; no alternative rules are admitted.
+    /// with a valid body is `InvalidZoneFooter`. Python-accepted, Jiff-rejected
+    /// footers use pinned CPython rules with independently validated history.
+    /// Other invalid or unsupported input remains `InvalidZoneData`.
     pub fn from_tzif_bytes(
         start: &str,
         end: &str,
@@ -222,25 +224,12 @@ impl DetectionWindow {
     }
 
     /// Same-target identity preserves Python's civil-time short circuit.
-    /// External historical/POSIX rules are interpreted by Jiff; checking the
-    /// round trip detects saturation at Jiff's civil range edges.
+    /// Native rules and retained history keep Jiff's checked round trip;
+    /// Python-only footer rules check the resulting civil coordinate directly.
     pub fn contains(&self, now: AwareDateTime) -> Result<bool, DetectionWindowError> {
         let time = match now.0 {
             ValidatedClock::SameTargetCivil(local) => local.time(),
-            ValidatedClock::ExternalInstant(timestamp) => {
-                let offset = self.zone.to_offset(timestamp);
-                let local = offset.to_datetime(timestamp);
-                if !(1..=9999).contains(&local.year())
-                    || offset
-                        .to_timestamp(local)
-                        .map(|value| value.as_nanosecond())
-                        .ok()
-                        != Some(timestamp.as_nanosecond())
-                {
-                    return Err(DetectionWindowError::ClockOutOfRange);
-                }
-                local.time()
-            }
+            ValidatedClock::ExternalInstant(timestamp) => self.zone.local_time(timestamp)?,
         };
         Ok(if self.start <= self.end {
             self.start <= time && time < self.end
@@ -301,13 +290,7 @@ fn compile(
     if bytes.len() > MAX_TZIF_BYTES {
         return Err(DetectionWindowError::ZoneDataTooLarge);
     }
-    let zone = TimeZone::tzif(tz, bytes).map_err(|_| {
-        if tzif_footer::invalid_footer(tz, bytes) {
-            DetectionWindowError::InvalidZoneFooter
-        } else {
-            DetectionWindowError::InvalidZoneData
-        }
-    })?;
+    let zone = tzif_footer::compile(tz, bytes)?;
     Ok(DetectionWindow {
         start,
         end,
