@@ -6,6 +6,23 @@ FROM docker.io/library/rust:1.90.0-bookworm@sha256:3f6e6f8d8725a65a2db964bb82885
 RUN rustup component add --toolchain 1.90.0 clippy rustfmt
 
 FROM nvcr.io/nvidia/deepstream@sha256:f6fa0247da9290979cbb05749e7da9435d089c93db7c4dcfe85ba2488b5f4994
+# CPU publication tests execute ffprobe; restore the codec libraries stripped
+# from the SDK image, matching the cargo-build prerequisite in Dockerfile.edge.
+RUN apt-get update \
+    && apt-get install -y --reinstall --no-install-recommends \
+        ffmpeg \
+        libavcodec60 \
+        libavformat60 \
+        libavutil58 \
+        libswscale7 \
+        libflac12t64 \
+        libmp3lame0 \
+        libmpg123-0t64 \
+        libvpx9 \
+        libx264-164 \
+        libx265-199 \
+    && rm -rf /var/lib/apt/lists/* \
+    && /usr/bin/ffprobe -version
 COPY --from=rust-toolchain /usr/local/cargo /usr/local/cargo
 COPY --from=rust-toolchain /usr/local/rustup /usr/local/rustup
 ENV CARGO_HOME=/usr/local/cargo \

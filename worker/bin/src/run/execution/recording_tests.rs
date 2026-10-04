@@ -1,16 +1,14 @@
 use super::*;
-use crate::clips::manifest::Contributor;
-use crate::clips::recorder::Boundary;
+use crate::clips::publish::TERMINAL_MARKER;
+use crate::clips::reserve::FINALIZE_FAILED;
 use crate::seam::{IdSource, RandomIds};
 use seeon_deepstream_native::RecordTicket;
-use std::path::PathBuf;
+use support::{CLIP_ID, EVENT_REF, INVALID_MEDIA, SaveFixture, Scratch, assert_absent};
 
-struct Scratch(PathBuf);
-impl Drop for Scratch {
-    fn drop(&mut self) {
-        std::fs::remove_dir_all(&self.0).expect("owned recording fixture cleanup");
-    }
-}
+#[path = "recording_failure_tests.rs"]
+mod failure_tests;
+#[path = "recording_test_support.rs"]
+mod support;
 
 #[test]
 fn media_receipt_accepts_regular_owned_file_but_not_traversal_or_symlink() {
@@ -39,100 +37,102 @@ fn media_receipt_accepts_regular_owned_file_but_not_traversal_or_symlink() {
 }
 
 #[test]
-fn failed_codec_probe_retains_original_media_and_durable_attribution() {
-    assert_failed_save_retains_attribution(30_000);
+fn failed_codec_probe_publishes_unavailable_and_retires_durable_attribution() {
+    let mut fixture = SaveFixture::new(30_000);
+    assert!(
+        std::process::Command::new(Tools::default().ffprobe)
+            .arg("-version")
+            .output()
+            .expect("actual ffprobe must run")
+            .status
+            .success()
+    );
+    assert!(measured_codec(&fixture.sealed.path).is_err());
+    let slots = fixture.reserve.available();
+    let saved = fixture.save();
+    let Ok(SaveOutcome::Saved(published)) = saved else {
+        panic!("codec refusal must complete FINALIZE_FAILED publication: {saved:?}");
+    };
+    assert!(published.video_path.is_none());
+    assert!(published.admitted && !published.resumed);
+    let manifest: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&published.manifest_path).unwrap()).unwrap();
+    assert_eq!(manifest["state"], "UNAVAILABLE");
+    assert_eq!(manifest["reason_code"], FINALIZE_FAILED);
+    assert_eq!(manifest["video_available"], false);
+    assert_eq!(manifest["event_refs"], serde_json::json!([EVENT_REF]));
+    assert_eq!(manifest["finalized_at"], fixture.now.iso_millis());
+    assert!(manifest["path"].is_null());
+    for key in ["codec", "sha256", "size_bytes", "mime_type", "duration_ms"] {
+        assert!(
+            manifest.get(key).is_none(),
+            "unavailable has no {key} claim"
+        );
+    }
+    let entry: serde_json::Value = serde_json::from_slice(
+        &crate::delivery::DeliveryEntry::from(published.entry)
+            .to_bytes()
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(entry["local_state"], "UNAVAILABLE");
+    assert_eq!(entry["unavailable_reason"], FINALIZE_FAILED);
+    assert_eq!(fixture.queue.entries().unwrap(), vec![entry]);
+    assert!(
+        fixture
+            .store
+            .clip_dir(CLIP_ID)
+            .join(TERMINAL_MARKER)
+            .is_file()
+    );
+    assert_absent(&fixture.sidecars.directory().join(format!("{CLIP_ID}.json")));
+    assert_eq!(
+        fixture
+            .sidecars
+            .pending("camera-real")
+            .unwrap()
+            .recoveries
+            .len(),
+        0
+    );
+    assert_eq!(std::fs::read(&fixture.sealed.path).unwrap(), INVALID_MEDIA);
+    assert_eq!(fixture.reserve.available(), slots);
 }
 
 #[test]
 fn zero_duration_ready_retains_observation_before_metadata_refusal() {
-    assert_failed_save_retains_attribution(0);
-}
-
-fn assert_failed_save_retains_attribution(duration_ms: u64) {
-    let root = Scratch(std::env::temp_dir().join(RandomIds.uuid4().unwrap()));
-    std::fs::create_dir(&root.0).unwrap();
-    let store = ClipStore::new(root.0.join("store"));
-    let mut reserve = ReservePool::arm(&store, 1).unwrap();
-    let queue = DeliveryQueue::open(&root.0.join("queue"), true).unwrap();
-    let sidecars = SealedSidecars::new(root.0.join(crate::clips::sealed::SIDECAR_DIR));
-    let source = root.0.join("invalid-media.mp4");
-    // Invalid encoded bytes deliberately exercise failure, not inference or encoding success.
-    std::fs::write(&source, b"invalid encoded media").unwrap();
-    let event_ref = "00000000-0000-4000-8000-000000000001";
-    let event = SealedEvent {
-        domain: "fall".into(),
-        event_type: "FALL_DETECTED".into(),
-        identity: event_ref.into(),
-        camera_id: "camera-real".into(),
-        facility_id: "facility-real".into(),
-        time_sec: 12.0,
-        probability: None,
-    };
-    let events = BTreeMap::from([(event_ref.to_owned(), event.clone())]);
-    let detected_at = Utc::parse("2026-08-20T17:20:58.197192Z").unwrap();
-    let sealed = ClipSealed {
-        ticket: RecordTicket::default(),
-        result: MediaResult::Ok,
-        contains_video: true,
-        duration_ms,
-        boundary: Boundary::ExtensionRaced,
-        contributors: vec![Contributor {
-            event_ref: event_ref.into(),
-            detected_at,
-        }],
-        path: source.clone(),
-    };
-    let result = RecordingPublisher {
-        reserve: &mut reserve,
-        store: &store,
-        queue: &queue,
-        sidecars: &sidecars,
-        events: &events,
-    }
-    .save("boot-camera-session", &sealed, detected_at);
-    assert!(result.is_err());
-    if duration_ms == 0 {
-        assert!(matches!(
-            result,
-            Err(PublishError::Reservation("sealed metadata"))
-        ));
-    }
-    assert!(queue.entries().unwrap().is_empty());
-    assert_eq!(std::fs::read(&source).unwrap(), b"invalid encoded media");
-    assert!(
-        !store
-            .clip_dir("boot-camera-session")
-            .join("manifest.json")
-            .exists()
-    );
-    let pending = sidecars.pending("camera-real").unwrap();
-    assert!(pending.malformed.is_empty());
-    assert_eq!(pending.recoveries.len(), 1);
-    let recovered = &pending.recoveries[0];
-    assert_eq!(recovered.events[event_ref], event);
-    assert_eq!(recovered.sealed.clip_id, "boot-camera-session");
-    assert_eq!(recovered.sealed.path, source.to_str().unwrap());
-    assert_eq!(recovered.sealed.duration_ms, duration_ms as i64);
-    assert_eq!(recovered.sealed.boundary, "extension_raced");
-    assert_eq!(
-        recovered.sealed.contributors[0].detected_at,
-        detected_at.iso_micros()
-    );
-    let staged = store
-        .reserve("camera-real", "boot-camera-session")
+    let mut fixture = SaveFixture::new(0);
+    assert!(matches!(
+        fixture.save(),
+        Err(PublishError::Reservation("sealed metadata"))
+    ));
+    assert!(fixture.queue.entries().unwrap().is_empty());
+    fixture.assert_retained();
+    fixture.assert_no_terminal();
+    let staged = fixture
+        .store
+        .reserve("camera-real", CLIP_ID)
         .unwrap()
         .artifact_path();
-    std::fs::rename(&source, &staged).unwrap();
+    std::fs::rename(&fixture.sealed.path, &staged).unwrap();
     let replay = super::super::publication::replay_before_media(
-        &root.0,
+        &fixture.root.0,
         &["camera-real".into()],
-        &store,
-        &queue,
+        &fixture.store,
+        &fixture.queue,
         &crate::seam::SystemClock::new(),
     )
     .unwrap();
     assert_eq!(replay.reports[0].failed, 1);
     assert_eq!(replay.reports[0].missing_media, 0);
-    assert_eq!(std::fs::read(staged).unwrap(), b"invalid encoded media");
-    assert_eq!(sidecars.pending("camera-real").unwrap().recoveries.len(), 1);
+    assert_eq!(std::fs::read(staged).unwrap(), INVALID_MEDIA);
+    assert_eq!(
+        fixture
+            .sidecars
+            .pending("camera-real")
+            .unwrap()
+            .recoveries
+            .len(),
+        1
+    );
 }

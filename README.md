@@ -54,7 +54,9 @@ relay tokens.
 and the DeepStream SDK base by digest. Checksum-verified `clippy` and `rustfmt`
 components and the compiler are copied into the SDK builder so native CUDA/
 TensorRT linking uses the actual libraries. `rust-toolchain.toml` declares
-the matching toolchain.
+the matching toolchain. Both this builder and the image's `cargo-verify` stage
+include real `ffprobe` and its codec libraries for CPU publication-failure tests;
+those tests remain enabled in the ordinary workspace suite.
 This prerequisite does not replace `Dockerfile.edge` or install a host compiler.
 
 On the authorized onsite build host, use an explicit two-file context:

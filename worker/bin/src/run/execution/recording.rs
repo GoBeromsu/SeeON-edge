@@ -5,10 +5,10 @@ use std::path::Path;
 use seeon_deepstream_native::MediaResult;
 
 use crate::clips::entry::{ContributorEvent, FLOW_ENCODER, flow_metadata};
-use crate::clips::publish::{PublishError, Publisher};
+use crate::clips::publish::{MANIFEST_FILE, PublishError, Publisher, TERMINAL_MARKER};
 use crate::clips::recorder::ClipSealed;
 use crate::clips::rendition::{Tools, video_codec};
-use crate::clips::reserve::{ReservePool, SaveOutcome};
+use crate::clips::reserve::{FINALIZE_FAILED, ReservePool, SaveOutcome};
 use crate::clips::sealed::{SealedClip, SealedContributor, SealedEvent, SealedSidecars};
 use crate::clips::store::ClipStore;
 use crate::clips::time::Utc;
@@ -80,17 +80,34 @@ impl RecordingPublisher<'_> {
             .map_err(|_| PublishError::Reservation("sealed metadata"))?;
         // Unavailable publications carry no media facts and therefore no codec claim.
         let codec = if ready {
-            measured_codec(&sealed.path)?
+            measured_codec(&sealed.path)
         } else {
-            String::new()
+            Ok(String::new())
         };
-        let saved = self.reserve.save(
-            self.store,
-            &Publisher::new(self.queue),
-            &meta,
-            sealed,
-            &codec,
-        )?;
+        let publisher = Publisher::new(self.queue);
+        let saved = match codec {
+            Ok(codec) => self
+                .reserve
+                .save(self.store, &publisher, &meta, sealed, &codec)?,
+            Err(_) => {
+                // Probing precedes media placement. Never convert an existing
+                // terminal or a partial publication into a different outcome.
+                let reservation = self.store.reserve(&meta.camera_id, &meta.clip_id)?;
+                for name in [MANIFEST_FILE, TERMINAL_MARKER] {
+                    match std::fs::symlink_metadata(reservation.final_dir.join(name)) {
+                        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                        Ok(_) => return Err(PublishError::Conflict),
+                        Err(error) => return Err(error.into()),
+                    }
+                }
+                SaveOutcome::Saved(publisher.publish_unavailable(
+                    &reservation,
+                    &meta,
+                    FINALIZE_FAILED,
+                    None,
+                )?)
+            }
+        };
         if !matches!(saved, SaveOutcome::FinalizeFailed(None))
             && let Some(path) = sidecar
         {

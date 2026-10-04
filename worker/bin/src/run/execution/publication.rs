@@ -504,6 +504,9 @@ pub fn channels() -> (
 #[path = "publication/native_tests.rs"]
 mod native_tests;
 #[cfg(test)]
+#[path = "publication_save_tests.rs"]
+mod save_tests;
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::clips::entry::{ContributorEvent, FLOW_ENCODER, flow_metadata};

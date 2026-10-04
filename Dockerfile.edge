@@ -75,18 +75,22 @@ RUN rustup component add --toolchain 1.90.0 clippy rustfmt
 FROM nvcr.io/nvidia/deepstream@sha256:f6fa0247da9290979cbb05749e7da9435d089c93db7c4dcfe85ba2488b5f4994 AS cargo-build
 # The clip decoder's test binaries load libav at run time. DeepStream ships no
 # libav and strips its codec runtimes; reinstall those as the runtime stage does.
+# Publication failure tests also execute the real ffprobe binary.
 RUN apt-get update \
     && apt-get install -y --reinstall --no-install-recommends \
+        ffmpeg \
         libavcodec60 \
         libavformat60 \
         libavutil58 \
         libswscale7 \
+        libflac12t64 \
         libmp3lame0 \
         libmpg123-0t64 \
         libvpx9 \
         libx264-164 \
         libx265-199 \
-    && rm -rf /var/lib/apt/lists/*
+    && rm -rf /var/lib/apt/lists/* \
+    && /usr/bin/ffprobe -version
 COPY --from=rust-toolchain /usr/local/cargo /usr/local/cargo
 COPY --from=rust-toolchain /usr/local/rustup /usr/local/rustup
 COPY --from=native-build /opt/seeon/lib/ /opt/seeon/lib/
