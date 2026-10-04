@@ -7,4 +7,5 @@ pub mod coverage;
 pub mod emit;
 pub mod fall;
 pub mod identity;
+pub mod incident;
 pub mod ingest;

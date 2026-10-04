@@ -12,7 +12,7 @@ use crate::run::execution::lifecycle::drain_policy;
 fn shutdown_drain_rejects_late_admission_without_consuming_or_fabricating_a_clip() {
     let mut fixture = Fixture::new();
     fixture.session.request_media_stop();
-    let mut sink = LiveSink::new();
+    let mut sink = LiveSink::new(fixture.clock.clone());
     assert!(drain_policy(
         &mut fixture.session,
         fixture.clock.as_ref(),
@@ -56,7 +56,7 @@ fn shutdown_drain_rejects_active_receipt_ownership_even_without_pending_alerts()
     assert!(!drain_policy(
         &mut fixture.session,
         fixture.clock.as_ref(),
-        &mut LiveSink::new(),
+        &mut LiveSink::new(fixture.clock.clone()),
     ));
     assert_eq!(fixture.snapshot(), retained);
     assert_eq!(
@@ -71,7 +71,7 @@ fn shutdown_drain_preserves_cap_race_pending_after_prior_receipt_publication() {
     let mut fixture = Fixture::new();
     let admitted = fixture.start(41, FIRST, 71);
     fixture.clock.at(120);
-    let mut sink = LiveSink::new();
+    let mut sink = LiveSink::new(fixture.clock.clone());
     sink.triggered.push(event(42, NEXT));
     apply_sink(&mut fixture.session, fixture.clock.as_ref(), &mut sink).unwrap();
     assert!(sink.triggered.is_empty());
@@ -104,7 +104,7 @@ fn shutdown_drain_retains_failed_save_attribution_after_recorder_returns_idle() 
     let mut receipt = fixture.receipt(admitted, MediaResult::Ok);
     receipt.duration_ms = 0;
     fixture.receipts.try_send(receipt).unwrap();
-    let mut sink = LiveSink::new();
+    let mut sink = LiveSink::new(fixture.clock.clone());
     assert!(!drain_policy(
         &mut fixture.session,
         fixture.clock.as_ref(),
@@ -138,7 +138,7 @@ fn shutdown_drain_accepts_completed_recording_without_requiring_empty_delivery_q
     assert!(drain_policy(
         &mut fixture.session,
         fixture.clock.as_ref(),
-        &mut LiveSink::new(),
+        &mut LiveSink::new(fixture.clock.clone()),
     ));
     assert_eq!(fixture.snapshot().0, State::Idle);
     assert_eq!(fixture.snapshot().2, 0);

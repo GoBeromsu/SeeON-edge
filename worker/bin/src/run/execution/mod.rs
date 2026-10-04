@@ -183,13 +183,14 @@ fn failed_preparation(
     let cleaned = if let Some(session) = session {
         // No policy turn has run; this is the real initial empty sink, not a
         // replacement for a sink containing accepted work.
+        let sink = runtime::LiveSink::new(session.publications.clock());
         lifecycle::shutdown(
             *session,
             booted,
             clock,
             deadline,
             runtime::RunOutcome::Stopped,
-            runtime::LiveSink::new(),
+            sink,
         )
     } else {
         // Static output admission failed before any output owner was started.

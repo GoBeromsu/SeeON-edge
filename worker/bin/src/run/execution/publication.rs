@@ -22,9 +22,11 @@ use crate::media::COMMAND_CAPACITY;
 use crate::media::Command;
 use crate::msg::{RECORD_CAPACITY, RecordReceipt};
 use crate::policy::emit::{EmitError, Stager};
+use crate::policy::identity::Limits;
+use crate::policy::incident::{AdmittedIncident, IncidentError, IncidentManager};
 use crate::run::clip_output::{self, ClipOutputError};
 use crate::run::events::{EventDelivery, EventDeliveryError, PreparedEvent, StagedEvent};
-use crate::seam::Clock;
+use crate::seam::{Clock, RandomIds};
 
 pub const CLIP_STORE_ROOT: &str = "/var/lib/clip-store";
 const COMMAND_WAIT: Duration = Duration::from_secs(2);
@@ -35,6 +37,7 @@ pub enum PublicationError {
     Queue,
     Reserve,
     Stager(EmitError),
+    Incident(IncidentError),
     Event(EventDeliveryError),
     Clip(ClipOutputError),
     Recorder(RecorderError),
@@ -51,6 +54,9 @@ impl std::fmt::Display for PublicationError {
             Self::Queue => "delivery queue could not be opened",
             Self::Reserve => "clip reserve could not be armed",
             Self::Stager(_) => "event stager refused admitted identity",
+            Self::Incident(error) => {
+                return write!(formatter, "incident admission refused: {error}");
+            }
             Self::Event(_) => "event staging retained the original identity",
             Self::Clip(_) => "sealed clip publication retained its sidecar",
             Self::Recorder(_) => "recording admission failed",
@@ -82,6 +88,7 @@ pub struct Publications {
     pub sidecars: SealedSidecars,
     pub stagers: Vec<Stager>,
     pub recorders: Vec<Recorder<CommandPlane>>,
+    incidents: Vec<IncidentManager>,
     records: Receiver<RecordReceipt>,
     pub record_dir: PathBuf,
     clock: Arc<dyn Clock>,
@@ -211,6 +218,7 @@ pub fn open(
     let reserve = ReservePool::arm(&store, cameras.len()).map_err(|_| PublicationError::Reserve)?;
     let mut stagers = Vec::with_capacity(cameras.len());
     let mut recorders = Vec::with_capacity(cameras.len());
+    let mut incidents = Vec::with_capacity(cameras.len());
     for (source_id, binding, camera_id, facility_id) in cameras {
         stagers.push(
             Stager::new(camera_id, facility_id, config_version, manifest_sha)
@@ -221,6 +229,10 @@ pub fn open(
             CommandPlane::new(commands.clone(), *source_id, *binding, COMMAND_WAIT),
             Arc::clone(&clock),
         ));
+        incidents.push(
+            IncidentManager::new(Arc::clone(&clock), Arc::new(RandomIds), Limits::default())
+                .map_err(PublicationError::Incident)?,
+        );
     }
     Ok(Publications {
         boot_id: boot_id.to_owned(),
@@ -232,6 +244,7 @@ pub fn open(
         sidecars: SealedSidecars::new(state_dir.join(SIDECAR_DIR)),
         stagers,
         recorders,
+        incidents,
         records,
         record_dir: record_dir.to_path_buf(),
         clock,
@@ -239,6 +252,28 @@ pub fn open(
 }
 
 impl Publications {
+    pub(super) fn clock(&self) -> Arc<dyn Clock> {
+        Arc::clone(&self.clock)
+    }
+
+    /// Camera routing precedes admission; facility/stager validation stays in stage.
+    pub(super) fn admit(
+        &mut self,
+        index: usize,
+        event: &seeon_worker::episode::BusinessEvent,
+        now: Duration,
+    ) -> Result<Option<AdmittedIncident>, PublicationError> {
+        let (_, _, camera_id, _) = self.cameras.get(index).ok_or(PublicationError::Identity)?;
+        if event.camera_id != *camera_id {
+            return Err(PublicationError::Identity);
+        }
+        self.incidents
+            .get_mut(index)
+            .ok_or(PublicationError::Identity)?
+            .admit(event, now)
+            .map_err(PublicationError::Incident)
+    }
+
     /// Stop new native start/extend work without consuming active receipts or
     /// pending contributors. Shutdown publication owns their eventual handoff.
     pub fn quiesce(&mut self) {

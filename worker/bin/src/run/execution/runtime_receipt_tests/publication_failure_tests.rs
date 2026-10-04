@@ -25,7 +25,7 @@ fn drain_after_failure(bad_path: bool) {
     let first = fixture.start(41, FIRST, 71);
     let next = fixture.start_on(23, 42, NEXT, 72);
     fixture.clock.at(120);
-    let mut pending = LiveSink::new();
+    let mut pending = LiveSink::new(fixture.clock.clone());
     pending.triggered = vec![event_on(19, 43, WAITING), event_on(23, 44, SUFFIX)];
     apply_sink(&mut fixture.session, fixture.clock.as_ref(), &mut pending).unwrap();
     assert!(pending.triggered.is_empty());

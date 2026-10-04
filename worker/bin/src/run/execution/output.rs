@@ -2,6 +2,7 @@
 //! media without a dummy runtime. Records require attribution; optional replay
 //! captures actual accepted metadata. Status/heartbeat use existing publishers.
 
+use std::collections::BTreeMap;
 use std::fmt;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -22,6 +23,7 @@ use crate::poll::poll_until;
 use crate::records::compose::{self, Composed};
 use crate::records::provenance::Identities;
 use crate::relay::RelayClient;
+use crate::relay::cameras::policies::PolicyBundle;
 use crate::run::Booted;
 use crate::run::cameras::{self, CameraPolicyError};
 use crate::run::delivery;
@@ -118,6 +120,11 @@ pub struct MediaSession {
     pub commands: SyncSender<Command>,
 }
 
+pub(super) struct DecisionPolicy {
+    pub module_qualified_id: String,
+    pub effective_policy_id: String,
+}
+
 pub struct Session {
     pub pump: PolicyPump,
     pub publications: Publications,
@@ -131,6 +138,7 @@ pub struct Session {
     policy_stop: AtomicBool,
     pub boot_id: String,
     pub temperature: f64,
+    pub(super) decision_policies: BTreeMap<String, DecisionPolicy>,
     pose_rx: Receiver<PosePacket>,
     preview_rx: Receiver<PreviewPacket>,
     pub sender: Option<delivery::Handle>,
@@ -168,6 +176,16 @@ pub(super) fn prepare(
         default_capacities(),
     )
     .map_err(OutputError::Policy)?;
+    let decision_policies = decision_policies(
+        &config.policies,
+        config
+            .cameras
+            .iter()
+            .zip(&policies)
+            .filter_map(|(camera, policy)| {
+                policy.stage.as_ref().map(|_| camera.camera_id.as_str())
+            }),
+    )?;
     let mut pump = PolicyPump::new(
         policies,
         config
@@ -272,6 +290,7 @@ pub(super) fn prepare(
         policy_stop: AtomicBool::new(false),
         boot_id: boot_id.to_owned(),
         temperature: booted.admitted.fall.calibration.temperature,
+        decision_policies,
         pose_rx,
         preview_rx,
         sender: None,
@@ -336,6 +355,26 @@ pub(super) fn prepare(
             session: Some(Box::new(session)),
         }),
     }
+}
+
+pub(super) fn decision_policies<'a>(
+    policies: &PolicyBundle,
+    camera_ids: impl IntoIterator<Item = &'a str>,
+) -> Result<BTreeMap<String, DecisionPolicy>, OutputError> {
+    camera_ids
+        .into_iter()
+        .map(|camera_id| {
+            let policy =
+                cameras::admitted_fall(policies, camera_id).map_err(OutputError::Policy)?;
+            Ok((
+                camera_id.to_owned(),
+                DecisionPolicy {
+                    module_qualified_id: format!("{}.v{}", policy.module_id, policy.module_version),
+                    effective_policy_id: policy.effective_policy_id.clone(),
+                },
+            ))
+        })
+        .collect()
 }
 
 fn default_capacities() -> seeon_worker::fall::FallCapacities {
@@ -610,6 +649,7 @@ pub(super) mod tests {
             policy_stop: AtomicBool::new(false),
             boot_id,
             temperature: 1.0,
+            decision_policies: BTreeMap::new(),
             pose_rx,
             preview_rx,
             sender: None,

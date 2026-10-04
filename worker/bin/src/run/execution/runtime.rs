@@ -6,6 +6,7 @@ use std::fmt;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::sync::mpsc::{Receiver, SyncSender, TryRecvError};
+use std::time::Duration;
 
 use seeon_deepstream_native::{MEDIA_MAX_OBJECTS, MEDIA_MAX_SOURCES, PosePacket};
 
@@ -13,6 +14,7 @@ use crate::config::pull;
 use crate::config::restart::{RESTART_POLL_INTERVAL, RestartCheck, RestartDirective};
 use crate::exit::Exit;
 use crate::msg::{FALL_RESPONSE_CAPACITY, FallRequest, FallResponse, POSE_PER_CAMERA};
+use crate::policy::incident::AdmittedIncident;
 use crate::poll::POLL_INTERVAL;
 use crate::run::Booted;
 use crate::run::pump::{PolicyPump, PolicySink};
@@ -54,7 +56,7 @@ impl fmt::Display for RuntimeError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Pump(_) => formatter.write_str("policy pump refused a live frame or response"),
-            Self::Publication(_) => formatter.write_str("publication drain refused"),
+            Self::Publication(error) => write!(formatter, "publication drain refused: {error}"),
             Self::Delivery => formatter.write_str("delivery sender failed"),
             Self::MediaFatal => formatter.write_str("media plane reported fatal"),
             Self::MediaOwner(exit) => {
@@ -92,9 +94,15 @@ struct ReadyScore {
     generation: Option<u64>,
 }
 
+struct ReadyDecision {
+    snapshot: seeon_worker::trace::DecisionTraceSnapshot,
+    generation: Option<u64>,
+}
+
 struct FrameScores {
     frame: seeon_deepstream_native::FrameIdentity,
     scores: Vec<ReadyScore>,
+    decisions: Vec<ReadyDecision>,
 }
 
 const SCORE_RETENTION: usize = MEDIA_MAX_SOURCES * MEDIA_MAX_OBJECTS;
@@ -123,7 +131,10 @@ impl FrameFailure {
 #[derive(Clone, Debug, PartialEq)]
 struct PendingEvent {
     frame: seeon_deepstream_native::FrameIdentity,
+    /// The genuine domain source is never replaced with its delivery identity.
     event: seeon_worker::episode::BusinessEvent,
+    admission_time: Duration,
+    admitted: Option<AdmittedIncident>,
     prepared: Option<PreparedEvent>,
     staged: Option<StagedEvent>,
 }
@@ -136,13 +147,43 @@ impl PendingEvent {
         Self {
             frame,
             event,
+            admission_time: Duration::ZERO,
+            admitted: None,
             prepared: None,
             staged: None,
         }
     }
+
+    /// Downstream-only UUID fixtures still obtain an actual admission receipt.
+    fn held_admitted(
+        frame: seeon_deepstream_native::FrameIdentity,
+        event: seeon_worker::episode::BusinessEvent,
+    ) -> Self {
+        struct FixtureIds(String);
+        impl crate::seam::IdSource for FixtureIds {
+            fn uuid4(&self) -> std::io::Result<String> {
+                Ok(self.0.clone())
+            }
+        }
+        let mut incidents = crate::policy::incident::IncidentManager::new(
+            Arc::new(crate::seam::SystemClock::new()),
+            Arc::new(FixtureIds(event.identity.clone())),
+            crate::policy::identity::Limits::default(),
+        )
+        .expect("valid downstream fixture incident owner");
+        let mut pending = Self::held(frame, event);
+        pending.admitted = Some(
+            incidents
+                .admit(&pending.event, pending.admission_time)
+                .expect("valid downstream fixture UUID")
+                .expect("fresh downstream fixture admission"),
+        );
+        pending
+    }
 }
 
 pub(super) struct LiveSink {
+    clock: Arc<dyn Clock>,
     ready: Vec<FrameScores>,
     triggered: Vec<PendingEvent>,
 
@@ -154,8 +195,9 @@ pub(super) struct LiveSink {
 
 impl LiveSink {
     /// Before policy execution there are no accepted responses or events.
-    pub(super) fn new() -> Self {
+    pub(super) fn new(clock: Arc<dyn Clock>) -> Self {
         Self {
+            clock,
             ready: Vec::new(),
             triggered: Vec::new(),
             scores: Vec::new(),
@@ -195,6 +237,7 @@ impl PolicySink for LiveSink {
     }
 
     fn decision(&mut self, update: crate::policy::fall::DecisionUpdate<'_>) {
+        let admission_time = self.clock.monotonic();
         let frame = update.frame;
         let ready = self
             .scores
@@ -208,14 +251,27 @@ impl PolicySink for LiveSink {
             })
             .collect();
         self.scores.retain(|score| score.frame != frame);
+        let decisions = update
+            .snapshots
+            .iter()
+            .map(|snapshot| ReadyDecision {
+                generation: snapshot
+                    .track_id
+                    .and_then(|track_id| update.generation_for(track_id)),
+                snapshot: snapshot.clone(),
+            })
+            .collect();
         self.ready.push(FrameScores {
             frame,
             scores: ready,
+            decisions,
         });
         self.triggered
             .extend(update.events.iter().cloned().map(|event| PendingEvent {
                 frame,
                 event,
+                admission_time,
+                admitted: None,
                 prepared: None,
                 staged: None,
             }));
@@ -256,7 +312,7 @@ pub fn run(
     boot_directive: RestartDirective,
 ) -> (RunOutcome, LiveSink) {
     let mut restart = RestartCheck::new(boot_directive, RESTART_POLL_INTERVAL);
-    let mut sink = LiveSink::new();
+    let mut sink = LiveSink::new(session.publications.clock());
     let mut announced_ready = false;
     loop {
         if let Some(exit) = booted.models.failure() {
@@ -526,6 +582,9 @@ fn deliver(
                 emitted += 1;
             }
             ready.scores.drain(..emitted);
+            if ready_error.is_none() && !ready.decisions.is_empty() {
+                ready_error = emit_decisions(session, &stream, ready, clock, lanes).err();
+            }
         }
         if ready_error.is_some() {
             break;
@@ -549,10 +608,33 @@ fn deliver(
                 .ok_or(RuntimeError::Identity)?;
             if pending.prepared.is_none() {
                 let record_frame = observed_frame(&pending.frame)?;
+                if pending.admitted.is_none() {
+                    match session
+                        .publications
+                        .admit(stager, &pending.event, pending.admission_time)
+                        .map_err(RuntimeError::Publication)?
+                    {
+                        Some(admitted) => pending.admitted = Some(admitted),
+                        None => {
+                            retired += 1;
+                            continue;
+                        }
+                    }
+                }
                 pending.prepared = Some(
                     session
                         .publications
-                        .prepare(stager, &pending.event, &stream, record_frame, None)
+                        .prepare(
+                            stager,
+                            &pending
+                                .admitted
+                                .as_ref()
+                                .ok_or(RuntimeError::Identity)?
+                                .event,
+                            &stream,
+                            record_frame,
+                            None,
+                        )
                         .map_err(RuntimeError::Publication)?,
                 );
             }
@@ -575,6 +657,11 @@ fn deliver(
                     sender.wake();
                 }
             }
+            let event = &pending
+                .admitted
+                .as_ref()
+                .ok_or(RuntimeError::Identity)?
+                .event;
             // Staging can span the receipt deadline. Observe queued evidence
             // before admission checks the immutable delivery budget, using a
             // cutoff sampled before the drain rather than after its work.
@@ -584,7 +671,7 @@ fn deliver(
                 .publications
                 .admit_recording(
                     stager,
-                    &pending.event,
+                    event,
                     pending.staged.as_ref().ok_or(RuntimeError::Identity)?,
                     receipt_observation_cutoff,
                 )
@@ -592,7 +679,7 @@ fn deliver(
             if let crate::clips::recorder::Admit::Refused(refusal) = &recording {
                 eprintln!(
                     "ml-worker: recording start refused camera_id={} reason={refusal:?}",
-                    pending.event.camera_id
+                    event.camera_id
                 );
             }
             retired += 1;
@@ -601,6 +688,65 @@ fn deliver(
     })();
     sink.triggered.drain(..retired);
     delivered
+}
+
+fn emit_decisions(
+    session: &Session,
+    stream: &crate::records::builder::Stream,
+    ready: &mut FrameScores,
+    clock: &dyn Clock,
+    lanes: &crate::records::lanes::Lanes,
+) -> Result<(), RuntimeError> {
+    let policy = session
+        .decision_policies
+        .get(&stream.camera_id)
+        .ok_or(RuntimeError::Identity)?;
+    let mut emitted = 0;
+    let delivered = (|| {
+        for decision in &ready.decisions {
+            let record = decision_record(stream, &ready.frame, decision, policy, clock)?;
+            let _ = lanes.try_emit(record);
+            emitted += 1;
+        }
+        Ok(())
+    })();
+    ready.decisions.drain(..emitted);
+    delivered
+}
+
+fn decision_record(
+    stream: &crate::records::builder::Stream,
+    frame: &seeon_deepstream_native::FrameIdentity,
+    decision: &ReadyDecision,
+    policy: &super::output::DecisionPolicy,
+    clock: &dyn Clock,
+) -> Result<crate::records::Record, RuntimeError> {
+    let trace = crate::run::decision::trace_id(
+        &decision.snapshot,
+        &policy.module_qualified_id,
+        &policy.effective_policy_id,
+    )
+    .map_err(|_| RuntimeError::Identity)?;
+    let source = crate::records::builder::DecisionSource {
+        generation: decision.generation,
+        module_qualified_id: Some(policy.module_qualified_id.clone()),
+        authority_role: crate::records::builder::AuthorityRole::Authoritative,
+        decision_trace_id: Some(trace),
+    };
+    let observed = clock
+        .wall()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_err(|_| RuntimeError::Identity)?
+        .as_nanos();
+    let observed_at_ns = u64::try_from(observed).map_err(|_| RuntimeError::Identity)?;
+    crate::run::records::decision_record(
+        stream,
+        observed_frame(frame)?,
+        observed_at_ns,
+        &decision.snapshot,
+        &source,
+    )
+    .map_err(|_| RuntimeError::Identity)
 }
 
 fn attributed(
@@ -747,7 +893,7 @@ mod tests {
             pts_valid: 1,
             ..FrameIdentity::default()
         };
-        let mut sink = LiveSink::new();
+        let mut sink = LiveSink::new(std::sync::Arc::new(SystemClock::new()));
         sink.score(frame, 42, &crate::msg::FallScore::Cpu(2.0))
             .expect("CPU score retained");
         let held = sink.scores.pop().expect("one retained score");
@@ -853,3 +999,6 @@ mod tests {
 #[cfg(test)]
 #[path = "runtime_bounds_tests.rs"]
 mod bounds_tests;
+#[cfg(test)]
+#[path = "runtime_decision_tests.rs"]
+mod decision_tests;

@@ -56,7 +56,7 @@ struct Queue {
 }
 
 impl Queue {
-    fn new() -> Self {
+    fn new(clock: Arc<dyn Clock>) -> Self {
         let (pose_tx, poses) = mpsc::sync_channel(64);
         let (requests, request_rx) = mpsc::sync_channel(64);
         let (response_tx, responses) = mpsc::sync_channel(64);
@@ -68,7 +68,7 @@ impl Queue {
             _response_tx: response_tx,
             responses,
             stop: AtomicBool::new(false),
-            sink: LiveSink::new(),
+            sink: LiveSink::new(clock),
         }
     }
 
@@ -182,7 +182,7 @@ fn capture_precedes_disabled_stage_and_outside_fall_window() {
             disabled(1, clock.clone())
         };
         pump.set_replay(ReplayCapture::new(&root, &config(1, enabled)).unwrap());
-        let mut queue = Queue::new();
+        let mut queue = Queue::new(clock.clone());
         queue.send(packet(0, 1, &[7]));
         queue.turn(&mut pump, 2, 2).unwrap();
         let actual = rows(&root, 0);
@@ -203,7 +203,7 @@ fn only_observed_empty_input_can_report_per_camera_availability_loss() {
     let clock = Arc::new(TestClock::default());
     let mut pump = disabled(3, clock.clone());
     pump.set_replay(ReplayCapture::new(&root, &config(3, false)).unwrap());
-    let mut queue = Queue::new();
+    let mut queue = Queue::new(clock.clone());
     queue.send(packet(0, 1, &[7]));
     queue.send(packet(1, 1, &[8]));
     queue.turn(&mut pump, 2, 4).unwrap();
@@ -247,7 +247,7 @@ fn rejected_metadata_restarts_wait_without_fabricating_a_trace_frame() {
     let clock = Arc::new(TestClock::default());
     let mut pump = disabled(1, clock.clone());
     pump.set_replay(ReplayCapture::new(&root, &config(1, false)).unwrap());
-    let mut queue = Queue::new();
+    let mut queue = Queue::new(clock.clone());
     queue.send(packet(0, 1, &[7]));
     queue.turn(&mut pump, 2, 4).unwrap();
     clock.at(1000);
@@ -284,12 +284,12 @@ fn real_trace_append_failure_does_not_change_fall_requests_or_policy_counters() 
     let mut results = Vec::new();
     for traced in [false, true] {
         let clock = Arc::new(TestClock::default());
-        let mut pump = PolicyPump::new(vec![camera(0)], None, clock).unwrap();
+        let mut pump = PolicyPump::new(vec![camera(0)], None, clock.clone()).unwrap();
         if traced {
             pump.set_replay(ReplayCapture::new(&root, &config(1, true)).unwrap());
             fs::create_dir(trace_path(&root, 0)).unwrap(); // Genuine append IO refusal.
         }
-        let mut queue = Queue::new();
+        let mut queue = Queue::new(clock.clone());
         for sequence in 1..=40 {
             queue.send(packet(0, sequence, &[7]));
         }
@@ -313,9 +313,10 @@ fn real_trace_append_failure_does_not_change_fall_requests_or_policy_counters() 
 #[test]
 fn unknown_source_remains_fatal_with_replay_enabled() {
     let root = directory();
-    let mut pump = disabled(1, Arc::new(TestClock::default()));
+    let clock = Arc::new(TestClock::default());
+    let mut pump = disabled(1, clock.clone());
     pump.set_replay(ReplayCapture::new(&root, &config(1, false)).unwrap());
-    let mut queue = Queue::new();
+    let mut queue = Queue::new(clock.clone());
     queue.send(packet(99, 1, &[7]));
     assert!(matches!(
         queue.turn(&mut pump, 2, 4),

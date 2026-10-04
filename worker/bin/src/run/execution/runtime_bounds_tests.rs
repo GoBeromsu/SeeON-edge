@@ -161,13 +161,7 @@ fn ends(pose_capacity: usize, response_capacity: usize) -> Ends {
 }
 
 fn sink() -> LiveSink {
-    LiveSink {
-        scores: Vec::new(),
-        ready: Vec::new(),
-        triggered: Vec::new(),
-        failures: Default::default(),
-        failure_receipts: Vec::new(),
-    }
+    LiveSink::new(Arc::new(SystemClock::new()))
 }
 
 fn due(
@@ -733,6 +727,7 @@ fn failed_score_handoff_retains_pending_suffix_and_unrelated_events() {
             evidence,
             generation: Some(1),
         }],
+        decisions: Vec::new(),
     };
     let event = |frame| {
         super::PendingEvent::held(
@@ -830,6 +825,7 @@ fn failed_score_handoff_retains_pending_suffix_and_unrelated_events() {
                     generation: Some(1),
                 },
             ],
+            decisions: Vec::new(),
         },
         ready(frame(53, 19), 13, 1.0),
     ];
@@ -926,7 +922,7 @@ fn recording_admission_failure_retains_failed_event_and_does_not_restage() {
         identity
     };
     let event = |sequence, identity: &str| {
-        super::PendingEvent::held(
+        super::PendingEvent::held_admitted(
             frame(sequence),
             BusinessEvent {
                 domain: "fall".into(),
