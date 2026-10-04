@@ -17,7 +17,7 @@ use seeon_deepstream_native::MediaResult;
 
 use super::durable::{self, PRIVATE_FILE, PUBLIC_FILE};
 use super::manifest::{ClipMetadata, MediaFacts};
-use super::publish::{MANIFEST_FILE, PublishError, Published, Publisher};
+use super::publish::{MANIFEST_FILE, PublishError, Published, Publisher, TERMINAL_MARKER};
 use super::recorder::ClipSealed;
 use super::store::{ClipStore, DIRECTORY_MODE as STORE_MODE, Reservation, exists};
 
@@ -142,6 +142,54 @@ impl ReservePool {
             }
             Err(other) => Err(other),
         }
+    }
+
+    /// Publishes a codec-probe failure only before any terminal evidence exists.
+    /// Directory creation and publication share at most one released slot and
+    /// one retry; an unresolved space failure retains the sealed attribution.
+    pub fn publish_preterminal_finalize_failed(
+        &mut self,
+        store: &ClipStore,
+        publisher: &Publisher<'_>,
+        meta: &ClipMetadata,
+    ) -> Result<SaveOutcome, PublishError> {
+        let final_dir = store.clip_dir(&meta.clip_id);
+        let terminal_absent = || -> Result<(), PublishError> {
+            for name in [MANIFEST_FILE, TERMINAL_MARKER] {
+                match std::fs::symlink_metadata(final_dir.join(name)) {
+                    Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+                    Ok(_) => return Err(PublishError::Conflict),
+                    Err(error) => return Err(error.into()),
+                }
+            }
+            Ok(())
+        };
+        for attempt in 0..2 {
+            let published = (|| {
+                let reservation = store.reserve(&meta.camera_id, &meta.clip_id)?;
+                terminal_absent()?;
+                publisher.publish_unavailable(&reservation, meta, FINALIZE_FAILED, None)
+            })();
+            match published {
+                Ok(published) => {
+                    return Ok(if attempt == 0 {
+                        SaveOutcome::Saved(published)
+                    } else {
+                        SaveOutcome::FinalizeFailed(Some(published))
+                    });
+                }
+                Err(PublishError::Io(error)) if no_space(&error) => {
+                    // A failed attempt may already have committed a manifest or
+                    // marker. Never release space or retry over that evidence.
+                    terminal_absent()?;
+                    if attempt == 1 || !self.release()? {
+                        break;
+                    }
+                }
+                Err(other) => return Err(other),
+            }
+        }
+        Ok(SaveOutcome::FinalizeFailed(None))
     }
 
     /// Reserves the clip directories, releasing one slot if they do not fit.

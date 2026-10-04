@@ -504,6 +504,9 @@ pub fn channels() -> (
 #[path = "publication/native_tests.rs"]
 mod native_tests;
 #[cfg(test)]
+#[path = "publication_reserve_tests.rs"]
+mod reserve_tests;
+#[cfg(test)]
 #[path = "publication_save_tests.rs"]
 mod save_tests;
 #[cfg(test)]

@@ -7,6 +7,7 @@ use crate::clips::rendition::Tools;
 use crate::clips::reserve::FINALIZE_FAILED;
 use crate::seam::IdSource;
 use seeon_deepstream_native::MediaResult;
+use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 use support::{
     BOOT_ID, CAMERA_ID, FACILITY_ID, INVALID_MEDIA, Scratch, TestClock, staged_event, start,
@@ -17,8 +18,18 @@ mod support;
 
 #[test]
 fn cpu_composition_failed_codec_probe_publishes_unavailable_and_keeps_admission_live() {
+    failed_codec_probe_continuation(None, |output, _| output.reserve.available());
+}
+
+pub(super) fn failed_codec_probe_continuation(
+    store_root: Option<&Path>,
+    prepare_store: impl FnOnce(&Publications, &str) -> usize,
+) {
     let root = Scratch(std::env::temp_dir().join(RandomIds.uuid4().unwrap()));
     std::fs::create_dir(&root.0).unwrap();
+    let store_root = store_root
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| root.0.join("store"));
     let wall = Arc::new(TestClock(AtomicU64::new(
         u64::try_from(Utc::parse("2026-08-20T17:20:58.197192Z").unwrap().micros()).unwrap(),
     )));
@@ -39,7 +50,7 @@ fn cpu_composition_failed_codec_probe_publishes_unavailable_and_keeps_admission_
             boot_id: BOOT_ID,
             state_dir: &root.0.join("state"),
             record_dir: &root.0.join("records"),
-            store_root: &root.0.join("store"),
+            store_root: &store_root,
             cameras: &cameras,
             config_version: 8,
             manifest_sha: None,
@@ -49,6 +60,10 @@ fn cpu_composition_failed_codec_probe_publishes_unavailable_and_keeps_admission_
         Arc::clone(&clock),
     )
     .unwrap();
+    assert_eq!(
+        output.reserve.available(),
+        ReservePool::slots_for(cameras.len())
+    );
     let (first, first_staged) = staged_event(&mut output, "fall-episode:first");
     let ticket = start(&mut output, &mut inbox, &first, &first_staged, 1);
     wall.0.fetch_add(2_000_000, Ordering::SeqCst);
@@ -60,6 +75,7 @@ fn cpu_composition_failed_codec_probe_publishes_unavailable_and_keeps_admission_
         Admit::Extended
     );
     let events_before = output.queue.entries().unwrap();
+    let attribution_before = output.events.clone();
     assert_eq!(events_before.len(), 2);
     let source = output.record_dir.join("invalid-media.mp4");
     std::fs::write(&source, INVALID_MEDIA).unwrap();
@@ -73,6 +89,8 @@ fn cpu_composition_failed_codec_probe_publishes_unavailable_and_keeps_admission_
             .success()
     );
     assert!(super::super::recording::measured_codec(&source).is_err());
+    let clip_id = format!("{BOOT_ID}-{}-{}", ticket.source_id, ticket.request_id);
+    let expected_slots = prepare_store(&output, &clip_id);
     wall.0.fetch_add(60_000_000, Ordering::SeqCst);
     let finalized_at = Utc::from_system(clock.wall());
     receipts
@@ -92,11 +110,24 @@ fn cpu_composition_failed_codec_probe_publishes_unavailable_and_keeps_admission_
 
     let drained = output.drain_records(clock.as_ref());
 
+    if !matches!(drained, Ok(true)) {
+        assert_eq!(output.queue.entries().unwrap(), events_before);
+        assert_eq!(output.events, attribution_before);
+        assert_eq!(std::fs::read(&source).unwrap(), INVALID_MEDIA);
+        let pending = output.sidecars.pending(CAMERA_ID).unwrap();
+        assert!(pending.malformed.is_empty());
+        let [retained] = pending.recoveries.as_slice() else {
+            panic!("uncompleted publication must retain its sealed sidecar: {pending:?}");
+        };
+        assert_eq!(retained.sealed.clip_id, clip_id);
+        assert_eq!(retained.sealed.path, source.to_str().unwrap());
+        assert_eq!(retained.events, attribution_before);
+    }
     assert!(
         matches!(drained, Ok(true)),
         "completed negative must drain successfully: {drained:?}"
     );
-    let clip_id = format!("{BOOT_ID}-{}-{}", ticket.source_id, ticket.request_id);
+    assert_eq!(output.reserve.available(), expected_slots);
     let directory = output.store.clip_dir(&clip_id);
     let bytes = std::fs::read(directory.join(MANIFEST_FILE)).unwrap();
     let manifest: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
@@ -163,6 +194,8 @@ fn cpu_composition_failed_codec_probe_publishes_unavailable_and_keeps_admission_
     }
     let marker: serde_json::Value =
         serde_json::from_slice(&std::fs::read(directory.join(TERMINAL_MARKER)).unwrap()).unwrap();
+    assert_eq!(marker["clip_id"], clip_id);
+    assert_eq!(marker["local_state"], "UNAVAILABLE");
     assert_eq!(marker["entry_id"], clip["entry_id"]);
     assert_eq!(
         marker["manifest_sha256"],
