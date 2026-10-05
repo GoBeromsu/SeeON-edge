@@ -1,8 +1,8 @@
 # PROJECT KNOWLEDGE BASE
 
-**Generated:** 2026-09-05
-**Commit:** 273e9e9
-**Branch:** feat/p1a-v2-fall-episode
+**Generated:** 2026-10-06
+**Commit:** 30d9ce5
+**Branch:** main
 
 Python/uv + React monorepo for fall and bed-exit detection. Three deployable
 instances (`front`, `backend`, `worker`) plus `shared` and the canonical
@@ -16,8 +16,8 @@ under `models/` and are never committed.
 
 | Package | Ownership |
 | --- | --- |
-| `front` | React/Vite SPA. Feature-sliced: `src/features/*`, `src/shared/{ui,api}`, `src/app`. |
-| `backend` | FastAPI gateway. Vertical slices under `app/features/*` (router + store). |
+| `front` | React/Vite SPA. Feature-sliced: `src/features/*`, `src/shared/{ui,api}`, `src/app`. Talks to the backend only over same-origin `/api/v1`. |
+| `backend` | FastAPI gateway. Eleven vertical slices under `app/features/*` (router + store); `app/lifespan.py` is its composition root. |
 | `worker` | DeepStream Flow worker. SDK media plane, CPU domain decisions, evidence, and relay egress. |
 | `shared` | `shared.events` (backend↔worker wire). |
 | `contracts` | ADR-0006 canonical typed-vocabulary leaf and the contract authority; the archived `eldercare-dataset-ops` copy is historical only. |
@@ -42,20 +42,21 @@ the sole composition root. The worker is an RTSP client only.
 
 | Surface | Path | Role |
 | --- | --- | --- |
-| Backend factory | `backend/app/main.py` | `create_app()` registers feature routers under `/api/v1`, seeds `app.state.edge_relay_token`, mounts `front` dist. Health stays at `/health/live` and `/health/ready`. |
-| Worker CLI | `worker/__main__.py` | `python -m worker`. Parses flags, loads config, constructs `WorkerRuntime`. |
+| Backend factory | `backend/app/main.py` | `create_app()` registers 19 feature routers under `/api/v1`, seeds `app.state.edge_relay_token` (handlers never re-read the env), mounts `front` dist. Unversioned probes stay at `/health/live`, `/health/ready`, and `/health/release-identity`. |
+| Worker CLI | `worker/__main__.py` | `python -m worker`, the sole production command. Parses flags, loads config, constructs `WorkerRuntime`. Exit codes: 0 clean, 1 generic, 2 config, 3 refuse-to-start, 4 fatal accelerator (never caught to retry). Containers pass the mounted volume as `--state-dir`. |
 | Composition root | `worker/runtime/worker.py` | Composes the Flow plane, CPU policy, evidence, and relay. |
-| Flow runtime | `worker/runtime/flow/` | Media-plane lifecycle, metadata admission, policy pump, and evidence handoff. |
+| Flow runtime | `worker/runtime/flow/` | Media-plane lifecycle, metadata admission, policy pump, and evidence handoff. The Flow process never imports torch or ultralytics. |
 | Vendor adapter | `worker/adapters/deepstream/` | Lazy DeepStream Service Maker integration and vendor-metadata conversion. |
-| Domain decisions | `worker/domains/` | CPU fall and bed-exit decisions. |
-| Engine build and gate | `worker/tools/edge_engine_build.py` | Builds the nvinfer engine ahead of source activation; boot rejects an engine that does not match the deployed batch. |
-| Pose ONNX export | `worker/tools/export_pose_onnx.py` | Exports the dynamic-batch pose ONNX used by the engine build gate. |
+| Domain decisions | `worker/domains/` | CPU fall and bed-exit decisions. `DETECTION_MODULE_REGISTRY` (`fall.v2`, `bed_exit.v1`) is the extension surface; `EpisodeAuthority` alone mints event identity. |
+| Engine build and gate | `worker/tools/` | Flow engines are image-owned artifacts: `edge_engine_build.py` builds the nvinfer engine ahead of source activation, never at boot; boot verifies digests and deployed-batch identity before accepting sources and rejects a mismatch. `export_pose_onnx.py` exports the dynamic-batch pose ONNX used by the engine build gate. `fetch_models` (compose service `edge-model-fetch`) pulls weights. `worker.tools` is banned from every production layer. |
 | Evidence | `worker/pipeline/output/evidence/` | Smart record actor, clip publication, sealed sidecar, durable stager, delivery queue, and snapshot store. |
 | Event wire | `shared/events/` | Schemas and `edge_ingest_client.py` (events and clip receipts to the backend over relay HTTP). |
 | Dashboard | `front/src/app/App.tsx` | `AuthGate` + `Dashboard`. Pages: events, operations, settings. |
 | Edge database | `backend/app/edge_db/` | PostgreSQL is the only durable store (`postgres.py` and the `postgres_*.sql` schemas). `migration/` imports the retired schema-19 `edge.sqlite3` once and is the only code that reads SQLite. |
 
-Read the nearest scoped `AGENTS.md` before changing a package.
+Read the nearest scoped `AGENTS.md` before changing a package: `worker/`,
+`backend/app/`, `shared/`, `contracts/`, `front/`, `tests/`, `tests_support/`,
+`scripts/`, and `docs/` each have one, most with deeper files beneath them.
 
 ## Commands
 
@@ -64,16 +65,15 @@ From the repo root:
 ```bash
 uv sync
 uv run pytest -q
+uv run pytest -q -m "not real_stack and not heavy and not integration"  # CI filter
 uvx ruff check .
-uv run --group lint lint-imports
+uv run --group lint lint-imports  # architecture boundaries
+uv run --group lint mypy contracts shared
 docker build -f Dockerfile.backend .
 docker build -f Dockerfile.edge .
 pnpm --dir front install --frozen-lockfile && pnpm --dir front test
+pnpm --dir front build && pnpm --dir front lint
 ```
-
-Architecture boundaries: `uv run --group lint lint-imports`. Contract-symbol
-exports: `tests/test_contract_symbol_exports.py`. Docs live in
-`docs/architecture.md`, `docs/decisions/`, `docs/runbooks/`.
 
 ## Conventions
 
@@ -95,6 +95,10 @@ exports: `tests/test_contract_symbol_exports.py`. Docs live in
 - No RTSP publisher, MediaMTX, or FFmpeg stream server on the worker.
 - No committed model artifacts or training code.
 - No real-stack E2E in CI. Mark those tests `real_stack`; `ci.yml` deselects them.
+- No required CI check behind `if:` or `paths:` (a skipped check reads green); no
+  secrets, RTSP URLs, or camera IPs in docs, issues, or shell history.
+- No `docker compose down -v`, `edge-state` deletion, or direct SQL repair of
+  `edge.sqlite3`; no mutable image tags (`latest`, `:dev`) or hand-written digests.
 - 기사님한테 회사 숙제 시키기: baking company-known deploy values (backend URL)
   into a field-tech form. Company-known values go in env/image; only site-local
   values (facility id, token) stay in the UI.
@@ -119,8 +123,6 @@ exports: `tests/test_contract_symbol_exports.py`. Docs live in
 
 - Image names and `ML_*`/`API_*`/`WORKER_*` prefixes are frozen. Renaming
   breaks `.env.edge.prod`, GHCR, and `contracts/worker_config.py`.
-- Flow engines are image-owned artifacts. Build them before source activation;
-  boot verifies deployed-batch identity before accepting sources.
 
 <!-- BEGIN CRAFT-SKILLS INIT DEVELOPMENT FLOW -->
 ## Development Flow Recipe

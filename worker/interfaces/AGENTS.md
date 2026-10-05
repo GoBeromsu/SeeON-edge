@@ -1,8 +1,9 @@
 # worker/interfaces: worker-internal seams
 
 One Protocol per seam. Interfaces contain no vendor imports, business policy,
-or runtime composition. They depend only on `worker.types`; implementations
-live in adapters or pipeline and are constructed by `worker.runtime`.
+or runtime composition. They depend only on `worker.types` and `contracts`
+(import-linter); implementations live in adapters or pipeline and are
+constructed by `worker.runtime`.
 
 ## Ownership
 
@@ -15,6 +16,19 @@ live in adapters or pipeline and are constructed by `worker.runtime`.
 - `source_packet.py`: source-packet identity used by clip evidence.
 - `frame.py`: host-frame materialization boundary.
 - `execution_records.py`: non-blocking `ExecutionRecordSink.try_emit`.
+- `decision.py`: `Decider`, `TraceSnapshotProvider`, `FreshnessProvider`,
+  `ShadowTraceProvider`.
+- `fall_model.py`: `FallModelProtocol`, `FallProbabilities`, shared by domain
+  classifiers and model adapters.
+- `clip_analysis.py`: stored-clip analysis control seam for the relay HTTP
+  server.
+- `thumbnail.py`, `encode.py`, `decode.py`, `extract.py`, `bus.py`: thumbnail,
+  clip-encode, decode-session, extractor, and frame-bus seams.
+
+`media_plane.py` also owns the port's refusal vocabulary: `RecordingRefused`,
+`EarlyStopUnsupported`, `SourceRosterFixed`, `SnapshotUnavailable`,
+`OnDemandSnapshotUnsupported`. Package `__all__` re-exports 17 names; import
+the rest (`MediaPlane`, `FallModelProtocol`) from their modules.
 
 A new seam is a Protocol plus two implementations, or one implementation plus
 a test double. Do not let a vendor type, a config resolver, or a runtime object
