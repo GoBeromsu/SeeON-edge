@@ -8,7 +8,6 @@ from collections.abc import Callable
 from typing import Protocol, assert_never
 
 import psycopg
-from fastapi import FastAPI
 
 from backend.app.features.audit.postgres_runtime import AuditMutation
 from backend.app.features.cameras.edge_topology_sync_state import (
@@ -21,7 +20,6 @@ from backend.app.features.cameras.edge_topology_sync_state import (
 from backend.app.features.cameras.store import CameraRegistryStore
 from backend.app.features.cameras.topology_client import (
     TopologyAccepted,
-    TopologyClient,
     TopologyPaused,
     TopologyPutResult,
     TopologyRetryable,
@@ -43,7 +41,6 @@ from backend.app.features.connection.topology_retry_result import (
     retry_result,
     unconfigured_retry_result,
 )
-from backend.app.shared.backend_client_bundle import backend_client_bundle
 from contracts.edge_provisioning_v1 import MachinePrincipal, TopologyConfirmation
 
 _INCOMPLETE = "모든 카메라에 명시적인 층/방/카메라 참조를 배정해야 합니다."
@@ -249,30 +246,6 @@ class TopologyRetryCoordinator:
         )
 
 
-def topology_retry_coordinator(app: FastAPI) -> TopologyRetryCoordinator:
-    existing = getattr(app.state, "topology_retry_coordinator", None)
-    if isinstance(existing, TopologyRetryCoordinator):
-        return existing
-    candidate = getattr(app.state, "camera_registry", None)
-    if candidate is None:
-        raise RuntimeError("camera registry is not injected")
-    if not isinstance(candidate, CameraRegistryStore):
-        raise TypeError("camera registry has invalid type")
-    registry = candidate
-
-    def client_provider() -> TopologyClient | None:
-        bundle = backend_client_bundle(app)
-        return None if bundle is None else TopologyClient.from_bundle(bundle)
-
-    coordinator = TopologyRetryCoordinator(
-        registry,
-        EdgeTopologySyncStateStore(registry.database, registry.authority),
-        client_provider,
-    )
-    app.state.topology_retry_coordinator = coordinator
-    return coordinator
-
-
 def _uuid7() -> str:
     timestamp = int(time.time() * 1000) & ((1 << 48) - 1)
     value = (
@@ -290,5 +263,4 @@ __all__ = [
     "TopologyRetryResult",
     "TopologySyncErrorClass",
     "TopologySyncStatus",
-    "topology_retry_coordinator",
 ]

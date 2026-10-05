@@ -5,10 +5,10 @@ from __future__ import annotations
 import json
 from typing import Annotated
 
-import psycopg
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from starlette.concurrency import run_in_threadpool
 
+from backend.app.edge_db import DatabaseDriverError
 from backend.app.edge_db.postgres import PostgresError
 from backend.app.features.diagnostics.schemas import (
     ExecutionQueryParams,
@@ -75,7 +75,7 @@ async def ingest_execution_records(
     # event loop: a busy ingest must not stall /health or the dashboard.
     try:
         receipt = await run_in_threadpool(store.ingest_batch, ingest)
-    except (PostgresError, psycopg.Error) as error:
+    except (PostgresError, DatabaseDriverError) as error:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail=UNAVAILABLE_DETAIL,
@@ -98,7 +98,7 @@ def query_execution_records(
             params.limit,
             params.cursor,
         )
-    except (PostgresError, psycopg.Error) as error:
+    except (PostgresError, DatabaseDriverError) as error:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail=UNAVAILABLE_DETAIL,

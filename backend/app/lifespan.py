@@ -20,17 +20,17 @@ from typing import Protocol, TypeGuard
 
 from fastapi import FastAPI
 
-from backend.app.core.config import get_settings, reject_retired_backend_environment
-from backend.app.edge_db.postgres import PostgresDatabase
-from backend.app.features.audit.startup import (
+from backend.app.audit_lifecycle import (
     close_audit_session,
     configure_audit_readiness,
     start_audit_verification,
 )
-from backend.app.features.clips.catalog_indexer import (
+from backend.app.clip_catalog_lifecycle import (
     start_clip_catalog_indexer,
     stop_clip_catalog_indexer,
 )
+from backend.app.core.config import get_settings, reject_retired_backend_environment
+from backend.app.edge_db.postgres import PostgresDatabase
 from backend.app.features.diagnostics.postgres_database import open_diagnostics_database
 from backend.app.features.diagnostics.retention import RetentionBudget
 from backend.app.features.diagnostics.store import ExecutionRecordStore
@@ -143,7 +143,7 @@ async def _gateway_lifespan(app: FastAPI) -> AsyncIterator[None]:
     )
     app.state.backend_config_refresh_executor = refresh_executor
 
-    from backend.app.features.cameras.roster_sync import recover_camera_roster_on_boot
+    from backend.app.features.cameras.dependencies import recover_camera_roster_on_boot
 
     await asyncio.get_running_loop().run_in_executor(
         refresh_executor, recover_camera_roster_on_boot, app
@@ -349,7 +349,7 @@ def _require_outbox_delivery(app: FastAPI) -> None:
 
 def apply_connection_settings(app: FastAPI) -> None:
     """Atomically publish all cloud clients for one persisted enrollment generation."""
-    from backend.app.features.connection.store import get_connection_settings_store
+    from backend.app.features.connection.dependencies import get_connection_settings_store
 
     settings = get_connection_settings_store(app).load()
     required = (
@@ -449,7 +449,7 @@ def refresh_backend_config(app: FastAPI, stop_token: asyncio.Event | None = None
         _mark_app_backend_status(app, True)
         _apply_backend_config(app, cfg)
         if was_reachable is not True:
-            from backend.app.features.cameras.roster_sync import (
+            from backend.app.features.cameras.dependencies import (
                 resume_camera_roster_after_connectivity,
             )
 

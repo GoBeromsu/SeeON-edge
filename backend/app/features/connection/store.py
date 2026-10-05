@@ -14,7 +14,6 @@ from datetime import UTC, datetime
 from typing import Final, TypedDict
 
 import psycopg
-from fastapi import FastAPI
 
 from backend.app.edge_db.authority import AuthorityToken, require_authority
 from backend.app.edge_db.postgres import PostgresDatabase
@@ -226,22 +225,12 @@ def mask_facility_token(token: str | None) -> str | None:
     return "****" if len(token) <= 4 else f"****{token[-4:]}"
 
 
-def get_connection_settings_store(app: FastAPI) -> ConnectionSettingsStore:
-    store = getattr(app.state, "connection_settings_store", None)
-    if store is None:
-        raise RuntimeError("connection settings store is not injected")
-    if not isinstance(store, ConnectionSettingsStore):
-        raise TypeError("connection settings store has invalid type")
-    return store
-
-
 __all__ = [
     "API_BACKEND_BASE_URL_ENV",
     "ConnectionSettings",
     "ConnectionSettingsStore",
     "InvalidConnectionSettingError",
     "MaskedConnectionSettings",
-    "get_connection_settings_store",
     "mask_facility_token",
     "utc_now_iso",
 ]

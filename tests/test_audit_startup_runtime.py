@@ -10,14 +10,14 @@ import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from backend.app.features.audit.catalog import AuditAction
-from backend.app.features.audit.postgres_runtime import PostgresAuditRuntime
-from backend.app.features.audit.startup import (
+from backend.app.audit_lifecycle import (
     close_audit_session,
     configure_audit_readiness,
     start_audit_verification,
     verify_audit_runtime,
 )
+from backend.app.features.audit.catalog import AuditAction
+from backend.app.features.audit.postgres_runtime import PostgresAuditRuntime
 from backend.app.main import create_app, no_lifespan
 from backend.app.postgres_root import PostgresRoot, install_postgres_stores
 from tests_support.postgres_api_app import postgres_api_app

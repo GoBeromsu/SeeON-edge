@@ -20,9 +20,7 @@ from backend.app.features.cameras.topology_confirmation import (
     TopologyConfirmationCommand,
     TopologyConfirmationRejected,
 )
-from backend.app.features.connection.topology_retry_coordinator import (
-    topology_retry_coordinator,
-)
+from backend.app.features.connection.dependencies import topology_retry_coordinator
 from contracts.edge_provisioning_v1 import EdgeErrorCode, MutationCounts
 
 router = APIRouter(prefix="/connection", tags=["connection"])

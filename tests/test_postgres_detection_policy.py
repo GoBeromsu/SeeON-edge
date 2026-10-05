@@ -26,6 +26,7 @@ from backend.app.features.audit.postgres_store import append_postgres_audit
 from backend.app.features.audit.store import AuditEvent
 from backend.app.features.cameras.camera_repository import CameraRegistryWriteError
 from backend.app.features.cameras.store import CameraRegistryStore
+from backend.app.features.cameras.update_command import CameraUpdate
 from backend.app.features.detection_settings.policy_store import (
     DetectionPolicyNotInitialized,
     DetectionPolicyStore,
@@ -754,13 +755,13 @@ def test_registry_alias_remapping_and_namespace_collision_keep_native_policy_ref
     bundle = store.resolve_bundle(_FACILITY, cameras)
     assert bundle.resolve(_CAMERA, "fall", 2).source == "camera-override"
     assert bundle.resolve("second-worker-camera", "fall", 2).source == "image-default"
-    registry.update(_LOCAL, {"backend_camera_id": _REMAPPED})
+    registry.update(_LOCAL, CameraUpdate.model_validate({"backend_camera_id": _REMAPPED}))
     renamed = store.activations(_FACILITY)[0]
     assert renamed.camera_id == _REMAPPED and renamed.activation_id == applied.activation_id
     assert (
         _apply(store, 0.81, camera_id=_REMAPPED, expected=applied.activation_generation) == renamed
     )
-    registry.update(_LOCAL, {"backend_camera_id": None})
+    registry.update(_LOCAL, CameraUpdate.model_validate({"backend_camera_id": None}))
     assert store.activations(_FACILITY)[0].camera_id == _LOCAL
     assert _rows(sandbox)[0]["camera_id"] == _LOCAL
     # The restrictive native reference prevents deleting a camera with policies.
@@ -1180,7 +1181,9 @@ def test_multiquery_projection_keeps_one_readonly_snapshot_across_policy_and_reg
             ):
                 interleaved.append(True)
                 _apply(other, 0.72, expected=1)
-                registry.update(_LOCAL, {"backend_camera_id": _REMAPPED})
+                registry.update(
+                    _LOCAL, CameraUpdate.model_validate({"backend_camera_id": _REMAPPED})
+                )
             return result
 
         with monkeypatch.context() as patch:
@@ -1342,7 +1345,10 @@ def test_registry_write_lock_precedes_policy_camera_lookup_across_independent_ow
                 change = pool.submit(registry.delete, _LOCAL, after_write=hold)
             else:
                 change = pool.submit(
-                    registry.update, _LOCAL, {"backend_camera_id": _REMAPPED}, after_write=hold
+                    registry.update,
+                    _LOCAL,
+                    CameraUpdate.model_validate({"backend_camera_id": _REMAPPED}),
+                    after_write=hold,
                 )
             try:
                 assert entered.wait(timeout=2)

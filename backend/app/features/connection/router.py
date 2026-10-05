@@ -10,15 +10,15 @@ from backend.app.core.config import get_settings
 from backend.app.features.audit.catalog import AuditAction, empty_detail
 from backend.app.features.audit.http import mutation_audit
 from backend.app.features.audit.store import AuditEvent, utc_now
-from backend.app.features.cameras.roster_sync import sync_camera_roster
+from backend.app.features.cameras.dependencies import sync_camera_roster
 from backend.app.features.cameras.router import _authorize
+from backend.app.features.connection.dependencies import get_connection_settings_store
 from backend.app.features.connection.enrollment import (
     EnrollmentCredentials,
     EnrollmentErrorClass,
     EnrollmentVerificationFailure,
     verify_enrollment,
 )
-from backend.app.features.connection.store import get_connection_settings_store
 from backend.app.features.connection.topology_retry_coordinator import (
     TopologySyncErrorClass,
     TopologySyncStatus,

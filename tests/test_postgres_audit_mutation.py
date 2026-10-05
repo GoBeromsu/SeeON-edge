@@ -19,6 +19,7 @@ from backend.app.features.audit.postgres_store import PostgresAuditStore
 from backend.app.features.audit.store import AuditEvent
 from backend.app.features.cameras.edge_topology_sync_state import EdgeTopologySyncStateStore
 from backend.app.features.cameras.store import CameraRegistryStore
+from backend.app.features.cameras.update_command import CameraUpdate
 from backend.app.features.connection.topology_retry_coordinator import TopologyRetryCoordinator
 from backend.app.main import create_app, no_lifespan
 from backend.app.shared.dashboard_auth import (
@@ -77,7 +78,9 @@ def _label(sandbox):
 def _update(audit, registry, *, camera_id="camera-1"):
     return audit.apply(
         registry,
-        lambda append: registry.update(camera_id, {"label": "after"}, after_write=append),
+        lambda append: registry.update(
+            camera_id, CameraUpdate.model_validate({"label": "after"}), after_write=append
+        ),
         expects_audit=lambda result: result is not None,
     )
 
@@ -208,7 +211,9 @@ def test_optional_owner_exception_rolls_back_and_preserves_identity(setup, cance
             append(connection)
             raise error
 
-        return registry.update("camera-1", {"label": "after"}, after_write=fail)
+        return registry.update(
+            "camera-1", CameraUpdate.model_validate({"label": "after"}), after_write=fail
+        )
 
     with pytest.raises(type(error)) as caught:
         AuditMutation(runtime, _event).apply(registry, write, expects_audit=bool)
@@ -230,7 +235,9 @@ def test_repeated_callback_never_constructs_second_event(setup):
             append(connection)
             append(connection)
 
-        return registry.update("camera-1", {"label": "after"}, after_write=twice)
+        return registry.update(
+            "camera-1", CameraUpdate.model_validate({"label": "after"}), after_write=twice
+        )
 
     with pytest.raises(AuditRuntimeUnavailable, match="was repeated"):
         AuditMutation(runtime, event).apply(registry, write, expects_audit=bool)
@@ -245,7 +252,9 @@ def test_committed_owner_contract_failure_never_claims_rollback(setup, expectati
     with pytest.raises(AuditRuntimeUnavailable, match="unexpected|expectation is invalid"):
         AuditMutation(runtime, _event).apply(
             registry,
-            lambda append: registry.update("camera-1", {"label": "after"}, after_write=append),
+            lambda append: registry.update(
+                "camera-1", CameraUpdate.model_validate({"label": "after"}), after_write=append
+            ),
             expects_audit=lambda result: expectation,
         )
     assert _label(sandbox) == ("after",) and len(_history(sandbox)) == before + 1
@@ -282,7 +291,9 @@ def test_classifier_failure_preserves_outcome_and_unrelated_token(
     with pytest.raises(type(error)) as caught:
         AuditMutation(runtime, _event).apply(
             registry,
-            lambda append: registry.update("camera-1", {"label": "after"}, after_write=append),
+            lambda append: registry.update(
+                "camera-1", CameraUpdate.model_validate({"label": "after"}), after_write=append
+            ),
             expects_audit=classified,
         )
     assert caught.value is error and failures == [error]
@@ -307,7 +318,9 @@ def test_zero_callback_classifier_failure_marks_unavailable(setup, kind):
     with pytest.raises(ValueError if kind == "raising" else AuditRuntimeUnavailable) as caught:
         AuditMutation(runtime, _event).apply(
             registry,
-            lambda append: registry.update("absent", {}, after_write=append),
+            lambda append: registry.update(
+                "absent", CameraUpdate.model_validate({}), after_write=append
+            ),
             expects_audit=classify,
         )
     if kind == "raising":
