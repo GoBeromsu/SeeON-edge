@@ -241,9 +241,9 @@ impl<P: RecordPlane> Recorder<P> {
         Ok(self.state)
     }
 
-    /// Hands a sealed recording to `save` once. An unpublished FINALIZE_FAILED
-    /// retains the seal in Finalizing; other outcomes return to idle with their
-    /// existing local behavior. Waiting alerts cannot start after quiescence
+    /// Hands a sealed recording to `save` once. Failed persistence or an
+    /// unpublished FINALIZE_FAILED retains the seal in Finalizing.
+    /// Waiting alerts cannot start after quiescence
     /// or a latched failure. An earlier receipt failure keeps its priority.
     pub fn on_receipt(
         &mut self,
@@ -265,7 +265,7 @@ impl<P: RecordPlane> Recorder<P> {
             duration_ms: receipt.duration_ms,
             boundary: self.boundary,
             contributors,
-            path: receipt.directory.join(&receipt.filename),
+            path: (!receipt.filename.is_empty()).then(|| receipt.directory.join(&receipt.filename)),
         };
         let saved = save(&sealed);
         if self.sealed.len() == SEALED_MEMORY {
@@ -273,11 +273,14 @@ impl<P: RecordPlane> Recorder<P> {
         }
         self.sealed.push_back(ticket);
         self.ticket = None;
-        if matches!(saved, Ok(SaveOutcome::FinalizeFailed(None))) {
+        if saved.is_err() || matches!(saved, Ok(SaveOutcome::FinalizeFailed(None))) {
             self.failed_seal = Some(sealed);
             return Err(match self.receipt_overdue {
                 Some(ticket) => RecorderError::ReceiptOverdue { ticket },
-                None => RecorderError::Unpublished { ticket },
+                None => match saved {
+                    Err(error) => RecorderError::Save(error),
+                    Ok(_) => RecorderError::Unpublished { ticket },
+                },
             });
         }
         self.boundary = Boundary::None;

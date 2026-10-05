@@ -6,7 +6,6 @@ import logging
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
-from pathlib import Path
 from typing import Protocol
 
 from shared.events.delivery_queue import AdmissionResult
@@ -14,11 +13,13 @@ from worker.interfaces.execution_records import ExecutionRecordSink
 from worker.pipeline.diagnostics.emit_delivery import event_delivery_record
 from worker.pipeline.diagnostics.record_builder import try_emit
 from worker.pipeline.output.evidence.flow_clip_publication import FlowClipPublisher
+from worker.pipeline.output.evidence.flow_sealed_observation import FlowSealedObservation
 from worker.pipeline.output.evidence.flow_sealed_sidecar import (
+    FlowSealedMediaMissingError,
     FlowSealedRecovery,
     FlowSealedSidecars,
 )
-from worker.pipeline.output.evidence.smart_record_actor import ClipSealed, SmartRecordActor
+from worker.pipeline.output.evidence.smart_record_actor import SmartRecordActor
 from worker.types import BusinessEvent, NativeEvidenceTrigger
 
 LOGGER = logging.getLogger(__name__)
@@ -111,8 +112,13 @@ class FlowEvidenceBinding:
         self._events[event_ref] = event
         self.actor.admit(event_ref, detected_at)
 
-    def on_sealed(self, sealed: ClipSealed) -> None:
-        """Publish before completing every incident bound to the shared clip."""
+    def on_sealed(self, sealed: FlowSealedObservation) -> None:
+        """Publish before completing every incident bound to the shared clip.
+
+        The observation, ready or unavailable, is durable before any media,
+        codec, or clock work; an unavailable one publishes its existing
+        ``ENCODER_FAILED``/``NO_FRAMES`` terminal through the same path.
+        """
         sidecar_path = self.sidecars.persist(sealed, self._events)
         recovery = FlowSealedRecovery(sealed, dict(self._events), self.camera_id, sidecar_path)
         self._publish_recovery(recovery)
@@ -125,16 +131,19 @@ class FlowEvidenceBinding:
         Each sidecar is isolated: a clip this replay cannot safely resume (a
         genuine identity mismatch, or any other publish failure) is logged and
         left in place rather than aborting every other sidecar queued behind it.
+        The publisher reconciles any committed terminal before it inspects
+        media; only a ready observation whose terminal, original, staged, and
+        final media are all absent retires as missing. Unavailable evidence
+        never retires that way.
         """
         for recovery in self.sidecars.pending_for_camera(self.camera_id):
-            media_path = Path(recovery.sealed.path)
-            if not media_path.is_file():
-                error = self.sidecars.discard_missing_media(recovery)
-                self.sealed_recovery_missing_media_total += 1
-                LOGGER.error("%s", error)
-                continue
             try:
-                self._publish_recovery(recovery)
+                try:
+                    self._publish_recovery(recovery)
+                except FlowSealedMediaMissingError:
+                    error = self.sidecars.discard_missing_media(recovery)
+                    self.sealed_recovery_missing_media_total += 1
+                    LOGGER.exception("%s", error)
             except Exception:  # noqa: BLE001 - one bad sidecar must not block the rest
                 LOGGER.exception(
                     "sealed Flow clip replay failed clip_id=%s camera_id=%s",
@@ -151,8 +160,8 @@ class FlowEvidenceBinding:
         published = self.publisher.publish(recovery.sealed, recovery.events)
         for contributor in recovery.sealed.contributors:
             self.stager.complete(contributor.event_ref, str(published.clip_id))
-        # ponytail: publish is idempotent (FlowClipPublisher resumes from the
-        # existing manifest on a collision) and replay_sealed() isolates each
+        # ponytail: publish is idempotent (FlowClipPublisher resumes a valid
+        # committed terminal before any media work) and replay_sealed() isolates each
         # sidecar, so retiring here is just cleanup -- a crash before this line
         # leaves a sidecar that the next replay_sealed() resumes and retires.
         self.sidecars.remove(recovery)

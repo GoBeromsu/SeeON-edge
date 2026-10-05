@@ -14,7 +14,7 @@ use crate::clips::durable::{self, PUBLIC_FILE};
 use crate::clips::entry::{ContributorEvent, FLOW_ENCODER, flow_metadata};
 use crate::clips::manifest::{ClipMetadata, Contributor, Extension, MediaFacts};
 use crate::clips::publish::{MEDIA_FILE, PublishError, Published, Publisher};
-use crate::clips::sealed::{Recovery, SealedContributor};
+use crate::clips::sealed::{Recovery, SealedContributor, SealedObservation};
 use crate::clips::store::{ClipStore, Reservation};
 use crate::clips::time::{TimeError, Utc};
 use crate::delivery::DeliveryQueue;
@@ -67,12 +67,23 @@ pub fn publish_recovery(
     if let Some(published) = resume_terminal(recovery, store, queue)? {
         return Ok(published);
     }
+    let meta = metadata(recovery, now)?;
+    let reservation = store.reserve(&recovery.camera_id, recovery.sealed.clip_id())?;
+    if let SealedObservation::Unavailable(sealed) = &recovery.sealed {
+        return Ok(Publisher::new(queue).publish_unavailable(
+            &reservation,
+            &meta,
+            unavailable_reason(sealed.native_result),
+            None,
+        )?);
+    }
     if codec.trim().is_empty() {
         return Err(ClipOutputError::BlankCodec);
     }
-    let meta = metadata(recovery, now)?;
-    let reservation = store.reserve(&recovery.camera_id, &recovery.sealed.clip_id)?;
-    stage_source(&recovery.sealed.path, &reservation)?;
+    stage_source(
+        recovery.sealed.path().ok_or(PublishError::MissingMedia)?,
+        &reservation,
+    )?;
     let artifact = reservation.artifact_path();
     let video = reservation.final_dir.join(MEDIA_FILE);
     let path = if regular_file(&artifact) {
@@ -84,9 +95,17 @@ pub fn publish_recovery(
     Ok(Publisher::new(queue).publish_ready(&reservation, &meta, &facts)?)
 }
 
+fn unavailable_reason(native_result: i32) -> &'static str {
+    if native_result != 0 {
+        crate::clips::reserve::ENCODER_FAILED
+    } else {
+        crate::clips::reserve::NO_FRAMES
+    }
+}
+
 fn metadata(recovery: &Recovery, finalized_at: Utc) -> Result<ClipMetadata, ClipOutputError> {
     flow_metadata(
-        &recovery.sealed.clip_id,
+        recovery.sealed.clip_id(),
         &contributor_events(recovery)?,
         extension(recovery)?,
         FLOW_ENCODER,
@@ -98,13 +117,13 @@ fn metadata(recovery: &Recovery, finalized_at: Utc) -> Result<ClipMetadata, Clip
 fn contributor_events(
     recovery: &Recovery,
 ) -> Result<BTreeMap<String, ContributorEvent>, ClipOutputError> {
-    if recovery.sealed.contributors.is_empty() {
+    if recovery.sealed.contributors().is_empty() {
         return Err(ClipOutputError::Metadata(
             crate::clips::manifest::ManifestError::Blank("contributors"),
         ));
     }
     let mut events = BTreeMap::new();
-    for contributor in &recovery.sealed.contributors {
+    for contributor in recovery.sealed.contributors() {
         let event =
             recovery
                 .events
@@ -131,14 +150,15 @@ fn contributor_events(
 fn extension(recovery: &Recovery) -> Result<Extension, ClipOutputError> {
     let contributors = recovery
         .sealed
-        .contributors
+        .contributors()
         .iter()
         .map(contributor_time)
         .collect::<Result<Vec<_>, _>>()?;
     Ok(Extension {
-        boundary: recovery.sealed.boundary.clone(),
+        boundary: recovery.sealed.boundary().to_owned(),
         contributors,
-        duration_ms: recovery.sealed.duration_ms,
+        duration_ms: i64::try_from(recovery.sealed.duration_ms())
+            .map_err(|_| PublishError::Reservation("duration"))?,
     })
 }
 

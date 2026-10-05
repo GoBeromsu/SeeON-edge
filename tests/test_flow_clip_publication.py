@@ -42,7 +42,15 @@ def _event(event_ref: str) -> BusinessEvent:
     return BusinessEvent("fall", "fall.detected", event_ref, "camera-a", "facility-a", 12.0, 0.99)
 
 
+def _media(tmp_path: Path) -> Path:
+    media = tmp_path / "plane" / "clip-1.mp4"
+    media.parent.mkdir(parents=True, exist_ok=True)
+    media.write_bytes(b"clip")
+    return media
+
+
 def test_sealed_clip_publishes_ordered_extension_with_covering_duration(tmp_path: Path) -> None:
+    media = _media(tmp_path)
     publisher = _Publisher([])
     flow = FlowClipPublisher(
         ClipIdAllocator(tmp_path),
@@ -51,7 +59,7 @@ def test_sealed_clip_publishes_ordered_extension_with_covering_duration(tmp_path
     )
     sealed = ClipSealed(
         "clip-1",
-        "/plane/clip-1.mp4",
+        str(media),
         60_000,
         (
             ClipContributor("late", "2026-01-01T00:00:20Z"),
@@ -65,7 +73,7 @@ def test_sealed_clip_publishes_ordered_extension_with_covering_duration(tmp_path
     assert str(published.clip_id) == "clip-1"
     reservation, source_path, metadata = publisher.calls[0]
     assert str(reservation.clip_id) == "clip-1"
-    assert source_path == Path("/plane/clip-1.mp4")
+    assert source_path == media
     assert metadata.event_refs == ("early", "late")
     assert metadata.facility_id == "facility-a"
     assert metadata.detected_at == datetime(2026, 1, 1, tzinfo=UTC)
@@ -107,7 +115,7 @@ def test_publication_failure_is_typed_and_counted_without_consuming_reservation(
     flow = FlowClipPublisher(ClipIdAllocator(tmp_path), publisher)
     sealed = ClipSealed(
         "clip-1",
-        "/plane/clip-1.mp4",
+        str(_media(tmp_path)),
         60_000,
         (ClipContributor("one", "2026-01-01T00:00:00Z"),),
         "none",

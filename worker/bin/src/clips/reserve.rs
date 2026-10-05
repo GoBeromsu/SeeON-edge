@@ -237,7 +237,8 @@ fn place_and_publish(
     codec: &str,
 ) -> Result<Published, PublishError> {
     let artifact = reservation.artifact_path();
-    durable::move_durable(&sealed.path, &artifact, PUBLIC_FILE)?;
+    let source = sealed.path.as_deref().ok_or(PublishError::MissingMedia)?;
+    durable::move_durable(source, &artifact, PUBLIC_FILE)?;
     let (sha256, size) = durable::sha256_file(&artifact)?;
     let facts = MediaFacts {
         sha256,

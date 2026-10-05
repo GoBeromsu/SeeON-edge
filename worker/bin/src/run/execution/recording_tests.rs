@@ -47,7 +47,7 @@ fn failed_codec_probe_publishes_unavailable_and_retires_durable_attribution() {
             .status
             .success()
     );
-    assert!(measured_codec(&fixture.sealed.path).is_err());
+    assert!(measured_codec(fixture.sealed.path.as_deref().unwrap()).is_err());
     let slots = fixture.reserve.available();
     let saved = fixture.save();
     let Ok(SaveOutcome::Saved(published)) = saved else {
@@ -95,7 +95,10 @@ fn failed_codec_probe_publishes_unavailable_and_retires_durable_attribution() {
             .len(),
         0
     );
-    assert_eq!(std::fs::read(&fixture.sealed.path).unwrap(), INVALID_MEDIA);
+    assert_eq!(
+        std::fs::read(fixture.sealed.path.as_deref().unwrap()).unwrap(),
+        INVALID_MEDIA
+    );
     assert_eq!(fixture.reserve.available(), slots);
 }
 
@@ -114,7 +117,15 @@ fn zero_duration_ready_retains_observation_before_metadata_refusal() {
         .reserve("camera-real", CLIP_ID)
         .unwrap()
         .artifact_path();
-    std::fs::rename(&fixture.sealed.path, &staged).unwrap();
+    std::fs::rename(
+        fixture
+            .sealed
+            .path
+            .as_deref()
+            .expect("reported fixture media"),
+        &staged,
+    )
+    .unwrap();
     let replay = super::super::publication::replay_before_media(
         &fixture.root.0,
         &["camera-real".into()],

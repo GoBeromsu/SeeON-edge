@@ -9,7 +9,10 @@ import pytest
 from shared.events.delivery_queue import AdmissionResult
 from worker.interfaces.media_plane import RecordingInfo
 from worker.pipeline.output.evidence.flow_clip_publication import FlowClipPublicationError
-from worker.pipeline.output.evidence.flow_sealed_sidecar import FlowSealedSidecars
+from worker.pipeline.output.evidence.flow_sealed_sidecar import (
+    FlowSealedMediaMissingError,
+    FlowSealedSidecars,
+)
 from worker.pipeline.output.evidence.smart_record_actor import (
     ClipContributor,
     ClipSealed,
@@ -52,6 +55,10 @@ class _Publisher:
     def publish(self, sealed: ClipSealed, events: object) -> object:
         del events
         self.calls.append(sealed.clip_id)
+        # The real publisher reports a ready clip missing only after it finds
+        # no terminal and none of its owned media.
+        if not Path(sealed.path).exists():
+            raise FlowSealedMediaMissingError(sealed.clip_id, Path(sealed.path))
         if self.fail:
             raise FlowClipPublicationError("publication failed")
         return type("_Published", (), {"clip_id": sealed.clip_id})()

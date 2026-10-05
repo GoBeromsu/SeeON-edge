@@ -1,6 +1,6 @@
 //! Reading sidecars back (`pending_for_camera`, `_read`).
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsString;
 use std::fs;
 use std::io;
@@ -8,10 +8,12 @@ use std::path::{Path, PathBuf};
 
 use serde_json::Value;
 
-use super::{Pending, Recovery, SealedClip, SealedContributor, SealedError, SealedEvent};
+use super::observation::valid_clip_id;
+use super::{
+    MAX_SIDECAR_BYTES, Pending, Recovery, SealedClip, SealedContributor, SealedError, SealedEvent,
+    SealedObservation, SealedUnavailable,
+};
 use crate::clips::durable::{self, Existing};
-
-const MAX_SIDECAR_BYTES: u64 = 1 << 20;
 
 pub(super) fn pending(directory: &Path, camera_id: &str) -> Result<Pending, SealedError> {
     let mut names = match fs::read_dir(directory) {
@@ -46,8 +48,105 @@ pub(super) fn pending(directory: &Path, camera_id: &str) -> Result<Pending, Seal
 
 fn parse(bytes: &[u8], sidecar_path: PathBuf) -> Option<Recovery> {
     let value: Value = serde_json::from_slice(bytes).ok()?;
-    let contributors = value
-        .get("contributors")?
+    let document = value.as_object()?;
+    let (sealed, camera_id, event_values, is_unavailable) =
+        if let Some(unavailable_value) = document.get("unavailable") {
+            if document.len() != 1 {
+                return None;
+            }
+            let fields = unavailable_value.as_object()?;
+            if fields.keys().any(|key| {
+                !matches!(
+                    key.as_str(),
+                    "clip_id"
+                        | "camera_id"
+                        | "duration_ms"
+                        | "boundary"
+                        | "contributors"
+                        | "events"
+                        | "native_result"
+                        | "contains_video"
+                        | "path"
+                )
+            }) {
+                return None;
+            }
+            let path = match fields.get("path") {
+                None => None,
+                Some(value) => {
+                    let path = value.as_str()?;
+                    if path.is_empty() {
+                        return None;
+                    }
+                    Some(path.to_owned())
+                }
+            };
+            let native_result = i32::try_from(fields.get("native_result")?.as_i64()?).ok()?;
+            let contains_video = fields.get("contains_video")?.as_bool()?;
+            if native_result == 0 && contains_video {
+                return None;
+            }
+            let unavailable = SealedUnavailable {
+                clip_id: text(unavailable_value, "clip_id")?,
+                path,
+                duration_ms: fields.get("duration_ms")?.as_u64()?,
+                boundary: text(unavailable_value, "boundary")?,
+                contributors: parse_contributors(unavailable_value.get("contributors")?)?,
+                native_result,
+                contains_video,
+            };
+            if unavailable.contributors.is_empty() {
+                return None;
+            }
+            let camera_id = text(unavailable_value, "camera_id")?;
+            if camera_id.trim().is_empty() {
+                return None;
+            }
+            (
+                SealedObservation::Unavailable(unavailable),
+                camera_id,
+                unavailable_value.get("events")?,
+                true,
+            )
+        } else {
+            if document.contains_key("native_result") || document.contains_key("contains_video") {
+                return None;
+            }
+            let sealed = SealedClip {
+                clip_id: text(&value, "clip_id")?,
+                path: text(&value, "path")?,
+                duration_ms: value.get("duration_ms")?.as_i64()?,
+                boundary: text(&value, "boundary")?,
+                contributors: parse_contributors(value.get("contributors")?)?,
+            };
+            (
+                SealedObservation::Ready(sealed),
+                text(&value, "camera_id")?,
+                value.get("events")?,
+                false,
+            )
+        };
+    if !valid_clip_id(sealed.clip_id())
+        || sidecar_path.file_name()?.to_str()? != format!("{}.json", sealed.clip_id())
+    {
+        return None;
+    }
+    let events = parse_events(
+        event_values,
+        sealed.contributors(),
+        &camera_id,
+        is_unavailable,
+    )?;
+    Some(Recovery {
+        camera_id,
+        sealed,
+        events,
+        sidecar_path,
+    })
+}
+
+fn parse_contributors(value: &Value) -> Option<Vec<SealedContributor>> {
+    value
         .as_array()?
         .iter()
         .map(|item| {
@@ -56,16 +155,29 @@ fn parse(bytes: &[u8], sidecar_path: PathBuf) -> Option<Recovery> {
                 detected_at: text(item, "detected_at")?,
             })
         })
-        .collect::<Option<Vec<_>>>()?;
-    let sealed = SealedClip {
-        clip_id: text(&value, "clip_id")?,
-        path: text(&value, "path")?,
-        duration_ms: value.get("duration_ms")?.as_i64()?,
-        boundary: text(&value, "boundary")?,
-        contributors,
-    };
+        .collect()
+}
+
+fn parse_events(
+    values: &Value,
+    contributors: &[SealedContributor],
+    camera_id: &str,
+    is_unavailable: bool,
+) -> Option<BTreeMap<String, SealedEvent>> {
+    let mut references = BTreeSet::new();
+    for contributor in contributors {
+        if contributor.event_ref.trim().is_empty()
+            || !references.insert(contributor.event_ref.as_str())
+        {
+            return None;
+        }
+    }
+    let rows = values.as_array()?;
+    if is_unavailable && rows.is_empty() {
+        return None;
+    }
     let mut events = BTreeMap::new();
-    for item in value.get("events")?.as_array()? {
+    for item in rows {
         let event = SealedEvent {
             domain: text(item, "domain")?,
             event_type: text(item, "event_type")?,
@@ -75,19 +187,16 @@ fn parse(bytes: &[u8], sidecar_path: PathBuf) -> Option<Recovery> {
             time_sec: item.get("time_sec")?.as_f64()?,
             probability: finite_probability(item.get("probability")?)?,
         };
-        events.insert(event.identity.clone(), event);
+        if event.identity.trim().is_empty()
+            || event.camera_id.trim().is_empty()
+            || event.camera_id != camera_id
+            || !references.contains(event.identity.as_str())
+            || events.insert(event.identity.clone(), event).is_some()
+        {
+            return None;
+        }
     }
-    let complete = sealed
-        .contributors
-        .iter()
-        .all(|contributor| events.contains_key(&contributor.event_ref));
-    complete.then_some(())?;
-    Some(Recovery {
-        camera_id: text(&value, "camera_id")?,
-        sealed,
-        events,
-        sidecar_path,
-    })
+    (events.len() == references.len()).then_some(events)
 }
 
 fn text(value: &Value, key: &str) -> Option<String> {

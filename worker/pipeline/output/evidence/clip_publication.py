@@ -31,10 +31,15 @@ from worker.pipeline.output.evidence.durability import fsync_directory, fsync_fi
 from worker.pipeline.output.evidence.evidence_manifest import (
     ClipManifest,
     finalize_ready_manifest,
+    parse_manifest_content,
     unavailable_manifest,
+    verify_ready_manifest,
 )
 from worker.pipeline.output.evidence.evidence_outbox_types import EvidenceReasonCode
-from worker.pipeline.output.evidence.manifest_models import ReadyClipManifest
+from worker.pipeline.output.evidence.manifest_models import (
+    ReadyClipManifest,
+    coalesce_event_refs,
+)
 from worker.pipeline.output.evidence.playback_rendition import schedule_playback_rendition
 from worker.pipeline.output.evidence.terminal_outcome import (
     TerminalClipOutcome,
@@ -213,6 +218,52 @@ class ClipPublisher:
         self._enqueue_clip(manifest, metadata)
         self._cleanup_staging(reservation)
         return PublishedClip(reservation.clip_id, manifest, manifest_path, None)
+
+    def reconcile_terminal(
+        self,
+        reservation: ClipReservation,
+        metadata: ClipPublicationMetadata,
+    ) -> PublishedClip:
+        """Complete an already committed manifest without regenerating evidence.
+
+        A crash after the manifest rename resumes here: the exact committed
+        manifest bytes are re-read, READY media is verified against them, and
+        the idempotent terminal outcome and relay admission are completed from
+        the manifest. No media is moved, no thumbnail, rendition, or ready hook
+        runs, and a mismatched, malformed, or contradicted terminal raises
+        rather than being overwritten.
+        """
+        self._validate_reservation(reservation)
+        manifest_path = reservation.final_dir / "manifest.json"
+        manifest, content, _ = parse_manifest_content(manifest_path)
+        if (
+            manifest.clip_id != reservation.clip_id
+            or manifest.camera_id != metadata.camera_id
+            or manifest.event_refs
+            != coalesce_event_refs(tuple(str(value) for value in metadata.event_refs))
+        ):
+            raise ClipPublicationConflictError(reservation.clip_id, "terminal identity differs")
+        video_path: Path | None = None
+        if isinstance(manifest, ReadyClipManifest):
+            video_path = reservation.final_dir / "clip.mp4"
+            verify_ready_manifest(manifest, video_path, ffprobe_bin=self._ffprobe_bin)
+            state = TerminalClipState.READY
+        elif manifest.reason_code is EvidenceReasonCode.CORRUPT:
+            state = TerminalClipState.CORRUPT
+        else:
+            state = TerminalClipState.UNAVAILABLE
+        _ = commit_terminal_outcome(
+            reservation.final_dir,
+            TerminalClipOutcome(
+                str(reservation.clip_id),
+                tuple(str(value) for value in metadata.event_refs),
+                state,
+                hashlib.sha256(content).hexdigest(),
+            ),
+        )
+        self._enqueue_clip(manifest, metadata)
+        self._cleanup_staging(reservation)
+        return PublishedClip(reservation.clip_id, manifest, manifest_path, video_path)
 
     def publish_corrupt(
         self,

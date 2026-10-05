@@ -10,7 +10,9 @@ use seeon_ml_worker::clips::publish::{
     MANIFEST_FILE, MEDIA_FILE, PublishError, Published, Publisher, TERMINAL_MARKER,
 };
 use seeon_ml_worker::clips::reserve::FINALIZE_FAILED;
-use seeon_ml_worker::clips::sealed::{Recovery, SealedClip, SealedContributor, SealedEvent};
+use seeon_ml_worker::clips::sealed::{
+    Recovery, SealedClip, SealedContributor, SealedEvent, SealedObservation,
+};
 use seeon_ml_worker::clips::store::ClipStore;
 use seeon_ml_worker::clips::time::Utc;
 use seeon_ml_worker::delivery::DeliveryQueue;
@@ -93,7 +95,7 @@ fn recovery_at(
         },
     );
     Recovery {
-        sealed: SealedClip {
+        sealed: SealedObservation::Ready(SealedClip {
             clip_id: CLIP.to_owned(),
             path: source.display().to_string(),
             duration_ms: 4_000,
@@ -102,10 +104,18 @@ fn recovery_at(
                 event_ref: event_ref.to_owned(),
                 detected_at: DETECTED.to_owned(),
             }],
-        },
+        }),
         events,
         camera_id: CAMERA.to_owned(),
         sidecar_path: sidecar.to_path_buf(),
+    }
+}
+
+/// The READY clip these fixtures build, for in-place test mutation.
+fn ready_mut(recovery: &mut Recovery) -> &mut SealedClip {
+    match &mut recovery.sealed {
+        SealedObservation::Ready(sealed) => sealed,
+        SealedObservation::Unavailable(_) => panic!("fixture is READY"),
     }
 }
 
@@ -170,11 +180,11 @@ fn terminal_metadata(recovery: &Recovery) -> ClipMetadata {
         })
         .collect();
     let extension = Extension {
-        boundary: recovery.sealed.boundary.clone(),
-        duration_ms: recovery.sealed.duration_ms,
+        boundary: recovery.sealed.boundary().to_owned(),
+        duration_ms: i64::try_from(recovery.sealed.duration_ms()).expect("READY duration"),
         contributors: recovery
             .sealed
-            .contributors
+            .contributors()
             .iter()
             .map(|contributor| Contributor {
                 event_ref: contributor.event_ref.clone(),
@@ -183,7 +193,7 @@ fn terminal_metadata(recovery: &Recovery) -> ClipMetadata {
             .collect(),
     };
     flow_metadata(
-        &recovery.sealed.clip_id,
+        recovery.sealed.clip_id(),
         &events,
         extension,
         FLOW_ENCODER,
@@ -323,10 +333,12 @@ fn missing_contributor_cross_camera_and_facility_are_refused() {
             probability: Some(0.8),
         },
     );
-    facility.sealed.contributors.push(SealedContributor {
-        event_ref: "evt-2".to_owned(),
-        detected_at: "2026-01-02T03:04:06.000000Z".to_owned(),
-    });
+    ready_mut(&mut facility)
+        .contributors
+        .push(SealedContributor {
+            event_ref: "evt-2".to_owned(),
+            detected_at: "2026-01-02T03:04:06.000000Z".to_owned(),
+        });
     assert!(matches!(
         publish(&bench, &facility, now()),
         Err(ClipOutputError::Metadata(_))
@@ -625,7 +637,7 @@ fn existing_ready_refuses_changed_missing_or_duration_conflicting_media() {
                 expected_manifest = canonical_bytes(&value);
                 fs::write(&first.manifest_path, &expected_manifest).expect("duration conflict");
             }
-            "sealed-duration" => recovery.sealed.duration_ms += 1,
+            "sealed-duration" => ready_mut(&mut recovery).duration_ms += 1,
             _ => unreachable!(),
         }
         let expected_media = if change == "missing-final" {

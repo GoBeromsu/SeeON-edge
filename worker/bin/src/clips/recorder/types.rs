@@ -106,7 +106,8 @@ pub struct ClipSealed {
     pub boundary: Boundary,
     /// Sorted by `(detected_at, event_ref)`.
     pub contributors: Vec<Contributor>,
-    pub path: PathBuf,
+    /// Present only when the native receipt actually named media.
+    pub path: Option<PathBuf>,
 }
 
 impl ClipSealed {

@@ -121,6 +121,23 @@ pub fn replay_before_media(
                         Err(error) => return ReplayOutcome::Failed(error),
                         Ok(None) => {}
                     }
+                    if matches!(
+                        recovery.sealed,
+                        crate::clips::sealed::SealedObservation::Unavailable(_)
+                    ) {
+                        return match recovery_media(recovery, store).and_then(|_| {
+                            clip_output::publish_recovery(
+                                recovery,
+                                store,
+                                queue,
+                                "",
+                                Utc::from_system(clock.wall()),
+                            )
+                        }) {
+                            Ok(published) => ReplayOutcome::Published(published),
+                            Err(error) => ReplayOutcome::Failed(error),
+                        };
+                    }
                     let media = match recovery_media(recovery, store) {
                         Ok(Some(media)) => media,
                         Ok(None) => return ReplayOutcome::MissingMedia,
@@ -160,23 +177,30 @@ fn recovery_media(
     recovery: &crate::clips::sealed::Recovery,
     store: &ClipStore,
 ) -> Result<Option<PathBuf>, ClipOutputError> {
+    let mut found = None;
     for path in [
         store
-            .staging_dir(&recovery.sealed.clip_id)
+            .staging_dir(recovery.sealed.clip_id())
             .join(crate::clips::store::ARTIFACT_FILE),
         store
-            .clip_dir(&recovery.sealed.clip_id)
+            .clip_dir(recovery.sealed.clip_id())
             .join(crate::clips::publish::MEDIA_FILE),
-        PathBuf::from(&recovery.sealed.path),
-    ] {
+    ]
+    .into_iter()
+    .chain(recovery.sealed.path().map(PathBuf::from))
+    {
         match path.symlink_metadata() {
-            Ok(metadata) if metadata.is_file() => return Ok(Some(path)),
+            Ok(metadata) if metadata.is_file() => {
+                if found.is_none() {
+                    found = Some(path);
+                }
+            }
             Ok(_) => return Err(crate::clips::publish::PublishError::Conflict.into()),
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
             Err(error) => return Err(error.into()),
         }
     }
-    Ok(None)
+    Ok(found)
 }
 
 pub struct PublicationConfig<'a> {
@@ -586,7 +610,12 @@ mod tests {
             };
             let events = BTreeMap::from([(event.identity.clone(), event)]);
             let sidecars = SealedSidecars::new(state.join(SIDECAR_DIR));
-            sidecars.persist(&sealed, &events).unwrap();
+            sidecars
+                .persist(
+                    &crate::clips::sealed::SealedObservation::Ready(sealed.clone()),
+                    &events,
+                )
+                .unwrap();
             let recovery = sidecars
                 .pending("camera-replay")
                 .unwrap()
@@ -675,7 +704,7 @@ mod tests {
     fn startup_probe_selects_the_same_owned_media_as_publication() {
         for staged in [true, false] {
             let fixture = ReplayFixture::new();
-            let original = Path::new(&fixture.recovery.sealed.path);
+            let original = Path::new(fixture.recovery.sealed.path().unwrap());
             std::fs::write(original, b"different original bytes").unwrap();
             let reservation = fixture
                 .store
@@ -716,7 +745,7 @@ mod tests {
     fn startup_nonregular_media_is_not_missing_attribution() {
         for symlink in [false, true] {
             let fixture = ReplayFixture::new();
-            let path = Path::new(&fixture.recovery.sealed.path);
+            let path = Path::new(fixture.recovery.sealed.path().unwrap());
             if symlink {
                 std::os::unix::fs::symlink(fixture.root.join("absent"), path).unwrap();
             } else {
@@ -751,7 +780,7 @@ mod tests {
                 .acknowledge_backend(first.entry.entry_id(), 204)
                 .unwrap()
         );
-        assert!(!Path::new(&fixture.recovery.sealed.path).exists());
+        assert!(!Path::new(fixture.recovery.sealed.path().unwrap()).exists());
         assert!(
             !fixture
                 .store
@@ -844,7 +873,7 @@ mod tests {
                 sha256: crate::clips::durable::sha256_hex(media),
                 size_bytes: i64::try_from(media.len()).unwrap(),
                 codec: "h264".into(),
-                duration_ms: fixture.recovery.sealed.duration_ms,
+                duration_ms: i64::try_from(fixture.recovery.sealed.duration_ms()).unwrap(),
             };
             let first = Publisher::new(&fixture.queue)
                 .publish_ready(&reservation, &fixture.meta, &facts)
@@ -903,7 +932,7 @@ mod tests {
         assert!(
             !fixture
                 .store
-                .clip_dir(&fixture.recovery.sealed.clip_id)
+                .clip_dir(fixture.recovery.sealed.clip_id())
                 .join(MANIFEST_FILE)
                 .exists()
         );

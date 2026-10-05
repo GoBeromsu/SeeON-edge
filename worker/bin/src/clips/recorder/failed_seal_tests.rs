@@ -143,7 +143,7 @@ fn failed_seal_keeps_exact_owner_without_reading_clocks_or_restarting() {
                     detected_at: at().plus_millis(offset),
                 })
                 .collect(),
-            path: original.directory.join(&original.filename),
+            path: Some(original.directory.join(&original.filename)),
         };
         let deadlines = recording_deadlines(&recorder);
         let reads = clock.reads.load(Ordering::Relaxed);
@@ -198,6 +198,46 @@ fn failed_seal_keeps_exact_owner_without_reading_clocks_or_restarting() {
         assert_eq!(recorder.receipt_overdue, None);
         assert_eq!(recording_deadlines(&recorder), deadlines);
         assert_eq!(clock.reads.load(Ordering::Relaxed), reads);
+    }
+}
+
+#[test]
+fn failed_negative_persistence_retains_actual_receipt_without_inventing_media() {
+    for result in [MediaResult::Fatal, MediaResult::Unknown(-73)] {
+        let (mut recorder, _, starts) = harness();
+        let Admit::Started(ticket) = recorder.admit("event", at()).unwrap() else {
+            panic!("expected admitted recording");
+        };
+        let mut original = receipt(ticket, result);
+        if matches!(result, MediaResult::Unknown(_)) {
+            original.ticket.session_id = 7;
+            original.ticket.session_valid = 1;
+        }
+        original.filename.clear();
+        original.duration_ms = 0;
+        assert!(matches!(
+            recorder.on_receipt(&original, |sealed| {
+                assert_eq!(sealed.path, None);
+                assert_eq!(sealed.duration_ms, 0);
+                assert_eq!(sealed.result, result);
+                Err(PublishError::Reservation("persistence failed"))
+            }),
+            Err(RecorderError::Save(PublishError::Reservation(
+                "persistence failed"
+            )))
+        ));
+        let retained = recorder.failed_seal.as_ref().expect("original retained");
+        assert_eq!(retained.ticket, original.ticket);
+        assert_eq!(retained.path, None);
+        assert_eq!(retained.duration_ms, 0);
+        assert_eq!(retained.result, result);
+        assert_eq!(retained.contributors[0].event_ref, "event");
+        assert_eq!(recorder.state(), State::Finalizing);
+        assert!(matches!(
+            recorder.admit("later", at()),
+            Err(RecorderError::Unpublished { .. })
+        ));
+        assert_eq!(starts.get(), 1);
     }
 }
 

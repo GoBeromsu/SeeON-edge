@@ -119,8 +119,8 @@ pub(super) fn failed_codec_probe_continuation(
         let [retained] = pending.recoveries.as_slice() else {
             panic!("uncompleted publication must retain its sealed sidecar: {pending:?}");
         };
-        assert_eq!(retained.sealed.clip_id, clip_id);
-        assert_eq!(retained.sealed.path, source.to_str().unwrap());
+        assert_eq!(retained.sealed.clip_id(), clip_id);
+        assert_eq!(retained.sealed.path(), Some(source.to_str().unwrap()));
         assert_eq!(retained.events, attribution_before);
     }
     assert!(

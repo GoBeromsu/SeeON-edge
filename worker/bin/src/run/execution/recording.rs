@@ -9,7 +9,10 @@ use crate::clips::publish::{PublishError, Publisher};
 use crate::clips::recorder::ClipSealed;
 use crate::clips::rendition::{Tools, video_codec};
 use crate::clips::reserve::{ReservePool, SaveOutcome};
-use crate::clips::sealed::{SealedClip, SealedContributor, SealedEvent, SealedSidecars};
+use crate::clips::sealed::{
+    SealedClip, SealedContributor, SealedEvent, SealedObservation, SealedSidecars,
+    SealedUnavailable,
+};
 use crate::clips::store::ClipStore;
 use crate::clips::time::Utc;
 use crate::delivery::DeliveryQueue;
@@ -48,39 +51,53 @@ impl RecordingPublisher<'_> {
             );
         }
         let ready = sealed.result == MediaResult::Ok && sealed.contains_video;
-        let sidecar = if ready {
-            let durable = SealedClip {
+        let path = sealed
+            .path
+            .as_deref()
+            .map(|path| {
+                path.to_str()
+                    .map(str::to_owned)
+                    .ok_or(PublishError::Reservation("media path"))
+            })
+            .transpose()?;
+        let contributors = sealed
+            .contributors
+            .iter()
+            .map(|contributor| SealedContributor {
+                event_ref: contributor.event_ref.clone(),
+                detected_at: contributor.detected_at.iso_micros(),
+            })
+            .collect();
+        let durable = if ready {
+            SealedObservation::Ready(SealedClip {
                 clip_id: clip_id.to_owned(),
-                path: sealed
-                    .path
-                    .to_str()
-                    .ok_or(PublishError::Reservation("media path"))?
-                    .to_owned(),
+                path: path.ok_or(PublishError::MissingMedia)?,
                 duration_ms: i64::try_from(sealed.duration_ms)
                     .map_err(|_| PublishError::Reservation("duration"))?,
                 boundary,
-                contributors: sealed
-                    .contributors
-                    .iter()
-                    .map(|contributor| SealedContributor {
-                        event_ref: contributor.event_ref.clone(),
-                        detected_at: contributor.detected_at.iso_micros(),
-                    })
-                    .collect(),
-            };
-            Some(self.sidecars.persist(&durable, self.events).map_err(|_| {
-                PublishError::Io(std::io::Error::other(
-                    "sealed attribution persistence failed",
-                ))
-            })?)
+                contributors,
+            })
         } else {
-            None
+            SealedObservation::Unavailable(SealedUnavailable {
+                clip_id: clip_id.to_owned(),
+                path,
+                duration_ms: sealed.duration_ms,
+                boundary,
+                contributors,
+                native_result: native_result(sealed.result),
+                contains_video: sealed.contains_video,
+            })
         };
+        let sidecar = self.sidecars.persist(&durable, self.events).map_err(|_| {
+            PublishError::Io(std::io::Error::other(
+                "sealed attribution persistence failed",
+            ))
+        })?;
         let meta = flow_metadata(clip_id, &events, extension, FLOW_ENCODER, now)
             .map_err(|_| PublishError::Reservation("sealed metadata"))?;
         // Unavailable publications carry no media facts and therefore no codec claim.
         let codec = if ready {
-            measured_codec(&sealed.path)
+            measured_codec(sealed.path.as_deref().ok_or(PublishError::MissingMedia)?)
         } else {
             Ok(String::new())
         };
@@ -93,16 +110,27 @@ impl RecordingPublisher<'_> {
                 .reserve
                 .publish_preterminal_finalize_failed(self.store, &publisher, &meta)?,
         };
-        if !matches!(saved, SaveOutcome::FinalizeFailed(None))
-            && let Some(path) = sidecar
-        {
-            self.sidecars.remove(&path).map_err(|_| {
+        if !matches!(saved, SaveOutcome::FinalizeFailed(None)) {
+            self.sidecars.remove(&sidecar).map_err(|_| {
                 PublishError::Io(std::io::Error::other(
                     "sealed attribution retirement failed",
                 ))
             })?;
         }
         Ok(saved)
+    }
+}
+
+fn native_result(result: MediaResult) -> i32 {
+    match result {
+        MediaResult::Ok => 0,
+        MediaResult::Empty => 1,
+        MediaResult::Busy => 2,
+        MediaResult::Stale => 3,
+        MediaResult::TooSmall => 4,
+        MediaResult::Unsupported => 5,
+        MediaResult::Fatal => 6,
+        MediaResult::Unknown(value) => value,
     }
 }
 

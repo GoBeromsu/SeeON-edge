@@ -6,14 +6,14 @@ use std::path::Path;
 
 use serde_json::Value;
 
-use super::{ClipOutputError, media_facts, metadata, regular_file};
+use super::{ClipOutputError, media_facts, metadata, regular_file, unavailable_reason};
 use crate::clips::durable::{self, Existing};
 use crate::clips::manifest::{MAX_MANIFEST_BYTES, MediaFacts, Terminal, manifest_bytes};
 use crate::clips::publish::{
     MANIFEST_FILE, MEDIA_FILE, PublishError, Published, Publisher, TERMINAL_MARKER,
 };
 use crate::clips::reserve::FINALIZE_FAILED;
-use crate::clips::sealed::Recovery;
+use crate::clips::sealed::{Recovery, SealedObservation};
 use crate::clips::store::ClipStore;
 use crate::clips::time::Utc;
 use crate::delivery::DeliveryQueue;
@@ -30,7 +30,7 @@ pub fn resume_terminal(
     store: &ClipStore,
     queue: &DeliveryQueue,
 ) -> Result<Option<Published>, ClipOutputError> {
-    let reservation = store.reserve(&recovery.camera_id, &recovery.sealed.clip_id)?;
+    let reservation = store.reserve(&recovery.camera_id, recovery.sealed.clip_id())?;
     let Some((bytes, value)) = snapshot(&reservation.final_dir.join(MANIFEST_FILE))? else {
         return match reservation
             .final_dir
@@ -45,7 +45,7 @@ pub fn resume_terminal(
     let stamp = text(&value, "finalized_at")?;
     let finalized_at = Utc::parse(stamp).map_err(|_| ClipOutputError::ManifestUnreadable)?;
     let meta = metadata(recovery, finalized_at)?;
-    let terminal = terminal(&value)?;
+    let terminal = terminal(&value, &recovery.sealed)?;
     let expected = manifest_bytes(&meta, &terminal).map_err(ClipOutputError::Metadata)?;
     if expected != bytes {
         return Err(PublishError::Conflict.into());
@@ -104,20 +104,26 @@ fn snapshot(path: &Path) -> Result<Option<(Vec<u8>, Value)>, ClipOutputError> {
     Ok(Some((bytes, value)))
 }
 
-fn terminal(value: &Value) -> Result<Terminal, ClipOutputError> {
+fn terminal(value: &Value, observation: &SealedObservation) -> Result<Terminal, ClipOutputError> {
+    let reason = match observation {
+        SealedObservation::Ready(_) => FINALIZE_FAILED,
+        SealedObservation::Unavailable(sealed) => unavailable_reason(sealed.native_result),
+    };
     match text(value, "state")? {
-        "READY" => Ok(Terminal::Ready(MediaFacts {
-            sha256: text(value, "sha256")?.to_owned(),
-            size_bytes: integer(value, "size_bytes")?,
-            codec: text(value, "codec")?.to_owned(),
-            duration_ms: integer(value, "duration_ms")?,
-        })),
+        "READY" if matches!(observation, SealedObservation::Ready(_)) => {
+            Ok(Terminal::Ready(MediaFacts {
+                sha256: text(value, "sha256")?.to_owned(),
+                size_bytes: integer(value, "size_bytes")?,
+                codec: text(value, "codec")?.to_owned(),
+                duration_ms: integer(value, "duration_ms")?,
+            }))
+        }
         "UNAVAILABLE"
-            if text(value, "reason_code")? == FINALIZE_FAILED
+            if text(value, "reason_code")? == reason
                 && value.get("source_error_reason").is_none() =>
         {
             Ok(Terminal::Unavailable {
-                reason_code: FINALIZE_FAILED.to_owned(),
+                reason_code: reason.to_owned(),
                 source_error_reason: None,
             })
         }

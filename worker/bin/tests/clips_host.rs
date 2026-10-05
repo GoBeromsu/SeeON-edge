@@ -27,7 +27,7 @@ use seeon_ml_worker::clips::rendition::{
     write_playback_rendition, write_thumbnail,
 };
 use seeon_ml_worker::clips::sealed::{
-    SIDECAR_DIR, SealedClip, SealedContributor, SealedEvent, SealedSidecars,
+    SIDECAR_DIR, SealedClip, SealedContributor, SealedEvent, SealedObservation, SealedSidecars,
 };
 use seeon_ml_worker::clips::store::ClipStore;
 use seeon_ml_worker::clips::time::Utc;
@@ -486,7 +486,7 @@ fn t30_inner_writes() {
     };
     let events = BTreeMap::from([(EVENT_REF.to_owned(), event)]);
     let sidecar = SealedSidecars::new(root.join(SIDECAR_DIR))
-        .persist(&sealed, &events)
+        .persist(&SealedObservation::Ready(sealed), &events)
         .expect("sidecar persisted");
     for path in [clip.manifest, clip.dir.join(ATTESTATION_FILE), sidecar] {
         assert!(path.is_file(), "{} written", path.display());

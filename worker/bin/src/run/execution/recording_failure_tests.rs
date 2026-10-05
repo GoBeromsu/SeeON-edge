@@ -161,7 +161,12 @@ fn sidecar_persistence_failure_preserves_erroneous_and_partial_evidence() {
 
         assert!(matches!(fixture.save(), Err(PublishError::Io(_))));
 
-        assert_eq!(std::fs::read(&fixture.sealed.path).unwrap(), INVALID_MEDIA);
+        let source = fixture
+            .sealed
+            .path
+            .as_ref()
+            .expect("fixture reports its source");
+        assert_eq!(std::fs::read(source).unwrap(), INVALID_MEDIA);
         assert_eq!(
             std::fs::read(blocked.join("evidence")).unwrap(),
             b"preserve partial attribution"

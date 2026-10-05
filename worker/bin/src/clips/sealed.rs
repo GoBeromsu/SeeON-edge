@@ -1,17 +1,23 @@
 //! Flow sealed-clip sidecars (`flow_sealed_sidecar.py`): a sealed Flow clip
-//! is written to `flow-sealed/` before it is published and retired only
-//! after publication succeeds or its owner confirms missing media.
+//! is written to `flow-sealed/` before it is published and retired after
+//! publication succeeds; ready clips may also retire after confirmed absence.
 
+mod immutable;
+mod observation;
 mod payload;
 mod read;
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 
 use super::durable::{self, PUBLIC_FILE};
 use crate::json::Serialiser;
+
+pub use observation::{SealedObservation, SealedUnavailable};
+
+const MAX_SIDECAR_BYTES: u64 = 1 << 20;
 
 /// The sidecar directory name under the worker state directory.
 pub const SIDECAR_DIR: &str = "flow-sealed";
@@ -51,7 +57,7 @@ pub struct SealedEvent {
 /// A persisted sidecar read back for replay.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Recovery {
-    pub sealed: SealedClip,
+    pub sealed: SealedObservation,
     /// Keyed by event identity, which is the contributor's `event_ref`.
     pub events: BTreeMap<String, SealedEvent>,
     pub camera_id: String,
@@ -74,6 +80,18 @@ pub enum SealedError {
     InvalidClipId,
     /// A probability or time is NaN or infinite.
     NonFinite,
+    /// Event references, identities, or camera attribution contradict.
+    InvalidAttribution,
+    /// An unavailable observation is not a valid native-media result.
+    InvalidObservation,
+    /// The canonical observation exceeds the bounded sidecar size.
+    PayloadTooLarge,
+    /// A sidecar already exists with different or malformed bytes.
+    ImmutableConflict,
+    /// The existing sidecar is not a bounded regular non-symlink file.
+    ImmutableUnreadable,
+    /// Missing-media retirement cannot discard unavailable evidence.
+    NegativeMissingMedia,
     /// A sidecar is not a readable sealed record.
     Malformed,
     Io(io::Error),
@@ -99,8 +117,8 @@ pub enum ReplayOutcome<T, E> {
     /// Publication succeeded (including a resumed terminal); retire the sidecar.
     Published(T),
     /// The caller confirmed absence after checking the terminal and all owned
-    /// media locations; retire the sidecar. A failed or malformed terminal
-    /// must be `Failed`, not `MissingMedia`.
+    /// media locations. Unavailable observations reject this outcome and stay
+    /// persisted; a failed or malformed terminal must be `Failed`.
     MissingMedia,
     /// Publication failed; the sidecar is kept for the next replay.
     Failed(E),
@@ -132,29 +150,53 @@ impl SealedSidecars {
         &self.directory
     }
 
-    /// Writes `<clip_id>.json` durably. Contributors are stably sorted by
-    /// the `detected_at` text; an unknown contributor refuses before the
-    /// directory is created.
+    /// Publishes `<clip_id>.json` once. Identical observations are idempotent;
+    /// contradictory existing evidence is preserved and refused.
     pub fn persist(
         &self,
-        sealed: &SealedClip,
+        observation: &SealedObservation,
         events: &BTreeMap<String, SealedEvent>,
     ) -> Result<PathBuf, SealedError> {
-        let target = self.sidecar_path(&sealed.clip_id)?;
-        let mut ordered: Vec<&SealedContributor> = sealed.contributors.iter().collect();
+        let target = self.sidecar_path(observation.clip_id())?;
+        let mut ordered: Vec<&SealedContributor> = observation.contributors().iter().collect();
         ordered.sort_by(|left, right| left.detected_at.cmp(&right.detected_at));
         let written = ordered
             .iter()
             .map(|contributor| events.get(&contributor.event_ref))
             .collect::<Option<Vec<&SealedEvent>>>()
             .ok_or(SealedError::UnknownRef)?;
-        let payload = payload::sidecar_json(sealed, &ordered, &written);
+        let camera_id = validate_attribution(&ordered, &written)?;
+        let payload = match observation {
+            SealedObservation::Ready(sealed) => payload::sidecar_json(sealed, &ordered, &written),
+            SealedObservation::Unavailable(unavailable) => {
+                if unavailable
+                    .path
+                    .as_ref()
+                    .is_some_and(|path| path.is_empty())
+                    || (unavailable.native_result == 0 && unavailable.contains_video)
+                    || unavailable.contributors.is_empty()
+                    || camera_id.trim().is_empty()
+                {
+                    return Err(SealedError::InvalidObservation);
+                }
+                payload::unavailable_sidecar_json(unavailable, camera_id, &ordered, &written)
+            }
+        };
         let text = Serialiser::ModelSelection
             .canonical(&payload)
             .map_err(|_| SealedError::NonFinite)?;
+        if u64::try_from(text.len()).map_or(true, |length| length > MAX_SIDECAR_BYTES) {
+            return Err(SealedError::PayloadTooLarge);
+        }
         fs::create_dir_all(durable::parent_of(&self.directory))?;
         durable::create_dir(&self.directory, SIDECAR_DIR_MODE)?;
-        durable::write_durable(&target, text.as_bytes(), PUBLIC_FILE)?;
+        immutable::publish_once(&target, text.as_bytes(), PUBLIC_FILE, MAX_SIDECAR_BYTES).map_err(
+            |error| match error {
+                immutable::PublishError::Conflict => SealedError::ImmutableConflict,
+                immutable::PublishError::Unreadable => SealedError::ImmutableUnreadable,
+                immutable::PublishError::Io(error) => SealedError::Io(error),
+            },
+        )?;
         Ok(target)
     }
 
@@ -164,8 +206,8 @@ impl SealedSidecars {
     }
 
     /// Always calls the publication owner, which checks terminal state and all
-    /// owned media locations. `Published` and explicit `MissingMedia` retire
-    /// the sidecar; `Failed` keeps it unchanged.
+    /// owned media locations. `Published` retires either observation;
+    /// `MissingMedia` retires only a ready observation.
     pub fn replay_one<T, E>(
         &self,
         recovery: &Recovery,
@@ -177,6 +219,9 @@ impl SealedSidecars {
                 Ok(ReplayOutcome::Published(published))
             }
             ReplayOutcome::MissingMedia => {
+                if matches!(&recovery.sealed, SealedObservation::Unavailable(_)) {
+                    return Err(SealedError::NegativeMissingMedia);
+                }
                 self.remove(&recovery.sidecar_path)?;
                 Ok(ReplayOutcome::MissingMedia)
             }
@@ -213,11 +258,35 @@ impl SealedSidecars {
     }
 
     fn sidecar_path(&self, clip_id: &str) -> Result<PathBuf, SealedError> {
-        let unsafe_id =
-            clip_id.is_empty() || clip_id.starts_with('.') || clip_id.contains(['/', '\0']);
-        if unsafe_id {
+        if !observation::valid_clip_id(clip_id) {
             return Err(SealedError::InvalidClipId);
         }
         Ok(self.directory.join(format!("{clip_id}.json")))
     }
+}
+
+fn validate_attribution<'a>(
+    ordered: &[&'a SealedContributor],
+    events: &[&'a SealedEvent],
+) -> Result<&'a str, SealedError> {
+    let mut identities = BTreeSet::new();
+    let mut camera_id = None;
+    for (contributor, event) in ordered.iter().zip(events) {
+        if contributor.event_ref.trim().is_empty()
+            || event.identity.trim().is_empty()
+            || event.identity != contributor.event_ref
+            || !identities.insert(event.identity.as_str())
+            || event.camera_id.trim().is_empty()
+        {
+            return Err(SealedError::InvalidAttribution);
+        }
+        match camera_id {
+            Some(camera) if camera != event.camera_id => {
+                return Err(SealedError::InvalidAttribution);
+            }
+            Some(_) => {}
+            None => camera_id = Some(event.camera_id.as_str()),
+        }
+    }
+    Ok(camera_id.unwrap_or(""))
 }

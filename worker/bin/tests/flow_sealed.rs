@@ -25,7 +25,7 @@ use seeon_ml_worker::clips::publish::{
 };
 use seeon_ml_worker::clips::sealed::{
     Recovery, ReplayOutcome, ReplayReport, SealedClip, SealedContributor, SealedError, SealedEvent,
-    SealedSidecars,
+    SealedObservation, SealedSidecars,
 };
 use seeon_ml_worker::clips::store::{ARTIFACT_FILE, ClipStore};
 use seeon_ml_worker::clips::time::Utc;
@@ -76,6 +76,16 @@ fn sealed_of(call: &Value) -> SealedClip {
                 detected_at: text(c, "detected_at"),
             })
             .collect(),
+    }
+}
+
+/// The READY clip of a recovery; these goldens never persist another arm.
+fn ready(recovery: &Recovery) -> &SealedClip {
+    match &recovery.sealed {
+        SealedObservation::Ready(sealed) => sealed,
+        SealedObservation::Unavailable(unavailable) => {
+            panic!("unexpected unavailable observation {}", unavailable.clip_id)
+        }
     }
 }
 
@@ -141,7 +151,7 @@ impl Bench {
     fn persist(&self, cases: &Value, case: &str) -> PathBuf {
         let call = call(cases, case);
         self.sidecars
-            .persist(&sealed_of(call), &events_of(call))
+            .persist(&SealedObservation::Ready(sealed_of(call)), &events_of(call))
             .expect("persist")
     }
 
@@ -160,7 +170,7 @@ impl Bench {
         }
         sealed.path = media.to_str().expect("utf-8").to_owned();
         self.sidecars
-            .persist(&sealed, &events_of(call))
+            .persist(&SealedObservation::Ready(sealed), &events_of(call))
             .expect("persist")
     }
 
@@ -187,7 +197,7 @@ impl Bench {
 /// The golden `pending_for_camera` item for a recovery (fields the sidecar
 /// carries; the reader's absent optional fields are the golden's nulls).
 fn view(recovery: &Recovery) -> Value {
-    let sealed = &recovery.sealed;
+    let sealed = ready(recovery);
     let contributors: Vec<Value> = sealed
         .contributors
         .iter()
@@ -261,9 +271,10 @@ fn persist_writes_golden_bytes_in_a_private_directory() {
 
     let refused = call(&cases, "unknown-contributor");
     assert_eq!(refused["result"]["verdict"], "refused");
-    let outcome = bench
-        .sidecars
-        .persist(&sealed_of(refused), &events_of(refused));
+    let outcome = bench.sidecars.persist(
+        &SealedObservation::Ready(sealed_of(refused)),
+        &events_of(refused),
+    );
     assert!(
         matches!(outcome, Err(SealedError::UnknownRef)),
         "{outcome:?}"
@@ -341,7 +352,7 @@ fn replay_publishes_in_file_name_order_and_a_second_replay_does_nothing() {
                 recovery.sidecar_path.is_file(),
                 "retired only after the PUT"
             );
-            seen.borrow_mut().push(recovery.sealed.clip_id.clone());
+            seen.borrow_mut().push(recovery.sealed.clip_id().to_owned());
             ReplayOutcome::<(), ()>::Published(())
         })
         .expect("replay");
@@ -356,7 +367,10 @@ fn replay_publishes_in_file_name_order_and_a_second_replay_does_nothing() {
     let again = bench
         .sidecars
         .replay(&camera, |recovery| -> ReplayOutcome<(), ()> {
-            panic!("second replay issued a PUT for {}", recovery.sealed.clip_id)
+            panic!(
+                "second replay issued a PUT for {}",
+                recovery.sealed.clip_id()
+            )
         })
         .expect("second replay");
     assert_eq!(again, ReplayReport::default());
@@ -375,14 +389,14 @@ fn replay_one_invokes_the_publisher_without_original_media() {
             .expect("pending");
         assert_eq!(pending.recoveries.len(), 1);
         let recovery = &pending.recoveries[0];
-        assert!(!Path::new(&recovery.sealed.path).exists());
+        assert!(!Path::new(&ready(recovery).path).exists());
         let mut invoked = false;
         let outcome = bench
             .sidecars
             .replay_one(recovery, |recovery| {
                 invoked = true;
-                assert_eq!(recovery.sealed.clip_id, A);
-                assert!(!Path::new(&recovery.sealed.path).exists());
+                assert_eq!(recovery.sealed.clip_id(), A);
+                assert!(!Path::new(&ready(recovery).path).exists());
                 assert!(
                     recovery.sidecar_path.is_file(),
                     "owner still holds evidence"
@@ -419,7 +433,7 @@ fn publish_recovery(
     queue: &DeliveryQueue,
     recovery: &Recovery,
 ) -> ReplayOutcome<Published, PublishError> {
-    let sealed = &recovery.sealed;
+    let sealed = ready(recovery);
     let events: BTreeMap<String, ContributorEvent> = recovery
         .events
         .iter()
@@ -557,7 +571,7 @@ fn modelled_publication_interruptions_replay_to_one_clip() {
                         match kill {
                             Kill::AfterStage | Kill::AfterMediaMove => {
                                 let reservation = store
-                                    .reserve(&recovery.camera_id, &recovery.sealed.clip_id)
+                                    .reserve(&recovery.camera_id, recovery.sealed.clip_id())
                                     .expect("reservation");
                                 let target = if matches!(kill, Kill::AfterStage) {
                                     reservation.artifact_path()
@@ -565,7 +579,7 @@ fn modelled_publication_interruptions_replay_to_one_clip() {
                                     fs::create_dir(&reservation.final_dir).expect("final dir");
                                     reservation.final_dir.join(MEDIA_FILE)
                                 };
-                                fs::rename(&recovery.sealed.path, target).expect("move media");
+                                fs::rename(&ready(recovery).path, target).expect("move media");
                                 panic!("killed after the media move");
                             }
                             Kill::AfterPutBeforeRetire => {
@@ -592,7 +606,7 @@ fn modelled_publication_interruptions_replay_to_one_clip() {
             .pending(&camera)
             .expect("pending after crash");
         assert_eq!(pending.recoveries.len(), 1);
-        let original = Path::new(&pending.recoveries[0].sealed.path);
+        let original = Path::new(&ready(&pending.recoveries[0]).path);
         match kill {
             Kill::AfterPersist | Kill::BeforePut => assert!(original.is_file()),
             Kill::AfterStage => {
@@ -656,7 +670,7 @@ fn completed_terminal_without_original_media_preserves_ack_and_retires_sidecar()
         ReplayOutcome::Published(published) => published,
         outcome => panic!("initial publication: {outcome:?}"),
     };
-    assert!(!Path::new(&recovery.sealed.path).exists());
+    assert!(!Path::new(&ready(recovery).path).exists());
     assert!(sidecar.is_file(), "crash window before retirement");
     let marker = store.clip_dir(A).join(TERMINAL_MARKER);
     let marker_bytes = fs::read(&marker).expect("marker");
@@ -720,7 +734,7 @@ fn malformed_terminal_without_original_media_keeps_the_sidecar() {
             ReplayOutcome::Published(published) => published,
             outcome => panic!("initial publication: {outcome:?}"),
         };
-        assert!(!Path::new(&recovery.sealed.path).exists());
+        assert!(!Path::new(&ready(recovery).path).exists());
         assert!(!store.staging_dir(A).join(ARTIFACT_FILE).exists());
         let marker = store.clip_dir(A).join(TERMINAL_MARKER);
         fs::write(&marker, b"{").expect("malformed marker");
@@ -805,7 +819,7 @@ fn failed_put_keeps_the_sidecar_and_continues() {
     let report = bench
         .sidecars
         .replay(&camera, |recovery| {
-            if recovery.sealed.clip_id == A {
+            if recovery.sealed.clip_id() == A {
                 ReplayOutcome::Failed("relay refused")
             } else {
                 ReplayOutcome::Published(())
@@ -825,7 +839,7 @@ fn failed_put_keeps_the_sidecar_and_continues() {
     bench
         .sidecars
         .replay(&camera, |recovery| {
-            seen.borrow_mut().push(recovery.sealed.clip_id.clone());
+            seen.borrow_mut().push(recovery.sealed.clip_id().to_owned());
             ReplayOutcome::<(), ()>::Published(())
         })
         .expect("later replay");
@@ -914,7 +928,7 @@ fn persisted_events(bench: &Bench, clip_id: &str) -> BTreeMap<String, SealedEven
     let recovery = pending
         .recoveries
         .iter()
-        .find(|recovery| recovery.sealed.clip_id == clip_id)
+        .find(|recovery| recovery.sealed.clip_id() == clip_id)
         .unwrap_or_else(|| panic!("{clip_id} was not recovered"));
     recovery.events.clone()
 }
@@ -934,7 +948,10 @@ fn absent_probability_persists_as_null_and_zero_stays_present() {
         ("evt-zero".to_owned(), zero.clone()),
         ("evt-present".to_owned(), present.clone()),
     ]);
-    let path = bench.sidecars.persist(&clip, &events).expect("persist");
+    let path = bench
+        .sidecars
+        .persist(&SealedObservation::Ready(clip), &events)
+        .expect("persist");
     let bytes = fs::read(&path).expect("sidecar bytes");
     let document: Value = serde_json::from_slice(&bytes).expect("sidecar JSON");
     let written: Vec<&Value> = document["events"]
@@ -960,7 +977,9 @@ fn nonfinite_probability_is_refused_and_invalid_shapes_stay_malformed() {
     let bench = Bench::new("invalid-probability");
     let clip = clip_with("sealed-nonfinite", &["evt-nan"]);
     let events = BTreeMap::from([("evt-nan".to_owned(), event_with("evt-nan", Some(f64::NAN)))]);
-    let refused = bench.sidecars.persist(&clip, &events);
+    let refused = bench
+        .sidecars
+        .persist(&SealedObservation::Ready(clip), &events);
     assert!(
         matches!(refused, Err(SealedError::NonFinite)),
         "{refused:?}"
@@ -978,7 +997,7 @@ fn nonfinite_probability_is_refused_and_invalid_shapes_stay_malformed() {
     let legal_events = BTreeMap::from([("evt-zero".to_owned(), event_with("evt-zero", Some(0.0)))]);
     let legal_path = bench
         .sidecars
-        .persist(&legal, &legal_events)
+        .persist(&SealedObservation::Ready(legal), &legal_events)
         .expect("legal persist");
     let legal_bytes = fs::read(&legal_path).expect("legal bytes");
     let document: Value = serde_json::from_slice(&legal_bytes).expect("legal JSON");
@@ -1082,7 +1101,7 @@ fn python_writes_absent_and_zero_probability_with_the_same_sidecar_bytes() {
     ]);
     let rust_path = bench
         .sidecars
-        .persist(&clip, &events)
+        .persist(&SealedObservation::Ready(clip.clone()), &events)
         .expect("rust persist");
     let rust_bytes = fs::read(&rust_path).expect("rust bytes");
     fs::remove_file(&rust_path).expect("clear rust sidecar");

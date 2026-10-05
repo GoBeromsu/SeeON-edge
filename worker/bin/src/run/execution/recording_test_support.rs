@@ -4,7 +4,9 @@ use crate::clips::manifest::{ClipMetadata, Contributor};
 use crate::clips::publish::{MANIFEST_FILE, PublishError, TERMINAL_MARKER};
 use crate::clips::recorder::{Boundary, ClipSealed};
 use crate::clips::reserve::{ReservePool, SaveOutcome};
-use crate::clips::sealed::{SealedClip, SealedContributor, SealedEvent, SealedSidecars};
+use crate::clips::sealed::{
+    SealedClip, SealedContributor, SealedEvent, SealedObservation, SealedSidecars,
+};
 use crate::clips::store::ClipStore;
 use crate::clips::time::Utc;
 use crate::delivery::DeliveryQueue;
@@ -72,7 +74,7 @@ impl SaveFixture {
                     event_ref: EVENT_REF.into(),
                     detected_at,
                 }],
-                path: source,
+                path: Some(source),
             },
             now: detected_at.plus_millis(60_000),
         }
@@ -89,17 +91,24 @@ impl SaveFixture {
         .save(CLIP_ID, &self.sealed, self.now)
     }
 
-    fn observation(&self) -> SealedClip {
-        SealedClip {
+    fn observation(&self) -> SealedObservation {
+        SealedObservation::Ready(SealedClip {
             clip_id: CLIP_ID.into(),
-            path: self.sealed.path.to_str().unwrap().into(),
+            path: self
+                .sealed
+                .path
+                .as_deref()
+                .expect("reported fixture media")
+                .to_str()
+                .unwrap()
+                .into(),
             duration_ms: i64::try_from(self.sealed.duration_ms).unwrap(),
             boundary: "extension_raced".into(),
             contributors: vec![SealedContributor {
                 event_ref: EVENT_REF.into(),
                 detected_at: self.sealed.contributors[0].detected_at.iso_micros(),
             }],
-        }
+        })
     }
 
     pub(super) fn persist_observation(&self) -> PathBuf {
@@ -130,7 +139,10 @@ impl SaveFixture {
     }
 
     pub(super) fn assert_retained(&self) {
-        assert_eq!(std::fs::read(&self.sealed.path).unwrap(), INVALID_MEDIA);
+        assert_eq!(
+            std::fs::read(self.sealed.path.as_deref().unwrap()).unwrap(),
+            INVALID_MEDIA
+        );
         let pending = self.sidecars.pending("camera-real").unwrap();
         assert!(pending.malformed.is_empty());
         assert_eq!(pending.recoveries.len(), 1);
