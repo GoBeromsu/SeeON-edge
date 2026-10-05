@@ -9,11 +9,20 @@ Define every cross-layer **protocol, constant, enum, and shared data shape** her
 - `model.py`: model module protocol and shared confidence defaults.
 - `artifacts.py`: model/weight path helpers.
 - `tracker.py`: shared tracker protocol surface.
-- `event.py`: event severity, levels, and frontend event-type mapping.
+- `event.py`: event severity, levels, `EVENT_TYPE_REGISTRY`, and frontend event-type mapping.
+- `relay.py`: `AlertEventType`, `EventApiPayload`, relay alert/heartbeat payloads.
+- `runner.py`: runner result kinds, `<X>Output` aliases, `RunnerProtocol`.
+- `worker_config.py`: `PulledWorkerConfig` family, `WORKER_CONFIG_PATH` / `WORKER_RESTART_PATH`, version keys.
+- `replay_trace.py`: versioned replay rows + `encode_*` / `decode_*` (document and JSONL).
+- `model_selection.py`: desired/applied model selection, canonical digest, receipt identity validators.
+- `edge_provisioning_*.py` (v1, models, parse, codec, enrollment, response, validation): Hub enrollment and topology vocabulary. `edge_provisioning_v1.py` is the entry.
+- `edge-provisioning-v1/`: byte-frozen `contract-fixtures.json` + `provenance.json`. Synthetic tokens keep the upstream digest (`.gitleaksignore`).
+- `decode_diagnostics.py` / `encode_diagnostics.py`: backend names, fallback reasons, selection shapes.
+- `__init__.py` re-exports 34 names; `tests/test_contract_symbol_exports.py` pins them.
 
 ## Imports
 
-Allowed: standard library and local `contracts` modules.
+Allowed: standard library and local `contracts` modules. Import-linter leaf contract forbids `backend`, `worker`, `shared.events`. mypy `strict` on `contracts.*`.
 
 Forbidden: `features`, `sources`, `runners`, `perception`, `domains`, `runtime`, `events`, `api`, `demo`, `training`, model loading, camera I/O, network I/O.
 
@@ -26,14 +35,16 @@ Forbidden: `features`, `sources`, `runners`, `perception`, `domains`, `runtime`,
 - **Enums**: `StrEnum`, PascalCase with an axis suffix that reads at the call site (`DetectionEventType`, `Level`, `<Concept>State`); members are `UPPER_SNAKE` with lowercase string values.
 - **Debug/telemetry**: `<Concept>DebugSnapshot`.
 - **Constants**: `UPPER_SNAKE_CASE` (`FALL_LABEL_TEXT`, `DEFAULT_FALL_CONFIDENCE_THRESHOLD`).
-- Every module ends with an explicit `__all__`.
+- New modules end with an explicit `__all__`. `frame.py`, `observation.py`, `model.py`, `artifacts.py` predate the rule and have none.
 
 ## Focused Tests
 
 - `tests/test_contract.py`
 - `tests/test_frame_observation_contract.py`
 - `tests/test_events_schema.py`
-- `tests/test_import_dependency_ladder.py`
+- `tests/test_contract_symbol_exports.py`, `tests/test_worker_config_contract.py`, `tests/test_replay_trace_contract.py`
+- `tests/test_edge_provisioning_contract.py`, `tests/test_edge_topology_contract.py`
+- `uv run --group lint lint-imports` and `uv run --group lint mypy contracts shared` (the AST ladder test is gone)
 
 ## Gotchas
 

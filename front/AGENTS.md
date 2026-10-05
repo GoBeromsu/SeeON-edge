@@ -5,12 +5,13 @@ Frontend-wide rules for `front/`. Slice layout lives in `src/AGENTS.md`.
 ## Vite / pnpm
 
 - Package manager is `pnpm@10.32.1`. Commit `pnpm-lock.yaml`. Install with `pnpm --dir front install --frozen-lockfile`.
-- Scripts: `dev` (Vite `--host 0.0.0.0`), `build` (`tsc --noEmit && vite build`), `test` (Vitest), `test:e2e` (Playwright).
+- Scripts: `dev` (Vite `--host 0.0.0.0`), `build` (`tsc --noEmit && vite build`), `lint` (`eslint src`, import-boundary rules only), `test` (Vitest), `test:e2e` (Playwright), `preview`.
 - `@/` maps to `src/`. Skip deep `../../../` imports.
 - Same-origin `/api/v1` is the default. Point the Vite proxy with server env `ML_API_PROXY_TARGET`. That is not a `VITE_` bake.
 - `VITE_ML_API_BASE_URL` is cross-origin hot-reload QA only. It rewrites fetch, MJPEG, clip, and thumbnail URLs together. Leave it unset in Docker and reverse-proxy deploys.
 - `allowedHosts: ['.ts.net']` is tailnet-dev only. Production never reads `vite.config.ts`. FastAPI StaticFiles serves `front/dist` at `/`.
 - One bundler. No CRA, no frontend-owned Node API, no second lockfile.
+- Outside `src/`: `e2e/` (Playwright, `workers: 1`, own Vite on `127.0.0.1:4173`, three viewports), `design-handoff/` (HTML prototype reference; reimplement, never copy markup; `support.js` and `_ds/` are generated, do not edit), `dist/` (build output).
 
 ## API / session
 
@@ -33,7 +34,6 @@ Frontend-wide rules for `front/`. Slice layout lives in `src/AGENTS.md`.
 - Live wall uses `useMjpegStream`: `fetch` plus canvas, Content-Length framed parts, stall reconnect after 3s, exponential backoff. No `<img multipart>`. No timed remount `key`.
 - Offline or offscreen tiles pass `baseUrl: null` and fall back to snapshot. Live fetch streams do not need `_r=` cache-busting.
 
-
 ## Owner UI preferences (2026-09-05, binding)
 
 - Icons and buttons over text. Status such as detection readiness, missing bed region, or overlay subjects is an icon with `aria-label`/`title`, never a sentence or a text pill. Explanatory paragraphs are removed, not shortened.
@@ -45,6 +45,7 @@ Frontend-wide rules for `front/`. Slice layout lives in `src/AGENTS.md`.
 
 - UI change: focused Vitest beside the module (`*.test.ts` / `*.test.tsx`), then `pnpm --dir front build`.
 - `pnpm --dir front test` is jsdom Vitest. `e2e/` is excluded there. Keep Playwright specs out of the Vitest tree.
+- `vite.config.ts` sets `test.fileParallelism: false`: containment for a Vitest 2.1.9 `vi.mock` + `importActual` partial-namespace flake (~1%). Do not add `pool`, `poolOptions`, `maxWorkers`, or `minWorkers`. `src/test/testConfig.test.ts` asserts both from the config AST.
 - `pnpm --dir front test:e2e` is a real local stack. Root CI already deselects real-stack. Playwright is not the merge gate.
 - Tests must not pass by sleep. Subscribe to the state change, act, then await with a bound timeout.
 - `src/test/setup.ts` stubs `HTMLMediaElement.play`. Assert UI states and API URLs, not pixel dumps of frames.
@@ -59,5 +60,5 @@ Frontend-wide rules for `front/`. Slice layout lives in `src/AGENTS.md`.
 - Polling `edge.sqlite3`, worker ports, or clip-store paths from the browser.
 - Silent empty media frames. Keep loading, live/stalled, unavailable, or error visible.
 - `crypto.randomUUID()` on LAN HTTP. That API is missing on insecure origins and will crash the tree. Use `generateUuidV4`.
-- Client-only wizard progress in `localStorage`. Resume from server-known connection and camera state.
+- Client-only wizard progress in `localStorage`. Resume from server-known connection and camera state. The one `localStorage` key in the SPA is the clip overlay toggle preference (`clip-overlay-targets`).
 - Guessing clip size, duration, or storage gauges when the API omits the field. Show guidance. Do not estimate.

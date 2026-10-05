@@ -1,19 +1,15 @@
 # FEATURE SLICES
 
 Vertical cut: one capability, one package. Router and store live together.
-Sibling `*_router.py` files stay in that package. `create_app` is the only
-mounter. `qa/` is retired and is not a runtime owner.
+Sibling `*_router.py` files stay in that package. `create_app` is the only mounter.
 ## Layout
 
-Export `router`. End the router module with `__all__` that includes it.
-Do not `include_router` a sibling slice from inside this tree.
+Router modules export `router` in `__all__`. Never `include_router` a sibling slice here.
 Owner constructs (`from_env()` or lifespan) and exposes a getter that
 writes `app.state` once. Dependents call the getter. They never
 `from_env()` a second copy of someone else's store.
-Lifespan pre-builds `camera_registry`, in-memory `heartbeat_store`,
-`runtime_status_store`, and (when `ML_API_EXECUTION_RECORDS_ENABLED`)
-`execution_record_store`. Clip listing is compact-authority on request. Other
-stores may lazy-open so `no_lifespan` tests still boot. Catalog is optional:
+Stores lifespan does not pre-build may lazy-open so `no_lifespan` tests still
+boot. Catalog is optional:
 `get_catalog_store` returns `None` and sets `catalog_error` when the file
 cannot open. Relay still accepts the alert when the Hub push carries
 durability. On the local-accept path (no Hub mapping / no client) a
@@ -23,6 +19,8 @@ terminal receipt deletes the worker's only other copy (`_local_accept_body`).
 ## Cross-slice graph
 
 Read or call. Do not construct the other slice's store.
+- `audit` owns `AuditStore`. Governed mutations in any slice append through
+  `audit.http.append_transactional` / `append_governed` with a catalog `AuditAction`.
 - `relay` consumes cameras (`worker_config_snapshot`, registry), clips
   catalog, and status stores. No store of its own.
 - `diagnostics` owns `execution_record_store` and the engineer query
@@ -45,9 +43,8 @@ Read or call. Do not construct the other slice's store.
   writes `app.state.pulled_config`.
 - `streams` lives in cameras. It proxies worker MJPEG and duplicates the
   relay header constant so it does not import cameras-router privates.
-Hard edges: no `backend.app.main` imports. Connection is the only slice
-that imports `lifespan`. `qa` imports nothing under `features/`; nothing
-here imports `qa` until its router exists.
+Hard edges: no `backend.app.main` imports. Only connection imports `lifespan`.
+No `qa/` package exists (retired); nothing imports one.
 ## HTTP, stores, tests
 
 Parent locks BaseModel shape. Schemas sit next to the router or in slice
@@ -61,16 +58,15 @@ A route that serves bytes registers `methods=HEAD_METHODS` (`shared/head_respons
 bare `@router.get` 404s the probe a player sends before it opens the media.
 One endpoint serves both methods so headers cannot drift; drop the body last
 with `drop_body_for_head`, and never read a file a HEAD will not send.
-API actor writes the compact application tables and the six schema-19
-execution-record tables. Never INSERT retired
-`control_*`, `qa_*`, `runtime_*`, `evidence_*`, or `derivative_*` families.
-Auth has no SQLite row; sessions live in
-`shared/dashboard_auth.py`. Incomplete enrollment deletes ingest and evidence
+Never INSERT retired `control_*`, `qa_*`, `runtime_*`, `evidence_*`, or
+`derivative_*` families; the `edge_db` authorizer denies undeclared tables.
+Auth sessions are in-memory in `shared/dashboard_auth.py`; credentials persist
+through `shared/dashboard_credentials.py`. Incomplete enrollment deletes ingest and evidence
 attrs and sets `backend_configured=False`. Handlers do not
 build `EdgeIngestClient`. Drive the slice through
 `create_app(lifespan=no_lifespan)` plus an injected store, or full lifespan
 when listing or refresh is the subject. Slice tests: `tests/test_api_*.py`,
-`tests/test_connection_*.py`, `tests/test_clip_listing_*.py`. New
+`tests/test_connection_*.py`, `tests/test_clip_listing_*.py`, `tests/test_audit_*.py`. New
 `features.*` import: `uv run --group lint lint-imports`.
 ## Anti-patterns
 
@@ -80,5 +76,4 @@ top-level folder for the same capability. Operator UX growing inside
 local registry id on a Hub-bound payload. Worker-config keeps unmapped cameras
 and uses `backend_camera_id` or the local id so ingestion never stops. Raw path joins into the clip store (use
 `clips/descriptor_files.py` or evidence `_verified_media`, O_NOFOLLOW).
-Teaching retired QA HTTP from `create_app`.
-Polling `edge.sqlite3` for worker progress; HTTP relay is the signal.
+Teaching retired QA HTTP from `create_app`. Polling `edge.sqlite3` for worker progress; HTTP relay is the signal.

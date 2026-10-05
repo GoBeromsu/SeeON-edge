@@ -5,12 +5,12 @@ HTTP + DTO boundary. Features call this. Screens stay out.
 ## Ownership
 - `client.ts`: dashboard JSON verbs. Re-exports types and session URL helpers.
 - `topologyClient.ts`: floors, rooms, sync, preview, confirm.
-- `clipPagination.ts`: paged `/clips` plus one-clip metadata.
+- `clipPagination.ts`: paged `/clips` plus one-clip metadata. `clipCursor.ts`: opaque keyset cursor encode/decode + descending key compare. `clipEventFacet.ts`: `toEventFacet`.
 - `types.ts`, `topologyTypes.ts`, `clipPaginationTypes.ts`: DTOs only.
 - `*Normalizer.ts` + `normalizerFields.ts`: parse or throw. Barrel is `normalizers.ts`.
 - `http.ts` + `session.ts`: `requestJson`, `HttpError`, 401/403 bus, `getApiBase()`, media URLs.
 - `usePollingResource.ts`: shared poller plus named resource hooks.
-- `useMjpegStream.ts`: `fetch` + canvas MJPEG hook (Content-Length framed parts, 3s stall reconnect, backoff). Used by operations `LiveStreamPanel` and `shared/ui/BedZoneRecognitionPanel`.
+- `useMjpegStream.ts`: `fetch` + canvas MJPEG hook (Content-Length framed parts, 3s stall reconnect, backoff). Sole consumer is operations `LiveStreamPanel`; `shared/ui/BedZoneRecognitionPanel` uses a still snapshot instead.
 
 ## client.ts
 All traffic goes through `requestJson`. Paths are `/api/v1`-relative. Encode ids.
@@ -19,7 +19,8 @@ Connection writes send facility code, token, and installation ref. Hub address s
 `saveDetectionSettings` is a full replace. Send every domain.
 
 Narrow failures here: `cameraProbeFailureDetail` (422), `cameraDuplicateDetail` (409), `bedZoneRecognitionFailureDetail` (422). Features don't parse `HttpError.body`.
-New 200 envelopes get a normalizer. Don't add another `as Type` on `requestJson`. Policies, incidents, and artifacts still cast. Shrink that set.
+New 200 envelopes get a normalizer. Don't add another `as Type` on `requestJson`. Only the detection-policy catalog and diff still cast. Shrink that set.
+Clip analysis verbs (`fetchClipAnalysis`, `triggerClipAnalysis`, `cancelClipAnalysis`) go through `normalizeClipAnalysisStatus`. `normalizeClipArtifacts` rejects unknown keys so a retired derivative field never reaches the UI.
 
 ## types
 Projected API shapes. `Camera.rtsp_url_masked` only, never a live RTSP secret.
@@ -57,7 +58,8 @@ Worker relay tokens, RTSP secrets, clip-store paths, and Hub credentials stay ou
 Connection test may send unsaved form values. Persist is a separate `PUT`.
 
 ## tests
-Colocate: `client.test.ts`, `normalizers.test.ts`, `usePollingResource.test.tsx`, `useMjpegStream.test.ts`, `topologyClient.test.ts`, `clipPagination.test.ts`, `clipThumbnail.test.ts`.
+Colocate: `client.test.ts`, `normalizers.test.ts`, `usePollingResource.test.tsx`, `useMjpegStream.test.ts`, `topologyClient.test.ts`, `clipPagination.test.ts`, `clipCursor.test.ts`, `clipAnalysisNormalizer.test.ts`, `clipThumbnail.test.ts`.
+`clientRetirement.test.ts` stays its own file. `src/test/importStructure.test.ts` pins it and `client.test.ts` to exactly one static request for `@/shared/api/client` and no dynamic one.
 Client tests reject contract-invalid 200 envelopes. Normalizer tests stay table-style.
 Polling tests use `createRoot` + `act`. Subscribe, act, then await. No `sleep`.
 Assert URLs, statuses, and DTO fields. Don't pin Korean copy unless it's a sentinel.
