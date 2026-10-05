@@ -3,11 +3,17 @@
 from __future__ import annotations
 
 import json
-import math
 from collections.abc import Mapping
 from dataclasses import asdict, dataclass
 
 from worker.pipeline.output.evidence.evidence_outbox_types import EvidenceReasonCode
+from worker.pipeline.output.evidence.flow_sealed_json import (
+    event_payload,
+    finite_number,
+    reject_constant,
+    text_field,
+    unique_object,
+)
 from worker.pipeline.output.evidence.smart_record_actor import (
     ClipBoundary,
     ClipContributor,
@@ -115,7 +121,7 @@ def encode_sidecar(
             "camera_id": camera_id,
             "boundary": observation.boundary,
             "contributors": [asdict(item) for item in contributors],
-            "events": [_event_payload(event, exact=False) for event in ordered],
+            "events": [event_payload(event, exact=False) for event in ordered],
         }
     else:
         if not camera_id.strip():
@@ -126,7 +132,7 @@ def encode_sidecar(
             "duration_ms": observation.duration_ms,
             "boundary": observation.boundary,
             "contributors": [asdict(item) for item in contributors],
-            "events": [_event_payload(event, exact=True) for event in ordered],
+            "events": [event_payload(event, exact=True) for event in ordered],
             "native_result": observation.native_result,
             "contains_video": observation.contains_video,
         }
@@ -142,7 +148,7 @@ def decode_sidecar(
     """Strictly read one sidecar into its observation, events and camera."""
     try:
         document = json.loads(
-            data.decode("utf-8"), object_pairs_hook=_unique_object, parse_constant=_no_constant
+            data.decode("utf-8"), object_pairs_hook=unique_object, parse_constant=reject_constant
         )
         observation, camera_id, rows = _observation(document)
         events = _events(rows, observation, camera_id)
@@ -160,17 +166,17 @@ def _observation(document: object) -> tuple[FlowSealedObservation, str, object]:
         fields = document["unavailable"]
         if len(document) != 1 or not isinstance(fields, dict) or set(fields) - _UNAVAILABLE_KEYS:
             raise ValueError("unavailable envelope has unknown fields")
-        camera_id = _text(fields, "camera_id")
+        camera_id = text_field(fields, "camera_id")
         if not camera_id.strip():
             raise ValueError("unavailable observation has no attributed camera")
         path = fields.get("path")
         if "path" in fields and type(path) is not str:
             raise ValueError("unavailable path is not a string")
         unavailable = ClipSealedUnavailable(
-            clip_id=_text(fields, "clip_id"),
+            clip_id=text_field(fields, "clip_id"),
             duration_ms=fields["duration_ms"],
             contributors=_contributors(fields["contributors"]),
-            boundary=_text(fields, "boundary"),  # type: ignore[arg-type]
+            boundary=text_field(fields, "boundary"),  # type: ignore[arg-type]
             native_result=fields["native_result"],
             contains_video=fields["contains_video"],
             path=path,
@@ -182,22 +188,24 @@ def _observation(document: object) -> tuple[FlowSealedObservation, str, object]:
     if type(duration_ms) is not int or duration_ms not in _I64_RANGE:
         raise ValueError("ready duration is not a signed 64-bit integer")
     sealed = ClipSealed(
-        clip_id=_text(document, "clip_id"),
-        path=_text(document, "path"),
+        clip_id=text_field(document, "clip_id"),
+        path=text_field(document, "path"),
         duration_ms=duration_ms,
         contributors=_contributors(document["contributors"]),
-        boundary=_text(document, "boundary"),  # type: ignore[arg-type]
+        boundary=text_field(document, "boundary"),  # type: ignore[arg-type]
     )
     if not valid_clip_id(sealed.clip_id):
         raise ValueError("ready clip id is invalid")
-    return sealed, _text(document, "camera_id"), document["events"]
+    return sealed, text_field(document, "camera_id"), document["events"]
 
 
 def _contributors(value: object) -> tuple[ClipContributor, ...]:
     if not isinstance(value, list):
         raise TypeError("contributors are not an array")
     return tuple(
-        ClipContributor(event_ref=_text(item, "event_ref"), detected_at=_text(item, "detected_at"))
+        ClipContributor(
+            event_ref=text_field(item, "event_ref"), detected_at=text_field(item, "detected_at")
+        )
         for item in value
     )
 
@@ -215,13 +223,13 @@ def _events(
     events: dict[str, BusinessEvent] = {}
     for item in rows:
         event = BusinessEvent(
-            domain=_text(item, "domain"),
-            event_type=_text(item, "event_type"),
-            identity=_text(item, "identity"),
-            camera_id=_text(item, "camera_id"),
-            facility_id=_text(item, "facility_id"),
-            time_sec=_finite(item["time_sec"]),
-            probability=None if item["probability"] is None else _finite(item["probability"]),
+            domain=text_field(item, "domain"),
+            event_type=text_field(item, "event_type"),
+            identity=text_field(item, "identity"),
+            camera_id=text_field(item, "camera_id"),
+            facility_id=text_field(item, "facility_id"),
+            time_sec=finite_number(item["time_sec"]),
+            probability=None if item["probability"] is None else finite_number(item["probability"]),
         )
         identity = str(event.identity)
         if (
@@ -255,54 +263,6 @@ def _attributed_camera(
             raise ValueError("sealed Flow clip attribution is contradictory")
         identities.add(identity)
     return events[0].camera_id if events else ""
-
-
-def _event_payload(event: BusinessEvent, *, exact: bool) -> dict[str, object]:
-    """Keep only the immutable event facts publication needs, never pixels.
-
-    The unavailable arm writes numbers as floats, the shared schema's types;
-    the ready arm keeps its established bytes.
-    """
-    probability = event.probability
-    return {
-        "domain": event.domain,
-        "event_type": event.event_type,
-        "identity": str(event.identity),
-        "camera_id": event.camera_id,
-        "facility_id": event.facility_id,
-        "time_sec": _number(event.time_sec) if exact else event.time_sec,
-        "probability": (_number(probability) if exact and probability is not None else probability),
-    }
-
-
-def _text(value: object, key: str) -> str:
-    if not isinstance(value, dict) or type(value.get(key)) is not str:
-        raise ValueError(f"{key} is not a string")
-    return value[key]
-
-
-def _finite(value: object) -> float:
-    """Validate a finite JSON number, returning it exactly as read."""
-    if type(value) not in (int, float) or not math.isfinite(value):  # type: ignore[arg-type]
-        raise ValueError("value is not a finite number")
-    return value  # type: ignore[return-value]
-
-
-def _number(value: object) -> float:
-    return float(_finite(value))
-
-
-def _unique_object(pairs: list[tuple[str, object]]) -> dict[str, object]:
-    result: dict[str, object] = {}
-    for key, value in pairs:
-        if key in result:
-            raise ValueError("duplicate JSON key")
-        result[key] = value
-    return result
-
-
-def _no_constant(value: str) -> object:
-    raise ValueError(f"non-finite JSON constant {value}")
 
 
 __all__ = [
