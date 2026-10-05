@@ -11,7 +11,7 @@ Nothing imports it. `backend` is forbidden. Relay HTTP only.
 - `worker.py`: `WorkerRuntime`. Composes one Flow media plane, per-camera CPU
   policy state, evidence, telemetry, relay, and shutdown.
 - `flow/`: Flow media-plane lifecycle, metadata admission, policy pump, and
-  evidence handoff. The SDK owns capture, decode, inference, and tracking.
+  evidence handoff. See `flow/AGENTS.md`.
 - `bootstrap.py`: named boot stages. It refuses activation until the deployed
   nvinfer engine matches the configured batch.
 - `profile/`: `flow` is the only production profile; unknown or absent profile
@@ -22,8 +22,14 @@ Nothing imports it. `backend` is forbidden. Relay HTTP only.
 - `telemetry/`: `StatusStore`, `WorkerDiagnostics`, and `RuntimeStatusSender`.
   Local snapshot can grow; relay wire stays frozen.
 - `faults/`: one first-fault record, stop every loop, `os._exit(4)`.
-- `lease.py`: advisory flock at `~/.local/state/ml-worker/.gpu.lease`.
+- `lease.py`, `state_dir.py`: advisory flock `.gpu.lease` under the state dir
+  (`--state-dir`, default `~/.local/state/ml-worker`; no env override).
 - `watchdog.py`: hung Flow work drives the same `FaultHandler` path.
+- `clip_analysis_*.py`: one-at-a-time bounded subprocess supervision for stored
+  clip re-analysis (queue, admission, child process, boot catch-up).
+- `model_composition.py`: shared component graph and pool across cameras.
+- `execution_records.py`: composes the optional execution-record export path.
+- `nvidia_bed_zone_recognizer.py`: bounded CPU on-demand bed segmentation.
 
 `worker/tools/edge_engine_build.py` builds the engine before source activation.
 Boot never performs a lazy build. Source-open faults are camera-local; media
@@ -54,8 +60,9 @@ path or refuse boot.
 
 `worker/__main__.py` owns argparse and exit codes and constructs `WorkerRuntime`
 from `worker.runtime.worker` directly. Keep `--config`, `--check-config`,
-`--heartbeat-on-start`, `--max-frames-per-camera`, `--backfill-thumbnails`, and
-signal shutdown. Exit codes: 0 clean, 1 generic, 2 config, 3 refuse-to-start,
+`--heartbeat-on-start`, `--max-frames-per-camera`, `--state-dir`, and signal
+shutdown. Containers must pass `--state-dir` as the mounted volume, or pending
+evidence dies with the container layer. Exit codes: 0 clean, 1 generic, 2 config, 3 refuse-to-start,
 4 fatal accelerator. `--check-config` has no model, camera, or relay side effect.
 Production pulls from the baked relay plus `RELAY_TOKEN`. `RELAY_URL` is retired.
 

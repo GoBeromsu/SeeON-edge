@@ -1,11 +1,11 @@
 # APP-LEVEL ROUTES
 
-Own the leftover compatibility/health HTTP surface: two k8s-style probes plus two read-only GETs. Product capabilities do not land here.
+Own the leftover compatibility/health HTTP surface: three unversioned probes (live, ready, release identity) plus two read-only GETs. Product capabilities do not land here.
 
 ## Local Ownership
 
 - `health.py` exports two routers, not one.
-  - `probe_router`: unversioned `/health/live` (always `{"status":"ok"}`) and `/health/ready` (reads `app.state.readiness`; 503 while booting).
+  - `probe_router`: unversioned `/health/live` (always `{"status":"ok"}`) and `/health/ready` (reads `app.state.readiness`; 503 while booting), plus `/health/release-identity` returning `format` (`EDGE_DATABASE_FORMAT_IDENTITY`) and `edge_database_schema_version` from `shared.release_identity`. The worker pairs against it (`worker/runtime/config/release_pair.py`).
   - `router`: versioned `GET /api/v1/health`. Legacy pairing dump: gateway ready/booting, relay token present, ingest client present, registry camera count.
 - `models.py`: `GET /api/v1/models`. Static gateway metadata (`service=ml-api`, `role=gateway`, `ml=external-worker`) plus the same relay configured/count snapshot.
 - `__init__.py`: re-exports `health` and `models` only.
@@ -26,7 +26,7 @@ Keep this package tiny. A frozen compatibility GET or a process probe can stay. 
 
 ## Imports
 
-Allowed: FastAPI, Pydantic, `backend.app.features.cameras.store` (read-only `CameraRegistryStore` + `registry_expected_cameras`), `app.state` fields lifespan already set.
+Allowed: FastAPI, Pydantic, `shared.release_identity` constants, `backend.app.features.cameras.store` (read-only `CameraRegistryStore` + `registry_expected_cameras`), `app.state` fields lifespan already set.
 
 Forbidden: `worker`, `training`, camera open, model load/train, store writes, collaborator construction.
 
@@ -36,7 +36,7 @@ Handlers only `getattr` and count. Lifespan owns construction. Keep the cameras-
 
 - `tests/test_serving_health.py`: live 200, ready 503 while booting, ready 200 after lifespan, unwritable catalog still ready, no ML runtime on `app.state`, legacy `/api/v1/health` `camera_count`.
 - `tests/test_serving_models.py`: `/api/v1/models` is gateway metadata only.
-- `tests/test_route_version_contract.py`: probes stay unversioned; product paths stay under `/api/v1`.
+- `tests/test_route_version_contract.py`: probes (incl. release identity) stay unversioned; product paths stay under `/api/v1`.
 - `tests/test_serving_boundary_contract.py`: both paths stay on the public allowlist.
 - `tests/test_serving_status.py` covers `/api/v1/status`, not this package.
 - Boundary: `uv run --group lint lint-imports`
@@ -53,4 +53,4 @@ These handlers have no request body. If you add query or header validation, cove
 
 ## Change Boundary
 
-Probes stay unversioned. `/health` and `/models` stay under `/api/v1`. Handlers stay read-only and thin. New product routes go to a feature slice.
+Probes stay unversioned. The release-identity keys are a worker-read wire; change them only with the worker pair check. `/health` and `/models` stay under `/api/v1`. Handlers stay read-only and thin. New product routes go to a feature slice.

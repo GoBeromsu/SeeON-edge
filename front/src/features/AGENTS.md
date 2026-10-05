@@ -4,8 +4,10 @@ One folder, one capability. `app/pages/` composes these. Parent already names th
 
 ## Ownership
 
-- `operations/`: live wall + room detail. Owns the live wall (MJPEG hook lives in `shared/api/useMjpegStream`), snapshot queue, overlay fetch/set, floor/liveness sort (`operationsModel`), room clip history. `ClipPlayerModal` plays that history. No delete, no artifacts.
-- `events/`: clip catalogue + clean source playback. Owns filters, keyset pager, `useEventsPage` / `useClipMetadata`, `eventTypes` facets (`bed-exit` / `fall` / `other`). Incident review surface retired; persisted sidecar analysis retired; burned boxes exist only in the snapshot JPEG. `ClipPlaybackModal` plays only unmodified source clip bytes and owns artifact state.
+- `operations/`: live wall + room detail. Owns the live wall (MJPEG hook lives in `shared/api/useMjpegStream`), snapshot queue, overlay fetch/set, floor/liveness sort (`operationsModel`), room clip history. `ClipPlayerModal` plays that history. No delete, no artifacts. `OverlayModeControl.tsx` exports `OverlaySelectionControl` + `useCameraOverlaySelection` (server-persisted per camera via `fetchCameraOverlay` / `setCameraOverlay`). `RoomDetail.tsx` is the one module without a sibling test.
+- `events/`: clip catalogue + source playback. Owns filters, keyset pager (`EVENTS_PAGE_SIZE = 48`, `EVENTS_POLL_INTERVAL_MS = 8_000`), `useEventsPage` / `useClipMetadata` / `useClipAnalysis`, `eventTypes` facets (`bed-exit` / `fall` / `other`). Incident review surface retired; derivative and label clients retired (`shared/api/clientRetirement.test.ts`); burned boxes exist only in the snapshot JPEG. `ClipPlaybackModal` plays only unmodified source clip bytes and owns artifact state.
+  - Overlay is client-drawn: `ClipOverlayCanvas` sits over the `<video>` and never alters it. `useClipAnalysis` reads `GET /clips/{id}/analysis`, exposes `trigger` / `cancel`, and re-reads every 2s only while `queued` / `running`. Boxes draw only when state is `available` and `served_timing_identical` is true. Once analysis answers, the video src carries `?media=<served_media_sha256>`.
+  - Person/bed toggles persist in `localStorage` key `clip-overlay-targets` (default both on). That is a UI preference, not nav or wizard state.
 - `settings/`: registry writes and site policy. `CameraSection` orchestrates table + register + edit + delete. Its `DetectionSettingsCard` is the global schedule editor (`saveDetectionSettings`). Also clip storage/export, policy evidence, processing status, and the shared bed-zone panel (`shared/ui/BedZoneRecognitionPanel`).
 - `connection/`: 3-step wizard + `ConnectionSettingsPanel`. `wizardSteps.ts` is pure and server-state only (`enrolled`, camera total, `dirty_registry_version`, `readiness_error`, `preview.confirmed`). SettingsPage mounts the wizard. No page of its own.
 - `cameras/`: topology widgets only. Pairing list, structure editor, confirm dialog. No wizard progress, no registry table. Wizard steps 2 and 3 consume them.
@@ -14,7 +16,7 @@ One folder, one capability. `app/pages/` composes these. Parent already names th
 ## Allowed deps
 
 - `@/shared/api/*`: client, types, http, polling hooks, `useMjpegStream`, topology client, session URL builders.
-- `@/shared/ui/*`: AccessibleDialog, Toast, StatusBadge, ClipThumbnail, AutoplayVideo, AuthGate.
+- `@/shared/ui/*`: AccessibleDialog, Toast, StatusBadge, ClipThumbnail, AutoplayVideo, AuthGate, OverlayTargetIcon, BedZoneRecognitionPanel.
 - `@/shared/format/*`: bytes, uuid. Use `generateUuidV4`, never `crypto.randomUUID`.
 - `@/app/dashboardLocation` types and helpers, only through each slice's `use*Location`.
 - Own-slice modules. React. vitest in tests.
@@ -40,7 +42,7 @@ Enforced by `front/eslint.config.js` (`no-restricted-imports`, one override per 
 
 Same-named cards stay separate files. operations card = status + overlay + navigate. settings card = editor. Don't merge by import.
 
-Clip modals stay separate. operations `ClipPlayerModal` = room-history playback. events `ClipPlaybackModal` plays the unmodified source clip with no overlay; snapshot JPEG carries burned boxes.
+Clip modals stay separate. operations `ClipPlayerModal` = room-history playback. events `ClipPlaybackModal` plays the unmodified source clip with the toggleable overlay canvas; snapshot JPEG carries burned boxes.
 
 Clip paging is keyset only. `GET /clips` takes `limit` plus an opaque `cursor` and answers with `next_cursor`; the order is `(started_at DESC, clip_id DESC)`. `useEventsPage` keeps the walked cursor trail so 이전/다음 stay on exact boundaries. Never reintroduce `offset`, a page-number jump, or a client-side re-sort that ignores the clip-id tiebreak.
 
@@ -52,7 +54,7 @@ Colocate: `Foo.tsx` next to `Foo.test.tsx` (or `.ts`) in the same slice.
 Pure helpers stay table-driven beside the module: `operationsModel`, `wizardSteps`, `connectionSettingsForm`, `detectionSettingsForm`, `eventTypes`, `formatters`, `SnapshotQueue`, `rtspSubstreamGuidance`.
 Page suites live under `app/pages/`, not here.
 `cameras` unit-tests the confirm dialog. Pairing and editor coverage rides `connection` step tests.
-`src/test/` is setup only.
+`src/test/` holds setup and config guards only, never slice tests.
 
 ## Anti-patterns
 
