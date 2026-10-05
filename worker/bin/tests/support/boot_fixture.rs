@@ -311,6 +311,18 @@ pub struct Server {
 }
 impl Server {
     pub fn start(config: Option<Value>, shutdown_started: Option<Arc<AtomicBool>>) -> Self {
+        Self::start_with_identity(
+            json!({"edge_database_schema_version":19,"format":"seeon-edge-v1"}),
+            config,
+            shutdown_started,
+        )
+    }
+
+    pub fn start_with_identity(
+        identity: Value,
+        config: Option<Value>,
+        shutdown_started: Option<Arc<AtomicBool>>,
+    ) -> Self {
         let addresses: Vec<_> = ("ml-api", 8000)
             .to_socket_addrs()
             .expect("isolated ml-api alias required")
@@ -351,7 +363,12 @@ impl Server {
                     assert!(stopped.load(Ordering::SeqCst) || waited.is_err());
                     break;
                 };
-                let request = respond(stream, config.as_ref(), shutdown_started.as_deref());
+                let request = respond(
+                    stream,
+                    &identity,
+                    config.as_ref(),
+                    shutdown_started.as_deref(),
+                );
                 publishing
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -394,6 +411,7 @@ impl Drop for Server {
 
 fn respond(
     stream: TcpStream,
+    identity: &Value,
     config: Option<&Value>,
     shutdown_started: Option<&AtomicBool>,
 ) -> Request {
@@ -437,10 +455,7 @@ fn respond(
         serde_json::from_slice(&body).expect("JSON request")
     };
     let (status, response) = match (method.as_str(), route) {
-        ("GET", IDENTITY_PATH) => (
-            200,
-            json!({"edge_database_schema_version":19,"format":"seeon-edge-v1"}),
-        ),
+        ("GET", IDENTITY_PATH) => (200, identity.clone()),
         ("GET", CONFIG_PATH) => {
             assert_eq!(token.as_deref(), Some(TOKEN));
             match config {

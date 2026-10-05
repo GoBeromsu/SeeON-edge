@@ -19,6 +19,8 @@ use seeon_ml_worker::records::id::sha256_hex;
 use seeon_ml_worker::seam::{Clock, SystemClock};
 use serde_json::Value;
 
+#[path = "support/boot_refusals.rs"]
+mod boot_refusals;
 #[path = "support/boot_fixture.rs"]
 mod fixture;
 use fixture::{CONFIG_PATH, Fixture, IDENTITY_PATH, Request, STATUS_PATH, Server};
