@@ -104,7 +104,7 @@ pub struct ClipSealed {
     pub contains_video: bool,
     pub duration_ms: u64,
     pub boundary: Boundary,
-    /// Sorted by `(detected_at, event_ref)`.
+    /// Sorted by detected_at; equal timestamps preserve admission order.
     pub contributors: Vec<Contributor>,
     /// Present only when the native receipt actually named media.
     pub path: Option<PathBuf>,

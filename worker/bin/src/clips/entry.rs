@@ -40,7 +40,7 @@ pub fn flow_metadata(
 ) -> Result<ClipMetadata, ManifestError> {
     extension
         .contributors
-        .sort_by(|a, b| (a.detected_at, &a.event_ref).cmp(&(b.detected_at, &b.event_ref)));
+        .sort_by_key(|contributor| contributor.detected_at);
     let lookup = |event_ref: &str| events.get(event_ref).ok_or(ManifestError::MissingEvent);
     let (event, earliest) = match extension.contributors.first() {
         Some(primary) => (lookup(&primary.event_ref)?, primary.detected_at),

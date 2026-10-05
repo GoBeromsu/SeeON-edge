@@ -264,8 +264,7 @@ impl<P: RecordPlane> Recorder<P> {
         }
         self.state = State::Finalizing;
         let mut contributors = std::mem::take(&mut self.contributors);
-        contributors
-            .sort_by(|a, b| (a.detected_at, &a.event_ref).cmp(&(b.detected_at, &b.event_ref)));
+        contributors.sort_by_key(|contributor| contributor.detected_at);
         let sealed = ClipSealed {
             ticket,
             result: receipt.result,
