@@ -305,6 +305,7 @@ class WorkerConfigResponse(BaseModel):
 
     registry_version: int = Field(ge=0)
     cameras: list[WorkerCameraConfig]
+    enrolled_facility_id: str | None = Field(default=None, min_length=1, pattern=r"\S")
     config_version: int | None = Field(default=None, ge=0)
     restart_epoch: int | None = Field(default=None, ge=0)
     # Deprecated alias for detection_windows["bed_exit"]; kept for old workers.
@@ -843,6 +844,8 @@ def worker_config_snapshot(
         "registry_version": snapshot["registry_version"],
         "cameras": cameras,
     }
+    if facility_id is not None:
+        response["enrolled_facility_id"] = facility_id
     live_pulled: PulledWorkerConfig | None = None
     if isinstance(pulled, PulledWorkerConfig):
         live_pulled = _live_pulled_config(request, pulled)

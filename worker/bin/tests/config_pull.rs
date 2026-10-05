@@ -536,6 +536,25 @@ fn relay_down_without_lkg_is_a_typed_refusal() {
     assert_eq!(refused, Err(PullError::NoConfig));
 }
 
+#[test]
+fn enrolled_empty_configuration_retains_identity_through_lkg_revalidation() {
+    let state = owned_scratch("enrolled-empty");
+    let payload = serde_json::json!({
+        "registry_version": 1, "cameras": [], "enrolled_facility_id": "genuine-site"
+    });
+    let (server, base) = serve_json(&payload);
+    let fresh = pull_startup_config(&base, RELAY_TOKEN, &state.0).expect("fresh empty config");
+    joined(server);
+    assert_eq!(fresh.config.enrolled_facility_id(), Some("genuine-site"));
+    assert!(fresh.cameras.is_empty());
+    let cached =
+        pull_startup_config(&dead_relay(), RELAY_TOKEN, &state.0).expect("cached empty config");
+    assert_eq!(cached.source, ConfigSource::Lkg);
+    assert_eq!(cached.payload, fresh.payload);
+    assert_eq!(cached.config.enrolled_facility_id(), Some("genuine-site"));
+    assert!(cached.cameras.is_empty());
+}
+
 // Python `load_worker_config_from_relay` (`config_pull.py:139-158`): the
 // save of an older fresh pull is refused by the newer stored record, the
 // stored payload fails re-validation, so `WorkerConfigLkgStore.clear`

@@ -6,12 +6,18 @@ use std::time::{Duration, Instant};
 
 use seeon_ml_worker::config::pull::{ConfigSource, PulledConfig};
 use seeon_ml_worker::json::Json;
-use seeon_ml_worker::relay::cameras::{WorkerConfigPayload, policies::resolve_detection_policies};
+use seeon_ml_worker::relay::cameras::{
+    CameraConfigError, WorkerConfigPayload, policies::resolve_detection_policies,
+};
 use seeon_ml_worker::run::BootStatusContext;
 use seeon_ml_worker::run::status::{BootReason, ReportContextError, ReportOutcome};
 use seeon_ml_worker::telemetry::gpu::GpuStatus;
 
 fn config(facilities: &[&str]) -> PulledConfig {
+    config_with_enrollment(facilities, None)
+}
+
+fn config_with_enrollment(facilities: &[&str], enrolled: Option<&str>) -> PulledConfig {
     let cameras: Vec<_> = facilities
         .iter()
         .enumerate()
@@ -21,7 +27,8 @@ fn config(facilities: &[&str]) -> PulledConfig {
         })
         .collect();
     let payload = Json::from(&serde_json::json!({"cameras": cameras,
-        "clip_export_enabled": true, "clip_export_version": 17, "registry_version": 4}));
+        "clip_export_enabled": true, "clip_export_version": 17, "registry_version": 4,
+        "enrolled_facility_id": enrolled}));
     let config = WorkerConfigPayload::parse(&payload).expect("admitted payload");
     let cameras = config.runtime_cameras().expect("admitted roster");
     let ids = cameras
@@ -48,6 +55,39 @@ fn gpu() -> GpuStatus {
         device_name: None,
         captured_at_sec: 12.0,
         nvml_error: None,
+    }
+}
+
+#[test]
+fn enrollment_identity_is_optional_but_strict_when_supplied() {
+    let absent = serde_json::json!({"registry_version": 1, "cameras": []});
+    assert_eq!(
+        WorkerConfigPayload::parse(&Json::from(&absent))
+            .unwrap()
+            .enrolled_facility_id(),
+        None
+    );
+    for value in [serde_json::Value::Null, serde_json::json!(" genuine-site ")] {
+        let mut payload = absent.clone();
+        payload["enrolled_facility_id"] = value.clone();
+        let parsed = WorkerConfigPayload::parse(&Json::from(&payload)).unwrap();
+        assert_eq!(parsed.enrolled_facility_id(), value.as_str());
+        assert!(parsed.runtime_cameras().unwrap().is_empty());
+    }
+    for value in [
+        serde_json::json!(""),
+        serde_json::json!(" \t\n"),
+        serde_json::json!(false),
+        serde_json::json!(17),
+        serde_json::json!([]),
+        serde_json::json!({}),
+    ] {
+        let mut payload = absent.clone();
+        payload["enrolled_facility_id"] = value;
+        assert_eq!(
+            WorkerConfigPayload::parse(&Json::from(&payload)).unwrap_err(),
+            CameraConfigError::Field("enrolled_facility_id")
+        );
     }
 }
 
@@ -83,6 +123,26 @@ fn empty_roster_has_a_typed_unconstructible_report_without_contacting_relay() {
 
 #[test]
 fn admitted_facility_and_export_policy_reach_exactly_one_failure_post() {
+    assert_failure_post(config(&["site-z", "site-a"]), "site-a");
+}
+
+#[test]
+fn enrolled_empty_roster_reports_the_genuine_facility_once() {
+    assert_failure_post(
+        config_with_enrollment(&[], Some("enrolled-site")),
+        "enrolled-site",
+    );
+}
+
+#[test]
+fn camera_facility_selection_is_not_replaced_by_enrollment() {
+    assert_failure_post(
+        config_with_enrollment(&["site-z", "site-a"], Some("enrolled-site")),
+        "site-a",
+    );
+}
+
+fn assert_failure_post(admitted: PulledConfig, expected_facility: &str) {
     let listener = TcpListener::bind("127.0.0.1:0").expect("listener");
     listener.set_nonblocking(true).expect("nonblocking");
     let address = listener.local_addr().expect("address");
@@ -131,19 +191,15 @@ fn admitted_facility_and_export_policy_reach_exactly_one_failure_post() {
         reader.get_mut().write_all(b"HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").expect("response");
         serde_json::from_slice::<serde_json::Value>(&body).expect("JSON")
     });
-    let context = BootStatusContext::for_config(
-        &format!("http://{address}"),
-        "test-token",
-        &config(&["site-z", "site-a"]),
-        10.0,
-    )
-    .expect("report context");
+    let context =
+        BootStatusContext::for_config(&format!("http://{address}"), "test-token", &admitted, 10.0)
+            .expect("report context");
     assert_eq!(
         context.send(BootReason::EngineIdentity, &gpu()),
         ReportOutcome::Status(503)
     );
     let body = server.join().expect("server");
-    assert_eq!(body["facility_id"], "site-a");
+    assert_eq!(body["facility_id"], expected_facility);
     assert_eq!(
         body["clip_export"],
         serde_json::json!({"enabled": true, "version": 17})

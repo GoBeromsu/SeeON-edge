@@ -47,6 +47,7 @@ pub struct WorkerConfigPayload {
     registry_version: Option<i128>,
     config_version: Option<i128>,
     restart_epoch: Option<i128>,
+    enrolled_facility_id: Option<String>,
     night_window: Option<DetectionWindow>,
     detection_windows: Option<Vec<(String, Json)>>,
     cameras: Vec<Json>,
@@ -72,6 +73,11 @@ impl WorkerConfigPayload {
             registry_version: version(members, "registry_version")?,
             config_version: version(members, "config_version")?,
             restart_epoch: version(members, "restart_epoch")?,
+            enrolled_facility_id: match lookup(members, "enrolled_facility_id") {
+                None | Some(Json::Null) => None,
+                Some(Json::Str(value)) if !value.trim().is_empty() => Some(value.clone()),
+                Some(_) => return Err(CameraConfigError::Field("enrolled_facility_id")),
+            },
             night_window: match lookup(members, "night_window") {
                 None | Some(Json::Null) => None,
                 Some(window) => Some(
@@ -106,6 +112,11 @@ impl WorkerConfigPayload {
             return Err(CameraConfigError::MissingVersion);
         }
         Ok(payload)
+    }
+
+    /// Genuine enrollment context, independent of the camera roster.
+    pub fn enrolled_facility_id(&self) -> Option<&str> {
+        self.enrolled_facility_id.as_deref()
     }
 
     /// `directive`: (`restart_epoch` or 0, `config_version` else the

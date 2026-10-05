@@ -73,12 +73,12 @@ pub enum ReportOutcome {
     Status(u16),
     Malformed,
     Payload,
-    /// An admitted empty roster supplies no facility for a valid wire body.
+    /// Neither camera context nor enrollment supplies a facility for a wire body.
     NoFacility,
 }
 
 /// Construct before acquiring the lease. No Debug/Clone and no exposed client:
-/// consuming `send` permits one attempt, or `NoFacility` for an empty admitted
+/// consuming `send` permits one attempt, or `NoFacility` for an unenrolled empty
 /// roster whose valid wire body cannot be constructed. No periodic sender/retry.
 pub struct BootStatusContext {
     client: RelayClient,
@@ -110,7 +110,8 @@ impl BootStatusContext {
 
     /// Fresh/LKG config is resolved before the lease, as in the Python CLI.
     /// A single failure report uses the first facility in canonical sorted
-    /// order. Only an empty roster has no facility; it still runs boot gates.
+    /// order, or genuine enrollment when no camera supplies one. An unenrolled
+    /// empty roster still runs boot gates without inventing a facility.
     pub fn for_config(
         base_url: &str,
         token: &str,
@@ -128,14 +129,15 @@ impl BootStatusContext {
         match config
             .cameras
             .iter()
-            .map(|camera| &camera.facility_id)
+            .map(|camera| camera.facility_id.as_str())
             .min()
+            .or_else(|| config.config.enrolled_facility_id())
         {
             Some(facility_id) => Self::new(
                 base_url,
                 token,
                 ReportIdentity {
-                    facility_id: facility_id.clone(),
+                    facility_id: facility_id.to_owned(),
                     seq: 1,
                     generation: None,
                     clip_export,

@@ -19,6 +19,7 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from backend.app.features.audit.postgres_runtime import PostgresAuditRuntime
+from backend.app.features.connection.store import get_connection_settings_store
 from contracts.worker_config import PulledNightWindow, PulledWorkerConfig
 from tests_support.postgres_api_app import postgres_api_app
 from tests_support.postgres_sandbox import ProductSandbox
@@ -46,6 +47,30 @@ def app(
     postgres_product_sandbox: ProductSandbox, postgres_audit_runtime: PostgresAuditRuntime
 ) -> FastAPI:
     return postgres_api_app(postgres_product_sandbox, postgres_audit_runtime)
+
+
+@pytest.mark.parametrize("enrolled", [False, True])
+def test_empty_roster_carries_only_actual_enrollment(app: FastAPI, enrolled: bool) -> None:
+    if enrolled:
+        get_connection_settings_store(app).save(
+            {
+                "facility_code": "TEST-001",
+                "client_installation_ref": "test-installation",
+                "facility_id": "enrolled-site",
+                "facility_token": "synthetic-client-token-1234",
+                "edge_installation_id": "test-edge",
+                "enrollment_generation": 1,
+            }
+        )
+    with TestClient(app) as client:
+        response = client.get("/api/v1/cameras/worker-config", headers=AUTH)
+    assert response.status_code == 200
+    body = response.json()
+    assert body["cameras"] == []
+    if enrolled:
+        assert body["enrolled_facility_id"] == "enrolled-site"
+    else:
+        assert "enrolled_facility_id" not in body
 
 
 def test_with_no_local_overrides_the_response_reflects_the_externally_pulled_state(
