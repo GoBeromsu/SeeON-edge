@@ -338,3 +338,57 @@ forbidden_modules = ["pyservicemaker", "pyds"]
 # The runtime composes the adapter, so a transitive path through
 # worker.adapters.deepstream is the design; only a direct import is a leak.
 allow_indirect_imports = true
+
+
+[[tool.importlinter.contracts]]
+# New non-controller modules are covered automatically. Controller imports must
+# match ignore_imports; add new controller modules outside these patterns there.
+name = "backend repositories and services do not import HTTP frameworks"
+type = "forbidden"
+source_modules = ["backend.app.features", "backend.app.shared"]
+forbidden_modules = ["fastapi", "starlette"]
+allow_indirect_imports = true
+# Grimp collapses external submodule imports to their root package in this graph.
+ignore_imports = [
+    "backend.app.features.*.router -> fastapi",
+    "backend.app.features.*.dependencies -> fastapi",
+    "backend.app.features.diagnostics.router -> starlette",
+    "backend.app.features.relay.router -> starlette",
+    "backend.app.features.cameras.bed_zone_router -> fastapi",
+    "backend.app.features.cameras.streams_router -> fastapi",
+    "backend.app.features.cameras.streams_router -> starlette",
+    "backend.app.features.clips.analysis_router -> fastapi",
+    "backend.app.features.clips.storage_router -> fastapi",
+    "backend.app.features.connection.topology_confirmation_router -> fastapi",
+    "backend.app.features.evidence.operator_router -> fastapi",
+    "backend.app.features.status.system_router -> fastapi",
+    "backend.app.features.audit.http -> fastapi",
+    "backend.app.features.relay.auth -> fastapi",
+    "backend.app.features.clips.media_response -> starlette",
+    "backend.app.shared.dashboard_auth -> fastapi",
+    # INF-I3: HEAD response adapter remains controller support.
+    "backend.app.shared.head_response -> starlette",
+    # INF-I4: app-state bundle accessor remains a controller adapter.
+    "backend.app.shared.backend_client_bundle -> fastapi",
+]
+
+[[tool.importlinter.contracts]]
+# New per-slice router/dependencies modules are covered automatically.
+# A new *_router file must be added to source_modules explicitly.
+name = "backend routers do not import psycopg directly"
+type = "forbidden"
+source_modules = [
+    "backend.app.features.*.router",
+    "backend.app.features.*.dependencies",
+    "backend.app.features.cameras.bed_zone_router",
+    "backend.app.features.cameras.streams_router",
+    "backend.app.features.clips.analysis_router",
+    "backend.app.features.clips.storage_router",
+    "backend.app.features.connection.topology_confirmation_router",
+    "backend.app.features.evidence.operator_router",
+    "backend.app.features.status.system_router",
+    "backend.app.features.audit.http",
+    "backend.app.routes",
+]
+forbidden_modules = ["psycopg"]
+allow_indirect_imports = true
