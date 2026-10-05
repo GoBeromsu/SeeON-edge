@@ -50,6 +50,14 @@ def _input_path(member: tarfile.TarInfo) -> PurePosixPath:
     return path
 
 
+def _destination_path(path: PurePosixPath) -> PurePosixPath:
+    if path.parts[:4] == ("worker", "rust", "tests", "fixtures"):
+        return PurePosixPath("worker/policy/tests/fixtures").joinpath(*path.parts[4:])
+    if path == PurePosixPath("worker/runtime/rust/tests/fixtures/gpu/manifest.json"):
+        return PurePosixPath("worker/runtime/inference/tests/fixtures/gpu/manifest.json")
+    return path
+
+
 def _read_inputs(archive: Path, expected_digest: str) -> dict[PurePosixPath, bytes]:
     try:
         raw = archive.read_bytes()
@@ -66,9 +74,10 @@ def _read_inputs(archive: Path, expected_digest: str) -> dict[PurePosixPath, byt
     try:
         with tarfile.open(fileobj=io.BytesIO(raw), mode="r:*") as bundle:
             for member in bundle:
-                path = _input_path(member)
+                archive_path = _input_path(member)
+                path = _destination_path(archive_path)
                 if path in inputs:
-                    raise InputPreparationError(f"Duplicate archive path: {path}")
+                    raise InputPreparationError(f"Duplicate archive path: {archive_path}")
                 stream = bundle.extractfile(member)
                 if stream is None:
                     raise InputPreparationError(f"Missing archive payload: {path}")

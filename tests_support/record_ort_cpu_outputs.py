@@ -10,7 +10,8 @@ from pathlib import Path
 
 MANIFEST_SHA256 = "1184583122b90f5ecbe83a5f5b9c59e740a4c4701e4600b1a038c5db728cb82b"
 MANIFEST = (
-    Path(__file__).resolve().parents[1] / "worker/runtime/rust/tests/fixtures/gpu/manifest.json"
+    Path(__file__).resolve().parents[1]
+    / "worker/runtime/inference/tests/fixtures/gpu/manifest.json"
 )
 MODELS = (
     ("fall", "fall/pose-bbox56-gru/model.onnx", 0),

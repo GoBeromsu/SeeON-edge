@@ -12,7 +12,7 @@ recording session returning supplied float32 output0. Its tensor and ordered box
 bits are the oracle; no resize/filter/unletterbox implementation is copied here.
 Nonfinite rejection and transport limits are separate Rust admission tests, not
 claims that Python rejects those inputs. No GPU gate or tolerance is changed.
-The complete binary grammar is in worker/rust/examples/stored_pose_probe.rs.
+The complete binary grammar is in worker/policy/examples/stored_pose_probe.rs.
 """
 
 from __future__ import annotations

@@ -9,8 +9,8 @@ publish = false
 path = "src/lib.rs"
 
 [dependencies]
-seeon-worker = { path = "../../rust" }
-seeon-deepstream-native = { path = "../../adapters/deepstream/rust" }
+seeon-worker = { path = "../../policy" }
+seeon-deepstream-native = { path = "../../adapters/deepstream/bindings" }
 seeon-onnxruntime-native = { path = "../../adapters/model/onnxruntime" }
 
 [dev-dependencies]

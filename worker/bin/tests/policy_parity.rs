@@ -233,7 +233,7 @@ fn window_sha256(request: &FallRequest) -> String {
 }
 
 /// The canonical replay lines of `tests_support/native_yolo_parity.py`, as
-/// `worker/runtime/rust/tests/gpu_parity.rs` renders them.
+/// `worker/runtime/inference/tests/gpu_parity.rs` renders them.
 fn render(
     lines: &mut Vec<String>,
     frame: i64,

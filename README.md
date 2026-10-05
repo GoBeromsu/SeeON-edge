@@ -93,7 +93,7 @@ provider fallback.
 
 The separate `worker/adapters/model/onnxruntime` Rust owner executes captured
 ONNX bytes through the existing ONNX Runtime CPU library. The role owners in
-`worker/runtime/rust/src/cpu` connect it to existing RGB preprocessing, ordered
+`worker/runtime/inference/src/cpu` connect it to existing RGB preprocessing, ordered
 person-box decoding, bed tensors and fall windows. Thread-confined actors in
 `worker/bin/src/inference/cpu.rs` now warm and execute all three roles, retain
 the loaded ORT version and fatal failures independently of reply queues, and

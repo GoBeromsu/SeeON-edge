@@ -13,7 +13,7 @@ use seeon_ml_worker::run::ModelRole;
 use seeon_ml_worker::seam::{IdSource, RandomIds};
 use serde_json::Value;
 
-const MANIFEST: &str = include_str!("../../runtime/rust/tests/fixtures/gpu/manifest.json");
+const MANIFEST: &str = include_str!("../../runtime/inference/tests/fixtures/gpu/manifest.json");
 const INFER: &str = include_str!("../../adapters/deepstream/configs/nvinfer-yolo26-pose.txt");
 
 fn source(variable: &str, expected: &str) -> Vec<u8> {

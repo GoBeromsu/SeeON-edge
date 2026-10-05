@@ -1,3 +1,3 @@
 [workspace]
 resolver = "3"
-members = ["worker/rust", "worker/adapters/deepstream/rust", "worker/adapters/model/onnxruntime", "worker/runtime/rust", "worker/bin"]
+members = ["worker/policy", "worker/adapters/deepstream/bindings", "worker/adapters/model/onnxruntime", "worker/runtime/inference", "worker/bin"]

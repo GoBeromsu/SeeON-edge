@@ -43,7 +43,7 @@ const TRACKER_LIBRARY: &str =
     "/opt/nvidia/deepstream/deepstream/lib/libnvds_nvmultiobjecttracker.so";
 const PARSER_LIBRARY: &str =
     "/opt/nvidia/deepstream/deepstream/lib/libnvdsinfer_custom_yolo26_pose.so";
-const MANIFEST: &str = include_str!("../../runtime/rust/tests/fixtures/gpu/manifest.json");
+const MANIFEST: &str = include_str!("../../runtime/inference/tests/fixtures/gpu/manifest.json");
 const ROLES: [&str; 4] = ["live_pose", "stored_pose", "bed", "fall"];
 const ENGINES: [&str; 4] = [
     "live-pose.engine",

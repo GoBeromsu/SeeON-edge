@@ -4,7 +4,7 @@ Parent-owned build: cargo build -p seeon-worker --example fall_policy_probe --of
 Gate: SEEON_TEST_FALL_POLICY_PROBE="$PWD/target/debug/examples/fall_policy_probe" \
     uv run pytest -q tests/test_rust_fall_policy_parity.py
 An absent executable setting skips, never qualifies; a configured failure fails.
-The v1 TSV grammar is declared in worker/rust/examples/fall_policy_probe.rs.
+The v1 TSV grammar is declared in worker/policy/examples/fall_policy_probe.rs.
 
 Only the shared admitted domain is compared: finite f64 values, u64 IDs/source
 and track generations, i64 frames, <=64 collection entries/retained identities,

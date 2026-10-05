@@ -105,9 +105,9 @@ ENV CARGO_HOME=/usr/local/cargo \
     LD_LIBRARY_PATH=/opt/seeon/lib:/opt/nvidia/deepstream/deepstream/lib:${LD_LIBRARY_PATH}
 WORKDIR /usr/src/myapp
 COPY Cargo.toml Cargo.lock rust-toolchain.toml ./
-COPY worker/rust ./worker/rust
-COPY worker/runtime/rust ./worker/runtime/rust
-COPY worker/adapters/deepstream/rust ./worker/adapters/deepstream/rust
+COPY worker/policy ./worker/policy
+COPY worker/runtime/inference ./worker/runtime/inference
+COPY worker/adapters/deepstream/bindings ./worker/adapters/deepstream/bindings
 COPY worker/adapters/deepstream/native ./worker/adapters/deepstream/native
 COPY worker/adapters/model/onnxruntime ./worker/adapters/model/onnxruntime
 COPY worker/adapters/model/native ./worker/adapters/model/native

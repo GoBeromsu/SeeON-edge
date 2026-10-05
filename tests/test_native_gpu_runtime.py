@@ -2,11 +2,11 @@
 
 The oracle is onnxruntime 1.29 ``CUDAExecutionProvider`` (``use_tf32=0``, CPU EP fallback
 disabled), recorded once by ``tests_support/native_yolo_parity.py`` on the frozen synthetic
-frames of ``worker/runtime/rust/tests/fixtures/gpu``. The manifest records the provider, the
+frames of ``worker/runtime/inference/tests/fixtures/gpu``. The manifest records the provider, the
 device and the recorder digest, and this module pins the manifest digest. The CPU EP is never
 an oracle. These are parity inputs, not inference qualification: the corpus stays unverified.
 
-The gates mirror ``worker/runtime/rust/tests/gpu_parity.rs`` through the C ABI and the
+The gates mirror ``worker/runtime/inference/tests/gpu_parity.rs`` through the C ABI and the
 production Python decode: gated pose rows at 1e-4, gated bed rows at
 ``max(1e-4, 2 * spacing(oracle))``, then zero mismatches in the bed decision inputs. CI's ``-m``
 deselects these tests, and a selected test without an asset fails, naming its variable.
@@ -33,7 +33,7 @@ from worker.adapters.model.ort_clip_pose import _resize_rgb
 pytestmark = pytest.mark.gpu
 
 _ROOT = Path(__file__).resolve().parents[1]
-_MANIFEST = _ROOT / "worker/runtime/rust/tests/fixtures/gpu/manifest.json"
+_MANIFEST = _ROOT / "worker/runtime/inference/tests/fixtures/gpu/manifest.json"
 # Changes only when the oracle is re-recorded, never to absorb a runtime regression.
 _MANIFEST_SHA256 = "1184583122b90f5ecbe83a5f5b9c59e740a4c4701e4600b1a038c5db728cb82b"
 _SCHEMA = "seeon-gpu-oracle-fixtures/v2"

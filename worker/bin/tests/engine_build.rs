@@ -13,7 +13,7 @@ use seeon_ml_worker::run::ModelRole;
 use seeon_ml_worker::seam::{IdSource, RandomIds};
 use serde_json::Value;
 
-const MANIFEST: &str = include_str!("../../runtime/rust/tests/fixtures/gpu/manifest.json");
+const MANIFEST: &str = include_str!("../../runtime/inference/tests/fixtures/gpu/manifest.json");
 const IMAGE: &str = "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
 
 struct Scratch(PathBuf);

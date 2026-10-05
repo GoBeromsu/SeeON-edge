@@ -16,8 +16,8 @@ htmlcov/
 /tests/fixtures/worker-wire/**/*.json
 /tests/fixtures/worker-wire/**/*.sha256
 /tests/fixtures/synthetic-scene-v1.json
-/worker/rust/tests/fixtures/**/*.json
-/worker/runtime/rust/tests/fixtures/gpu/manifest.json
+/worker/policy/tests/fixtures/**/*.json
+/worker/runtime/inference/tests/fixtures/gpu/manifest.json
 
 # Node/dashboard output
 node_modules/

@@ -27,30 +27,47 @@ def _file(name: str, payload: bytes) -> tuple[tarfile.TarInfo, bytes]:
     return tarfile.TarInfo(name), payload
 
 
-def test_restore_and_idempotence_preserve_payloads_and_existing_files(tmp_path: Path) -> None:
-    payloads = {
+def test_legacy_archive_paths_restore_to_canonical_destinations_idempotently(
+    tmp_path: Path,
+) -> None:
+    archive_payloads = {
         "tests/fixtures/worker-wire/r/sample.json": b'{"sample": 1}\n',
         "tests/fixtures/worker-wire/r/sample.json.sha256": b"sample digest\n",
         "tests/fixtures/synthetic-scene-v1.json": b"{}\n",
         "worker/rust/tests/fixtures/bed_input/sample.json": b"[]\n",
         "worker/runtime/rust/tests/fixtures/gpu/manifest.json": b'{"sample": 2}\n',
     }
-    archive, digest = _archive(tmp_path, [_file(name, data) for name, data in payloads.items()])
+    destination_names = {
+        "worker/rust/tests/fixtures/bed_input/sample.json": (
+            "worker/policy/tests/fixtures/bed_input/sample.json"
+        ),
+        "worker/runtime/rust/tests/fixtures/gpu/manifest.json": (
+            "worker/runtime/inference/tests/fixtures/gpu/manifest.json"
+        ),
+    }
+    archive, digest = _archive(
+        tmp_path, [_file(name, data) for name, data in archive_payloads.items()]
+    )
     destination = tmp_path / "cache"
 
-    assert restore_test_inputs(archive, destination, digest) == len(payloads)
-    helper = destination / "worker/rust/tests/fixtures/support.rs"
+    assert restore_test_inputs(archive, destination, digest) == len(archive_payloads)
+    helper = destination / "worker/policy/tests/fixtures/support.rs"
     helper.write_bytes(b"// Existing Rust helper\n")
     fixed_mtime_ns = 1_000_000_000
-    for name, payload in payloads.items():
-        assert (destination / name).read_bytes() == payload
-        os.utime(destination / name, ns=(fixed_mtime_ns, fixed_mtime_ns))
-    assert restore_test_inputs(archive, destination, digest) == len(payloads)
+    for archive_name, payload in archive_payloads.items():
+        target_name = destination_names.get(archive_name, archive_name)
+        target = destination / target_name
+        assert target.read_bytes() == payload
+        os.utime(target, ns=(fixed_mtime_ns, fixed_mtime_ns))
+    assert restore_test_inputs(archive, destination, digest) == len(archive_payloads)
 
-    for name, payload in payloads.items():
-        restored = destination / name
+    for archive_name, payload in archive_payloads.items():
+        target_name = destination_names.get(archive_name, archive_name)
+        restored = destination / target_name
         assert restored.read_bytes() == payload
         assert restored.stat().st_mtime_ns == fixed_mtime_ns
+    for archive_name in destination_names:
+        assert not (destination / archive_name).exists()
     assert helper.read_bytes() == b"// Existing Rust helper\n"
 
 
@@ -76,6 +93,8 @@ def test_digest_mismatch_writes_nothing(tmp_path: Path) -> None:
         "tests/fixtures/baseline.json",
         "worker/rust/tests/fixtures/support.rs",
         "worker/runtime/rust/tests/fixtures/gpu/other.json",
+        "worker/policy/tests/fixtures/bed_input/sample.json",
+        "worker/runtime/inference/tests/fixtures/gpu/manifest.json",
     ],
 )
 def test_invalid_archive_paths_fail_before_restoring_valid_member(
@@ -116,17 +135,31 @@ def test_nonregular_archive_members_are_rejected(tmp_path: Path, kind: bytes) ->
     assert not destination.exists()
 
 
-def test_conflicting_cache_is_preserved_without_partial_restore(tmp_path: Path) -> None:
-    name = "tests/fixtures/worker-wire/existing.json"
+@pytest.mark.parametrize(
+    ("archive_name", "target_name"),
+    [
+        (
+            "tests/fixtures/worker-wire/existing.json",
+            "tests/fixtures/worker-wire/existing.json",
+        ),
+        (
+            "worker/rust/tests/fixtures/bed_input/existing.json",
+            "worker/policy/tests/fixtures/bed_input/existing.json",
+        ),
+    ],
+)
+def test_conflicting_cache_is_preserved_without_partial_restore(
+    tmp_path: Path, archive_name: str, target_name: str
+) -> None:
     archive, digest = _archive(
         tmp_path,
         [
             _file("tests/fixtures/synthetic-scene-v1.json", b"{}\n"),
-            _file(name, b"new bytes\n"),
+            _file(archive_name, b"new bytes\n"),
         ],
     )
     destination = tmp_path / "cache"
-    existing = destination / name
+    existing = destination / target_name
     existing.parent.mkdir(parents=True)
     existing.write_bytes(b"local bytes\n")
 
@@ -137,12 +170,26 @@ def test_conflicting_cache_is_preserved_without_partial_restore(tmp_path: Path) 
     assert not (destination / "tests/fixtures/synthetic-scene-v1.json").exists()
 
 
+@pytest.mark.parametrize(
+    ("archive_name", "target_name"),
+    [
+        (
+            "tests/fixtures/worker-wire/sample.json",
+            "tests/fixtures/worker-wire/sample.json",
+        ),
+        (
+            "worker/rust/tests/fixtures/bed_input/sample.json",
+            "worker/policy/tests/fixtures/bed_input/sample.json",
+        ),
+    ],
+)
 @pytest.mark.parametrize("link_parent", [False, True])
-def test_existing_symlink_cannot_redirect_cache_writes(tmp_path: Path, link_parent: bool) -> None:
-    name = "tests/fixtures/worker-wire/sample.json"
-    archive, digest = _archive(tmp_path, [_file(name, b"new bytes\n")])
+def test_existing_symlink_cannot_redirect_cache_writes(
+    tmp_path: Path, archive_name: str, target_name: str, link_parent: bool
+) -> None:
+    archive, digest = _archive(tmp_path, [_file(archive_name, b"new bytes\n")])
     destination = tmp_path / "cache"
-    target = destination / name
+    target = destination / target_name
     outside = tmp_path / "outside"
     outside.mkdir()
     sentinel = outside / "sample.json"
@@ -188,11 +235,25 @@ def test_duplicate_or_overlapping_archive_paths_write_nothing(
     assert not destination.exists()
 
 
-def test_existing_hardlink_is_preserved_and_refused(tmp_path: Path) -> None:
-    name = "tests/fixtures/worker-wire/sample.json"
-    archive, digest = _archive(tmp_path, [_file(name, b"same bytes\n")])
+@pytest.mark.parametrize(
+    ("archive_name", "target_name"),
+    [
+        (
+            "tests/fixtures/worker-wire/sample.json",
+            "tests/fixtures/worker-wire/sample.json",
+        ),
+        (
+            "worker/rust/tests/fixtures/bed_input/sample.json",
+            "worker/policy/tests/fixtures/bed_input/sample.json",
+        ),
+    ],
+)
+def test_existing_hardlink_is_preserved_and_refused(
+    tmp_path: Path, archive_name: str, target_name: str
+) -> None:
+    archive, digest = _archive(tmp_path, [_file(archive_name, b"same bytes\n")])
     destination = tmp_path / "cache"
-    target = destination / name
+    target = destination / target_name
     target.parent.mkdir(parents=True)
     outside = tmp_path / "outside.json"
     outside.write_bytes(b"same bytes\n")

@@ -10,6 +10,11 @@ Python worker modules remain source-level reference/verification code, not the
 shipping entrypoint. The isolated model-fetch operator runs in `ml-api`'s image.
 Replay is backend-owned; the production worker has no replay CLI.
 
+Rust source ownership: `policy/` contains numeric and lifecycle policy,
+`runtime/inference/` composes model providers, and
+`adapters/deepstream/bindings/` owns the native SDK bindings. Crate/package names
+are independent of these responsibility-based paths.
+
 Rust binaries capture `ML_WORKER_BUILD_REVISION` at compilation.
 Only a trusted build of frozen, clean source may supply that declaration; a
 runtime environment value cannot attribute an undeclared binary. Image markers

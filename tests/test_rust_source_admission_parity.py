@@ -26,7 +26,7 @@ not equated to the Rust constructor. No take/remove, native transport admission,
 rotation/floor, or Arc policy-work lifetime parity is claimed. With no take(),
 peek non-emptiness is comparable to historical admission readiness. Transport
 malformation and Rust-only registration validation controls are labeled below.
-Protocol/API and byte budgets: worker/rust/examples/source_admission_probe.rs.
+Protocol/API and byte budgets: worker/policy/examples/source_admission_probe.rs.
 """
 
 from __future__ import annotations

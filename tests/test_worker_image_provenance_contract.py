@@ -28,9 +28,9 @@ ORT_NATIVE_LIBRARIES = (
 )
 BUILD_ONLY_TREES = (
     "bin",
-    "rust",
-    "runtime/rust",
-    "adapters/deepstream/rust",
+    "policy",
+    "runtime/inference",
+    "adapters/deepstream/bindings",
     "adapters/model/onnxruntime",
     "adapters/model/native",
 )
@@ -348,8 +348,7 @@ def test_runtime_has_no_python_worker_source_and_ort_is_built_from_locked_flow_d
     assert (
         "FROM ghcr.io/astral-sh/uv:python3.12-bookworm-slim"
         "@sha256:e5b65587bce7de595f299855d7385fe7fca39b8a74baa261ba1b7147afa78e58"
-        " AS ort-native-build"
-        in source
+        " AS ort-native-build" in source
     )
     assert "COPY pyproject.toml uv.lock ./" in ort_build
     assert '\nname = "onnxruntime"\nversion = "1.29.0"\n' in lock
@@ -417,8 +416,8 @@ def test_dockerignore_excludes_cargo_targets_and_live_pose_scratch() -> None:
     assert "**/target" in ignored
     assert "**/.live-pose-*" in ignored
     assert "tests" in ignored
-    assert "worker/rust/tests/fixtures/**/*.json" in ignored
-    assert "worker/runtime/rust/tests/fixtures/gpu/*.json" in ignored
+    assert "worker/policy/tests/fixtures/**/*.json" in ignored
+    assert "worker/runtime/inference/tests/fixtures/gpu/*.json" in ignored
 
 
 def test_compile_time_footer_oracle_is_available_only_in_verification_stage() -> None:
