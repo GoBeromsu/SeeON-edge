@@ -10,7 +10,7 @@ use seeon_deepstream_native::{MediaBinding, MediaPoll, MediaResult, RecordTicket
 use seeon_worker::episode::BusinessEvent;
 
 use super::{LiveSink, PendingEvent, apply_sink};
-use crate::clips::recorder::{CAP_SECONDS, LOOKBACK_SECONDS, State};
+use crate::clips::recorder::{FORWARD_SECONDS, LOOKBACK_SECONDS, State};
 use crate::media::Command;
 use crate::msg::RecordReceipt;
 use crate::records::lanes::Lanes;
@@ -178,7 +178,7 @@ impl Fixture {
             assert_eq!((source_id, binding), (ticket.source_id, ticket.binding));
             assert_eq!(
                 (lookback_seconds, forward_seconds),
-                (LOOKBACK_SECONDS, CAP_SECONDS)
+                (LOOKBACK_SECONDS, FORWARD_SECONDS)
             );
             reply.send(Ok(MediaPoll::Ready(ticket))).unwrap();
             inbox

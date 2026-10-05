@@ -20,8 +20,9 @@ use seeon_ml_worker::clips::entry::FLOW_ENCODER;
 use seeon_ml_worker::clips::manifest::{ClipMetadata, Contributor};
 use seeon_ml_worker::clips::publish::{PublishError, Published, Publisher};
 use seeon_ml_worker::clips::recorder::{
-    Admit, Boundary, CAP_SECONDS, ClipSealed, EXTENSION_SECONDS, MAX_PENDING_ALERTS,
-    NATIVE_COMPLETION_GRACE_SECONDS, PlaneRefusal, RecordPlane, Recorder, RecorderError, State,
+    Admit, Boundary, CAP_SECONDS, ClipSealed, EXTENSION_SECONDS, FORWARD_SECONDS,
+    MAX_PENDING_ALERTS, NATIVE_COMPLETION_GRACE_SECONDS, PlaneRefusal, RecordPlane, Recorder,
+    RecorderError, State,
 };
 use seeon_ml_worker::clips::reserve::{FINALIZE_FAILED, SaveOutcome};
 use seeon_ml_worker::clips::store::ClipStore;
@@ -100,7 +101,10 @@ impl RecordPlane for CountingPlane {
         forward_seconds: u32,
     ) -> Result<RecordTicket, PlaneRefusal> {
         assert_eq!(lookback_seconds, 15, "native lookback stays unchanged");
-        assert_eq!(forward_seconds, 120, "native forward stays unchanged");
+        assert_eq!(
+            forward_seconds, 105,
+            "native forward is total budget minus lookback"
+        );
         self.counts.starts.set(self.counts.starts.get() + 1);
         self.clock.advance(self.counts.start_delay.get());
         if self.counts.refuse.get() {
@@ -439,7 +443,7 @@ fn quiesce_blocks_admit_tick_and_receipt_including_save_failure() {
     );
     assert_eq!(counts.stops.get(), 0);
 
-    clock.advance(Duration::from_secs(u64::from(CAP_SECONDS)) + Duration::from_secs(1));
+    clock.advance(Duration::from_secs(u64::from(FORWARD_SECONDS)) + Duration::from_secs(1));
     assert_eq!(recorder.tick().expect("quiesced cap"), State::Recording);
     assert_eq!(counts.starts.get(), 1);
     assert_eq!(counts.stops.get(), 0);
@@ -1005,7 +1009,7 @@ fn admit_before_tick_extends_only_just_before_the_content_cap() {
         counts,
     } = Harness::new();
     let active = started(&mut recorder, "first", "2026-08-20T17:20:58Z");
-    clock.advance(Duration::from_secs(u64::from(CAP_SECONDS)) - Duration::from_nanos(1));
+    clock.advance(Duration::from_secs(u64::from(FORWARD_SECONDS)) - Duration::from_nanos(1));
     assert!(matches!(
         recorder.admit("just-before", at("2026-08-20T17:22:57.999999Z")),
         Ok(Admit::Extended)
@@ -1065,7 +1069,7 @@ fn post_cap_pending_is_bounded_and_admission_alone_latches_receipt_expiry() {
         counts,
     } = Harness::new();
     let active = started(&mut recorder, "active", "2026-08-20T17:20:58Z");
-    clock.advance(Duration::from_secs(u64::from(CAP_SECONDS)));
+    clock.advance(Duration::from_secs(u64::from(FORWARD_SECONDS)));
     for index in 0..MAX_PENDING_ALERTS {
         let event_ref = format!("00000000-0000-4000-8000-{index:012x}");
         assert!(matches!(
@@ -1082,7 +1086,7 @@ fn post_cap_pending_is_bounded_and_admission_alone_latches_receipt_expiry() {
     assert_eq!(unchanged(&recorder), before);
     assert_eq!(recorder.counters(), counters);
     clock.advance(Duration::from_secs(u64::from(
-        NATIVE_COMPLETION_GRACE_SECONDS,
+        CAP_SECONDS + NATIVE_COMPLETION_GRACE_SECONDS - FORWARD_SECONDS,
     )));
     assert_overdue(
         recorder.admit("refused-at-delivery-deadline", at("2026-08-20T17:23:28Z")),
@@ -1124,15 +1128,15 @@ fn receipt_delivery_deadline_is_exact_and_sticky_in_recording_and_stopping() {
             clock.advance(Duration::from_secs(u64::from(EXTENSION_SECONDS)));
             assert_eq!(recorder.tick().expect("early stop"), State::Stopping);
             clock.advance(Duration::from_secs(u64::from(
-                CAP_SECONDS - EXTENSION_SECONDS,
+                FORWARD_SECONDS - EXTENSION_SECONDS,
             )));
             State::Stopping
         } else {
-            clock.advance(Duration::from_secs(u64::from(CAP_SECONDS)));
+            clock.advance(Duration::from_secs(u64::from(FORWARD_SECONDS)));
             State::Recording
         };
         assert_eq!(
-            recorder.tick().expect("120 seconds is not receipt expiry"),
+            recorder.tick().expect("content stop is not receipt expiry"),
             expected_state
         );
         assert!(matches!(
@@ -1140,8 +1144,9 @@ fn receipt_delivery_deadline_is_exact_and_sticky_in_recording_and_stopping() {
             Ok(Admit::Queued)
         ));
         clock.advance(
-            Duration::from_secs(u64::from(NATIVE_COMPLETION_GRACE_SECONDS))
-                - Duration::from_nanos(1),
+            Duration::from_secs(u64::from(
+                CAP_SECONDS + NATIVE_COMPLETION_GRACE_SECONDS - FORWARD_SECONDS,
+            )) - Duration::from_nanos(1),
         );
         assert_eq!(
             recorder.tick().expect("just before delivery deadline"),
@@ -1184,10 +1189,10 @@ fn delayed_matching_receipt_before_deadline_saves_and_starts_pending() {
             clock.advance(Duration::from_secs(u64::from(EXTENSION_SECONDS)));
             assert_eq!(recorder.tick().expect("early stop"), State::Stopping);
             clock.advance(Duration::from_secs(u64::from(
-                CAP_SECONDS - EXTENSION_SECONDS,
+                FORWARD_SECONDS - EXTENSION_SECONDS,
             )));
         } else {
-            clock.advance(Duration::from_secs(u64::from(CAP_SECONDS)));
+            clock.advance(Duration::from_secs(u64::from(FORWARD_SECONDS)));
             assert_eq!(recorder.tick().expect("content cap"), State::Recording);
         }
         assert!(matches!(
@@ -1195,8 +1200,9 @@ fn delayed_matching_receipt_before_deadline_saves_and_starts_pending() {
             Ok(Admit::Queued)
         ));
         clock.advance(
-            Duration::from_secs(u64::from(NATIVE_COMPLETION_GRACE_SECONDS))
-                - Duration::from_nanos(1),
+            Duration::from_secs(u64::from(
+                CAP_SECONDS + NATIVE_COMPLETION_GRACE_SECONDS - FORWARD_SECONDS,
+            )) - Duration::from_nanos(1),
         );
         let mut saves = 0;
         recorder
@@ -1336,13 +1342,13 @@ fn latched_failure_survives_late_save_without_starting_pending() {
             recorder.admit("extended", at("2026-08-20T17:20:59Z")),
             Ok(Admit::Extended)
         ));
-        clock.advance(Duration::from_secs(u64::from(CAP_SECONDS)));
+        clock.advance(Duration::from_secs(u64::from(FORWARD_SECONDS)));
         assert!(matches!(
             recorder.admit("pending", at("2026-08-20T17:22:58Z")),
             Ok(Admit::Queued)
         ));
         clock.advance(Duration::from_secs(u64::from(
-            NATIVE_COMPLETION_GRACE_SECONDS,
+            CAP_SECONDS + NATIVE_COMPLETION_GRACE_SECONDS - FORWARD_SECONDS,
         )));
         assert_overdue(recorder.tick(), active);
         clock.advance(Duration::from_secs(1));
@@ -1424,7 +1430,7 @@ fn start_acknowledgement_anchors_both_immutable_deadlines() {
     counts.start_delay.set(acknowledgement_delay);
     let active = started(&mut recorder, "first", "2026-08-20T17:20:58Z");
     assert_eq!(clock.monotonic(), before_start + acknowledgement_delay);
-    clock.advance(Duration::from_secs(u64::from(CAP_SECONDS)) - acknowledgement_delay);
+    clock.advance(Duration::from_secs(u64::from(FORWARD_SECONDS)) - acknowledgement_delay);
     assert!(matches!(
         recorder.admit("before-acknowledged-cap", at("2026-08-20T17:22:58Z")),
         Ok(Admit::Extended)
@@ -1439,7 +1445,9 @@ fn start_acknowledgement_anchors_both_immutable_deadlines() {
         State::Recording
     );
     clock.advance(
-        Duration::from_secs(u64::from(NATIVE_COMPLETION_GRACE_SECONDS)) - Duration::from_nanos(1),
+        Duration::from_secs(u64::from(
+            CAP_SECONDS + NATIVE_COMPLETION_GRACE_SECONDS - FORWARD_SECONDS,
+        )) - Duration::from_nanos(1),
     );
     assert_eq!(
         recorder
@@ -1523,13 +1531,13 @@ fn matching_receipt_drained_at_delivery_deadline_does_not_false_fail() {
         counts,
     } = Harness::new();
     let active = started(&mut recorder, "active", "2026-08-20T17:20:58Z");
-    clock.advance(Duration::from_secs(u64::from(CAP_SECONDS)));
+    clock.advance(Duration::from_secs(u64::from(FORWARD_SECONDS)));
     assert!(matches!(
         recorder.admit("pending", at("2026-08-20T17:22:58Z")),
         Ok(Admit::Queued)
     ));
     clock.advance(Duration::from_secs(u64::from(
-        NATIVE_COMPLETION_GRACE_SECONDS,
+        CAP_SECONDS + NATIVE_COMPLETION_GRACE_SECONDS - FORWARD_SECONDS,
     )));
     recorder
         .on_receipt(&receipt(active), |sealed| {
@@ -1570,7 +1578,8 @@ fn refused_early_stop_preserves_native_identity_and_immutable_deadlines() {
         Ok(Admit::Extended)
     ));
     clock.advance(
-        Duration::from_secs(u64::from(CAP_SECONDS - EXTENSION_SECONDS)) - Duration::from_nanos(1),
+        Duration::from_secs(u64::from(FORWARD_SECONDS - EXTENSION_SECONDS))
+            - Duration::from_nanos(1),
     );
     assert!(matches!(
         recorder.admit("just-before-cap", at("2026-08-20T17:22:57.999999Z")),
@@ -1586,7 +1595,7 @@ fn refused_early_stop_preserves_native_identity_and_immutable_deadlines() {
         State::Recording
     );
     clock.advance(Duration::from_secs(u64::from(
-        NATIVE_COMPLETION_GRACE_SECONDS,
+        CAP_SECONDS + NATIVE_COMPLETION_GRACE_SECONDS - FORWARD_SECONDS,
     )));
     assert_overdue(recorder.tick(), active);
     recorder.quiesce();

@@ -1,12 +1,16 @@
 //! The per-camera smart-record state machine, ported from `SmartRecordActor`.
 //!
 //! Recording is always on until `quiesce`: there is no toggle and no restart.
-//! Alerts start a recording or extend the running one up to `CAP_SECONDS`;
-//! alerts that race a stop or reach the cap wait for the next recording.
-//! A missing receipt latches a failure after the cap plus native completion
-//! grace, without stopping or forgetting native work. A matching receipt still
-//! saves once, but cannot clear that failure. If even FINALIZE_FAILED could not
-//! publish, its seal stays owned in FINALIZING and blocks further admission.
+//! Alerts start a recording with a nominal `CAP_SECONDS` content budget
+//! (lookback plus forward window), or extend the running one only through its
+//! forward window. SDK timer/frame overshoot means this is not a guarantee of
+//! measured playback duration. Alerts that race a stop or reach the content
+//! boundary wait for the next recording. A missing receipt latches a failure
+//! at the independent `CAP_SECONDS` plus native completion grace deadline
+//! after acknowledgement, without stopping or forgetting native work. A
+//! matching receipt still saves once, but cannot clear that failure. If even
+//! FINALIZE_FAILED could not publish, its seal stays owned in FINALIZING and
+//! blocks further admission.
 //! Other save outcomes return to idle (X18: the Python actor stays in FINALIZING
 //! when its sink raises).
 //!
@@ -38,12 +42,15 @@ use crate::seam::Clock;
 pub use plane::{CommandPlane, PlaneRefusal, RecordPlane};
 pub use types::{Admit, Boundary, ClipSealed, Counters, RecorderError, State};
 
-/// The recording length the media plane is asked for, and the content cap.
+/// Total nominal requested content budget: lookback plus forward window.
+/// This does not guarantee the measured SDK playback duration.
 pub const CAP_SECONDS: u32 = 120;
-/// Native's forward window plus this grace bounds receipt delivery, not content.
+pub const LOOKBACK_SECONDS: u32 = (FLOW_LOOKBACK_MILLIS / 1000) as u32;
+/// Native forward request derived from the total nominal content budget.
+pub const FORWARD_SECONDS: u32 = CAP_SECONDS - LOOKBACK_SECONDS;
+/// Additional receipt-delivery grace beyond `CAP_SECONDS`, independent of content stop.
 pub const NATIVE_COMPLETION_GRACE_SECONDS: u32 = 30;
 pub const EXTENSION_SECONDS: u32 = 45;
-pub const LOOKBACK_SECONDS: u32 = (FLOW_LOOKBACK_MILLIS / 1000) as u32;
 /// The admission budget for each of the active and pending contributor sets.
 pub const MAX_PENDING_ALERTS: usize = 128;
 const SEALED_MEMORY: usize = 64;
@@ -349,7 +356,7 @@ impl<P: RecordPlane> Recorder<P> {
         if self.quiesced || self.receipt_overdue.is_some() || self.failed_seal.is_some() {
             return Admit::Queued;
         }
-        let ticket = match self.plane.start(LOOKBACK_SECONDS, CAP_SECONDS) {
+        let ticket = match self.plane.start(LOOKBACK_SECONDS, FORWARD_SECONDS) {
             Ok(ticket) => ticket,
             Err(refusal) => {
                 self.counters.refused += 1;
@@ -361,8 +368,9 @@ impl<P: RecordPlane> Recorder<P> {
         self.contributors.append(&mut self.pending);
         self.ticket = Some(ticket);
         self.boundary = Boundary::None;
-        self.hard_deadline = now + seconds(CAP_SECONDS);
-        self.receipt_deadline = self.hard_deadline + seconds(NATIVE_COMPLETION_GRACE_SECONDS);
+        self.hard_deadline = now + seconds(FORWARD_SECONDS);
+        // Receipt delivery keeps the total-budget watchdog, not the earlier content stop.
+        self.receipt_deadline = now + seconds(CAP_SECONDS + NATIVE_COMPLETION_GRACE_SECONDS);
         self.stop_due = (now + seconds(EXTENSION_SECONDS)).min(self.hard_deadline);
         self.state = State::Recording;
         Admit::Started(ticket)
