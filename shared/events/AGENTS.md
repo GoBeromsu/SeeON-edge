@@ -12,6 +12,13 @@ Backend↔worker wire: outbound event shape, Event API client, evidence HTTP, re
 - `relay_failure_log.py`: rate-limited, classified relay failure reporter.
 - `execution_records.py`: Worker -> Backend diagnostics wire contract.
 - `execution_records_client.py`: relay HTTP client posting `WireBatch`.
+- `delivery_queue.py`: file-backed publish-once `DeliveryQueue` (fcntl lock, fsync-ordered moves, bounded admission, dead-letter retention). Used by worker evidence staging and `scripts/ops/review-refused-evidence.py`.
+- `clip_analysis_wire.py`: `ClipAnalysisResult` encode/decode, `MAX_CLIP_ANALYSIS_FRAMES`.
+- `replay_wire.py`: `decode_replay_trace` and derived replay body bounds.
+- `envelope_limits.py`: named `*_MAX_*` limits; worst-case envelope size is computed from them.
+- `clip_identity.py`: `is_clip_id`.
+
+Ids are derived, never caller-supplied: `EventEntry.entry_id`, `WireRecord.record_id`, `WireBatch.batch_id` are stamped in `__post_init__`. Size caps are products of named maxima, not hand-picked numbers.
 
 ## Schemas
 
@@ -35,6 +42,11 @@ A successful alert may PUT a JPEG snapshot to `{id}/snapshot`. Snapshot failure 
 `RelayFailureLog` is one instance per logical channel. First failure and class change log full detail. Repeats fold into a 60s summary. Recovery logs once.
 Never log response bodies, request headers, or tokens. Status, transport class, static hint, and path only. Client errors log at ERROR; transport and 5xx at WARNING.
 
+## Delivery queue
+
+`acknowledge_backend` accepts only `{200, 201, 202, 204, 409}`. A refused (422) entry is `dead_letter`ed, never deleted and never reported as acknowledged; deleting refused entries once lost real bed-exit events.
+Retention refuses when full; it does not evict. `requeue_dead_lettered` goes through the queue lock, never direct file writes.
+
 ## Imports
 
 Allowed: `contracts` and local `shared.events`.
@@ -52,7 +64,8 @@ Camera id is a string field. A live session belongs in `Flow media plane`. Durab
 
 ```bash
 uv run pytest -q tests/test_events_schema.py tests/test_dead_shared_surfaces.py tests/test_events_ingest_client.py tests/test_evidence_export_client.py tests/test_evidence_http_transport.py
+uv run pytest -q tests/test_delivery_queue.py tests/test_clip_analysis_wire.py tests/test_execution_records_wire.py tests/test_replay_transfer_bound.py tests/test_relay_failure_log.py
 uv run --group lint lint-imports
 ```
 
-Schema tests lock `EmittedEvent` fields and the Event API payload. Ingest tests hit a local HTTP server: no HMAC, optional Bearer, omitted `clip_id`, failure count, dropped `detection-lost`, and receipt `on_accepted`.
+Schema tests lock `EmittedEvent` fields and the Event API payload. Ingest tests hit a local HTTP server: no HMAC, optional Bearer, omitted `clip_id`, failure count, dropped `detection-lost`, and receipt `on_accepted`. `test_dead_shared_surfaces.py` keeps the retired `outbox.py` / `local_publisher.py` and their publisher names out of this package.

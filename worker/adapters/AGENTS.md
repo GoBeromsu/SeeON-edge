@@ -15,10 +15,19 @@ and "worker runtime is the sole composition root".
 - `deepstream/`: the only worker package allowed to import `pyservicemaker` or
   `pyds`. Imports are lazy; convert vendor metadata immediately to worker
   envelopes. Owns Flow sources and Service Maker composition helpers.
-- `model/`: model registry and CPU model helpers used by domain policy.
-- `device/`: honest probes. Import success is not capability.
+- `model/`: task registry, ORT and ultralytics runners, fall bundles. See
+  `model/AGENTS.md`.
+- `device/`: honest `cuda`, `mps`, and `nvml` probes. Import success is not
+  capability. A probe never raises; NVML always shuts down after a good init.
 - `frame/`: host-frame materialization. `view` is zero-copy host-only;
   `materialize` copies and counts.
+- `media/`: `FfmpegThumbnailGenerator` for published clips and
+  `grab_native_jpeg`, a bounded native-resolution RTSP frame grab.
+- `perception.py`: `PythonInferencePerceptionAdapter` maps Python runner outputs
+  onto `PerceptionFrameV1`.
+
+The pyds/pyservicemaker import-linter contract names `device`, `frame`, and
+`model` as sources but not `media` or `perception.py`. The rule still applies.
 
 ## Interface implementation
 

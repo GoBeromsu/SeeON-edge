@@ -1,7 +1,9 @@
 # tests
 
 Flat pytest tree. Contracts, slice coverage, and boundary guards live here as
-`test_*.py` beside shared helpers. No nested suite dirs.
+`test_*.py` beside shared helpers. No nested suite dirs, no `__init__.py`.
+319 test modules; `fixtures/` holds data only (golden episodes, replay v2 traces,
+nvinfer letterbox capture).
 
 ## Ownership
 
@@ -9,6 +11,12 @@ Flat pytest tree. Contracts, slice coverage, and boundary guards live here as
 - `edge_worker_fixtures.py`: typed worker config payloads.
 - `observability_stack_fixtures.py`: in-process Backend over real uvicorn, `wait_until`, honest `mediamtx`/`ffmpeg`/`pyservicemaker` probes.
 - `observability_load_harness.py` + `fanout_benchmark_metrics.py`: recorded-stream load measurements. Product code stays unpatched.
+- `fanout_benchmark_metrics.py` (`RunMetrics`, `take_sample`, `capacity_verdict`, `write_document`) emits `null` for unobserved fields so a bench JSON never looks healthy on defaults. Orphaned today: no `test_fanout_benchmark` module or `fanout_benchmark_harness.py` exists, nothing imports it, and `-k fanout_benchmark` selects nothing. Restore the harness before quoting a bench command or `BENCH_*` knobs.
+- `receipt_helpers.py`, `replay_fixtures.py`, `compact_cutover_sensitive_fixture.py`: one schema-valid payload shared across suites. Hand-built variants drift from the CHECK constraints.
+- `_yolo_load_timeout_exit_repro.py`, `_yolo_offline_guard_repro.py`: not collected. `test_worker_yolo_adapters.py` runs them in a fresh interpreter with a bounded `subprocess.run(timeout=...)`.
+- `sqlite_ownership_baseline.txt`: ADR-0005 ratchet read by `test_sqlite_ownership_boundary.py`. Entries are removed, never added.
+- `test_public_repository_privacy.py` (2449 lines): pins tracked-file privacy, the `ci.yml` steps, the shard cover, and `ci-ok` as the single required check. `test_release_workflow_contract.py`, `test_edge_topology_contract.py`, `test_backend_image_build_contract.py` pin the other workflows and compose. Change workflow and test together.
+- Cross-suite builders with real importers live in `tests_support/`, not here.
 - `test_contract_symbol_exports.py`: contracts keep exporting runner, tracker, and worker_config symbols. Import direction is `lint-imports`, not a walker.
 - `test_*.py`: named after the slice or seam under test.
 
@@ -28,6 +36,7 @@ Allowed: the package under test, pytest, local helpers. Forbidden as default inp
   `SEEON_TEST_POSTGRES_DSN`; a missing DSN fails, never skips.
 - `Path.home()` redirects to `tmp_path`. Don't rewrite `HOME`.
 - RTSP DNS is stubbed. Real `getaddrinfo` lives in `test_rtsp_url_policy.py`.
+- Private fall bundle: `_PRIVATE_BUNDLE_MODULES` (15 module names) skip with a reason when `models/fall/pose-bbox56-gru/model.onnx` is absent. CI downloads no weights. A new bundle-reading module joins that set.
 - Process umask is `0o022`. Insecure-mode tests `chmod` the path. `mkdir(..., mode=...)` sets the leaf only. Create each parent with an explicit mode when a validator walks the tree.
 
 ## Naming and async
@@ -35,6 +44,8 @@ Allowed: the package under test, pytest, local helpers. Forbidden as default inp
 Keep the tree flat. Name `test_<capability>.py` after the slice or seam (`test_api_clips.py`, `test_capability_inference_coordinator.py`). Don't add `unit/`, `e2e/`, or package-mirroring folders.
 
 Async tests must not pass by sleep. Subscribe to the event or state, act, then await with a bound timeout. `wait_until(predicate, timeout=..., what=...)` is the shared helper. A bare `time.sleep` is not an assertion.
+
+Modules keep their own `_login`, `_app`, `clip_env`, `_record` helpers (13 files define `_login`). Typed fakes stay module-local and underscore-prefixed.
 
 ## Markers
 
@@ -48,18 +59,7 @@ CI runs `uv run pytest -q -m "not real_stack and not heavy and not integration a
 
 `private_bundle` fails rather than skips: an unprovisioned bundle is deselected with `-m`, never skipped by the test. `real_stack` is RTSP tooling, not "any live service". `integration` is a live enrolled API, not RTSP. `heavy` is subprocess deadline supervision, not "slow".
 
-## Fan-out benchmark
-
-`fanout_benchmark_metrics.py` is the recorded-stream fan-out reducer. A local `mediamtx` serves N looping recorded streams. A real `WorkerRuntime` loads `models/`. Output is `bench-<N>.json` under `BENCH_OUTPUT_DIR` (default `.omo/evidence/bench`). N is in `{1,2,4,8,13}`. `BENCH_STREAMS` selects which run (default `1,2`). Leave extra N unset so a bare suite doesn't burn minutes. Other knobs: `BENCH_DURATION_SEC`, `BENCH_PROFILE`, `BENCH_LABEL`, `BENCH_VIEWERS`, `BENCH_CAMERA_FPS`. Timing and relay stubs wrap test-side only.
-
-```bash
-uv run pytest -m real_stack -k fanout_benchmark
-BENCH_STREAMS=1,2,4,8,13 uv run pytest -m real_stack -k fanout_benchmark
-# 13 cameras at 15fps (todo 13). CURRENT_TEMPORAL_PROFILE in worker/types
-# is today's 15fps identity; BENCH_CAMERA_FPS still owns the bench fps.
-BENCH_STREAMS=13 BENCH_CAMERA_FPS=15 BENCH_DURATION_SEC=300 BENCH_VIEWERS=0 \
-  BENCH_LABEL=13x15 uv run pytest -m real_stack -k 'test_fanout_benchmark['
-```
+CI shards the same filter 4 ways by sorted test file; a module that matches no shard pattern never runs. After an import boundary change, run `uv run --group lint lint-imports` and update `[tool.importlinter]` and the matching AGENTS files in the same commit.
 
 ## Observability load (Gate M/V)
 

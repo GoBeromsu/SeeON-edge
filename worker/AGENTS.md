@@ -3,6 +3,7 @@
 DeepStream Flow worker: SDK-owned capture, decode, inference, and tracking; CPU-owned fall and bed-exit decisions; evidence and one-way relay egress.
 Image `ml-worker`. Sole production command: `python -m worker`.
 Replay is backend-owned; the production worker has no replay CLI.
+`replay/` is the decider-replay library behind the live-view `/replay` route.
 
 ## Layers
 
@@ -14,10 +15,11 @@ Run `uv run --group lint lint-imports` for configured contracts. A forbidden imp
 | `interfaces/` | one Protocol per seam | `types` |
 | `adapters/` | DeepStream vendor integration and model helpers | `types`, `interfaces` |
 | `pipeline/` | decision and output coordination | everything except `runtime` |
-| `domains/` | fall and bed-exit decisions | `types`, `interfaces`, `pipeline` |
+| `domains/` | fall and bed-exit decisions | `types`, `interfaces`, `pipeline` except `pipeline.output` |
+| `replay/` | deterministic decider replay over recovered traces | `domains`, `pipeline`, `interfaces`, `types` |
 | `runtime/` | sole composition root | everything |
 | `tools/edge_engine_build.py` | nvinfer engine build before source activation | out of the production import graph |
-| `tools/fetch_models/` | pinned model provisioning (`edge-model-fetch`) | stdlib only; out of the production import graph |
+| `tools/fetch_models/` | pinned model provisioning (`edge-model-fetch`) | stdlib at import, lazy `adapters.model` / `runtime.provenance` for bundle admission; out of the production import graph |
 
 Order: `runtime -> pipeline -> domains -> adapters -> interfaces -> types -> contracts`.
 `tools/` is out-of-band; import-linter forbids every worker layer from importing it.
@@ -42,12 +44,13 @@ Read the nearest `AGENTS.md` before changing that package.
 | `interfaces/` | media-plane, association, output, and serving seams |
 | `adapters/deepstream/` | lazy `pyservicemaker`/`pyds` integration, sources, and metadata conversion |
 | `adapters/model/` | model registry and CPU model helpers |
-| `adapters/media/` | bounded native RTSP frame capture for one-off CPU recognition |
+| `adapters/media/` | bounded native RTSP frame capture for one-off CPU recognition; FFmpeg clip thumbnails |
 | `pipeline/decision/` | `IncidentManager`, admission |
-| `pipeline/output/` | event publication and evidence handoff |
+| `pipeline/output/` | event publication, evidence handoff, live view, worker HTTP surface |
 | `pipeline/output/evidence/` | smart record actor, clip publication, sealed sidecar, durable stager, delivery queue, snapshot store |
 | `domains/fall/` | window classifier and rising-edge latch |
-| `domains/bed_exit/` | assignment, grace, and hold |
+| `domains/bed_exit/` | own-bed assignment and PTS dwell gating |
+| `domains/episode/` | `EpisodeAuthority`: event identity and exact-once lifecycle |
 | `runtime/worker.py` | composition root |
 | `runtime/flow/onnx_shape.py` | shared ONNX input-shape inspection for engine build and Flow boot gates |
 | `tools/export_pose_onnx.py` | owned dynamic-batch pose export; imports ultralytics only inside tool functions |
@@ -55,6 +58,11 @@ Read the nearest `AGENTS.md` before changing that package.
 | `runtime/bootstrap.py` | named stages and boot gate |
 | `tools/edge_engine_build.py` | nvinfer engine build and deployed-batch identity |
 | `tools/fetch_models/` | manifest-pinned model download + SHA-256 verification into `/app/models` |
+| `tools/export_bed_seg_onnx.py`, `tools/export_fall_onnx.py` | digest-pinned ONNX exports for bed segmentation and the fall bundle |
+| `tools/clip_analysis.py` | isolated child entrypoint for stored-clip re-analysis |
+| `tools/clip_playback_backfill.py` | backfill of browser playback renditions |
+| `tools/promote_model/` | stdlib-only promotion contract schemas |
+| `replay/` | `replay_recovered`, `replay_camera`, `compare_runs`, `assess_reproducibility` |
 
 New seam: Protocol plus two implementations, or one plus a test double.
 Keep new pure-code modules at or below 250 logical LOC. Split by port or stage.

@@ -9,6 +9,9 @@ authority is PostgreSQL, and nothing here may import `sqlite3`.
 - `events/`: backend↔worker egress. Read `events/AGENTS.md`.
 - `detection_policies.py`: closed typed policy parser and bundle.
 - `rtsp_url_policy.py`: RTSP/RTSPS destination admission and IP pin.
+- `release_identity.py`: `EDGE_DATABASE_FORMAT_IDENTITY`, `EDGE_DATABASE_SCHEMA_VERSION`
+  (19), `require_peer_schema_identity`. Backend bootstrap/health and the worker
+  release-pair check read the same constant; bump it with the `edge_db` schema.
 - `pyproject.toml`: `eldercare-shared`. Empty deps.
 
 Import-linter owns the graph. Allowed: stdlib, `contracts`, local `shared.*`.
@@ -43,7 +46,8 @@ Types live in this file. Rows live in
 `backend/app/features/detection_settings/`. Worker pull:
 `worker/runtime/config/pull_models.py`. Camera admit:
 `backend/app/features/cameras/router.py`. Worker open:
-`worker/runtime/ingest_composition.py`. Child suites stay in those guides.
+`worker/runtime/worker.py`, `worker/pipeline/output/_mjpeg_http.py`. Child
+suites stay in those guides. Types: `uv run --group lint mypy contracts shared`.
 `uv run pytest -q tests/test_detection_policy_models.py tests/test_rtsp_url_policy.py tests/test_worker_policy_resolution.py tests/test_worker_static_detection_policy_authority.py tests/test_api_detection_policy.py tests/test_camera_rtsp_destination_api.py`
 Then `uv run --group lint lint-imports`. Real `getaddrinfo` lives in
 `test_rtsp_url_policy.py`. Other tests stub DNS.

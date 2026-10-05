@@ -1,12 +1,10 @@
 # FEATURE SLICES
 
 Vertical cut: one capability, one package. Router and store live together.
-Sibling `*_router.py` files stay in that package. `create_app` is the only
-mounter. `qa/` is retired and is not a runtime owner.
+Sibling `*_router.py` files stay in that package. `create_app` is the only mounter.
 ## Layout
 
-Export `router`. End the router module with `__all__` that includes it.
-Do not `include_router` a sibling slice from inside this tree.
+Router modules export `router` in `__all__`. Never `include_router` a sibling slice here.
 Owner constructs (`from_env()` or lifespan) and exposes a getter that
 writes `app.state` once. Dependents call the getter. They never
 `from_env()` a second copy of someone else's store.
@@ -19,6 +17,8 @@ client the alert stays local and gets a local receipt.
 ## Cross-slice graph
 
 Read or call. Do not construct the other slice's store.
+- `audit` owns `AuditStore`. Governed mutations in any slice append through
+  `audit.http.append_transactional` / `append_governed` with a catalog `AuditAction`.
 - `relay` consumes cameras (`worker_config_snapshot`, registry), clips
   catalog, and status stores. No store of its own.
 - `diagnostics` owns `execution_record_store` and the engineer query
@@ -41,9 +41,8 @@ Read or call. Do not construct the other slice's store.
   writes `app.state.pulled_config`.
 - `streams` lives in cameras. It proxies worker MJPEG and duplicates the
   relay header constant so it does not import cameras-router privates.
-Hard edges: no `backend.app.main` imports. Connection is the only slice
-that imports `lifespan`. `qa` imports nothing under `features/`; nothing
-here imports `qa` until its router exists.
+Hard edges: no `backend.app.main` imports. Only connection imports `lifespan`.
+No `qa/` package exists (retired); nothing imports one.
 ## HTTP, stores, tests
 
 Parent locks BaseModel shape. Schemas sit next to the router or in slice
@@ -66,7 +65,7 @@ attrs and sets `backend_configured=False`. Handlers do not
 build `EdgeIngestClient`. Drive the slice through
 `create_app(lifespan=no_lifespan)` plus an injected store, or full lifespan
 when listing or refresh is the subject. Slice tests: `tests/test_api_*.py`,
-`tests/test_connection_*.py`, `tests/test_clip_listing_*.py`. New
+`tests/test_connection_*.py`, `tests/test_clip_listing_*.py`, `tests/test_audit_*.py`. New
 `features.*` import: `uv run --group lint lint-imports`.
 ## Anti-patterns
 
@@ -76,5 +75,4 @@ top-level folder for the same capability. Operator UX growing inside
 local registry id on a Hub-bound payload. Worker-config keeps unmapped cameras
 and uses `backend_camera_id` or the local id so ingestion never stops. Raw path joins into the clip store (use
 `clips/descriptor_files.py` or evidence `_verified_media`, O_NOFOLLOW).
-Teaching retired QA HTTP from `create_app`.
-Polling `edge.sqlite3` for worker progress; HTTP relay is the signal.
+Teaching retired QA HTTP from `create_app`. Polling `edge.sqlite3` for worker progress; HTTP relay is the signal.
