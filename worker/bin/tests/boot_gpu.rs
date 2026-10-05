@@ -143,6 +143,32 @@ fn empty_roster_reaches_cuda_gate_with_cpu_auxiliaries_without_fabricating_a_fac
     assert_empty_roster_cuda_refusal(&fixture);
 }
 
+#[test]
+#[ignore = "requires genuine schema-2 identity, real model/engine inputs, no CUDA devices or NVML utility capability, and isolated ml-api loopback alias"]
+fn enrolled_empty_roster_reports_cuda_refusal_once_with_cpu_auxiliaries() {
+    let _guard = relay_guard();
+    let fixture = Fixture::with_provider("enrolled-empty-cpu", AuxiliaryRuntime::OnnxRuntimeCpu);
+    let mut config = fixture.config(false);
+    config["enrolled_facility_id"] = serde_json::json!("facility-1");
+    assert_eq!(config["cameras"], serde_json::json!([]));
+    let server = Server::start(Some(config), None);
+    let (status, stderr) = run(fixture.command("run"));
+    assert_eq!(
+        status.code(),
+        Some(4),
+        "{}",
+        String::from_utf8_lossy(&stderr)
+    );
+    let requests = server.finish();
+    let report = failure_post(&requests);
+    assert_golden(report);
+    fixture.assert_no_source_activation();
+    let diagnostic = String::from_utf8_lossy(&stderr);
+    assert!(diagnostic.contains("reason=cuda_unavailable"));
+    assert!(!diagnostic.contains("report=no facility"));
+    println!("BOOT_ENROLLED_EMPTY_REPORT={report}");
+}
+
 fn assert_empty_roster_cuda_refusal(fixture: &Fixture) {
     let server = Server::start(Some(fixture.config(false)), None);
     let (status, stderr) = run(fixture.command("run"));
