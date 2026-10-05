@@ -31,7 +31,7 @@ from backend.app.features.audit.http import mutation_audit
 from backend.app.features.audit.store import AuditEvent
 from backend.app.features.audit.store import utc_now as audit_now
 from backend.app.features.cameras.store import CameraRegistryStore
-from backend.app.features.connection.store import get_connection_settings_store
+from backend.app.features.connection.dependencies import get_connection_settings_store
 from backend.app.features.detection_settings.policy_store import (
     DetectionPolicyStore,
     PolicyActivationRefused,

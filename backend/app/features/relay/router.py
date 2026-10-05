@@ -12,12 +12,12 @@ from collections.abc import Callable, Coroutine, Iterator
 from contextlib import contextmanager
 from typing import Annotated, Any, Protocol
 
-import psycopg
 from fastapi import APIRouter, Depends, Header, HTTPException, Request, Response, status
 from fastapi.routing import APIRoute
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 from starlette.types import Message, Receive
 
+from backend.app.edge_db import CheckViolation, DataError, NotNullViolation
 from backend.app.edge_db.authority import AuthorityFenced
 from backend.app.features.audit.catalog import (
     AuditAction,
@@ -33,6 +33,7 @@ from backend.app.features.cameras.router import (
     worker_config_snapshot,
 )
 from backend.app.features.cameras.store import CameraRegistryStore
+from backend.app.features.cameras.update_command import CameraUpdate
 from backend.app.features.evidence.event_outbox import (
     AcceptedEvent,
     EventIdentityConflict,
@@ -687,9 +688,9 @@ def _accept_alert(
 # Constraint failures describe the request, not the database: answering 503
 # would make the worker resend a payload that can never be stored.
 _REJECTED_FACTS = (
-    psycopg.errors.CheckViolation,
-    psycopg.errors.NotNullViolation,
-    psycopg.DataError,
+    CheckViolation,
+    NotNullViolation,
+    DataError,
 )
 
 
@@ -1079,7 +1080,7 @@ def _clear_never_connected_on_first_heartbeat(request: Request, camera_id: str) 
         return
     local_id = record.get("id")
     if isinstance(local_id, str):
-        store.update(local_id, {"never_connected": False})
+        store.update(local_id, CameraUpdate(never_connected=False))
 
 
 def _find_registry_record(store: CameraRegistryStore, camera_id: str) -> dict[str, object] | None:

@@ -30,7 +30,6 @@ from functools import partial
 from pathlib import Path
 
 import psycopg
-from fastapi import FastAPI
 
 from backend.app.edge_db.authority import AuthorityToken, require_authority
 from backend.app.edge_db.postgres import PostgresDatabase
@@ -624,42 +623,7 @@ def _parse_cursor(cursor: str) -> tuple[str, str]:
     return started_at, clip_id
 
 
-def _clip_store(app: FastAPI) -> ClipStore:
-    store = getattr(app.state, "clip_store", None)
-    if isinstance(store, ClipStore):
-        return store
-    store = ClipStore.from_env()
-    app.state.clip_store = store
-    return store
-
-
-async def start_clip_catalog_indexer(app: FastAPI) -> None:
-    """Index the store once (refusing startup on failure), then keep it indexed."""
-    indexer = getattr(app.state, "clip_catalog_indexer", None)
-    if indexer is None:
-        raise RuntimeError("clip catalog indexer is not injected")
-    if not isinstance(indexer, ClipCatalogIndexer):
-        raise TypeError("clip catalog indexer has invalid type")
-    interval = clip_catalog_interval_sec()
-    store = _clip_store(app)
-    executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="clip-catalog-indexer")
-    try:
-        outcome = await asyncio.get_running_loop().run_in_executor(
-            executor, indexer.reconcile, store
-        )
-    except BaseException:
-        executor.shutdown(wait=False, cancel_futures=True)
-        raise
-    stop = asyncio.Event()
-    app.state.clip_catalog_indexer_stop = stop
-    app.state.clip_catalog_indexer_executor = executor
-    app.state.clip_catalog_indexer_task = asyncio.create_task(
-        _run_loop(indexer, store, stop, executor, interval, outcome.remaining),
-        name="clip-catalog-indexer",
-    )
-
-
-async def _run_loop(
+async def run_clip_catalog_indexer(
     indexer: ClipCatalogIndexer,
     store: ClipStore,
     stop: asyncio.Event,
@@ -686,24 +650,6 @@ async def _run_loop(
             remaining = outcome.remaining
 
 
-async def stop_clip_catalog_indexer(app: FastAPI) -> None:
-    stop = getattr(app.state, "clip_catalog_indexer_stop", None)
-    task = getattr(app.state, "clip_catalog_indexer_task", None)
-    executor = getattr(app.state, "clip_catalog_indexer_executor", None)
-    if isinstance(stop, asyncio.Event):
-        stop.set()
-    if isinstance(task, asyncio.Task):
-        try:
-            await asyncio.wait_for(asyncio.shield(task), CLIP_CATALOG_SHUTDOWN_WAIT_SEC)
-        except TimeoutError:
-            task.cancel()
-    if isinstance(executor, ThreadPoolExecutor):
-        executor.shutdown(wait=False, cancel_futures=True)
-    app.state.clip_catalog_indexer_stop = None
-    app.state.clip_catalog_indexer_task = None
-    app.state.clip_catalog_indexer_executor = None
-
-
 __all__ = [
     "API_CLIP_CATALOG_INTERVAL_SEC_ENV",
     "CLIP_CATALOG_SHUTDOWN_WAIT_SEC",
@@ -717,6 +663,5 @@ __all__ = [
     "PostgresClipCatalog",
     "ReconcileOutcome",
     "clip_catalog_interval_sec",
-    "start_clip_catalog_indexer",
-    "stop_clip_catalog_indexer",
+    "run_clip_catalog_indexer",
 ]

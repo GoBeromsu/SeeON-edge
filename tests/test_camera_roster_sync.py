@@ -8,7 +8,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from backend.app.features.audit.postgres_runtime import PostgresAuditRuntime
-from backend.app.features.cameras.roster_sync import sync_camera_roster
+from backend.app.features.cameras.dependencies import sync_camera_roster
 from backend.app.features.cameras.store import CameraRegistryStore
 from backend.app.features.connection.store import (
     API_BACKEND_BASE_URL_ENV,

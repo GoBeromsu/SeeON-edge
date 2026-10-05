@@ -25,6 +25,7 @@ from backend.app.features.cameras.topology_confirmation import (
     TopologyConfirmationRejected,
 )
 from backend.app.features.cameras.topology_confirmation_state import TopologyConfirmationStore
+from backend.app.features.cameras.update_command import CameraUpdate
 from backend.app.features.connection.store import ConnectionSettingsStore
 from backend.app.features.connection.topology_retry_coordinator import TopologyRetryCoordinator
 from contracts.edge_provisioning_v1 import (
@@ -205,7 +206,7 @@ def test_expired_confirmation_has_zero_upstream_calls_or_local_mutation(sandbox)
 def test_changed_registry_rejects_confirmation_without_mutation(sandbox):
     coordinator, registry, client, _ = _primed(sandbox)
     before = _state(sandbox).load()
-    registry.update("local-1", {"label": "Changed"})
+    registry.update("local-1", CameraUpdate.model_validate({"label": "Changed"}))
     result = _confirm(coordinator)
     assert isinstance(result, TopologyConfirmationRejected) and result.status_code == 409
     assert client.confirmations == []

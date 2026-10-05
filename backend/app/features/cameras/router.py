@@ -35,7 +35,7 @@ from backend.app.features.audit.store import AuditEvent
 from backend.app.features.audit.store import utc_now as audit_now
 from backend.app.features.cameras.bed_zone_router import BedZonePayload, BedZoneRegionPayload
 from backend.app.features.cameras.bed_zone_store import BedZone, BedZoneStore
-from backend.app.features.cameras.roster_sync import (
+from backend.app.features.cameras.dependencies import (
     camera_sync_view,
     sync_camera_roster,
 )
@@ -54,15 +54,16 @@ from backend.app.features.cameras.topology import (
     RegistryTopologySnapshot,
     TopologyConflictError,
 )
+from backend.app.features.cameras.update_command import CameraUpdate
 from backend.app.features.clips.storage_location_store import ClipStorageLocationStore
-from backend.app.features.connection.store import get_connection_settings_store
+from backend.app.features.connection.dependencies import get_connection_settings_store
 from backend.app.features.detection_settings.policy_store import (
     DetectionPolicyStore,
     PolicyActivationRefused,
     PolicyCameraIdentity,
 )
 from backend.app.features.detection_settings.store import DetectionSettingsStore
-from backend.app.features.runtime_settings.store import get_runtime_settings_store
+from backend.app.features.runtime_settings.dependencies import get_runtime_settings_store
 from backend.app.features.status.heartbeat_store import ONLINE, get_heartbeat_store
 from backend.app.shared.dashboard_auth import authorize_dashboard
 from contracts.edge_provisioning_models import EdgeErrorCode, TopologyFloor, TopologyRoom
@@ -573,7 +574,9 @@ def test_camera(
         )
         mutation_audit(request, lambda: event).apply(
             store,
-            lambda append: store.update(camera_id, updates, after_write=append),
+            lambda append: store.update(
+                camera_id, CameraUpdate.model_validate(updates), after_write=append
+            ),
             expects_audit=lambda result: result is not None,
         )
     return _probe_response(probe)
@@ -620,7 +623,9 @@ def update_camera(
     try:
         updated = _camera_mutation(request, actor, AuditAction.CAMERA_UPDATE, camera_id).apply(
             store,
-            lambda append: store.update(camera_id, updates, after_write=append),
+            lambda append: store.update(
+                camera_id, CameraUpdate.model_validate(updates), after_write=append
+            ),
             expects_audit=lambda result: result is not None,
         )
     except DuplicateCameraError as exc:

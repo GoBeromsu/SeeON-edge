@@ -32,6 +32,7 @@ from backend.app.features.cameras.store import (
     registry_expected_cameras,
 )
 from backend.app.features.cameras.topology import TopologyConflictError, TopologyErrorCode
+from backend.app.features.cameras.update_command import CameraUpdate
 from contracts.edge_provisioning_models import EdgeErrorCode
 
 if TYPE_CHECKING:
@@ -101,7 +102,9 @@ def _mutation(store: CameraRegistryStore, name: str, after_write=None):
     operations = {
         "create": lambda: _create(store, "camera-b", status="offline", after_write=after_write),
         "update": lambda: store.update(
-            "camera-a", {"label": "Changed", "status": "offline"}, after_write=after_write
+            "camera-a",
+            CameraUpdate.model_validate({"label": "Changed", "status": "offline"}),
+            after_write=after_write,
         ),
         "delete": lambda: store.delete("camera-a", after_write=after_write),
         "create_floor": lambda: store.create_floor(
@@ -176,15 +179,17 @@ def test_crud_complete_registry_public_output_and_revisions(
     }
     updated = store.update(
         "camera-a",
-        {
-            "label": "Renamed",
-            "backend_camera_id": "hub-a",
-            "mapping_pending": True,
-            "floor": 10,
-            "status": "offline",
-            "never_connected": False,
-            "last_ok_at": _TIME,
-        },
+        CameraUpdate.model_validate(
+            {
+                "label": "Renamed",
+                "backend_camera_id": "hub-a",
+                "mapping_pending": True,
+                "floor": 10,
+                "status": "offline",
+                "never_connected": False,
+                "last_ok_at": _TIME,
+            }
+        ),
     )
     assert updated == expected | {
         "label": "Renamed",
@@ -210,9 +215,14 @@ def test_crud_complete_registry_public_output_and_revisions(
         "hub-a": {"camera_id": "hub-a", "facility_id": None, "resident_id": None},
         "camera-a": {"camera_id": "hub-a", "facility_id": None, "resident_id": None},
     }
-    pending = store.update("camera-a", {"backend_camera_id": None, "mapping_pending": True})
+    pending = store.update(
+        "camera-a",
+        CameraUpdate.model_validate({"backend_camera_id": None, "mapping_pending": True}),
+    )
     assert pending["mapping_pending"] is True and pending["backend_camera_id"] is None
-    unmapped = store.update("camera-a", {"mapping_pending": False, "floor": None})
+    unmapped = store.update(
+        "camera-a", CameraUpdate.model_validate({"mapping_pending": False, "floor": None})
+    )
     assert unmapped["floor"] is None and unmapped["mapping_pending"] is False
     assert pending["status"] == unmapped["status"] == "offline"
     assert sandbox.admin.execute(
@@ -220,7 +230,12 @@ def test_crud_complete_registry_public_output_and_revisions(
     ).fetchone() == (incarnation, "UNMAPPED", 4)
     before = _rows(sandbox)
     hooks = []
-    assert store.update("absent", {"label": "No row"}, after_write=hooks.append) is None
+    assert (
+        store.update(
+            "absent", CameraUpdate.model_validate({"label": "No row"}), after_write=hooks.append
+        )
+        is None
+    )
     assert store.delete("absent", after_write=hooks.append) is False
     assert _rows(sandbox) == before and not hooks
     assert store.delete("camera-a") is True
@@ -258,13 +273,17 @@ def test_normalized_duplicate_identity_rolls_back_without_status_or_revision_cha
             _create(store, "camera-c", rtsp_url=url, after_write=hooks.append)
         else:
             store.update(
-                "camera-b", {"rtsp_url": url, "status": "offline"}, after_write=hooks.append
+                "camera-b",
+                CameraUpdate.model_validate({"rtsp_url": url, "status": "offline"}),
+                after_write=hooks.append,
             )
     assert error.value.existing_record["id"] == "camera-a"
     assert error.value.existing_record == store.get("camera-a") | {"status": "unknown"}
     assert "secret" not in str(error.value) and "credentials" not in repr(error.value)
     assert _rows(sandbox) == before and store._statuses == statuses and not hooks
-    assert store.update("camera-a", {"rtsp_url": url})["rtsp_url"] == url
+    assert (
+        store.update("camera-a", CameraUpdate.model_validate({"rtsp_url": url}))["rtsp_url"] == url
+    )
 
 
 def test_distinct_stream_paths_ports_queries_and_safe_parameters_remain_distinct(
@@ -360,10 +379,12 @@ def test_topology_complete_projection_rename_rebind_unbind_and_deletion(
     )
     assert public_camera(store.get("camera-a"))["edge_ref"] == "edge-a"
     assert public_camera(store.get("camera-a"))["room_edge_ref"] == "room-a"
-    moved = store.update("camera-a", {"room_edge_ref": "room-b"})
+    moved = store.update("camera-a", CameraUpdate.model_validate({"room_edge_ref": "room-b"}))
     assert moved["edge_ref"] == "edge-a" and moved["room_edge_ref"] == "room-b"
     assert store.delete_room("room-a") is True
-    detached = store.update("camera-a", {"edge_ref": None, "room_edge_ref": None})
+    detached = store.update(
+        "camera-a", CameraUpdate.model_validate({"edge_ref": None, "room_edge_ref": None})
+    )
     assert detached["edge_ref"] is None and detached["room_edge_ref"] is None
     assert "edge_ref" not in public_camera(detached)
     unbound = store.topology_snapshot()
@@ -468,7 +489,10 @@ def test_failed_rebinding_does_not_remove_the_previous_binding(
     _create(store, "camera-b", edge_ref="edge-b", room_edge_ref="room-b")
     before = _rows(sandbox)
     with pytest.raises(TopologyConflictError) as error:
-        store.update("camera-a", updates | {"status": "offline", "label": "Must roll back"})
+        store.update(
+            "camera-a",
+            CameraUpdate.model_validate(updates | {"status": "offline", "label": "Must roll back"}),
+        )
     assert error.value.code is code and _rows(sandbox) == before
     assert store.get("camera-a")["status"] == "online"
     assert store.get("camera-a")["room_edge_ref"] == "room-a"
@@ -503,7 +527,7 @@ def test_constraint_errors_are_privacy_safe_and_do_not_publish_failed_status(
     _create(store, rtsp_url=_URL)
     before = _rows(sandbox)
     with pytest.raises(CameraRegistryWriteError) as error:
-        store.update("camera-a", {"label": "", "status": "offline"})
+        store.update("camera-a", CameraUpdate.model_validate({"label": "", "status": "offline"}))
     assert "synthetic-private" not in repr(error.value)
     assert error.value.__suppress_context__ and error.value.__cause__ is None
     assert _rows(sandbox) == before and store.get("camera-a")["status"] == "online"
@@ -758,7 +782,7 @@ def test_frozen_authority_precedes_invalid_input_and_missing_camera_checks(
     with pytest.raises(AuthorityFenced):
         _create(store, rtsp_url="rtsp://camera.invalid:not-a-port/live")
     with pytest.raises(AuthorityFenced):
-        store.update("absent", {"edge_ref": "invalid ref"})
+        store.update("absent", CameraUpdate.model_validate({"edge_ref": "invalid ref"}))
     with pytest.raises(AuthorityFenced):
         store.delete("absent")
     with pytest.raises(AuthorityFenced):
@@ -873,8 +897,12 @@ def test_competing_partial_camera_updates_merge_after_lock_without_lost_fields(
     one, two = _compete(
         sandbox,
         monkeypatch,
-        lambda: first.update("camera-a", {"label": "Concurrent label"}),
-        lambda: second.update("camera-a", {"backend_camera_id": "hub-a", "floor": -1}),
+        lambda: first.update(
+            "camera-a", CameraUpdate.model_validate({"label": "Concurrent label"})
+        ),
+        lambda: second.update(
+            "camera-a", CameraUpdate.model_validate({"backend_camera_id": "hub-a", "floor": -1})
+        ),
     )
     assert one["label"] == "Concurrent label" and two["backend_camera_id"] == "hub-a"
     record = first.get("camera-a")
@@ -968,14 +996,22 @@ def test_mutation_returns_its_own_committed_record_not_a_racing_reload(
                 assert other.delete("camera-a")
                 _create(other, label="Later committed writer", status="offline")
             else:
-                other.update("camera-a", {"label": "Later committed writer", "status": "offline"})
+                other.update(
+                    "camera-a",
+                    CameraUpdate.model_validate(
+                        {"label": "Later committed writer", "status": "offline"}
+                    ),
+                )
         return candidate
 
     monkeypatch.setattr(sandbox.database, "transact", interleaved_transaction)
     if operation == "create":
         saved = _create(store, label="Own committed label")
     else:
-        saved = store.update("camera-a", {"label": "Own committed label", "status": "online"})
+        saved = store.update(
+            "camera-a",
+            CameraUpdate.model_validate({"label": "Own committed label", "status": "online"}),
+        )
     assert saved["label"] == "Own committed label" and saved["status"] == "online"
     assert len(interleaved) == 1 and interleaved[0][1]["label"] == "Own committed label"
     incarnation = interleaved[0][0]
@@ -1019,7 +1055,7 @@ def test_snapshots_use_one_readonly_statement_snapshot_across_committed_writers(
             armed = False
             statements.append(query)
             # The read's result exists, but has not been fetched or projected.
-            other.update("camera-a", {"label": "Concurrent label"})
+            other.update("camera-a", CameraUpdate.model_validate({"label": "Concurrent label"}))
             other.create_floor(edge_ref="floor-b", name="New floor", order_index=2)
             other.create_room(edge_ref="room-b", floor_edge_ref="floor-b", name="201")
             _create(other, "camera-b", edge_ref="edge-b", room_edge_ref="room-b")

@@ -92,7 +92,8 @@ def get_clip_metadata(
         manifest,
         resolved_video_size(store, located),
         store.thumbnail_available(located),
-    ).model_copy(update={"playback_codec": store.playback_codec(located)})
+        playback_codec=store.playback_codec(located),
+    )
     append_governed(
         request, actor_id=actor, action=AuditAction.CLIP_DETAIL, target_id=manifest.clip_id
     )

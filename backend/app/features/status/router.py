@@ -13,7 +13,7 @@ from typing import Any
 from fastapi import APIRouter, Request
 
 from backend.app.features.cameras.store import CameraRegistryStore, registry_expected_cameras
-from backend.app.features.runtime_settings.store import get_runtime_settings_store
+from backend.app.features.runtime_settings.dependencies import get_runtime_settings_store
 from backend.app.features.status.heartbeat_store import get_heartbeat_store
 from backend.app.features.status.runtime_status_store import get_runtime_status_store
 

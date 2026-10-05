@@ -2,16 +2,16 @@
 
 from __future__ import annotations
 
+from dataclasses import asdict
 from typing import Annotated
 
 from fastapi import APIRouter, HTTPException, Query, Request, status
 from pydantic import BaseModel, ConfigDict, Field
 
 from backend.app.features.audit.catalog import AuditAction
+from backend.app.features.audit.history_repository import get_history, list_history
 from backend.app.features.audit.http import append_governed, audit_runtime
 from backend.app.shared.dashboard_auth import authorize_dashboard
-
-SqlValue = str | int | float | bytes | None
 
 router = APIRouter(prefix="/audit", tags=["audit"])
 
@@ -47,71 +47,26 @@ class AuditListResponse(BaseModel):
     next_before_id: int | None
 
 
-class AuditStoredIdentityError(ValueError):
-    """A verified audit row contains a non-integer identity."""
-
-
-_SELECT = (
-    "SELECT audit_id,occurred_at,recorded_at,actor_type,actor_id,action,target_type,"
-    "target_id,outcome,detail_json,previous_hash,record_hash FROM audit_events"
-)
-
-
-def _audit_id(value: SqlValue) -> int:
-    if not isinstance(value, int) or isinstance(value, bool):
-        raise AuditStoredIdentityError
-    return value
-
-
-def _response(row: tuple[SqlValue, ...]) -> AuditEventResponse:
-    return AuditEventResponse(
-        audit_id=_audit_id(row[0]),
-        occurred_at=str(row[1]),
-        recorded_at=str(row[2]),
-        actor_type=str(row[3]),
-        actor_id=str(row[4]),
-        action=AuditAction(str(row[5])),
-        target_type=str(row[6]),
-        target_id=str(row[7]),
-        outcome=str(row[8]),
-        detail_json=None if row[9] is None else str(row[9]),
-        previous_hash=str(row[10]),
-        record_hash=str(row[11]),
-    )
-
 
 @router.get("", response_model=AuditListResponse)
 def list_audit(request: Request, filters: Annotated[AuditListQuery, Query()]) -> AuditListResponse:
     actor = authorize_dashboard(request)
-    parameters: tuple[int, ...]
-    if filters.before_id is None:
-        query = _SELECT + " ORDER BY audit_id DESC LIMIT %s"
-        parameters = (filters.limit + 1,)
-    else:
-        query = _SELECT + " WHERE audit_id < %s ORDER BY audit_id DESC LIMIT %s"
-        parameters = (filters.before_id, filters.limit + 1)
-    rows = audit_runtime(request).database.read(
-        lambda connection: connection.execute(query, parameters).fetchall()
-    )
+    rows = list_history(audit_runtime(request).database, filters.limit, filters.before_id)
     page = rows[: filters.limit]
     append_governed(request, actor_id=actor, action=AuditAction.AUDIT_LIST, target_id="audit")
     return AuditListResponse(
-        events=tuple(_response(row) for row in page),
-        next_before_id=_audit_id(page[-1][0]) if len(rows) > filters.limit else None,
+        events=tuple(AuditEventResponse(**asdict(event)) for event in page),
+        next_before_id=page[-1].audit_id if len(rows) > filters.limit else None,
     )
 
 
 @router.get("/{audit_id}", response_model=AuditEventResponse)
 def get_audit(audit_id: int, request: Request) -> AuditEventResponse:
     actor = authorize_dashboard(request)
-    row = audit_runtime(request).database.read(
-        lambda connection: connection.execute(
-            _SELECT + " WHERE audit_id = %s", (audit_id,)
-        ).fetchone()
-    )
+    row = get_history(audit_runtime(request).database, audit_id)
     if row is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="audit event not found")
-    response = _response(row)
+    response = AuditEventResponse(**asdict(row))
     append_governed(
         request, actor_id=actor, action=AuditAction.AUDIT_DETAIL, target_id=str(audit_id)
     )

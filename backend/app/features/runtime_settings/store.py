@@ -11,7 +11,6 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 
 import psycopg
-from fastapi import FastAPI
 
 from backend.app.edge_db.authority import AuthorityToken, require_authority
 from backend.app.edge_db.postgres import PostgresDatabase, PostgresError
@@ -91,19 +90,9 @@ def _require_expected_version(current: RuntimeSetting, expected: int | None) -> 
         raise RuntimeSettingsVersionConflict(current)
 
 
-def get_runtime_settings_store(app: FastAPI) -> RuntimeSettingsStore:
-    store = getattr(app.state, "runtime_settings_store", None)
-    if store is None:
-        raise RuntimeError("runtime settings store is not injected")
-    if not isinstance(store, RuntimeSettingsStore):
-        raise TypeError("runtime settings store has invalid type")
-    return store
-
-
 __all__ = [
     "RuntimeSetting",
     "RuntimeSettingsNotInitialized",
     "RuntimeSettingsStore",
     "RuntimeSettingsVersionConflict",
-    "get_runtime_settings_store",
 ]

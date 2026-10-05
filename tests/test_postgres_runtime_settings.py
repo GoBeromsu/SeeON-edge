@@ -21,12 +21,12 @@ from psycopg.rows import tuple_row
 from backend.app.edge_db.authority import AuthorityFenced, freeze_authority
 from backend.app.edge_db.postgres import CommitOutcomeUnknown, PoolBudget, PostgresDatabase
 from backend.app.features.runtime_settings import store as runtime_store
+from backend.app.features.runtime_settings.dependencies import get_runtime_settings_store
 from backend.app.features.runtime_settings.store import (
     RuntimeSetting,
     RuntimeSettingsNotInitialized,
     RuntimeSettingsStore,
     RuntimeSettingsVersionConflict,
-    get_runtime_settings_store,
 )
 
 if TYPE_CHECKING:

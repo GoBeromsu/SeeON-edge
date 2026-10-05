@@ -5,9 +5,9 @@ from __future__ import annotations
 from collections.abc import Callable
 from threading import Lock
 
-import psycopg
 from fastapi import FastAPI, Request, Response, status
 
+from backend.app.edge_db import DatabaseDriverError
 from backend.app.edge_db.postgres import PostgresError
 from backend.app.features.audit.catalog import AuditAction, empty_detail
 from backend.app.features.audit.postgres_runtime import AuditMutation, PostgresAuditRuntime
@@ -68,7 +68,7 @@ def append_governed(
 def audit_unavailable_handler(request: Request, error: Exception) -> Response:
     runtime = getattr(request.app.state, "audit_runtime", None)
     if isinstance(
-        error, (PostgresError, psycopg.Error, DashboardCredentialsStoreError)
+        error, (PostgresError, DatabaseDriverError, DashboardCredentialsStoreError)
     ) and isinstance(runtime, PostgresAuditRuntime):
         runtime.record_failure(error)
     if isinstance(runtime, PostgresAuditRuntime):

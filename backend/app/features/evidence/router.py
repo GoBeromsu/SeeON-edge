@@ -35,7 +35,7 @@ from backend.app.features.evidence.receipt_store import (
 )
 from backend.app.features.relay.auth import authorize_relay as _authorize
 from backend.app.features.relay.router import RELAY_TOKEN_HEADER, _camera_binding
-from backend.app.features.runtime_settings.store import get_runtime_settings_store
+from backend.app.features.runtime_settings.dependencies import get_runtime_settings_store
 from backend.app.shared.backend_client_bundle import backend_client_bundle
 from shared.events.clip_identity import is_clip_id
 from shared.events.evidence_export_client import ReadyClipRequest, UnavailableClipRequest

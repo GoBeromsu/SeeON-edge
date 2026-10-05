@@ -24,6 +24,7 @@ from backend.app.features.audit.store import AuditEvent
 from backend.app.features.cameras.bed_zone_store import BedZone, BedZoneRegion, BedZoneStore
 from backend.app.features.cameras.camera_repository import CameraRegistryNotInitialized
 from backend.app.features.cameras.store import CameraRegistryStore
+from backend.app.features.cameras.update_command import CameraUpdate
 
 if TYPE_CHECKING:
     from tests_support.postgres_sandbox import ProductSandbox
@@ -640,7 +641,9 @@ def test_competing_camera_and_bed_writes_preserve_fields_and_all_revisions(
         sandbox,
         monkeypatch,
         (lambda: zones.delete("camera-a")) if clear else (lambda: _put(zones)),
-        lambda: registry.update("camera-a", {"label": "Concurrent label", "floor": -1}),
+        lambda: registry.update(
+            "camera-a", CameraUpdate.model_validate({"label": "Concurrent label", "floor": -1})
+        ),
     )
     assert (zone is True) if clear else (zone == original)
     assert camera["label"] == "Concurrent label" and camera["floor"] == -1

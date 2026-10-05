@@ -27,6 +27,7 @@ from backend.app.features.cameras.camera_values import (
 )
 from backend.app.features.cameras.location_operations import CameraLocationOperations
 from backend.app.features.cameras.topology import CameraTopologyStore
+from backend.app.features.cameras.update_command import CameraUpdate
 
 DEFAULT_FLOOR = camera_values.DEFAULT_FLOOR
 FLOOR_MAX = camera_values.FLOOR_MAX
@@ -139,10 +140,12 @@ class CameraRegistryStore(CameraLocationOperations):
     def update(
         self,
         camera_id: str,
-        updates: dict[str, object],
+        updates: CameraUpdate,
         *,
         after_write: Callable[[psycopg.Connection], None] | None = None,
     ) -> dict[str, object] | None:
+        fields = updates.model_dump(exclude_unset=True)
+
         def persist(
             connection: psycopg.Connection,
         ) -> tuple[uuid.UUID, dict[str, object]] | None:
@@ -150,12 +153,12 @@ class CameraRegistryStore(CameraLocationOperations):
             if current is None:
                 return None
             _, current_record = current
-            rtsp_url = updates.get("rtsp_url")
+            rtsp_url = fields.get("rtsp_url")
             if isinstance(rtsp_url, str):
                 duplicate = find_duplicate(connection, rtsp_url, exclude_camera_id=camera_id)
                 if duplicate is not None:
                     raise DuplicateCameraError(duplicate)
-            values = {**current_record, **updates}
+            values = {**current_record, **fields}
             backend_id = _text(values.get("backend_camera_id"))
             pending = values.get("mapping_pending") is True
             mapping_state = (
@@ -183,7 +186,7 @@ class CameraRegistryStore(CameraLocationOperations):
                     camera_id,
                 ),
             )
-            if "edge_ref" in updates or "room_edge_ref" in updates:
+            if "edge_ref" in fields or "room_edge_ref" in fields:
                 self._topology.delete_camera(connection, camera_id)
                 self._topology.bind_camera(
                     connection,
@@ -198,7 +201,7 @@ class CameraRegistryStore(CameraLocationOperations):
             if updated is None:
                 raise PostgresError("camera update returned no row")
             incarnation, record = updated
-            status = updates.get("status")
+            status = fields.get("status")
             if status in {"online", "offline", "starting", "unknown"}:
                 record["status"] = status
             return incarnation, record

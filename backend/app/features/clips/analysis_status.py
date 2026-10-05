@@ -6,9 +6,7 @@ import json
 from http import HTTPStatus
 from typing import Literal, cast
 
-from fastapi import HTTPException, Request, status
-
-from backend.app.features.clips.analysis_relay import relay
+from backend.app.features.clips.analysis_relay import AnalysisRelayError, AnalysisTransport
 from backend.app.features.clips.schemas import ClipAnalysisResponse
 from backend.app.features.clips.store import ClipStore, LocatedClip
 from shared.events.clip_analysis_wire import ClipAnalysisWireError, decode_clip_analysis
@@ -17,7 +15,7 @@ _WORKER_STATES = frozenset({"idle", "queued", "running", "available", "failed"})
 
 
 def assemble_clip_analysis_status(
-    request: Request, clip_id: str, located: LocatedClip, store: ClipStore
+    transport: AnalysisTransport, clip_id: str, located: LocatedClip, store: ClipStore
 ) -> ClipAnalysisResponse:
     try:
         identity = store.open_located_playback_identity(located)
@@ -64,16 +62,15 @@ def assemble_clip_analysis_status(
         if artifact_invalid:
             return _unavailable(served_media_sha256, "artifact_invalid")
     try:
-        upstream = relay(
-            request,
+        upstream = transport(
             clip_id,
             "analysis",
             body=None,
             accepted=frozenset({HTTPStatus.OK, HTTPStatus.SERVICE_UNAVAILABLE}),
             method="GET",
         )
-    except HTTPException as exc:
-        if exc.status_code == status.HTTP_503_SERVICE_UNAVAILABLE:
+    except AnalysisRelayError as exc:
+        if exc.status_code == HTTPStatus.SERVICE_UNAVAILABLE:
             return _unavailable(served_media_sha256, "worker_unreachable")
         raise
     try:

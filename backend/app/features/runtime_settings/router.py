@@ -10,9 +10,9 @@ from pydantic import BaseModel, ConfigDict, Field
 from backend.app.features.audit.catalog import AuditAction, empty_detail
 from backend.app.features.audit.http import mutation_audit
 from backend.app.features.audit.store import AuditEvent, utc_now
+from backend.app.features.runtime_settings.dependencies import get_runtime_settings_store
 from backend.app.features.runtime_settings.store import (
     RuntimeSettingsVersionConflict,
-    get_runtime_settings_store,
 )
 from backend.app.shared.dashboard_auth import authorize_dashboard
 
