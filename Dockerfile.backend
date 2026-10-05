@@ -38,6 +38,8 @@ COPY contracts ./contracts
 COPY shared ./shared
 COPY backend ./backend
 COPY scripts/ops ./scripts/ops
+# Isolated one-shot provisioning tool; the API process does not import it.
+COPY worker/tools/fetch_models ./worker/tools/fetch_models
 COPY --from=front-build /src/front/dist /app/front
 # State dir is image-owned (matches backend/app/shared/state_dir.py's resolver
 # for the root container user); deliberately no VOLUME here to avoid

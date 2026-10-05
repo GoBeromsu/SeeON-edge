@@ -140,14 +140,19 @@ RUN --mount=type=secret,id=rust-test-inputs,required=true,uid=65534,gid=65534 \
     && cargo test --locked --workspace
 
 
-FROM ghcr.io/astral-sh/uv:python3.12-bookworm-slim@sha256:e5b65587bce7de595f299855d7385fe7fca39b8a74baa261ba1b7147afa78e58 AS uv-bin
-
-# Filter build/verification sources before they enter any shipping image layer.
-# cargo-build and cargo-verify retain their complete, independent source copies.
-FROM uv-bin AS worker-runtime-source
-COPY worker /worker
-RUN rm -rf /worker/bin /worker/rust /worker/runtime/rust /worker/adapters/deepstream/rust \
-    /worker/adapters/model/onnxruntime /worker/adapters/model/native
+# Resolve the locked flow dependencies in an isolated build stage and extract
+# only ORT's native CPU runtime libraries for the Rust worker image.
+FROM ghcr.io/astral-sh/uv:python3.12-bookworm-slim@sha256:e5b65587bce7de595f299855d7385fe7fca39b8a74baa261ba1b7147afa78e58 AS ort-native-build
+WORKDIR /src/ort
+ENV UV_PROJECT_ENVIRONMENT=/opt/ort-venv
+COPY pyproject.toml uv.lock ./
+RUN --mount=type=cache,target=/root/.cache/uv \
+    uv sync --frozen --no-default-groups --group flow --no-install-project \
+    && ort_capi=/opt/ort-venv/lib/python3.12/site-packages/onnxruntime/capi \
+    && install -D "$ort_capi/libonnxruntime.so.1.29.0" /opt/seeon/lib/libonnxruntime.so.1.29.0 \
+    && install -D "$ort_capi/libonnxruntime_providers_shared.so" /opt/seeon/lib/libonnxruntime_providers_shared.so \
+    && test -s /opt/seeon/lib/libonnxruntime.so.1.29.0 \
+    && test -s /opt/seeon/lib/libonnxruntime_providers_shared.so
 
 FROM nvcr.io/nvidia/deepstream@sha256:f6fa0247da9290979cbb05749e7da9435d089c93db7c4dcfe85ba2488b5f4994 AS runtime
 WORKDIR /app
@@ -164,7 +169,6 @@ RUN apt-get update \
         libx265-199 \
         vainfo \
     && rm -rf /var/lib/apt/lists/*
-COPY --from=uv-bin /usr/local/bin/uv /usr/local/bin/uv
 COPY --from=parser-build /src/libnvdsinfer_custom_yolo26_pose.so /opt/nvidia/deepstream/deepstream/lib/
 COPY --from=sdk-observer-build /src/observer/sources/libs/nvdsinfer/libnvds_infer.so /opt/nvidia/deepstream/deepstream/lib/
 COPY --from=sdk-observer-build /src/observer/build-result.json /opt/seeon/nvdsinfer-observer/build-result.json
@@ -176,30 +180,14 @@ COPY --from=native-build /opt/seeon/lib/libseeon_gpu.so /opt/seeon/lib/libseeon_
 COPY --from=native-build /opt/seeon/lib/libseeon_media.so /opt/seeon/lib/libseeon_media.so
 COPY --from=native-build /opt/seeon/lib/libseeon_clipdec.so /opt/seeon/lib/libseeon_clipdec.so
 COPY --from=native-build /opt/seeon/lib/libseeon_ort.so /opt/seeon/lib/libseeon_ort.so
+COPY --from=ort-native-build /opt/seeon/lib/libonnxruntime.so.1.29.0 /opt/seeon/lib/libonnxruntime.so.1.29.0
+COPY --from=ort-native-build /opt/seeon/lib/libonnxruntime_providers_shared.so /opt/seeon/lib/libonnxruntime_providers_shared.so
 COPY --from=source-revision /opt/seeon/ml-worker-image-revision /opt/seeon/ml-worker-image-revision
 COPY --from=source-revision /opt/seeon/edge-database-schema-version /opt/seeon/edge-database-schema-version
 
-ENV UV_PROJECT_ENVIRONMENT=/app/.venv \
-    PATH=/app/.venv/bin:$PATH \
-    ORT_DISABLE_TELEMETRY=1 \
-    PYTHONDONTWRITEBYTECODE=1 \
-    PYTHONUNBUFFERED=1 \
+ENV ORT_DISABLE_TELEMETRY=1 \
     GST_PLUGIN_PATH=/opt/nvidia/deepstream/deepstream/lib/gst-plugins \
     LD_LIBRARY_PATH=/opt/seeon/lib:/opt/nvidia/deepstream/deepstream/lib:${LD_LIBRARY_PATH}
-COPY pyproject.toml uv.lock ./
-RUN --mount=type=cache,target=/root/.cache/uv \
-    uv venv --system-site-packages /app/.venv \
-    && uv sync --frozen --no-default-groups --group flow --no-install-project \
-    && python -m pip install --no-cache-dir pyyaml \
-    && python -c 'import importlib.util as u; assert u.find_spec("pyservicemaker"), "pyservicemaker not visible from the venv"' \
-    && python -c 'import onnxruntime; assert "CPUExecutionProvider" in onnxruntime.get_available_providers()' \
-    && test -s /app/.venv/lib/python3.12/site-packages/onnxruntime/capi/libonnxruntime.so.1.29.0 \
-    && ! python -c 'import torch' \
-    && ! python -c 'import ultralytics'
-
-COPY contracts ./contracts
-COPY shared ./shared
-COPY --from=worker-runtime-source /worker ./worker
 COPY worker/adapters/deepstream/configs /opt/seeon/deepstream-flow
 RUN mkdir -p \
         /root/.local/state/ml-worker \
@@ -217,6 +205,5 @@ LABEL org.opencontainers.image.revision="${SOURCE_REVISION}" \
       com.seniorailab.seeon.deepstream.image="nvcr.io/nvidia/deepstream@sha256:f6fa0247da9290979cbb05749e7da9435d089c93db7c4dcfe85ba2488b5f4994" \
       com.seniorailab.seeon.worker.profile="flow"
 ENV ML_WORKER_BUILD_REVISION="${SOURCE_REVISION}" \
-    ML_WORKER_PROFILE=flow \
-    PYTHONPATH=/app
-CMD ["python", "-m", "worker"]
+    ML_WORKER_PROFILE=flow
+CMD ["/usr/local/bin/ml-worker", "run", "--auxiliary-runtime=onnxruntime-cpu"]

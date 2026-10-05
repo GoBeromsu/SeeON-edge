@@ -208,10 +208,10 @@ services:
   # Face revision / GitHub release tag), verifies size + SHA-256 of every
   # file, and lands them in the `worker-models` named volume. Idempotent --
   # a volume that already verifies is a no-op -- and it exits non-zero on any
-  # mismatch, which holds ml-worker back via depends_on below. Mirrors the
-  # edge-db-migrator pattern: same image as the runtime it prepares.
+  # mismatch, which holds ml-worker back via depends_on below. The existing API
+  # image carries this isolated Python operator tool; the worker runtime does not.
   edge-model-fetch:
-    image: ${ML_WORKER_IMAGE:?ML_WORKER_IMAGE is required in edge prod}
+    image: ${ML_API_IMAGE:?ML_API_IMAGE is required in edge prod}
     build: !reset null
     pull_policy: always
     restart: "no"
@@ -257,17 +257,18 @@ services:
       edge-model-fetch:
         condition: service_completed_successfully
     command:
-      - python
-      - -m
-      - worker.tools.edge_engine_build
+      - /usr/local/bin/ml-worker
+      - engine-build
+      - --auxiliary-runtime=onnxruntime-cpu
       - --onnx=/app/models/pose/yolo26n-pose.onnx
       - --engine=/var/cache/seeon/tensorrt/yolo26n-pose-fp16.engine
       - --identity=/var/cache/seeon/tensorrt/engine-identity.json
       - --parser-lib=/opt/nvidia/deepstream/deepstream/lib/libnvdsinfer_custom_yolo26_pose.so
       - --infer-config=/opt/seeon/deepstream-flow/nvinfer-yolo26-pose.txt
       - --served-infer-config=/var/cache/seeon/tensorrt/nvinfer-yolo26-pose.txt
-      - --tracker-config=/opt/seeon/deepstream-flow/config_tracker_NvDCF_perf.yml
+      - --tracker-config=/opt/seeon/deepstream-flow/${ML_WORKER_FLOW_TRACKER_PROFILE:-config_tracker_NvDCF_perf}.yml
       - --tracker-library=/opt/nvidia/deepstream/deepstream/lib/libnvds_nvmultiobjecttracker.so
+      - --bed-onnx=/app/models/bed/yolo26l-seg.onnx
       - --image-digest=${ML_WORKER_IMAGE:?ML_WORKER_IMAGE is required in edge prod}
       - --batch-size=${ML_WORKER_FLOW_BATCH_SIZE:?ML_WORKER_FLOW_BATCH_SIZE is required}
 
@@ -343,9 +344,9 @@ services:
       edge-engine-build:
         condition: service_completed_successfully
     command:
-      - python
-      - -m
-      - worker
+      - /usr/local/bin/ml-worker
+      - run
+      - --auxiliary-runtime=onnxruntime-cpu
       - --heartbeat-on-start
       # REQUIRED in a container. The default resolves under the user's home,
       # which here is the writable layer, so the durable delivery queue would be

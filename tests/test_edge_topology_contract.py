@@ -535,7 +535,10 @@ def test_edge_model_fetch_owns_the_models_volume_before_worker_start() -> None:
     services = _compose_services(EDGE_COMPOSE_FILE)
     fetch = services[EDGE_MODEL_FETCH_SERVICE]
 
-    assert "ML_WORKER_IMAGE" in str(fetch["image"]), "same image as the runtime it prepares"
+    assert "ML_API_IMAGE" in str(fetch["image"]), "isolated operator tool, not worker runtime"
+    assert "COPY worker/tools/fetch_models ./worker/tools/fetch_models" in (
+        REPO_ROOT / "Dockerfile.backend"
+    ).read_text(encoding="utf-8")
     assert fetch["pull_policy"] == "always"
     assert fetch["restart"] == "no"
     assert "profiles" not in fetch, "must run on every `up`, not behind an opt-in profile"
@@ -552,6 +555,27 @@ def test_edge_model_fetch_owns_the_models_volume_before_worker_start() -> None:
     )
     assert _mapping_field(fetch, "environment")["HF_TOKEN"] == "${HF_TOKEN:-}"
     assert "depends_on" not in fetch, "model provisioning is independent of the database cutover"
+
+    engine = services[EDGE_ENGINE_BUILD_SERVICE]
+    engine_command = _list_field(engine, "command")
+    assert engine_command[:3] == [
+        "/usr/local/bin/ml-worker",
+        "engine-build",
+        "--auxiliary-runtime=onnxruntime-cpu",
+    ]
+    assert "--bed-onnx=/app/models/bed/yolo26l-seg.onnx" in engine_command
+    assert (
+        "--tracker-config=/opt/seeon/deepstream-flow/"
+        "${ML_WORKER_FLOW_TRACKER_PROFILE:-config_tracker_NvDCF_perf}.yml"
+    ) in engine_command
+    assert _list_field(services["ml-worker"], "command") == [
+        "/usr/local/bin/ml-worker",
+        "run",
+        "--auxiliary-runtime=onnxruntime-cpu",
+        "--heartbeat-on-start",
+        "--state-dir",
+        "/var/lib/seeon-state",
+    ]
 
     worker_volumes = _list_field(services["ml-worker"], "volumes")
     assert f"{MODELS_VOLUME}:/models:ro" in worker_volumes

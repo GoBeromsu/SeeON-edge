@@ -35,20 +35,21 @@ prefixes. `front` is built into the backend image and served at `/`.
 `flow` is the only production worker profile. The DeepStream Flow owns capture,
 decode, inference, and tracking inside the SDK. Only
 `worker/adapters/deepstream/` may import `pyservicemaker` or `pyds`, and those
-imports stay lazy so host modules import without the SDK. `worker.runtime` is
-the sole composition root. The worker is an RTSP client only.
+imports stay lazy so reference modules import without the SDK. The shipping
+Rust composition root is `worker/bin/src/run/execution/`; `worker.runtime`
+remains the Python reference composition root. The worker is an RTSP client only.
 
 ## Code Map
 
 | Surface | Path | Role |
 | --- | --- | --- |
 | Backend factory | `backend/app/main.py` | `create_app()` registers feature routers under `/api/v1`, seeds `app.state.edge_relay_token`, mounts `front` dist. Health stays at `/health/live` and `/health/ready`. |
-| Worker CLI | `worker/__main__.py` | `python -m worker`. Parses flags, loads config, constructs `WorkerRuntime`. |
-| Composition root | `worker/runtime/worker.py` | Composes the Flow plane, CPU policy, evidence, and relay. |
+| Worker CLI | `worker/bin/src/main.rs` | `ml-worker run --auxiliary-runtime=onnxruntime-cpu`; native shipping entrypoint. |
+| Composition root | `worker/bin/src/run/execution/` | Composes the Flow plane, CPU policy, evidence, and relay. |
 | Flow runtime | `worker/runtime/flow/` | Media-plane lifecycle, metadata admission, policy pump, and evidence handoff. |
 | Vendor adapter | `worker/adapters/deepstream/` | Lazy DeepStream Service Maker integration and vendor-metadata conversion. |
 | Domain decisions | `worker/domains/` | CPU fall and bed-exit decisions. |
-| Engine build and gate | `worker/tools/edge_engine_build.py` | Builds the nvinfer engine ahead of source activation; boot rejects an engine that does not match the deployed batch. |
+| Engine build and gate | `worker/bin/src/engine_build/` | `ml-worker engine-build` prepares engines before source activation; boot verifies provider, image and deployed-batch identity. |
 | Pose ONNX export | `worker/tools/export_pose_onnx.py` | Exports the dynamic-batch pose ONNX used by the engine build gate. |
 | Evidence | `worker/pipeline/output/evidence/` | Smart record actor, clip publication, sealed sidecar, durable stager, delivery queue, and snapshot store. |
 | Event wire | `shared/events/` | Schemas and `edge_ingest_client.py` (events and clip receipts to the backend over relay HTTP). |

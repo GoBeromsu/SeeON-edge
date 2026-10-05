@@ -149,7 +149,12 @@ and `SEEON_TEST_PYTHON` pointing to Python with ONNX installed. Its generated
 fault model tests terminal failure retention under full response queues, not
 product-model numerical parity.
 
-Production remains `python -m worker`. Ignored GPU integration tests require
+The worker image and Compose launch `ml-worker run` with explicit
+`--auxiliary-runtime=onnxruntime-cpu`. Live pose still requires the GPU.
+The worker application ships no Python source or virtual environment; the
+pinned DeepStream base may still contain vendor Python tools. Model provisioning
+uses the existing API image in the separate `edge-model-fetch` operator service.
+Ignored GPU integration tests require
 explicit engine/model inputs and actual GPU access. CPU-adapter comparisons
 do not replace the GPU parity gate or qualify a complete Rust worker.
 
@@ -183,23 +188,25 @@ API_EDGE_RELAY_TOKEN=local-edge-relay-token \
 uv run uvicorn backend.app.main:app --host 127.0.0.1 --port 8000
 ```
 
-`API_EDGE_RELAY_TOKEN` must equal `relay.token` in the worker's YAML — the
+`API_EDGE_RELAY_TOKEN` must equal the worker's `RELAY_TOKEN` — the
 worker sends it as `X-Edge-Relay-Token` and `ml-api` compares against this env
 var. `GET /api/v1/health` reports `relay.token_configured` so the pairing is
 observable without sending a relay call.
 
 ### Worker
 
-Validate and run the worker with a local configuration:
+Inside the worker image, with models and matching engine identity provisioned
+and the backend reachable at `http://ml-api:8000`:
 
 ```bash
-uv run python -m worker --config worker/ml-worker.local.yaml --check-config
-
-ML_WORKER_PROFILE=cpu \
-uv run python -m worker --config worker/ml-worker.local.yaml
+/usr/local/bin/ml-worker check-config --auxiliary-runtime=onnxruntime-cpu
+/usr/local/bin/ml-worker run --auxiliary-runtime=onnxruntime-cpu \
+  --heartbeat-on-start --state-dir /var/lib/seeon-state
 ```
 
-`cpu` is the only profile whose device check passes without a GPU.
+Camera configuration comes from the backend registry, not local YAML. Compose
+prepares models and runs the Rust `engine-build` command before starting the
+worker. The explicit CPU auxiliary provider is not a GPU-free worker profile.
 `ML_WORKER_DEV_MJPEG*` and `CLIP_STORE_DIR` are retired; the worker refuses to
 start while any of them is set.
 

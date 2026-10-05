@@ -1,10 +1,16 @@
 # worker
 
 DeepStream Flow worker: SDK-owned capture, decode, inference, and tracking; CPU-owned fall and bed-exit decisions; evidence and one-way relay egress.
-Image `ml-worker`. Sole production command: `python -m worker`.
+Image `ml-worker`. Production command:
+`/usr/local/bin/ml-worker run --auxiliary-runtime=onnxruntime-cpu`.
+Live pose remains on the GPU; auxiliary models use the existing ORT CPU owner.
+The shipping worker contains native artifacts and configuration, not the Python
+worker package/venv. The vendor DeepStream base may contain Python tooling.
+Python worker modules remain source-level reference/verification code, not the
+shipping entrypoint. The isolated model-fetch operator runs in `ml-api`'s image.
 Replay is backend-owned; the production worker has no replay CLI.
 
-Rust verification binaries capture `ML_WORKER_BUILD_REVISION` at compilation.
+Rust binaries capture `ML_WORKER_BUILD_REVISION` at compilation.
 Only a trusted build of frozen, clean source may supply that declaration; a
 runtime environment value cannot attribute an undeclared binary. Image markers
 and runtime revision values must agree with the compiled declaration. Runtime

@@ -61,8 +61,11 @@ services:
       dockerfile: Dockerfile.edge
 
     pull_policy: never
-  # Same locally built worker tag; never try to pull it from GHCR.
+  # Provisioning uses the locally built API image.
   edge-model-fetch:
+    pull_policy: never
+  # Engine construction uses the locally built Rust worker image.
+  edge-engine-build:
     pull_policy: never
   # The locally built ml-api tag; never try to pull it from GHCR.
   edge-db-migrator:

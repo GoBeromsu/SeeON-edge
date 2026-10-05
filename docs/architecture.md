@@ -90,6 +90,11 @@ and for querying and interpreting execution records
 
 ## Layers
 
+The shipping Rust entrypoint composes the native media plane, policy, evidence
+and relay in `worker/bin/src/run/execution/`. Explicit ORT CPU auxiliaries do
+not remove the live-pose GPU requirement. The Python layer map below describes
+the retained reference implementation, not the shipping application payload.
+
 Flow is one-way. A layer may depend on the layer above it and on
 `worker/types` and `worker/interfaces`; it may never reach back down.
 
@@ -253,30 +258,28 @@ Model weights are a pinned external artifact owned by the worker side, never
 part of an image and never a host bind mount. `worker/tools/fetch_models/
 manifest.json` pins each file to an upstream revision (Hugging Face commit or
 GitHub release tag), a byte size, and a SHA-256; the one-shot `edge-model-fetch`
-compose service runs `python -m worker.tools.fetch_models` from the worker
+compose service runs `python -m worker.tools.fetch_models` from the API
 image into the `worker-models` named volume before `ml-worker` starts, skips
 files that already verify, and exits non-zero on any mismatch. `ml-worker`
 mounts that volume read-only at `/app/models`; `ml-api` does not mount it at
 all. `worker/tools/` is out-of-band operator tooling, not a worker entrypoint:
 import-linter forbids every runtime layer from importing it, and the fetcher is
-stdlib-only so it runs before torch or any adapter is loaded.
+stdlib-only and packaged separately from the API application. The API service
+does not import the tool or mount model storage.
 
 ## Entrypoint
 
 The canonical and only command is:
 
 ```sh
-python -m worker
+/usr/local/bin/ml-worker run --auxiliary-runtime=onnxruntime-cpu
 ```
 
-`worker/__main__.py` owns the CLI: it parses argv, loads config, constructs
-`WorkerRuntime` directly, and maps outcomes to exit codes. `worker/runtime/worker.py`
-stays composition-only and exports exactly three classes —
-`CameraRuntimeContext`, `HeartbeatReporter`, `WorkerRuntime`. There is no
-module-level `main` there and no delegate indirection; earlier drafts of this
-document claimed one, and that claim was wrong. Do not add an alias module, a
-console script, or a per-submodule `python -m` target: one entrypoint is a plan
-requirement.
+`worker/bin/src/main.rs` and `cli.rs` own process admission and command parsing;
+`run/execution/` composes the runtime. Compose invokes the same binary's
+`engine-build` command before starting sources, with the same explicit auxiliary
+provider and image/batch identity. There is no Python fallback entrypoint in the
+worker image. Native ORT is loaded from `/opt/seeon/lib/libonnxruntime.so.1.29.0`.
 
 | Exit code | Meaning |
 | --- | --- |

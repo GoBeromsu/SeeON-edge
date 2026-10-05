@@ -13,10 +13,9 @@ use crate::config::env::Env;
 use crate::config::model_bundle::identity::{BED_ONNX, CpuModelHashes, IdentityKind};
 use crate::config::model_bundle::packaged::PACKAGED_FALL_ROOT;
 
-// Dockerfile.edge installs the locked API-29 package in this image-owned venv.
+// Dockerfile.edge extracts the locked API-29 library into the native runtime path.
 // This is a library location, not a claimed observation of the loaded runtime.
-const RUNTIME_LIBRARY: &str =
-    "/app/.venv/lib/python3.12/site-packages/onnxruntime/capi/libonnxruntime.so.1.29.0";
+const RUNTIME_LIBRARY: &str = "/opt/seeon/lib/libonnxruntime.so.1.29.0";
 
 pub(super) fn admit(
     env: &Env,

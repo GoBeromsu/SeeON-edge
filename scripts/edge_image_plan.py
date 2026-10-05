@@ -73,17 +73,15 @@ _ML_API_INPUTS = (
     "scripts/ops/",
     "shared/",
     "uv.lock",
+    "worker/tools/fetch_models/",
 )
 
 #: Paths that reach the ``ml-worker`` build (``COPY`` sources in
-#: ``Dockerfile.edge``). ``worker/`` covers both the DeepStream native sources
-#: and the pinned model manifest ``worker/tools/fetch_models/manifest.json``,
-#: which is why neither is listed separately.
+#: ``Dockerfile.edge``). The more specific model-fetch rule belongs to the
+#: API image's isolated provisioning tool, not the Rust worker runtime.
 _ML_WORKER_INPUTS = (
     "Dockerfile.edge",
-    "contracts/",
     "pyproject.toml",
-    "shared/",
     "uv.lock",
     "worker/",
     "Cargo.toml",

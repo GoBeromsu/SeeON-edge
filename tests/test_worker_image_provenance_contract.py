@@ -22,6 +22,10 @@ NATIVE_LIBRARIES = (
     "libseeon_clipdec.so",
     "libseeon_ort.so",
 )
+ORT_NATIVE_LIBRARIES = (
+    "libonnxruntime.so.1.29.0",
+    "libonnxruntime_providers_shared.so",
+)
 BUILD_ONLY_TREES = (
     "bin",
     "rust",
@@ -93,24 +97,29 @@ def test_unnamed_final_stage_cannot_hide_from_packaging_assertions() -> None:
 
 
 @pytest.mark.parametrize("payload", [None, b"", b"test-library-bytes"])
-def test_cpu_loader_path_has_an_executed_image_presence_guard(
+def test_cpu_loader_path_has_an_executed_build_presence_guard(
     tmp_path: Path, payload: bytes | None
 ) -> None:
     source = (ROOT / "worker/bin/src/run/cpu_admission.rs").read_text(encoding="utf-8")
     declared = re.search(r'const RUNTIME_LIBRARY: &str =\s*"([^"]+)";', source)
     assert declared is not None
     guards = [
-        shlex.split(part.strip())
-        for command in _commands(_stages(_dockerfile())["runtime"])
+        part.strip()
+        for command in _commands(_stages(_dockerfile())["ort-native-build"])
         for part in command.split("&&")
         if part.strip().startswith("test -s ")
     ]
-    assert ["test", "-s", declared.group(1)] in guards
-    library = tmp_path / "libonnxruntime.so"
+    assert f"test -s {declared.group(1)}" in guards
+    for name in ORT_NATIVE_LIBRARIES:
+        assert f"test -s /opt/seeon/lib/{name}" in guards
+    library = tmp_path / Path(declared.group(1)).name
     if payload is not None:
         library.write_bytes(payload)
+    guard = next(
+        command for command in guards if shlex.split(command) == ["test", "-s", declared.group(1)]
+    )
     result = subprocess.run(
-        ["/bin/sh", "-c", 'test -s "$1"', "ort-image-guard", str(library)],
+        ["/bin/sh", "-c", guard.replace(declared.group(1), shlex.quote(str(library)))],
         capture_output=True,
         timeout=5,
         check=False,
@@ -291,11 +300,34 @@ def test_runtime_packages_release_binary_and_native_libraries_without_verificati
         assert (
             f"COPY --from=native-build /opt/seeon/lib/{library} /opt/seeon/lib/{library}" in runtime
         )
+    ort_copies = [
+        line for line in runtime.splitlines() if line.startswith("COPY --from=ort-native-build ")
+    ]
+    assert len(ort_copies) == len(ORT_NATIVE_LIBRARIES)
+    for library in ORT_NATIVE_LIBRARIES:
+        assert (
+            f"COPY --from=ort-native-build /opt/seeon/lib/{library} /opt/seeon/lib/{library}"
+            in runtime
+        )
     assert (
         "LD_LIBRARY_PATH=/opt/seeon/lib:/opt/nvidia/deepstream/deepstream/lib:${LD_LIBRARY_PATH}"
         in runtime
     )
-    assert 'CMD ["python", "-m", "worker"]' in runtime
+    assert (
+        'CMD ["/usr/local/bin/ml-worker", "run", "--auxiliary-runtime=onnxruntime-cpu"]' in runtime
+    )
+    assert "COPY contracts ./contracts" not in runtime
+    assert "COPY shared ./shared" not in runtime
+    assert "COPY --from=worker-runtime-source" not in runtime
+    assert "COPY pyproject.toml uv.lock" not in runtime
+    for python_runtime_setting in (
+        "UV_PROJECT_ENVIRONMENT",
+        "/app/.venv",
+        "PYTHONPATH",
+        "PYTHONUNBUFFERED",
+        "PYTHONDONTWRITEBYTECODE",
+    ):
+        assert python_runtime_setting not in runtime
     assert (
         "COPY --from=source-revision /opt/seeon/ml-worker-image-revision "
         "/opt/seeon/ml-worker-image-revision"
@@ -308,58 +340,43 @@ def test_runtime_packages_release_binary_and_native_libraries_without_verificati
     assert 'ENV ML_WORKER_BUILD_REVISION="${SOURCE_REVISION}"' in runtime
 
 
-def test_runtime_copies_filtered_worker_without_shipping_build_stage_layers() -> None:
+def test_runtime_has_no_python_worker_source_and_ort_is_built_from_locked_flow_deps() -> None:
     source = _dockerfile()
     stages = _stages(source)
-    assert "FROM uv-bin AS worker-runtime-source" in source
-    assert "COPY worker /worker" in stages["worker-runtime-source"]
-    assert "COPY --from=worker-runtime-source /worker ./worker" in stages["runtime"]
-    assert "COPY worker " not in stages["runtime"]
+    ort_build = stages["ort-native-build"]
+    lock = (ROOT / "uv.lock").read_text(encoding="utf-8")
+    assert (
+        "FROM ghcr.io/astral-sh/uv:python3.12-bookworm-slim"
+        "@sha256:e5b65587bce7de595f299855d7385fe7fca39b8a74baa261ba1b7147afa78e58"
+        " AS ort-native-build"
+        in source
+    )
+    assert "COPY pyproject.toml uv.lock ./" in ort_build
+    assert '\nname = "onnxruntime"\nversion = "1.29.0"\n' in lock
+    resolution_commands = [command for command in _commands(ort_build) if "uv sync" in command]
+    assert len(resolution_commands) == 1
+    assert (
+        "uv sync --frozen --no-default-groups --group flow --no-install-project"
+        in resolution_commands[0]
+    )
+    for library in ORT_NATIVE_LIBRARIES:
+        assert (
+            f'install -D "$ort_capi/{library}" /opt/seeon/lib/{library}' in resolution_commands[0]
+        )
+        assert f"test -s /opt/seeon/lib/{library}" in resolution_commands[0]
+    runtime = stages["runtime"]
+    assert "worker-runtime-source" not in source
+    assert "COPY contracts " not in runtime
+    assert "COPY shared " not in runtime
+    assert "COPY worker " not in runtime
     runtime_header = next(
         match.group(0) for match in _STAGE_HEADER.finditer(source) if match.group(1) == "runtime"
     )
     assert runtime_header.startswith("FROM nvcr.io/nvidia/deepstream@sha256:")
-    for stage in ("cargo-build", "runtime"):
-        assert "ORT_DISABLE_TELEMETRY=1" in stages[stage]
+    assert "ORT_DISABLE_TELEMETRY=1" in stages["cargo-build"]
+    assert "ORT_DISABLE_TELEMETRY=1" in runtime
     for tree in BUILD_ONLY_TREES:
         assert f"COPY worker/{tree} ./worker/{tree}" in stages["cargo-build"]
-
-
-def test_worker_payload_filter_removes_only_build_trees_before_final_copy(tmp_path: Path) -> None:
-    commands = _commands(_stages(_dockerfile())["worker-runtime-source"])
-    assert len(commands) == 1
-    tokens = shlex.split(commands[0])
-    removed = BUILD_ONLY_TREES
-    assert tokens[:2] == ["rm", "-rf"]
-    assert tokens[2:] == [f"/worker/{tree}" for tree in removed]
-    root = tmp_path / "worker payload"
-    for tree in removed:
-        fixture = root / tree / "tests" / "private-fixture.json"
-        fixture.parent.mkdir(parents=True)
-        fixture.write_bytes(b"verification-only")
-    kept = {
-        "__main__.py": b"python entry",
-        "runtime/worker.py": b"python composition",
-        "adapters/deepstream/configs/labels.txt": b"person\n",
-        "adapters/deepstream/metadata.py": b"python adapter",
-        "adapters/model/ort_bed_seg.py": b"existing CPU model adapter",
-        "tools/edge_engine_build.py": b"offline builder",
-    }
-    for name, content in kept.items():
-        path = root / name
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_bytes(content)
-    subprocess.run(
-        ["/bin/sh", "-eu", "-c", commands[0].replace("/worker", shlex.quote(str(root)))],
-        check=True,
-        capture_output=True,
-        timeout=5,
-    )
-    for tree in removed:
-        assert not (root / tree).exists()
-    assert {
-        str(path.relative_to(root)): path.read_bytes() for path in root.rglob("*") if path.is_file()
-    } == kept
 
 
 def test_cargo_verify_requires_secret_and_keeps_cpu_tests_unchanged() -> None:
