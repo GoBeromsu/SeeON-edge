@@ -11,8 +11,9 @@
 //! matching receipt still saves once, but cannot clear that failure. If even
 //! FINALIZE_FAILED could not publish, its seal stays owned in FINALIZING and
 //! blocks further admission.
-//! Other save outcomes return to idle (X18: the Python actor stays in FINALIZING
-//! when its sink raises).
+//! Successful publications may return to idle without clearing an earlier
+//! receipt-overdue failure. Failed saves and unpublished FINALIZE_FAILED seals
+//! remain in FINALIZING.
 //!
 //! `quiesce` is a one-way admission guard for process shutdown. It does not
 //! stop, finalize, or close the native recording: the media owner still does

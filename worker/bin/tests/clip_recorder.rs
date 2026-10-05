@@ -422,7 +422,7 @@ fn refused_start_stays_pending_and_take_unstarted_does_not_steal_it() {
 }
 
 #[test]
-fn quiesce_blocks_admit_tick_and_receipt_including_save_failure() {
+fn quiesce_retains_failed_save_and_blocks_admit_tick_and_receipt() {
     let Harness {
         mut recorder,
         clock,
@@ -466,11 +466,17 @@ fn quiesce_blocks_admit_tick_and_receipt_including_save_failure() {
         saved += 1;
         contributors = sealed.contributors.clone();
         assert_eq!(sealed.ticket, receipt(active).ticket);
+        assert_eq!(sealed.result, MediaResult::Ok);
         assert_eq!(sealed.duration_ms, 30_000);
         assert!(sealed.contains_video);
         Err(PublishError::Io(std::io::Error::other("volume full")))
     });
-    assert!(matches!(failed, Err(RecorderError::Save(_))));
+    match failed {
+        Err(RecorderError::Save(PublishError::Io(error))) => {
+            assert_eq!(error.to_string(), "volume full")
+        }
+        other => panic!("expected original save error, got {other:?}"),
+    }
     assert_eq!(saved, 1);
     assert_eq!(
         contributors,
@@ -479,40 +485,44 @@ fn quiesce_blocks_admit_tick_and_receipt_including_save_failure() {
             detected_at: at("2026-08-20T17:20:58.197192Z"),
         }]
     );
-    assert_eq!(recorder.state(), State::Idle);
+    assert_eq!(recorder.state(), State::Finalizing);
     assert_eq!(
         recorder.pending(),
         1,
-        "queued alert must survive save failure"
+        "queued alert stays pending while the failed seal retains ownership"
     );
     assert_eq!(counts.starts.get(), 1, "save failure must not restart");
+    assert_eq!(counts.stops.get(), 0, "quiesce does not stop native work");
+
+    let saved_ticket = receipt(active).ticket;
+    assert!(matches!(
+        recorder.on_receipt(&receipt(active), |_| panic!("failed seal consumes receipt")),
+        Err(RecorderError::DuplicateRequest(request)) if request == active.request_id
+    ));
+    let before = unchanged(&recorder);
+    let counters = recorder.counters();
 
     let late_at = at("2026-08-20T17:22:00Z");
-    assert!(matches!(
+    assert_unpublished(
         recorder.admit("00000000-0000-4000-8000-00000000e0c3", late_at),
-        Ok(Admit::Queued)
-    ));
-    assert_eq!(recorder.state(), State::Idle);
-    assert_eq!(recorder.pending(), 2);
-    assert_eq!(recorder.tick().expect("quiesced idle"), State::Idle);
+        saved_ticket,
+    );
+    assert_unpublished(recorder.tick(), saved_ticket);
+    assert_eq!(unchanged(&recorder), before);
+    assert_eq!(recorder.counters(), counters);
     assert_eq!(counts.starts.get(), 1);
 
     let drained = recorder.take_unstarted().expect("drain after quiesce");
     assert_eq!(
         drained,
-        vec![
-            Contributor {
-                event_ref: "00000000-0000-4000-8000-00000000e0b2".to_owned(),
-                detected_at: queued_at,
-            },
-            Contributor {
-                event_ref: "00000000-0000-4000-8000-00000000e0c3".to_owned(),
-                detected_at: late_at,
-            },
-        ]
+        vec![Contributor {
+            event_ref: "00000000-0000-4000-8000-00000000e0b2".to_owned(),
+            detected_at: queued_at,
+        }]
     );
     assert_eq!(recorder.pending(), 0);
     assert!(recorder.take_unstarted().expect("second drain").is_empty());
+    assert_unpublished(recorder.tick(), saved_ticket);
     assert_eq!(counts.starts.get(), 1);
     assert_eq!(counts.stops.get(), 0);
 }
@@ -1330,7 +1340,7 @@ fn rejected_receipts_neither_renew_delivery_deadline_nor_latch_failure() {
 }
 
 #[test]
-fn latched_failure_survives_late_save_without_starting_pending() {
+fn overdue_failure_stays_sticky_across_late_save_outcomes() {
     for save_mode in 0..3 {
         let Harness {
             mut recorder,
@@ -1360,12 +1370,17 @@ fn latched_failure_survives_late_save_without_starting_pending() {
             assert!(sealed.contains_video);
             assert_eq!(sealed.duration_ms, receipt(active).duration_ms);
             assert_eq!(
-                sealed
-                    .contributors
-                    .iter()
-                    .map(|alert| alert.event_ref.as_str())
-                    .collect::<Vec<_>>(),
-                ["first", "extended"]
+                sealed.contributors.as_slice(),
+                &[
+                    Contributor {
+                        event_ref: "first".to_owned(),
+                        detected_at: at("2026-08-20T17:20:58Z"),
+                    },
+                    Contributor {
+                        event_ref: "extended".to_owned(),
+                        detected_at: at("2026-08-20T17:20:59Z"),
+                    },
+                ]
             );
             match save_mode {
                 0 => save_with_publication(sealed),
@@ -1375,16 +1390,16 @@ fn latched_failure_survives_late_save_without_starting_pending() {
         });
         match save_mode {
             0 => assert!(matches!(saved, Ok(SaveOutcome::Saved(_)))),
-            1 => assert!(matches!(saved, Err(RecorderError::Save(_)))),
-            _ => assert_overdue(saved, active),
+            1 | 2 => assert_overdue(saved, active),
+            _ => unreachable!("the test enumerates exactly three save outcomes"),
         }
         assert_eq!(saves, 1);
         assert_eq!(
             recorder.state(),
-            if save_mode == 2 {
-                State::Finalizing
-            } else {
+            if save_mode == 0 {
                 State::Idle
+            } else {
+                State::Finalizing
             }
         );
         assert_eq!(
@@ -1715,7 +1730,7 @@ fn unpublished_seal_blocks_admission_without_changing_bounded_pending_work() {
 }
 
 #[test]
-fn ordinary_save_errors_wait_for_explicit_tick_before_restart() {
+fn ordinary_save_errors_retain_finalizing_and_block_restart() {
     for storage_full in [false, true] {
         let Harness {
             mut recorder,
@@ -1735,8 +1750,15 @@ fn ordinary_save_errors_wait_for_explicit_tick_before_restart() {
             std::io::Error::other("local save error")
         };
         let expected_kind = error.kind();
-        match recorder.on_receipt(&receipt(active), |_| {
+        let saved_ticket = receipt(active).ticket;
+        let mut contributors = Vec::new();
+        match recorder.on_receipt(&receipt(active), |sealed| {
             saves += 1;
+            assert_eq!(sealed.ticket, saved_ticket);
+            assert_eq!(sealed.result, MediaResult::Ok);
+            assert!(sealed.contains_video);
+            assert_eq!(sealed.duration_ms, 30_000);
+            contributors = sealed.contributors.clone();
             Err(PublishError::Io(error))
         }) {
             Err(RecorderError::Save(PublishError::Io(error))) => {
@@ -1745,32 +1767,42 @@ fn ordinary_save_errors_wait_for_explicit_tick_before_restart() {
             other => panic!("expected the original save error, got {other:?}"),
         }
         assert_eq!(saves, 1);
-        assert_eq!(recorder.state(), State::Idle);
+        assert_eq!(
+            contributors,
+            vec![Contributor {
+                event_ref: "active".to_owned(),
+                detected_at: at("2026-08-20T17:20:58Z"),
+            }]
+        );
+        assert_eq!(recorder.state(), State::Finalizing);
         assert_eq!(recorder.pending(), 1);
         assert_eq!(
             counts.starts.get(),
             1,
-            "return failure before any new start"
+            "failed save retains pending work without starting"
         );
+        assert_eq!(counts.stops.get(), 1);
+
+        let before = unchanged(&recorder);
+        let counters = recorder.counters();
+        assert_unpublished(recorder.tick(), saved_ticket);
+        assert_eq!(unchanged(&recorder), before);
+        assert_eq!(recorder.counters(), counters);
+        assert_unpublished(
+            recorder.admit("next-contributor", at("2026-08-20T17:21:51Z")),
+            saved_ticket,
+        );
+        assert_eq!(unchanged(&recorder), before);
+        assert_eq!(recorder.counters(), counters);
+        assert_eq!(recorder.pending(), 1);
+        assert_eq!(counts.starts.get(), 1);
         assert!(matches!(
             recorder.on_receipt(&receipt(active), |_| panic!("failed save consumed receipt")),
             Err(RecorderError::DuplicateRequest(request)) if request == active.request_id
         ));
-        assert_eq!(
-            recorder.tick().expect("no sticky unpublished refusal"),
-            State::Recording
-        );
-        assert_eq!(recorder.pending(), 0);
-        assert_eq!(counts.starts.get(), 2);
-        assert!(matches!(
-            recorder.admit("next-contributor", at("2026-08-20T17:21:51Z")),
-            Ok(Admit::Extended)
-        ));
-        assert_eq!(
-            recorder.tick().expect("no sticky unpublished refusal"),
-            State::Recording
-        );
-        assert_eq!(counts.starts.get(), 2);
+        assert_eq!(unchanged(&recorder), before);
+        assert_eq!(recorder.counters(), counters);
+        assert_eq!(counts.starts.get(), 1);
         assert_eq!(counts.stops.get(), 1);
     }
 }

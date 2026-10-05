@@ -2,7 +2,7 @@
 
 use seeon_deepstream_native::MediaResult;
 
-use super::assertions::unavailable;
+use super::assertions::{clip_id, unavailable};
 use super::fixture::{FIRST, Fixture, NEXT, event};
 use super::{LiveSink, apply_sink};
 use crate::clips::recorder::State;
@@ -97,10 +97,20 @@ fn shutdown_drain_preserves_cap_race_pending_after_prior_receipt_publication() {
 }
 
 #[test]
-fn shutdown_drain_retains_failed_save_attribution_after_recorder_returns_idle() {
+fn shutdown_drain_retains_failed_save_attribution_in_finalizing() {
     let mut fixture = Fixture::new();
     let admitted = fixture.start(41, FIRST, 71);
     fixture.session.request_media_stop();
+    let id = clip_id(admitted);
+    let conflict = fixture.session.publications.store.clip_dir(&id);
+    std::fs::create_dir_all(&conflict).unwrap();
+    std::fs::write(
+        conflict.join("manifest.json"),
+        b"conflicting-owned-test-manifest\n",
+    )
+    .unwrap();
+    let queued = fixture.session.publications.queue.entries().unwrap();
+    assert_eq!(queued.len(), 1, "the admitted event remains queued");
     let mut receipt = fixture.receipt(admitted, MediaResult::Ok);
     receipt.duration_ms = 0;
     fixture.receipts.try_send(receipt).unwrap();
@@ -110,10 +120,34 @@ fn shutdown_drain_retains_failed_save_attribution_after_recorder_returns_idle() 
         fixture.clock.as_ref(),
         &mut sink
     ));
-    assert_eq!(fixture.snapshot().0, State::Idle);
+    assert_eq!(fixture.snapshot().0, State::Finalizing);
     assert_eq!(fixture.snapshot().2, 0);
-    let queued = fixture.session.publications.queue.entries().unwrap();
-    assert_eq!(queued.len(), 1);
+    assert_eq!(
+        std::fs::read(conflict.join("manifest.json")).unwrap(),
+        b"conflicting-owned-test-manifest\n"
+    );
+    let sidecars = fixture
+        .session
+        .publications
+        .sidecars
+        .pending("camera-19")
+        .unwrap();
+    assert!(sidecars.malformed.is_empty());
+    assert_eq!(sidecars.recoveries.len(), 1);
+    let retained = &sidecars.recoveries[0];
+    assert_eq!(retained.sealed.clip_id(), id.as_str());
+    assert!(matches!(
+        &retained.sealed,
+        crate::clips::sealed::SealedObservation::Unavailable(unavailable)
+            if unavailable.duration_ms == 0 && !unavailable.contains_video
+    ));
+    assert_eq!(retained.sealed.contributors().len(), 1);
+    assert_eq!(retained.sealed.contributors()[0].event_ref, FIRST);
+    assert_eq!(retained.events.get(FIRST).unwrap().identity, FIRST);
+    assert_eq!(
+        fixture.session.publications.queue.entries().unwrap(),
+        queued
+    );
     assert!(!drain_policy(
         &mut fixture.session,
         fixture.clock.as_ref(),
