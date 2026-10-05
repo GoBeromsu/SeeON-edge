@@ -549,6 +549,16 @@ fn frame_local_ingest_and_gap_failures_preserve_both_sources_pending_work() {
 }
 
 #[test]
+fn reconnect_history_capacity_failure_is_not_frame_local() {
+    let refusal = crate::run::policy::FallResponseError::Policy(
+        crate::policy::fall::FallStageError::ReconnectCapacity,
+    );
+    assert_eq!(refusal.exit(), crate::exit::Exit::Runtime);
+    let error = crate::run::pump::PumpError::Response(refusal);
+    assert!(!super::frame_local(&error));
+}
+
+#[test]
 fn routing_and_accelerator_faults_never_become_frame_local_diagnostics() {
     let mut pump = ungated(vec![camera(19)]);
     let ends = ends(2, 2);

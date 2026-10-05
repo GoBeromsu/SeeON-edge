@@ -10,6 +10,9 @@ mod decision;
 pub mod score;
 pub mod window;
 #[cfg(test)]
+#[path = "fall/window_capacity_tests.rs"]
+mod window_capacity_tests;
+#[cfg(test)]
 #[path = "fall/window_gate_tests.rs"]
 mod window_gate_tests;
 
@@ -36,12 +39,20 @@ pub enum FallStageError {
     Temperature,
     /// Python raises `PtsGapTooLargeError` out of the update.
     Gap(PtsGapTooLargeError),
+    /// Bounded reconnect history refused to evict another track.
+    ReconnectCapacity,
     Policy(FallError),
 }
 
 impl From<FallError> for FallStageError {
     fn from(error: FallError) -> Self {
         Self::Policy(error)
+    }
+}
+
+impl From<window::ReconnectCapacityError> for FallStageError {
+    fn from(_: window::ReconnectCapacityError) -> Self {
+        Self::ReconnectCapacity
     }
 }
 
@@ -107,6 +118,9 @@ impl FallStage {
             .resampler
             .push(pts_ns, &frame.rows)
             .map_err(FallStageError::Gap)?;
+        self.windows
+            .preflight(&frame.live_track_ids, resampled.len())
+            .map_err(|_| FallStageError::ReconnectCapacity)?;
         let mut events = self.flush(observer)?;
         if resampled.is_empty() {
             events.extend(self.decider.coast()?);
@@ -128,12 +142,12 @@ impl FallStage {
                     .iter()
                     .map(|&id| (id, ZERO_ROW))
                     .collect();
-                self.windows.update(&zero, &frame.live_track_ids);
+                self.windows.update(&zero, &frame.live_track_ids)?;
                 self.counters.resample_gap_rows += 1;
                 continue;
             };
             // Only the last resampled row is valid, so these are the frame's.
-            let outcome = self.windows.update(rows, &frame.live_track_ids);
+            let outcome = self.windows.update(rows, &frame.live_track_ids)?;
             pending.reasons = outcome.reasons;
             for (track_id, window) in outcome.due {
                 let request = FallRequest {

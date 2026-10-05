@@ -9,14 +9,16 @@ use seeon_worker::pose_bbox56::{FALL_WINDOW_FRAMES, PoseBbox56History, PoseBbox5
 use seeon_worker::trace::DecisionTraceMissingReason as Reason;
 
 /// Python `_TRACK_TTL_FRAMES`.
-const TRACK_TTL_FRAMES: u64 = 45;
+pub(super) const TRACK_TTL_FRAMES: u64 = 45;
 /// Python `FALL_STRIDE_FRAMES`: a window is due every fifth update.
 pub const FALL_STRIDE_FRAMES: u64 = 5;
-/// Evicted ids remembered for reconnect padding; Python's set is unbounded,
-/// here the oldest id is forgotten first.
-const RECONNECT_CAPACITY: usize = 4096;
+/// Evicted ids retained for reconnect padding; overflow refuses the eviction.
+pub(super) const RECONNECT_CAPACITY: usize = 4096;
 
 pub type Window = Box<[PoseBbox56Row; FALL_WINDOW_FRAMES]>;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct ReconnectCapacityError;
 
 #[derive(Debug, Default)]
 struct Track {
@@ -40,11 +42,54 @@ pub struct Outcome {
 }
 
 impl Windows {
+    /// Check the entire resampled batch before flushing a pending decision.
+    /// All updates in one batch share the same live track identities.
+    pub(super) fn preflight(
+        &self,
+        live: &[u64],
+        updates: usize,
+    ) -> Result<(), ReconnectCapacityError> {
+        self.check_capacity(&live.iter().copied().collect(), updates)
+    }
+
+    fn check_capacity(
+        &self,
+        live: &BTreeSet<u64>,
+        updates: usize,
+    ) -> Result<(), ReconnectCapacityError> {
+        if updates == 0 {
+            return Ok(());
+        }
+        let reconnecting = live
+            .iter()
+            .filter(|id| !self.tracks.contains_key(id) && self.reconnect.contains(id))
+            .count();
+        let horizon = u128::from(self.counter) + updates as u128;
+        let expiring = self
+            .tracks
+            .iter()
+            .filter(|(id, track)| {
+                !live.contains(id)
+                    && horizon - u128::from(track.last_seen) >= u128::from(TRACK_TTL_FRAMES)
+            })
+            .count();
+        if expiring > RECONNECT_CAPACITY - (self.reconnect.len() - reconnecting) {
+            return Err(ReconnectCapacityError);
+        }
+        Ok(())
+    }
+
     /// Appends one row per live track (a missing row coasts) and one coasted
-    /// row per absent track until its TTL evicts it.
-    pub fn update(&mut self, rows: &BTreeMap<u64, PoseBbox56Row>, live: &[u64]) -> Outcome {
-        self.counter += 1;
+    /// row per absent track until its TTL evicts it. An expired track stays
+    /// live if its reconnect marker cannot be retained.
+    pub(super) fn update(
+        &mut self,
+        rows: &BTreeMap<u64, PoseBbox56Row>,
+        live: &[u64],
+    ) -> Result<Outcome, ReconnectCapacityError> {
         let live: BTreeSet<u64> = live.iter().copied().collect();
+        self.check_capacity(&live, 1)?;
+        self.counter += 1;
         for &track_id in &live {
             let reconnected = !self.tracks.contains_key(&track_id) && self.forget(track_id);
             let track = self.tracks.entry(track_id).or_default();
@@ -63,13 +108,17 @@ impl Windows {
             .filter(|track_id| !live.contains(track_id))
             .collect();
         for track_id in absent {
-            let Some(track) = self.tracks.get_mut(&track_id) else {
+            let Some(expired) = self
+                .tracks
+                .get(&track_id)
+                .map(|track| self.counter - track.last_seen >= TRACK_TTL_FRAMES)
+            else {
                 continue;
             };
-            if self.counter - track.last_seen >= TRACK_TTL_FRAMES {
+            if expired {
+                self.remember(track_id)?;
                 self.tracks.remove(&track_id);
-                self.remember(track_id);
-            } else {
+            } else if let Some(track) = self.tracks.get_mut(&track_id) {
                 track.history.push(None);
             }
         }
@@ -79,7 +128,7 @@ impl Windows {
                 .iter()
                 .map(|&track_id| (track_id, Reason::ClassifierStrideNotDue))
                 .collect();
-            return outcome;
+            return Ok(outcome);
         }
         for track_id in live {
             let rows = self.tracks.get(&track_id).map(|track| track.history.rows());
@@ -96,21 +145,22 @@ impl Windows {
                 }
             }
         }
-        outcome
+        Ok(outcome)
     }
     /// The stream-epoch reset of a PTS rollback: a fresh classifier.
     pub fn clear(&mut self) {
         *self = Self::default();
     }
 
-    fn remember(&mut self, track_id: u64) {
+    fn remember(&mut self, track_id: u64) -> Result<(), ReconnectCapacityError> {
         if self.reconnect.contains(&track_id) {
-            return;
+            return Ok(());
         }
-        if self.reconnect.len() == RECONNECT_CAPACITY {
-            self.reconnect.pop_front();
+        if self.reconnect.len() >= RECONNECT_CAPACITY {
+            return Err(ReconnectCapacityError);
         }
         self.reconnect.push_back(track_id);
+        Ok(())
     }
 
     /// Whether `track_id` was evicted before; it is forgotten either way.
