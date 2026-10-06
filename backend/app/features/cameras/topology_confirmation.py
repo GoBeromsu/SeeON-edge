@@ -1,12 +1,14 @@
 from __future__ import annotations
 
-import sqlite3
 import threading
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Protocol, TypeAlias, assert_never
 
+import psycopg
+
+from backend.app.features.audit.postgres_runtime import AuditMutation
 from backend.app.features.cameras.edge_topology_sync_state import EdgeTopologySyncStateStore
 from backend.app.features.cameras.store import CameraRegistryStore
 from backend.app.features.cameras.topology_client import (
@@ -61,10 +63,15 @@ class TopologyConfirmationService:
         state_store: EdgeTopologySyncStateStore,
         client_provider: Callable[[], ConfirmationClientProtocol | None],
     ) -> None:
+        if (
+            registry.database is not state_store.database
+            or registry.authority != state_store.authority
+        ):
+            raise ValueError("confirmation and registry must share database and authority")
         self._registry = registry
         self._state_store = state_store
         self._client_provider = client_provider
-        self._store = TopologyConfirmationStore(registry.path)
+        self._store = TopologyConfirmationStore(registry.database, registry.authority)
         self._lock = threading.Lock()
 
     def preview(self) -> TopologyConfirmationPreview | None:
@@ -76,7 +83,7 @@ class TopologyConfirmationService:
         principal: MachinePrincipal,
         registry_version: int,
         *,
-        connection: sqlite3.Connection | None = None,
+        connection: psycopg.Connection | None = None,
     ) -> None:
         self._store.save(response, principal, registry_version, connection=connection)
 
@@ -84,7 +91,7 @@ class TopologyConfirmationService:
         self,
         command: TopologyConfirmationCommand,
         *,
-        after_write: Callable[[sqlite3.Connection], None] | None = None,
+        audit: AuditMutation | None = None,
     ) -> TopologyConfirmationResult:
         with self._lock:
             preview = self._store.load()
@@ -101,6 +108,8 @@ class TopologyConfirmationService:
                 return TopologyConfirmationRejected(409, EdgeErrorCode.CONFIRMATION_STALE)
             if _expired(preview.expires_at):
                 return TopologyConfirmationRejected(410, EdgeErrorCode.CONFIRMATION_EXPIRED)
+            if audit is not None:
+                audit.require_admission(self._store)
             outcome = client.confirm(
                 preview.snapshot_id,
                 TopologyConfirmation(
@@ -115,7 +124,15 @@ class TopologyConfirmationService:
                     ):
                         return TopologyRetryable("unreachable")
                     try:
-                        self._store.complete(preview, response, after_write=after_write)
+                        if audit is None:
+                            self._store.complete(preview, response)
+                        else:
+                            audit.apply(
+                                self._store,
+                                lambda append: self._store.complete(
+                                    preview, response, after_write=append
+                                ),
+                            )
                     except TopologyConfirmationStateConflictError:
                         return TopologyConfirmationRejected(409, EdgeErrorCode.CONFIRMATION_STALE)
                     return outcome
@@ -125,14 +142,17 @@ class TopologyConfirmationService:
                     assert_never(unreachable)
 
     def _pending_is_stale(self, preview: TopologyConfirmationPreview) -> bool:
-        state = self._state_store.load()
-        topology = self._registry.topology_snapshot()
-        return (
-            preview.registry_version != topology.registry_version
-            or state.principal != preview.principal
-            or state.last_client_revision != preview.client_revision
-            or state.server_revision != preview.server_revision
-        )
+        def read(connection: psycopg.Connection) -> bool:
+            state = self._state_store.load(connection=connection)
+            topology = self._registry.topology_snapshot(connection=connection)
+            return (
+                preview.registry_version != topology.registry_version
+                or state.principal != preview.principal
+                or state.last_client_revision != preview.client_revision
+                or state.server_revision != preview.server_revision
+            )
+
+        return self._state_store.database.read_snapshot(read)
 
 
 def _matches_request(

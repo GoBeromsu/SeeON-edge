@@ -3,10 +3,9 @@
 from __future__ import annotations
 
 import hashlib
-from pathlib import Path
 
-from backend.app.edge_db.bootstrap import bootstrap_database
-from backend.app.edge_db.connection import RuntimeActor, open_runtime_database, write_transaction
+import psycopg
+
 from backend.app.features.diagnostics.coverage import insert_coverage
 from backend.app.features.diagnostics.prune import coarsen_coverage, prune_unit
 from backend.app.features.diagnostics.query import encode_cursor
@@ -26,6 +25,9 @@ from backend.app.features.diagnostics.retention import (
     used_bytes,
 )
 from backend.app.features.diagnostics.store import ExecutionRecordStore
+from tests_support.postgres_diagnostics_sandbox import DiagnosticsSandbox
+
+pytest_plugins = ("tests_support.postgres_diagnostics_sandbox",)
 
 CAMERA = "cam-a"
 BOOT = "boot-1"
@@ -58,15 +60,8 @@ def _hex(label: str) -> str:
     return hashlib.sha256(label.encode()).hexdigest()
 
 
-def _open(path: Path):
-    return open_runtime_database(path, actor=RuntimeActor.API)
-
-
-def _store(tmp_path: Path, budget: RetentionBudget) -> tuple[ExecutionRecordStore, Path]:
-    path = tmp_path / "edge-state" / "edge.sqlite3"
-    bootstrap_database(path)
-    store = ExecutionRecordStore(lambda: _open(path), budget, clock=_Clock())
-    return store, path
+def _store(diag: DiagnosticsSandbox, budget: RetentionBudget) -> ExecutionRecordStore:
+    return ExecutionRecordStore(diag.database, budget, clock=_Clock())
 
 
 def _record(
@@ -112,11 +107,15 @@ def _batch(
     )
 
 
-def test_b1_forced_incomplete_unknown_converges_without_infinite_loop(tmp_path: Path) -> None:
+def test_b1_forced_incomplete_unknown_converges_without_infinite_loop(
+    postgres_diagnostics_sandbox: DiagnosticsSandbox,
+) -> None:
+    diag = postgres_diagnostics_sandbox
     budget = RetentionBudget(total_bytes=DISK_BUDGET, unit_horizon_ns=HORIZON)
-    store, path = _store(tmp_path, budget)
+    store = _store(diag, budget)
     blob = PAYLOAD_BLOB
-    for index in range(500):
+    # 800 single-record batches are ~747 KB of live rows unpruned, past high_water.
+    for index in range(800):
         store.ingest_batch(
             _batch(
                 f"u{index}",
@@ -131,39 +130,38 @@ def test_b1_forced_incomplete_unknown_converges_without_infinite_loop(tmp_path: 
                 ),
             )
         )
-    connection = _open(path)
-    try:
-        remaining = {
-            str(row[0])
-            for row in connection.execute("SELECT causal_unit_id FROM execution_units").fetchall()
-        }
-        states = {
-            str(row[0])
-            for row in connection.execute("SELECT causal_state FROM execution_units").fetchall()
-        }
-        kinds = {
-            str(row[0])
-            for row in connection.execute("SELECT coverage_kind FROM execution_coverage").fetchall()
-        }
-        used = used_bytes(connection)
-        # An exact enforce converges below high_water; between exact checks
-        # usage may exceed high_water by one interval of accrual error but
-        # never the total envelope.
-        assert used <= budget.total_bytes
-        # Each exact call prunes whole units and stops near low_water using
-        # the measured ratio; it converges within a bounded number of calls.
-        for _ in range(50):
-            if used_bytes(connection) <= budget.high_water:
-                break
-            connection.execute("BEGIN IMMEDIATE")
-            assert enforce_budget(connection, budget, 10_000_000) is True
-            connection.execute("COMMIT")
-        used = used_bytes(connection)
-        counters = connection.execute(
-            "SELECT MIN(record_count), MIN(payload_bytes) FROM execution_segments"
-        ).fetchone()
-    finally:
-        connection.close()
+    admin = diag.admin
+    remaining = {
+        str(row[0])
+        for row in admin.execute("SELECT causal_unit_id FROM execution_units").fetchall()
+    }
+    states = {
+        str(row[0]) for row in admin.execute("SELECT causal_state FROM execution_units").fetchall()
+    }
+    kinds = {
+        str(row[0])
+        for row in admin.execute("SELECT coverage_kind FROM execution_coverage").fetchall()
+    }
+    used = used_bytes(admin)
+    # An exact enforce converges below high_water; between exact checks
+    # usage may exceed high_water by one interval of accrual error but
+    # never the total envelope.
+    assert used <= budget.total_bytes
+    # Each exact call prunes whole units and stops near low_water using
+    # the measured ratio; it converges within a bounded number of calls.
+    for _ in range(50):
+        if used_bytes(admin) <= budget.high_water:
+            break
+        assert (
+            diag.database.transact(
+                lambda connection: enforce_budget(connection, budget, 10_000_000)
+            )
+            is True
+        )
+    used = used_bytes(admin)
+    counters = admin.execute(
+        "SELECT MIN(record_count), MIN(payload_bytes) FROM execution_segments"
+    ).fetchone()
     assert used <= budget.high_water
     assert "live-0" not in remaining
     assert CoverageKind.DELETED_BY_CAPACITY in kinds
@@ -173,9 +171,12 @@ def test_b1_forced_incomplete_unknown_converges_without_infinite_loop(tmp_path: 
     assert int(counters[1]) >= 0
 
 
-def test_b2_prune_unit_straddling_segments_leaves_no_survivors(tmp_path: Path) -> None:
+def test_b2_prune_unit_straddling_segments_leaves_no_survivors(
+    postgres_diagnostics_sandbox: DiagnosticsSandbox,
+) -> None:
+    diag = postgres_diagnostics_sandbox
     budget = RetentionBudget(total_bytes=DISK_BUDGET, unit_horizon_ns=HORIZON)
-    store, path = _store(tmp_path, budget)
+    store = _store(diag, budget)
     blob = PAYLOAD_BLOB
     old_records = tuple(
         _record(
@@ -200,31 +201,28 @@ def test_b2_prune_unit_straddling_segments_leaves_no_survivors(tmp_path: Path) -
         for index in range(800)
     )
     store.ingest_batch(_batch("keep", keep_records))
-    connection = _open(path)
-    try:
-        leftover = connection.execute(
-            "SELECT COUNT(*) FROM execution_records WHERE causal_unit_id = 'old'"
-        ).fetchone()
-        units = {
-            str(row[0])
-            for row in connection.execute("SELECT causal_unit_id FROM execution_units").fetchall()
-        }
-        segments = connection.execute(
-            "SELECT record_count, payload_bytes FROM execution_segments"
-        ).fetchall()
-        page = store.query(CAMERA, 0, 10_000, limit=500)
-        deleted_ranges = [
-            item for item in page.availability if item.kind is AvailabilityKind.DELETED_BY_CAPACITY
-        ]
-        exact_deleted = connection.execute(
-            """
-            SELECT from_ns, to_ns, exact FROM execution_coverage
-            WHERE coverage_kind = ?
-            """,
-            (str(CoverageKind.DELETED_BY_CAPACITY),),
-        ).fetchall()
-    finally:
-        connection.close()
+    admin = diag.admin
+    leftover = admin.execute(
+        "SELECT COUNT(*) FROM execution_records WHERE causal_unit_id = 'old'"
+    ).fetchone()
+    units = {
+        str(row[0])
+        for row in admin.execute("SELECT causal_unit_id FROM execution_units").fetchall()
+    }
+    segments = admin.execute(
+        "SELECT record_count, payload_bytes FROM execution_segments"
+    ).fetchall()
+    page = store.query(CAMERA, 0, 10_000, limit=500)
+    deleted_ranges = [
+        item for item in page.availability if item.kind is AvailabilityKind.DELETED_BY_CAPACITY
+    ]
+    exact_deleted = admin.execute(
+        """
+        SELECT from_ns, to_ns, exact FROM execution_coverage
+        WHERE coverage_kind = %s
+        """,
+        (str(CoverageKind.DELETED_BY_CAPACITY),),
+    ).fetchall()
     assert leftover == (0,)
     assert "old" not in units
     assert all(int(row[0]) >= 0 and int(row[1]) >= 0 for row in segments)
@@ -243,9 +241,12 @@ def test_b2_prune_unit_straddling_segments_leaves_no_survivors(tmp_path: Path) -
         assert cursor > item.to_ns
 
 
-def test_b3_late_ack_after_prune_creates_new_unit_never_resurrects(tmp_path: Path) -> None:
+def test_b3_late_ack_after_prune_creates_new_unit_never_resurrects(
+    postgres_diagnostics_sandbox: DiagnosticsSandbox,
+) -> None:
+    diag = postgres_diagnostics_sandbox
     budget = RetentionBudget(total_bytes=2**20, unit_horizon_ns=HORIZON)
-    store, path = _store(tmp_path, budget)
+    store = _store(diag, budget)
     store.ingest_batch(
         _batch(
             "doomed",
@@ -260,12 +261,7 @@ def test_b3_late_ack_after_prune_creates_new_unit_never_resurrects(tmp_path: Pat
             ),
         )
     )
-    connection = _open(path)
-    try:
-        with write_transaction(connection):
-            prune_unit(connection, "unit-old", 2)
-    finally:
-        connection.close()
+    diag.database.transact(lambda connection: prune_unit(connection, "unit-old", 2))
     ack = _record(
         label="ack",
         unit="unit-old",
@@ -279,25 +275,19 @@ def test_b3_late_ack_after_prune_creates_new_unit_never_resurrects(tmp_path: Pat
     receipt = store.ingest_batch(_batch("ack", (ack,)))
     assert receipt.accepted == 1
     expected_unit = late_ack_unit_id("unit-old", _hex("ack"))
-    connection = _open(path)
-    try:
-        units = {
-            str(row[0])
-            for row in connection.execute("SELECT causal_unit_id FROM execution_units").fetchall()
-        }
-        stored = connection.execute(
-            "SELECT causal_unit_id FROM execution_records WHERE record_id = ?",
-            (_hex("ack"),),
-        ).fetchone()
-        resurrected = connection.execute(
-            "SELECT COUNT(*) FROM execution_records WHERE causal_unit_id = 'unit-old'"
-        ).fetchone()
-        kinds = {
-            str(row[0])
-            for row in connection.execute("SELECT coverage_kind FROM execution_coverage")
-        }
-    finally:
-        connection.close()
+    admin = diag.admin
+    units = {
+        str(row[0])
+        for row in admin.execute("SELECT causal_unit_id FROM execution_units").fetchall()
+    }
+    stored = admin.execute(
+        "SELECT causal_unit_id FROM execution_records WHERE record_id = %s",
+        (_hex("ack"),),
+    ).fetchone()
+    resurrected = admin.execute(
+        "SELECT COUNT(*) FROM execution_records WHERE causal_unit_id = 'unit-old'"
+    ).fetchone()
+    kinds = {str(row[0]) for row in admin.execute("SELECT coverage_kind FROM execution_coverage")}
     assert "unit-old" not in units
     assert expected_unit in units
     assert stored == (expected_unit,)
@@ -307,67 +297,69 @@ def test_b3_late_ack_after_prune_creates_new_unit_never_resurrects(tmp_path: Pat
     )
 
 
-def test_b4_coarsening_does_not_widen_exact_deleted_ranges(tmp_path: Path) -> None:
+def test_b4_coarsening_does_not_widen_exact_deleted_ranges(
+    postgres_diagnostics_sandbox: DiagnosticsSandbox,
+) -> None:
+    diag = postgres_diagnostics_sandbox
     budget = RetentionBudget(total_bytes=2**20, unit_horizon_ns=HORIZON, coverage_rows_per_epoch=3)
-    store, path = _store(tmp_path, budget)
+    store = _store(diag, budget)
     store.ingest_batch(
         _batch("seed", (_record(label="s", unit="u", seq=0, observed=1, payload="a"),))
     )
-    connection = _open(path)
-    try:
-        with write_transaction(connection):
+
+    def seed_and_coarsen(connection: psycopg.Connection) -> None:
+        insert_coverage(
+            connection,
+            camera_id=CAMERA,
+            worker_boot_id=BOOT,
+            source_generation=0,
+            stream_epoch=0,
+            kind=CoverageKind.DELETED_BY_CAPACITY,
+            producer="sdk",
+            from_sequence=0,
+            to_sequence=0,
+            from_ns=50,
+            to_ns=50,
+            record_count=1,
+            exact=True,
+            cause="capacity",
+            recorded_at_ns=1,
+        )
+        for index in range(6):
             insert_coverage(
                 connection,
                 camera_id=CAMERA,
                 worker_boot_id=BOOT,
                 source_generation=0,
                 stream_epoch=0,
-                kind=CoverageKind.DELETED_BY_CAPACITY,
+                kind=CoverageKind.MISSING_NOT_RECORDED,
                 producer="sdk",
-                from_sequence=0,
-                to_sequence=0,
-                from_ns=50,
-                to_ns=50,
+                from_sequence=index + 1,
+                to_sequence=index + 1,
+                from_ns=100 + index,
+                to_ns=100 + index,
                 record_count=1,
                 exact=True,
-                cause="capacity",
-                recorded_at_ns=1,
+                cause="gap",
+                recorded_at_ns=index + 2,
             )
-            for index in range(6):
-                insert_coverage(
-                    connection,
-                    camera_id=CAMERA,
-                    worker_boot_id=BOOT,
-                    source_generation=0,
-                    stream_epoch=0,
-                    kind=CoverageKind.MISSING_NOT_RECORDED,
-                    producer="sdk",
-                    from_sequence=index + 1,
-                    to_sequence=index + 1,
-                    from_ns=100 + index,
-                    to_ns=100 + index,
-                    record_count=1,
-                    exact=True,
-                    cause="gap",
-                    recorded_at_ns=index + 2,
-                )
-            coarsen_coverage(connection, budget.coverage_rows_per_epoch, 99)
-        rows = connection.execute(
-            """
-            SELECT coverage_kind, exact, from_ns, to_ns
-            FROM execution_coverage
-            WHERE coverage_kind IN (?, ?, ?)
-            ORDER BY from_ns
-            """,
-            (
-                str(CoverageKind.UNKNOWN_COARSENED),
-                str(CoverageKind.MISSING_NOT_RECORDED),
-                str(CoverageKind.DELETED_BY_CAPACITY),
-            ),
-        ).fetchall()
-        page = store.query(CAMERA, 0, 200, limit=10)
-    finally:
-        connection.close()
+        coarsen_coverage(connection, budget.coverage_rows_per_epoch, 99)
+
+    diag.database.transact(seed_and_coarsen)
+    rows = diag.admin.execute(
+        """
+        SELECT coverage_kind, exact, from_ns, to_ns
+        FROM execution_coverage
+        WHERE coverage_kind IN (%s, %s, %s)
+        ORDER BY from_ns
+        """,
+        (
+            str(CoverageKind.UNKNOWN_COARSENED),
+            str(CoverageKind.MISSING_NOT_RECORDED),
+            str(CoverageKind.DELETED_BY_CAPACITY),
+        ),
+    ).fetchall()
+    page = store.query(CAMERA, 0, 200, limit=10)
     coarsened = [row for row in rows if str(row[0]) == CoverageKind.UNKNOWN_COARSENED]
     exact_deleted = [
         row for row in rows if str(row[0]) == CoverageKind.DELETED_BY_CAPACITY and int(row[1]) == 1
@@ -383,35 +375,35 @@ def test_b4_coarsening_does_not_widen_exact_deleted_ranges(tmp_path: Path) -> No
                 assert not (int(coarse[2]) <= item.from_ns and int(coarse[3]) >= item.to_ns)
 
 
-def test_b5_availability_deleted_requires_exact_row(tmp_path: Path) -> None:
+def test_b5_availability_deleted_requires_exact_row(
+    postgres_diagnostics_sandbox: DiagnosticsSandbox,
+) -> None:
+    diag = postgres_diagnostics_sandbox
     budget = RetentionBudget(total_bytes=2**20, unit_horizon_ns=HORIZON)
-    store, path = _store(tmp_path, budget)
+    store = _store(diag, budget)
     store.ingest_batch(
         _batch("seed", (_record(label="s", unit="u", seq=0, observed=1, payload="a"),))
     )
-    connection = _open(path)
-    try:
-        with write_transaction(connection):
-            insert_coverage(
-                connection,
-                camera_id=CAMERA,
-                worker_boot_id=BOOT,
-                source_generation=0,
-                stream_epoch=0,
-                kind=CoverageKind.UNKNOWN_COARSENED,
-                producer=None,
-                from_sequence=None,
-                to_sequence=None,
-                from_ns=20,
-                to_ns=40,
-                record_count=3,
-                exact=False,
-                cause="coarsened",
-                recorded_at_ns=9,
-            )
-        page = store.query(CAMERA, 0, 50, limit=10)
-    finally:
-        connection.close()
+    diag.database.transact(
+        lambda connection: insert_coverage(
+            connection,
+            camera_id=CAMERA,
+            worker_boot_id=BOOT,
+            source_generation=0,
+            stream_epoch=0,
+            kind=CoverageKind.UNKNOWN_COARSENED,
+            producer=None,
+            from_sequence=None,
+            to_sequence=None,
+            from_ns=20,
+            to_ns=40,
+            record_count=3,
+            exact=False,
+            cause="coarsened",
+            recorded_at_ns=9,
+        )
+    )
+    page = store.query(CAMERA, 0, 50, limit=10)
     deleted = [
         item for item in page.availability if item.kind is AvailabilityKind.DELETED_BY_CAPACITY
     ]
@@ -422,9 +414,11 @@ def test_b5_availability_deleted_requires_exact_row(tmp_path: Path) -> None:
     assert coarsened
 
 
-def test_b9_foreign_cursor_does_not_leak_records(tmp_path: Path) -> None:
+def test_b9_foreign_cursor_does_not_leak_records(
+    postgres_diagnostics_sandbox: DiagnosticsSandbox,
+) -> None:
     budget = RetentionBudget(total_bytes=2**20, unit_horizon_ns=HORIZON)
-    store, _path = _store(tmp_path, budget)
+    store = _store(postgres_diagnostics_sandbox, budget)
     store.ingest_batch(
         _batch(
             "cam-a",

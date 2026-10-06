@@ -15,10 +15,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, BinaryIO, Protocol, runtime_checkable
 
-from backend.app.features.clips.catalog import CatalogConflictError, CatalogStore
-
 if TYPE_CHECKING:
-    from fastapi import FastAPI
+    from backend.app.features.clips.manifest import ClipManifest
 
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 
@@ -33,6 +31,10 @@ class ArtifactReceiptVerificationError(RuntimeError):
 
 class ArtifactReceiptPersistenceError(RuntimeError):
     """No durable backend receipt store is available."""
+
+
+class ReceiptMissingIncidentError(ArtifactReceiptPersistenceError):
+    """A manifest references an incident that has not reached durable storage."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -78,6 +80,22 @@ class VerifiedArtifact:
         return self.device, self.inode
 
 
+@dataclass(frozen=True, slots=True)
+class ClipProjection:
+    receipt: ArtifactReceipt
+    verified: VerifiedArtifact
+    manifest: ClipManifest
+    manifest_relpath: str
+    media_relpath: str
+    manifest_hash: str
+    manifest_size: int
+
+
+def primary_artifact_id(clip_id: str, edge_event_id: str) -> str:
+    digest = hashlib.sha256(f"{clip_id}\x1f{edge_event_id}".encode()).hexdigest()[:32]
+    return f"primary:{digest}"
+
+
 def verified_artifact(handle: BinaryIO) -> VerifiedArtifact:
     """Hash one open regular descriptor and preserve its identity and position."""
     try:
@@ -98,35 +116,6 @@ def verified_artifact(handle: BinaryIO) -> VerifiedArtifact:
         device=descriptor_stat.st_dev,
         inode=descriptor_stat.st_ino,
     )
-
-
-class CatalogArtifactReceiptStore:
-    """Receipt adapter over the existing API-owned ``clips`` catalog table."""
-
-    def __init__(self, catalog: CatalogStore) -> None:
-        self._catalog = catalog
-
-    @classmethod
-    def from_app(cls, app: FastAPI) -> CatalogArtifactReceiptStore:
-        from backend.app.features.clips.catalog import get_catalog_store
-
-        catalog = get_catalog_store(app)
-        if catalog is None:
-            raise ArtifactReceiptPersistenceError("clip catalog is unavailable")
-        return cls(catalog)
-
-    def commit(self, receipt: ArtifactReceipt) -> ArtifactReceipt:
-        try:
-            sha256, size_bytes, accepted = self._catalog.commit_artifact_receipt(
-                receipt.artifact_id, receipt.sha256, receipt.size_bytes
-            )
-        except CatalogConflictError as exc:
-            raise ArtifactReceiptConflictError(str(exc)) from exc
-        return ArtifactReceipt(receipt.artifact_id, sha256, size_bytes, accepted)
-
-    def get(self, artifact_id: str) -> ArtifactReceipt | None:
-        row = self._catalog.artifact_receipt(artifact_id)
-        return None if row is None else ArtifactReceipt(artifact_id, *row)
 
 
 def verify_artifact(path: Path, receipt: ArtifactReceipt) -> None:
@@ -154,8 +143,10 @@ __all__ = [
     "ArtifactReceiptPersistenceError",
     "ArtifactReceiptStore",
     "ArtifactReceiptVerificationError",
-    "CatalogArtifactReceiptStore",
+    "ClipProjection",
+    "ReceiptMissingIncidentError",
     "VerifiedArtifact",
+    "primary_artifact_id",
     "verified_artifact",
     "verify_artifact",
 ]

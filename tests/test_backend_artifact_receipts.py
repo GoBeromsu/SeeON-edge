@@ -8,42 +8,41 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import BinaryIO
 
+import psycopg
 import pytest
 from fastapi.testclient import TestClient
 
-from backend.app.edge_db.bootstrap import bootstrap_database
+from backend.app.features.audit.postgres_runtime import PostgresAuditRuntime
+from backend.app.features.audit.postgres_store import PostgresAuditStore
 from backend.app.features.cameras.store import CameraRegistryStore
-from backend.app.features.clips.catalog import CatalogStore
-from backend.app.features.clips.compact_listing import CompactClipListing, CompactClipQuery
-from backend.app.features.clips.manifest import ClipManifest
 from backend.app.features.clips.store import ClipStore
-from backend.app.features.evidence.compact_receipt_sql import (
-    ClipProjection,
-    commit_clip,
-    commit_primary_artifact,
-)
-from backend.app.features.evidence.compact_receipts import (
-    CompactArtifactReceiptStore,
-    CompactReceiptHooks,
-    CompactReceiptMissingIncidentError,
-)
+from backend.app.features.evidence.event_outbox import EventOutbox, OutboxBudget
+from backend.app.features.evidence.postgres_receipts import PostgresArtifactReceiptStore
+from backend.app.features.evidence.receipt_files import ReceiptHooks
 from backend.app.features.evidence.receipt_store import (
     ArtifactReceipt,
     ArtifactReceiptConflictError,
     ArtifactReceiptStore,
     ArtifactReceiptVerificationError,
-    CatalogArtifactReceiptStore,
     VerifiedArtifact,
     verify_artifact,
 )
-from backend.app.features.evidence.relay_projection import RelayEvent, RelayEvidenceProjection
+from backend.app.features.evidence.relay_projection import RelayEvent
 from backend.app.features.runtime_settings.store import RuntimeSettingsStore
 from backend.app.main import create_app, no_lifespan
+from backend.app.shared.postgres_dashboard_credentials import PostgresDashboardCredentialsStore
 from shared.events.evidence_export_contract import ClipReceipt
-from tests_support.compact_authority_db import prepare_compact_database
+from tests_support.postgres_sandbox import ProductSandbox
+
+pytest_plugins = ("tests_support.postgres_sandbox",)
 
 TOKEN = "relay-token"
+# The wire payload carries Hub-facing UUIDv4 references while the receipt owner
+# resolves incidents from the clip manifest's own event identity below. The two
+# are deliberately unequal; nothing here asserts metadata equality between them.
 EVENT_ID = "00000000-0000-4000-8000-000000000001"
+# One accepted event per native client; an explicit test budget, not a deployment policy.
+TEST_OUTBOX_BUDGET = OutboxBudget(4, 64 * 1024)
 
 
 class SqliteReceiptStore:
@@ -114,31 +113,6 @@ def _receipt(data: bytes, *, artifact_id: str = "clip-1") -> ArtifactReceipt:
     return ArtifactReceipt(artifact_id, hashlib.sha256(data).hexdigest(), len(data))
 
 
-def _projection(receipt: ArtifactReceipt, *, video_available: bool = True) -> ClipProjection:
-    manifest = ClipManifest(
-        clip_id=receipt.artifact_id,
-        camera_id="camera-1",
-        event_ref="event-1",
-        event_type="fall",
-        started_at="2026-07-06T00:00:00Z",
-        duration_s=1.0,
-        codec="h264",
-        path="clips/clip-1/clip.mp4",
-        video_available=video_available,
-        video_error=None if video_available else "NO_FRAMES",
-        finalized=True,
-    )
-    return ClipProjection(
-        receipt=receipt,
-        verified=VerifiedArtifact(None, receipt.sha256, receipt.size_bytes, 1, 1),  # type: ignore[arg-type]
-        manifest=manifest,
-        manifest_relpath="clips/clip-1/manifest.json",
-        media_relpath="clips/clip-1/clip.mp4",
-        manifest_hash="a" * 64,
-        manifest_size=1,
-    )
-
-
 def _raise_receipt_conflict() -> None:
     raise ArtifactReceiptConflictError("immutable artifact receipt fields conflict")
 
@@ -158,19 +132,6 @@ def test_immutable_receipt_conflict_is_typed(tmp_path: Path) -> None:
 
     with pytest.raises(ArtifactReceiptConflictError):
         store.commit(_receipt(b"changed"))
-
-
-def test_catalog_receipt_store_commits_and_retries_durably(tmp_path: Path) -> None:
-    catalog = CatalogStore.open(tmp_path / "catalog.sqlite3")
-    store = CatalogArtifactReceiptStore(catalog)
-    receipt = _receipt(b"verified video")
-    try:
-        assert store.commit(receipt) == receipt
-        assert store.commit(receipt) == receipt
-        with pytest.raises(ArtifactReceiptConflictError):
-            store.commit(_receipt(b"different video"))
-    finally:
-        catalog.close()
 
 
 def _login(client: TestClient) -> None:
@@ -196,15 +157,24 @@ def _payload(data: bytes) -> dict[str, object]:
     }
 
 
-def _client(tmp_path: Path, store: ArtifactReceiptStore) -> TestClient:
+def _client(tmp_path: Path, store: ArtifactReceiptStore, sandbox: ProductSandbox) -> TestClient:
     app = create_app(lifespan=no_lifespan)
+    runtime = PostgresAuditRuntime(
+        PostgresAuditStore(sandbox.database, sandbox.authority),
+        maximum_snapshot_age_sec=10.0,
+        clock=lambda: 0.0,
+    )
+    assert runtime.verify_once()
+    assert runtime.start_session_once()
+    app.state.audit_runtime = runtime
+    app.state.dashboard_credentials_store = PostgresDashboardCredentialsStore(
+        sandbox.database, sandbox.authority
+    )
     app.state.edge_relay_token = TOKEN
     app.state.artifact_receipt_store = store
     app.state.clip_store_root = tmp_path / "clip-store"
     app.state.clip_store = ClipStore(app.state.clip_store_root)
-    database = tmp_path / "catalog.sqlite3"
-    prepare_compact_database(database)
-    registry = CameraRegistryStore(database)
+    registry = CameraRegistryStore(sandbox.database, sandbox.authority)
     registry.create(
         camera_id="camera-1",
         label="Camera 1",
@@ -215,11 +185,15 @@ def _client(tmp_path: Path, store: ArtifactReceiptStore) -> TestClient:
     )
     app.state.camera_registry = registry
     app.state.backend_evidence_client = LocalBackend()
-    settings = RuntimeSettingsStore(database)
+    settings = RuntimeSettingsStore(sandbox.database, sandbox.authority)
     settings.set_clip_export_enabled(True)
     app.state.runtime_settings_store = settings
-    if isinstance(store, CompactArtifactReceiptStore):
-        RelayEvidenceProjection(store._database_path).project_event(  # noqa: SLF001
+    if isinstance(store, PostgresArtifactReceiptStore):
+        # The manifest incident comes from the real acceptance owner sharing this
+        # runtime, database and authority, under an explicit small test budget.
+        EventOutbox(
+            sandbox.database, sandbox.authority, TEST_OUTBOX_BUDGET, audit_runtime=runtime
+        ).accept(
             RelayEvent(
                 edge_event_id="event-1",
                 event_type="fall",
@@ -230,9 +204,27 @@ def _client(tmp_path: Path, store: ArtifactReceiptStore) -> TestClient:
                 resident_id=None,
                 evidence=None,
                 audit=None,
-            )
+            ),
+            backend_camera_id=None,
+            forward=False,
         )
     return TestClient(app)
+
+
+def _native_store(
+    tmp_path: Path, sandbox: ProductSandbox, hooks: ReceiptHooks | None = None
+) -> PostgresArtifactReceiptStore:
+    return PostgresArtifactReceiptStore(
+        sandbox.database, sandbox.authority, tmp_path / "clip-store", hooks
+    )
+
+
+def _counts(sandbox: ProductSandbox) -> tuple[int, ...]:
+    """Read published clips, artifacts and audit rows on the independent connection."""
+    return tuple(
+        sandbox.admin.execute("SELECT count(*) FROM " + table).fetchone()[0]
+        for table in ("clips", "artifacts", "audit_events")
+    )
 
 
 def _media(
@@ -267,439 +259,33 @@ def _media(
     return path
 
 
-def test_compact_receipt_commits_clip_and_primary_artifact(tmp_path: Path) -> None:
-    # Given: verified local media and an incident matching its manifest event reference.
-    data = b"verified video"
-    _media(tmp_path, data)
-    database = tmp_path / "edge.sqlite3"
-    bootstrap_database(database)
-    RelayEvidenceProjection(database).project_event(
-        RelayEvent(
-            edge_event_id="event-1",
-            event_type="fall",
-            probability=0.8,
-            detected_at="2026-07-06T00:00:00Z",
-            camera_id="camera-1",
-            facility_id="facility-1",
-            resident_id=None,
-            evidence=None,
-            audit=None,
-        )
-    )
-    store = CompactArtifactReceiptStore(database, tmp_path / "clip-store")
-    receipt = _receipt(data)
-
-    # When: the authenticated receipt is committed and reopened.
-    assert store.commit(receipt) == receipt
-    reopened = CompactArtifactReceiptStore(database, tmp_path / "clip-store")
-
-    # Then: clips owns publication and artifacts owns PRIMARY_CLIP projection.
-    assert reopened.get("clip-1") == receipt
-    with sqlite3.connect(database) as connection:
-        assert connection.execute(
-            "SELECT publish_state FROM clips WHERE clip_id='clip-1'"
-        ).fetchone() == ("PUBLISHED",)
-        assert connection.execute(
-            "SELECT clip_id,state FROM artifacts WHERE kind='PRIMARY_CLIP'"
-        ).fetchone() == ("clip-1", "AVAILABLE")
-        assert connection.execute(
-            "SELECT lifecycle_state FROM incidents WHERE edge_event_id='event-1'"
-        ).fetchone() == ("COMPLETE",)
-        created_at, updated_at = connection.execute(
-            "SELECT created_at, updated_at FROM incidents WHERE edge_event_id='event-1'"
-        ).fetchone()
-        assert created_at <= updated_at
-
-
-def test_compact_receipt_completes_every_manifest_event_reference(tmp_path: Path) -> None:
-    second_event = "event-2"
-    data = b"verified video"
-    _media(tmp_path, data, event_refs=["event-1", second_event])
-    database = tmp_path / "edge.sqlite3"
-    bootstrap_database(database)
-    projection = RelayEvidenceProjection(database)
-    for event_id in ("event-1", second_event):
-        projection.project_event(
-            RelayEvent(
-                edge_event_id=event_id,
-                event_type="fall",
-                probability=0.8,
-                detected_at="2026-07-06T00:00:00Z",
-                camera_id="camera-1",
-                facility_id="facility-1",
-                resident_id=None,
-                evidence=None,
-                audit=None,
-            )
-        )
-
-    CompactArtifactReceiptStore(database, tmp_path / "clip-store").commit(_receipt(data))
-
-    with sqlite3.connect(database) as connection:
-        assert connection.execute("SELECT count(*) FROM clips").fetchone() == (1,)
-        artifacts = connection.execute(
-            "SELECT artifact_id, clip_id FROM artifacts WHERE kind = 'PRIMARY_CLIP' "
-            "ORDER BY artifact_id"
-        ).fetchall()
-        assert len(artifacts) == 2
-        assert len({row[0] for row in artifacts}) == 2
-        assert {row[1] for row in artifacts} == {"clip-1"}
-        assert connection.execute(
-            "SELECT count(*) FROM incidents WHERE lifecycle_state = 'COMPLETE'"
-        ).fetchone() == (2,)
-
-
-def test_missing_manifest_incident_rolls_back_all_receipt_projection(tmp_path: Path) -> None:
-    data = b"verified video"
-    _media(tmp_path, data, event_refs=["event-1", "event-missing"])
-    database = tmp_path / "edge.sqlite3"
-    bootstrap_database(database)
-    RelayEvidenceProjection(database).project_event(
-        RelayEvent(
-            edge_event_id="event-1",
-            event_type="fall",
-            probability=0.8,
-            detected_at="2026-07-06T00:00:00Z",
-            camera_id="camera-1",
-            facility_id="facility-1",
-            resident_id=None,
-            evidence=None,
-            audit=None,
-        )
-    )
-
-    with pytest.raises(CompactReceiptMissingIncidentError, match="event-missing"):
-        CompactArtifactReceiptStore(database, tmp_path / "clip-store").commit(_receipt(data))
-    with sqlite3.connect(database) as connection:
-        assert connection.execute("SELECT count(*) FROM clips").fetchone() == (0,)
-        assert connection.execute("SELECT count(*) FROM artifacts").fetchone() == (0,)
-        assert connection.execute(
-            "SELECT lifecycle_state FROM incidents WHERE edge_event_id = 'event-1'"
-        ).fetchone() == ("OPEN",)
-
-
-def test_primary_artifact_id_accepts_maximum_legal_inputs_via_public_receipt_path(
-    tmp_path: Path,
-) -> None:
-    clip_id = "c" * 128
-    edge_event_id = "e" * 128
-    data = b"verified video"
-    _media(tmp_path, data, clip_id=clip_id, event_id=edge_event_id)
-    database = tmp_path / "edge.sqlite3"
-    bootstrap_database(database)
-    with sqlite3.connect(database) as connection:
-        connection.execute(
-            """
-            INSERT INTO incidents (
-                incident_id, edge_event_id, facility_id, camera_id, event_type, probability,
-                detected_at, lifecycle_state, provenance_state, provenance_missing_reason,
-                review_version, revision, created_at, updated_at
-            ) VALUES (?, ?, 'facility-1', 'camera-1', 'fall', 0.8,
-                      '2026-07-06T00:00:00Z', 'OPEN', 'MISSING', 'NOT_RECORDED',
-                      0, 1, '2026-07-06T00:00:00Z', '2026-07-06T00:00:00Z')
-            """,
-            ("incident-max-input", edge_event_id),
-        )
-    CompactArtifactReceiptStore(database, tmp_path / "clip-store").commit(
-        _receipt(data, artifact_id=clip_id)
-    )
-    with sqlite3.connect(database) as connection:
-        artifact_id = connection.execute(
-            "SELECT artifact_id FROM artifacts WHERE kind = 'PRIMARY_CLIP'"
-        ).fetchone()
-    # Generated once with hashlib.sha256(
-    #     ("c" * 128 + "\x1f" + "e" * 128).encode()
-    # ).hexdigest()[:32].
-    assert artifact_id == ("primary:0fb0648ada8974a9693610ced3a5e6f1",)
-
-
-def test_compact_receipt_replay_keeps_one_stable_digest_artifact(tmp_path: Path) -> None:
-    data = b"verified video"
-    _media(tmp_path, data)
-    database = tmp_path / "edge.sqlite3"
-    bootstrap_database(database)
-    RelayEvidenceProjection(database).project_event(
-        RelayEvent(
-            edge_event_id="event-1",
-            event_type="fall",
-            probability=0.8,
-            detected_at="2026-07-06T00:00:00Z",
-            camera_id="camera-1",
-            facility_id="facility-1",
-            resident_id=None,
-            evidence=None,
-            audit=None,
-        )
-    )
-    store = CompactArtifactReceiptStore(database, tmp_path / "clip-store")
-    receipt = _receipt(data)
-
-    assert store.commit(receipt) == store.commit(receipt) == receipt
-    with sqlite3.connect(database) as connection:
-        rows = connection.execute(
-            "SELECT artifact_id FROM artifacts WHERE kind = 'PRIMARY_CLIP'"
-        ).fetchall()
-    expected_id = "primary:" + hashlib.sha256(b"clip-1\x1fevent-1").hexdigest()[:32]
-    assert rows == [(expected_id,)]
-
-
-def test_public_receipt_rejects_digest_identity_collision_without_partial_state(
-    tmp_path: Path,
-) -> None:
-    data = b"verified video"
-    _media(tmp_path, data)
-    database = tmp_path / "edge.sqlite3"
-    bootstrap_database(database)
-    relay = RelayEvidenceProjection(database)
-    for event_id in ("event-1", "event-2"):
-        relay.project_event(
-            RelayEvent(
-                edge_event_id=event_id,
-                event_type="fall",
-                probability=0.8,
-                detected_at="2026-07-06T00:00:00Z",
-                camera_id="camera-1",
-                facility_id="facility-1",
-                resident_id=None,
-                evidence=None,
-                audit=None,
-            )
-        )
-    receipt = _receipt(data)
-    expected_id = "primary:" + hashlib.sha256(b"clip-1\x1fevent-1").hexdigest()[:32]
-    with sqlite3.connect(database) as connection:
-        commit_clip(connection, _projection(receipt))
-        connection.execute(
-            """
-            INSERT INTO artifacts (
-                incident_id, kind, artifact_id, clip_id, state, contained_relpath,
-                content_sha256, size_bytes, mime_type, codec, revision, created_at, updated_at
-            ) VALUES ('incident:event-2', 'PRIMARY_CLIP', ?, 'clip-1', 'AVAILABLE',
-                      'clips/clip-1/clip.mp4', ?, ?, 'video/mp4', 'h264', 1,
-                      '2026-07-06T00:00:00Z', '2026-07-06T00:00:00Z')
-            """,
-            (expected_id, receipt.sha256, receipt.size_bytes),
-        )
-
-    with pytest.raises(ArtifactReceiptConflictError, match="identity conflicts"):
-        CompactArtifactReceiptStore(database, tmp_path / "clip-store").commit(receipt)
-    with sqlite3.connect(database) as connection:
-        assert connection.execute(
-            "SELECT count(*) FROM artifacts WHERE incident_id = 'incident:event-1'"
-        ).fetchone() == (0,)
-        assert connection.execute(
-            "SELECT lifecycle_state FROM incidents WHERE incident_id = 'incident:event-1'"
-        ).fetchone() == ("OPEN",)
-
-
-def test_legacy_primary_artifact_replay_is_a_clean_noop(tmp_path: Path) -> None:
-    database = tmp_path / "edge.sqlite3"
-    bootstrap_database(database)
-    RelayEvidenceProjection(database).project_event(
-        RelayEvent(
-            edge_event_id="event-1",
-            event_type="fall",
-            probability=0.8,
-            detected_at="2026-07-06T00:00:00Z",
-            camera_id="camera-1",
-            facility_id="facility-1",
-            resident_id=None,
-            evidence=None,
-            audit=None,
-        )
-    )
-    data = b"verified video"
-    receipt = _receipt(data)
-    projection = _projection(receipt)
-    with sqlite3.connect(database) as connection:
-        commit_clip(connection, projection)
-        connection.execute(
-            """
-            INSERT INTO artifacts (
-                incident_id, kind, artifact_id, clip_id, state, contained_relpath,
-                content_sha256, size_bytes, mime_type, codec, revision, created_at, updated_at
-            ) VALUES ('incident:event-1', 'PRIMARY_CLIP', 'primary:clip-1', 'clip-1',
-                      'AVAILABLE', 'clips/clip-1/clip.mp4', ?, ?, 'video/mp4', 'h264',
-                      1, '2026-07-06T00:00:00Z', '2026-07-06T00:00:00Z')
-            """,
-            (receipt.sha256, receipt.size_bytes),
-        )
-        commit_primary_artifact(connection, "incident:event-1", "event-1", projection)
-        assert connection.execute(
-            "SELECT lifecycle_state FROM incidents WHERE incident_id = 'incident:event-1'"
-        ).fetchone() == ("COMPLETE",)
-    with sqlite3.connect(database) as connection:
-        assert connection.execute(
-            "SELECT artifact_id FROM artifacts WHERE incident_id = 'incident:event-1'"
-        ).fetchone() == ("primary:clip-1",)
-        assert connection.execute("SELECT count(*) FROM artifacts").fetchone() == (1,)
-
-
-def test_primary_artifact_conflict_rolls_back_without_lifecycle_change(tmp_path: Path) -> None:
-    database = tmp_path / "edge.sqlite3"
-    bootstrap_database(database)
-    RelayEvidenceProjection(database).project_event(
-        RelayEvent(
-            edge_event_id="event-1",
-            event_type="fall",
-            probability=0.8,
-            detected_at="2026-07-06T00:00:00Z",
-            camera_id="camera-1",
-            facility_id="facility-1",
-            resident_id=None,
-            evidence=None,
-            audit=None,
-        )
-    )
-    receipt = _receipt(b"verified video")
-    projection = _projection(receipt)
-    with sqlite3.connect(database) as connection:
-        commit_clip(connection, projection)
-        connection.execute(
-            """
-            INSERT INTO artifacts (
-                incident_id, kind, clip_id, state, reason, revision, created_at, updated_at
-            ) VALUES ('incident:event-1', 'PRIMARY_CLIP', 'clip-1', 'UNAVAILABLE',
-                      'NO_FRAMES', 1, '2026-07-06T00:00:00Z', '2026-07-06T00:00:00Z')
-            """,
-        )
-        with pytest.raises(ArtifactReceiptConflictError, match="primary clip artifact conflicts"):
-            commit_primary_artifact(connection, "incident:event-1", "event-1", projection)
-        assert connection.execute(
-            "SELECT lifecycle_state FROM incidents WHERE incident_id = 'incident:event-1'"
-        ).fetchone() == ("OPEN",)
-        assert connection.execute(
-            "SELECT state FROM artifacts WHERE incident_id = 'incident:event-1'"
-        ).fetchone() == ("UNAVAILABLE",)
-
-
-def test_unavailable_primary_marks_incident_failed_with_reason(tmp_path: Path) -> None:
-    database = tmp_path / "edge.sqlite3"
-    bootstrap_database(database)
-    RelayEvidenceProjection(database).project_event(
-        RelayEvent(
-            edge_event_id="event-1",
-            event_type="fall",
-            probability=0.8,
-            detected_at="2026-07-06T00:00:00Z",
-            camera_id="camera-1",
-            facility_id="facility-1",
-            resident_id=None,
-            evidence=None,
-            audit=None,
-        )
-    )
-    projection = _projection(_receipt(b"unavailable"), video_available=False)
-    with sqlite3.connect(database) as connection:
-        commit_clip(connection, projection)
-        commit_primary_artifact(connection, "incident:event-1", "event-1", projection)
-        assert connection.execute(
-            "SELECT lifecycle_state, failure_reason FROM incidents "
-            "WHERE incident_id = 'incident:event-1'"
-        ).fetchone() == ("FAILED", "NO_FRAMES")
-
-
-def test_compact_receipt_rejects_equal_size_different_hash_without_partial_state(
-    tmp_path: Path,
-) -> None:
-    # Given: current media bytes differ from an equal-size declared receipt.
-    actual = b"actual-media"
-    declared = b"bogus-media!"
-    assert len(actual) == len(declared)
-    _media(tmp_path, actual)
-    database = tmp_path / "edge.sqlite3"
-    bootstrap_database(database)
-    store = CompactArtifactReceiptStore(database, tmp_path / "clip-store")
-
-    # When: the compact store independently binds the receipt to current bytes.
-    with pytest.raises(ArtifactReceiptVerificationError):
-        store.commit(_receipt(declared))
-
-    # Then: neither compact authority contains a caller-declared partial fact.
-    with sqlite3.connect(database) as connection:
-        assert connection.execute("SELECT count(*) FROM clips").fetchone() == (0,)
-        assert connection.execute("SELECT count(*) FROM artifacts").fetchone() == (0,)
-
-
-def test_compact_receipt_failure_does_not_promote_existing_waiting_clip(
-    tmp_path: Path,
-) -> None:
-    # Given: manifest reconciliation created a WAITING compact clip row.
-    actual = b"actual-media"
-    declared = b"bogus-media!"
-    _media(tmp_path, actual)
-    database = tmp_path / "edge.sqlite3"
-    bootstrap_database(database)
-    listing = CompactClipListing(database)
-    listing.rebuild_and_page(
-        ClipStore(tmp_path / "clip-store"),
-        CompactClipQuery(None, None, 10, None),
-    )
-
-    # When: a same-size, wrong-hash receipt is rejected.
-    with pytest.raises(ArtifactReceiptVerificationError):
-        CompactArtifactReceiptStore(database, tmp_path / "clip-store").commit(_receipt(declared))
-
-    # Then: publication remains WAITING and no PRIMARY_CLIP appears.
-    with sqlite3.connect(database) as connection:
-        assert connection.execute(
-            "SELECT publish_state FROM clips WHERE clip_id='clip-1'"
-        ).fetchone() == ("WAITING",)
-        assert connection.execute("SELECT count(*) FROM artifacts").fetchone() == (0,)
-
-
-@pytest.mark.parametrize("invalid_path", ["symlink", "missing"])
-def test_compact_receipt_rejects_untrusted_media_path_without_partial_state(
-    tmp_path: Path,
-    invalid_path: str,
-) -> None:
-    # Given: direct compact commit sees either no media or a symlinked final path.
-    data = b"verified video"
-    media = _media(tmp_path, data)
-    if invalid_path == "symlink":
-        target = media.with_name("target.mp4")
-        target.write_bytes(data)
-        media.unlink()
-        media.symlink_to(target.name)
-    else:
-        media.unlink()
-    database = tmp_path / "edge.sqlite3"
-    bootstrap_database(database)
-
-    # When/Then: no untrusted pathname can produce publication state.
-    with pytest.raises(ArtifactReceiptVerificationError):
-        CompactArtifactReceiptStore(database, tmp_path / "clip-store").commit(_receipt(data))
-    with sqlite3.connect(database) as connection:
-        assert connection.execute("SELECT count(*) FROM clips").fetchone() == (0,)
-        assert connection.execute("SELECT count(*) FROM artifacts").fetchone() == (0,)
-
-
 @pytest.mark.parametrize("swap_kind", ["inode", "symlink", "missing"])
-def test_real_route_rejects_media_swap_before_compact_commit(
+def test_real_route_rejects_media_swap_before_native_commit(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     swap_kind: str,
+    postgres_product_sandbox: ProductSandbox,
 ) -> None:
     # Given: route verification has opened the declared inode.
     original = b"verified video"
     replacement = b"tampered bytes"
     assert len(original) == len(replacement)
-    database = tmp_path / "edge.sqlite3"
-    bootstrap_database(database)
-    store = CompactArtifactReceiptStore(database, tmp_path / "clip-store")
-    client = _client(tmp_path, store)
+    sandbox = postgres_product_sandbox
+    store = _native_store(tmp_path, sandbox)
+    client = _client(tmp_path, store, sandbox)
     media = _media(tmp_path, original)
+    before = _counts(sandbox)
     original_inode = media.stat().st_ino
-    original_commit = CompactArtifactReceiptStore.commit_verified
+    original_commit = PostgresArtifactReceiptStore.commit_verified
     observed_inode: int | None = None
     verified_handle: BinaryIO | None = None
 
     def swap_then_commit(
-        compact_store: CompactArtifactReceiptStore,
+        native_store: PostgresArtifactReceiptStore,
         receipt: ArtifactReceipt,
         route_verified: VerifiedArtifact,
         *,
-        after_write: Callable[[sqlite3.Connection], None] | None = None,
+        after_write: Callable[[psycopg.Connection], None] | None = None,
     ) -> ArtifactReceipt:
         nonlocal observed_inode, verified_handle
         verified_handle = route_verified.handle
@@ -718,39 +304,37 @@ def test_real_route_rejects_media_swap_before_compact_commit(
                 raise AssertionError(unreachable)
         if media.exists():
             observed_inode = media.stat().st_ino
-        return original_commit(compact_store, receipt, route_verified, after_write=after_write)
+        return original_commit(native_store, receipt, route_verified, after_write=after_write)
 
     monkeypatch.setattr(
-        CompactArtifactReceiptStore,
+        PostgresArtifactReceiptStore,
         "commit_verified",
         swap_then_commit,
     )
 
-    # When: the real relay route crosses verification -> compact commit.
+    # When: the real relay route crosses verification -> native commit.
     response = client.put(
         "/api/v1/relay/clips/clip-1",
         json=_payload(original),
         headers={"X-Edge-Relay-Token": TOKEN},
     )
 
-    # Then: pathname/inode drift is rejected and no publication fact commits.
+    # Then: pathname/inode drift is rejected and no publication or audit fact commits.
     assert response.status_code == 409
     assert verified_handle is not None and verified_handle.closed
     if observed_inode is not None:
         assert observed_inode != original_inode
-    with sqlite3.connect(database) as connection:
-        assert connection.execute("SELECT count(*) FROM clips").fetchone() == (0,)
-        assert connection.execute("SELECT count(*) FROM artifacts").fetchone() == (0,)
+    assert _counts(sandbox) == before
 
 
 def test_real_route_rejects_swap_after_preflight_before_transaction(
     tmp_path: Path,
+    postgres_product_sandbox: ProductSandbox,
 ) -> None:
     # Given: pathname identity is captured, then equal-size replacement occurs before DB open.
     original = b"verified video"
     replacement = b"tampered bytes"
-    database = tmp_path / "edge.sqlite3"
-    bootstrap_database(database)
+    sandbox = postgres_product_sandbox
     media = _media(tmp_path, original)
     inode_proof: tuple[int, int] | None = None
 
@@ -762,12 +346,9 @@ def test_real_route_rejects_swap_after_preflight_before_transaction(
         os.replace(replacement_path, media)
         inode_proof = old_inode, media.stat().st_ino
 
-    store = CompactArtifactReceiptStore(
-        database,
-        tmp_path / "clip-store",
-        CompactReceiptHooks(after_preflight=swap_after_preflight),
-    )
-    client = _client(tmp_path, store)
+    store = _native_store(tmp_path, sandbox, ReceiptHooks(after_preflight=swap_after_preflight))
+    client = _client(tmp_path, store, sandbox)
+    before = _counts(sandbox)
 
     # When: the real route reaches the exact post-preflight/pre-transaction hook.
     response = client.put(
@@ -779,21 +360,19 @@ def test_real_route_rejects_swap_after_preflight_before_transaction(
     # Then: the first in-transaction guard rejects replacement before any SQL write.
     assert response.status_code == 409
     assert inode_proof is not None and inode_proof[0] != inode_proof[1]
-    with sqlite3.connect(database) as connection:
-        assert connection.execute("SELECT count(*) FROM clips").fetchone() == (0,)
-        assert connection.execute("SELECT count(*) FROM artifacts").fetchone() == (0,)
+    assert _counts(sandbox) == before
 
 
 @pytest.mark.parametrize("swap_kind", ["inode", "symlink", "missing"])
 def test_real_route_rolls_back_swap_during_receipt_transaction(
     tmp_path: Path,
     swap_kind: str,
+    postgres_product_sandbox: ProductSandbox,
 ) -> None:
     # Given: SQL writes occur, then the current pathname is replaced before commit.
     original = b"verified video"
     replacement = b"tampered bytes"
-    database = tmp_path / "edge.sqlite3"
-    bootstrap_database(database)
+    sandbox = postgres_product_sandbox
     media = _media(tmp_path, original)
     inode_proof: tuple[int, int] | None = None
 
@@ -816,12 +395,11 @@ def test_real_route_rolls_back_swap_during_receipt_transaction(
         if media.exists():
             inode_proof = old_inode, media.stat().st_ino
 
-    store = CompactArtifactReceiptStore(
-        database,
-        tmp_path / "clip-store",
-        CompactReceiptHooks(before_final_check=swap_before_final_check),
+    store = _native_store(
+        tmp_path, sandbox, ReceiptHooks(before_final_check=swap_before_final_check)
     )
-    client = _client(tmp_path, store)
+    client = _client(tmp_path, store, sandbox)
+    before = _counts(sandbox)
 
     # When: the deterministic hook swaps after SQL but before transaction commit.
     response = client.put(
@@ -830,49 +408,51 @@ def test_real_route_rolls_back_swap_during_receipt_transaction(
         headers={"X-Edge-Relay-Token": TOKEN},
     )
 
-    # Then: the final in-transaction guard rolls back every compact write.
+    # Then: the final in-transaction guard rolls back every native write, audit included.
     assert response.status_code == 409
     if inode_proof is not None:
         assert inode_proof[0] != inode_proof[1]
-    with sqlite3.connect(database) as connection:
-        assert connection.execute("SELECT count(*) FROM clips").fetchone() == (0,)
-        assert connection.execute("SELECT count(*) FROM artifacts").fetchone() == (0,)
+    assert _counts(sandbox) == before
 
 
-def test_real_route_valid_compact_receipt_commits_and_closes_descriptor(
+def test_real_route_valid_native_receipt_commits_and_closes_descriptor(
     tmp_path: Path,
+    postgres_product_sandbox: ProductSandbox,
 ) -> None:
     # Given: valid bytes remain on the same pathname for both transaction guards.
     data = b"verified video"
-    database = tmp_path / "edge.sqlite3"
-    bootstrap_database(database)
+    sandbox = postgres_product_sandbox
     media = _media(tmp_path, data)
     hook_order: list[str] = []
     captured_handle: BinaryIO | None = None
 
-    class ObservedStore(CompactArtifactReceiptStore):
+    class ObservedStore(PostgresArtifactReceiptStore):
+        """Record the route descriptor; every native write still runs below."""
+
         def commit_verified(
             self,
             receipt: ArtifactReceipt,
             route_verified: VerifiedArtifact,
             *,
-            after_write: Callable[[sqlite3.Connection], None] | None = None,
+            after_write: Callable[[psycopg.Connection], None] | None = None,
         ) -> ArtifactReceipt:
             nonlocal captured_handle
             captured_handle = route_verified.handle
             return super().commit_verified(receipt, route_verified, after_write=after_write)
 
     store = ObservedStore(
-        database,
+        sandbox.database,
+        sandbox.authority,
         tmp_path / "clip-store",
-        CompactReceiptHooks(
+        ReceiptHooks(
             after_preflight=lambda: hook_order.append("after-preflight"),
             before_final_check=lambda: hook_order.append("before-final-check"),
         ),
     )
-    client = _client(tmp_path, store)
+    client = _client(tmp_path, store, sandbox)
+    clips, artifacts, audit_events = _counts(sandbox)
 
-    # When: the real route completes a descriptor-bound compact receipt.
+    # When: the real route completes a descriptor-bound native receipt.
     response = client.put(
         "/api/v1/relay/clips/clip-1",
         json=_payload(data),
@@ -883,18 +463,24 @@ def test_real_route_valid_compact_receipt_commits_and_closes_descriptor(
     assert response.status_code == 200
     assert hook_order == ["after-preflight", "before-final-check"]
     assert captured_handle is not None and captured_handle.closed
-    with sqlite3.connect(database) as connection:
-        stored = connection.execute(
-            "SELECT media_sha256,media_size_bytes,publish_state FROM clips WHERE clip_id='clip-1'"
-        ).fetchone()
-    assert stored == (_receipt(data).sha256, media.stat().st_size, "PUBLISHED")
+    assert sandbox.admin.execute(
+        "SELECT media_sha256,media_size_bytes,publish_state FROM clips WHERE clip_id='clip-1'"
+    ).fetchone() == (_receipt(data).sha256, media.stat().st_size, "PUBLISHED")
+    assert sandbox.admin.execute(
+        "SELECT lifecycle_state FROM incidents WHERE edge_event_id='event-1'"
+    ).fetchone() == ("COMPLETE",)
+    # One required publication for a new receipt, on the independent connection.
+    assert _counts(sandbox) == (clips + 1, artifacts + 1, audit_events + 1)
 
 
-def test_relay_verifies_before_durable_receipt_and_never_writes_media(tmp_path: Path) -> None:
+def test_relay_verifies_before_durable_receipt_and_never_writes_media(
+    tmp_path: Path, postgres_product_sandbox: ProductSandbox
+) -> None:
     data = b"verified video"
     media = _media(tmp_path, data)
-    store = SqliteReceiptStore(tmp_path / "receipts.sqlite3")
-    client = _client(tmp_path, store)
+    sandbox = postgres_product_sandbox
+    store = _native_store(tmp_path, sandbox)
+    client = _client(tmp_path, store, sandbox)
 
     response = client.put(
         "/api/v1/relay/clips/clip-1", json=_payload(data), headers={"X-Edge-Relay-Token": TOKEN}
@@ -907,12 +493,14 @@ def test_relay_verifies_before_durable_receipt_and_never_writes_media(tmp_path: 
 
 @pytest.mark.parametrize("declared", [b"wrong-size", b"wrong-hash"])
 def test_relay_verification_failure_is_distinct_from_conflict(
-    tmp_path: Path, declared: bytes
+    tmp_path: Path, declared: bytes, postgres_product_sandbox: ProductSandbox
 ) -> None:
     data = b"verified video"
     _media(tmp_path, data)
-    store = SqliteReceiptStore(tmp_path / "receipts.sqlite3")
-    client = _client(tmp_path, store)
+    sandbox = postgres_product_sandbox
+    store = _native_store(tmp_path, sandbox)
+    client = _client(tmp_path, store, sandbox)
+    before = _counts(sandbox)
 
     response = client.put(
         "/api/v1/relay/clips/clip-1", json=_payload(declared), headers={"X-Edge-Relay-Token": TOKEN}
@@ -921,6 +509,7 @@ def test_relay_verification_failure_is_distinct_from_conflict(
     assert response.status_code == 409
     assert response.json()["detail"] == "clip media mismatch"
     assert store.get("clip-1") is None
+    assert _counts(sandbox) == before
 
 
 def test_verification_failure_is_typed(tmp_path: Path) -> None:
@@ -931,7 +520,9 @@ def test_verification_failure_is_typed(tmp_path: Path) -> None:
         verify_artifact(artifact, _receipt(b"different bytes"))
 
 
-def test_a_receipt_that_exists_must_be_accepted_and_must_match(tmp_path: Path) -> None:
+def test_a_receipt_that_exists_must_be_accepted_and_must_match(
+    tmp_path: Path, postgres_product_sandbox: ProductSandbox
+) -> None:
     """The receipt binds the bytes; it does not license the viewing.
 
     This used to also require a receipt to EXIST before an operator could play
@@ -947,7 +538,7 @@ def test_a_receipt_that_exists_must_be_accepted_and_must_match(tmp_path: Path) -
     data = b"verified video"
     media = _media(tmp_path, data)
     store = SqliteReceiptStore(tmp_path / "receipts.sqlite3")
-    client = _client(tmp_path, store)
+    client = _client(tmp_path, store, postgres_product_sandbox)
     _login(client)
 
     # No receipt yet: local evidence is still reviewable.

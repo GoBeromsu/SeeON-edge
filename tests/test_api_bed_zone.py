@@ -5,27 +5,25 @@ from __future__ import annotations
 import json
 import urllib.request
 from collections.abc import Iterator
-from pathlib import Path
 from types import TracebackType
 from typing import NoReturn, Self
 
 import pytest
+from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from backend.app.core.config import get_settings
-from backend.app.edge_db.bootstrap import bootstrap_database
-from backend.app.features.cameras.bed_zone_store import BedZoneStore
-from backend.app.features.cameras.store import CameraRegistryStore
-from backend.app.main import LifespanFactory, create_app, no_lifespan
+from backend.app.features.audit.postgres_runtime import PostgresAuditRuntime
+from tests_support.postgres_api_app import postgres_api_app
+from tests_support.postgres_sandbox import ProductSandbox
 
-NO_LIFESPAN: LifespanFactory = no_lifespan
+pytest_plugins = ("tests_support.postgres_sandbox",)
 RECOGNIZE_PATH = "/api/v1/cameras/camera-1/bed-zone/recognize"
 SAVE_PATH = "/api/v1/cameras/camera-1/bed-zone"
 
 
 @pytest.fixture(autouse=True)
-def _environment(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
-    bootstrap_database(tmp_path / "catalog.sqlite3")
+def _environment(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     monkeypatch.setenv("API_EDGE_RELAY_TOKEN", "relay-token")
     monkeypatch.setenv("ML_API_WORKER_STREAM_ORIGIN", "http://worker.local:8090")
     get_settings.cache_clear()
@@ -42,18 +40,18 @@ def _login(client: TestClient) -> None:
     )
 
 
-def _app(tmp_path: Path):
-    app = create_app(lifespan=NO_LIFESPAN)
-    registry = CameraRegistryStore(tmp_path / "catalog.sqlite3")
-    registry.create(
+@pytest.fixture
+def app(
+    postgres_product_sandbox: ProductSandbox, postgres_audit_runtime: PostgresAuditRuntime
+) -> FastAPI:
+    app = postgres_api_app(postgres_product_sandbox, postgres_audit_runtime)
+    app.state.camera_registry.create(
         camera_id="camera-1",
         label="Bed camera",
         rtsp_url="rtsp://camera.invalid/live",
         space_id=None,
         status="unknown",
     )
-    app.state.camera_registry = registry
-    app.state.bed_zone_store = BedZoneStore(tmp_path / "catalog.sqlite3")
     return app
 
 
@@ -105,7 +103,7 @@ def _candidate() -> dict[str, object]:
 
 
 def test_recognition_forwards_threshold_but_does_not_save_or_bump_registry(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    app: FastAPI, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     calls: list[dict[str, object]] = []
 
@@ -120,7 +118,6 @@ def test_recognition_forwards_threshold_but_does_not_save_or_bump_registry(
         return FakeUpstreamResponse(_candidate())
 
     monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
-    app = _app(tmp_path)
     before = app.state.camera_registry.snapshot()["registry_version"]
     with TestClient(app) as client:
         _login(client)
@@ -143,7 +140,7 @@ def test_recognition_forwards_threshold_but_does_not_save_or_bump_registry(
 
 
 def test_recognition_uses_default_confidence_when_body_is_omitted(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    app: FastAPI, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     bodies: list[object] = []
 
@@ -153,7 +150,7 @@ def test_recognition_uses_default_confidence_when_body_is_omitted(
         return FakeUpstreamResponse(_candidate())
 
     monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
-    with TestClient(_app(tmp_path)) as client:
+    with TestClient(app) as client:
         _login(client)
         assert client.post(RECOGNIZE_PATH).status_code == 200
     assert bodies == [{"confidence": 0.15}]
@@ -161,20 +158,19 @@ def test_recognition_uses_default_confidence_when_body_is_omitted(
 
 @pytest.mark.parametrize("confidence", [0.049, 0.951, "NaN", "Infinity"])
 def test_recognition_rejects_invalid_confidence(
-    confidence: object, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    confidence: object, app: FastAPI, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setattr(
         urllib.request,
         "urlopen",
         lambda *args, **kwargs: pytest.fail("invalid request reached worker"),
     )
-    with TestClient(_app(tmp_path)) as client:
+    with TestClient(app) as client:
         _login(client)
         assert client.post(RECOGNIZE_PATH, json={"confidence": confidence}).status_code == 422
 
 
-def test_explicit_save_roundtrips_two_regions_and_bumps_once(tmp_path: Path) -> None:
-    app = _app(tmp_path)
+def test_explicit_save_roundtrips_two_regions_and_bumps_once(app: FastAPI) -> None:
     before = app.state.camera_registry.snapshot()["registry_version"]
     with TestClient(app) as client:
         _login(client)
@@ -192,8 +188,7 @@ def test_explicit_save_roundtrips_two_regions_and_bumps_once(tmp_path: Path) -> 
     assert app.state.camera_registry.snapshot()["registry_version"] == before + 1
 
 
-def test_empty_regions_explicitly_clear_the_saved_zone(tmp_path: Path) -> None:
-    app = _app(tmp_path)
+def test_empty_regions_explicitly_clear_the_saved_zone(app: FastAPI) -> None:
     with TestClient(app) as client:
         _login(client)
         assert client.put(SAVE_PATH, json=_candidate()).status_code == 200
@@ -229,8 +224,7 @@ def test_empty_regions_explicitly_clear_the_saved_zone(tmp_path: Path) -> None:
     ],
     ids=["duplicate_ids", "degenerate", "self_intersecting", "out_of_bounds"],
 )
-def test_save_rejects_invalid_regions(regions: list[dict[str, object]], tmp_path: Path) -> None:
-    app = _app(tmp_path)
+def test_save_rejects_invalid_regions(regions: list[dict[str, object]], app: FastAPI) -> None:
     with TestClient(app) as client:
         _login(client)
         response = client.put(
@@ -242,7 +236,7 @@ def test_save_rejects_invalid_regions(regions: list[dict[str, object]], tmp_path
 
 
 def test_save_rejects_regions_whose_compact_utf8_encoding_exceeds_4096_bytes(
-    tmp_path: Path,
+    app: FastAPI,
 ) -> None:
     scale = 10**12
     quarter = scale // 4
@@ -268,7 +262,6 @@ def test_save_rejects_regions_whose_compact_utf8_encoding_exceeds_4096_bytes(
         {"id": f"{index}-" + "😀" * 62, "polygon": polygon, "origin": "manual"}
         for index in range(8)
     ]
-    app = _app(tmp_path)
     with TestClient(app) as client:
         _login(client)
         response = client.put(
@@ -281,21 +274,21 @@ def test_save_rejects_regions_whose_compact_utf8_encoding_exceeds_4096_bytes(
 
 
 @pytest.mark.parametrize("method,path", [("post", RECOGNIZE_PATH), ("put", SAVE_PATH)])
-def test_bed_zone_routes_require_auth(method: str, path: str, tmp_path: Path) -> None:
+def test_bed_zone_routes_require_auth(method: str, path: str, app: FastAPI) -> None:
     payload = None if method == "post" else _candidate()
-    with TestClient(_app(tmp_path)) as client:
+    with TestClient(app) as client:
         response = getattr(client, method)(path, json=payload)
     assert response.status_code == 401
 
 
 def test_bed_zone_routes_report_unknown_camera_without_calling_worker(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    app: FastAPI, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     def fail_urlopen(*args, **kwargs) -> NoReturn:
         raise AssertionError("unknown camera reached worker")
 
     monkeypatch.setattr(urllib.request, "urlopen", fail_urlopen)
-    with TestClient(_app(tmp_path)) as client:
+    with TestClient(app) as client:
         _login(client)
         assert client.post(RECOGNIZE_PATH.replace("camera-1", "missing")).status_code == 404
         assert (

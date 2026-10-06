@@ -8,14 +8,12 @@ Router modules export `router` in `__all__`. Never `include_router` a sibling sl
 Owner constructs (`from_env()` or lifespan) and exposes a getter that
 writes `app.state` once. Dependents call the getter. They never
 `from_env()` a second copy of someone else's store.
-Stores lifespan does not pre-build may lazy-open so `no_lifespan` tests still
-boot. Catalog is optional:
-`get_catalog_store` returns `None` and sets `catalog_error` when the file
-cannot open. Relay still accepts the alert when the Hub push carries
-durability. On the local-accept path (no Hub mapping / no client) a
-receipt-tracked alert with neither projection nor catalog is refused
-instead -- 503 if retrying can help, 409/422 if it cannot -- because a
-terminal receipt deletes the worker's only other copy (`_local_accept_body`).
+Lifespan pre-builds `camera_registry`, in-memory `heartbeat_store`,
+`runtime_status_store`, and (when `ML_API_EXECUTION_RECORDS_ENABLED`)
+`execution_record_store`. Clip listing is compact-authority on request. Other
+stores may lazy-open so `no_lifespan` tests still boot. Relay commits each
+alert to PostgreSQL before any Hub push. With no Hub mapping or no ingest
+client the alert stays local and gets a local receipt.
 ## Cross-slice graph
 
 Read or call. Do not construct the other slice's store.
@@ -58,10 +56,11 @@ A route that serves bytes registers `methods=HEAD_METHODS` (`shared/head_respons
 bare `@router.get` 404s the probe a player sends before it opens the media.
 One endpoint serves both methods so headers cannot drift; drop the body last
 with `drop_body_for_head`, and never read a file a HEAD will not send.
-Never INSERT retired `control_*`, `qa_*`, `runtime_*`, `evidence_*`, or
-`derivative_*` families; the `edge_db` authorizer denies undeclared tables.
-Auth sessions are in-memory in `shared/dashboard_auth.py`; credentials persist
-through `shared/dashboard_credentials.py`. Incomplete enrollment deletes ingest and evidence
+API actor writes the compact application tables and the six `execution_*`
+record tables. Never INSERT retired
+`control_*`, `qa_*`, `runtime_*`, `evidence_*`, or `derivative_*` families.
+Dashboard sessions are in memory (`shared/dashboard_auth.py`), not in
+the database. Incomplete enrollment deletes ingest and evidence
 attrs and sets `backend_configured=False`. Handlers do not
 build `EdgeIngestClient`. Drive the slice through
 `create_app(lifespan=no_lifespan)` plus an injected store, or full lifespan

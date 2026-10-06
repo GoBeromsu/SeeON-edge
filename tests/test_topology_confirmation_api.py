@@ -1,20 +1,16 @@
 from __future__ import annotations
 
-import sqlite3
 from collections.abc import Callable
-from pathlib import Path
 
 from fastapi.testclient import TestClient
 
-from backend.app.edge_db.bootstrap import bootstrap_database
+from backend.app.features.audit.postgres_runtime import PostgresAuditRuntime
 from backend.app.features.cameras.edge_topology_sync_state import (
     EdgeTopologySyncStateStore,
     PendingTopologySnapshot,
 )
-from backend.app.features.cameras.store import CameraRegistryStore
 from backend.app.features.cameras.topology_client import TopologyAccepted, TopologyPutResult
 from backend.app.features.connection.topology_retry_coordinator import TopologyRetryCoordinator
-from backend.app.main import create_app, no_lifespan
 from contracts.edge_provisioning_v1 import (
     MachinePrincipal,
     MutationCounts,
@@ -23,7 +19,10 @@ from contracts.edge_provisioning_v1 import (
     TopologyMutationResult,
     TopologySuccessEnvelope,
 )
-from tests_support.compact_authority_db import seed_enrollment
+from tests_support.postgres_api_app import postgres_api_app
+from tests_support.postgres_sandbox import ProductSandbox
+
+pytest_plugins = ("tests_support.postgres_sandbox",)
 
 PRINCIPAL = MachinePrincipal("c72bd9a7-3e04-47ba-a8cd-a56e54f98152", 3)
 CONFIRMATION_ID = "0197f671-3a31-7a6c-a6e4-83ed412de81b"
@@ -52,14 +51,21 @@ class _Client:
         return None
 
 
-def _app_client(path: Path) -> tuple[TestClient, _Client]:
-    bootstrap_database(path)
-    seed_enrollment(
-        path,
-        edge_installation_id=PRINCIPAL.edge_installation_id,
-        enrollment_generation=PRINCIPAL.enrollment_generation,
+def _app_client(
+    sandbox: ProductSandbox, audit_runtime: PostgresAuditRuntime
+) -> tuple[TestClient, _Client]:
+    app = postgres_api_app(sandbox, audit_runtime)
+    app.state.connection_settings_store.save(
+        {
+            "facility_code": "NH-7H2K9M4QXP",
+            "client_installation_ref": "aa83ea3f-6e5f-4f45-a401-fb36c38835b6",
+            "facility_id": "facility-fixture",
+            "facility_token": "token-fixture",
+            "edge_installation_id": PRINCIPAL.edge_installation_id,
+            "enrollment_generation": PRINCIPAL.enrollment_generation,
+        }
     )
-    registry = CameraRegistryStore(path)
+    registry = app.state.camera_registry
     registry.create_floor(edge_ref="floor-1", name="First", order_index=1)
     registry.create_room(edge_ref="room-101", floor_edge_ref="floor-1", name="101")
     registry.create(
@@ -102,11 +108,9 @@ def _app_client(path: Path) -> tuple[TestClient, _Client]:
 
     client = _Client(accepted)
     coordinator = TopologyRetryCoordinator(
-        registry, EdgeTopologySyncStateStore(path), lambda: client
+        registry, EdgeTopologySyncStateStore(sandbox.database, sandbox.authority), lambda: client
     )
     coordinator.trigger(force=True, now_epoch=100.0)
-    app = create_app(lifespan=no_lifespan)
-    app.state.camera_registry = registry
     app.state.topology_retry_coordinator = coordinator
     return TestClient(app), client
 
@@ -116,9 +120,12 @@ def _login(client: TestClient) -> None:
     assert response.status_code == 204
 
 
-def test_local_preview_and_confirmation_require_dashboard_auth(tmp_path: Path) -> None:
+def test_local_preview_and_confirmation_require_dashboard_auth(
+    postgres_product_sandbox: ProductSandbox,
+    postgres_audit_runtime: PostgresAuditRuntime,
+) -> None:
     # Given
-    client, upstream = _app_client(tmp_path / "catalog.sqlite3")
+    client, upstream = _app_client(postgres_product_sandbox, postgres_audit_runtime)
 
     # When
     preview = client.get("/api/v1/connection/topology-preview")
@@ -138,9 +145,11 @@ def test_local_preview_and_confirmation_require_dashboard_auth(tmp_path: Path) -
     assert upstream.confirmation is None
 
 
-def test_topology_confirm_route_commits_canonical_action_and_detail(tmp_path: Path) -> None:
-    database = tmp_path / "canonical-confirm.sqlite3"
-    client, _upstream = _app_client(database)
+def test_topology_confirm_route_commits_canonical_action_and_detail(
+    postgres_product_sandbox: ProductSandbox,
+    postgres_audit_runtime: PostgresAuditRuntime,
+) -> None:
+    client, _upstream = _app_client(postgres_product_sandbox, postgres_audit_runtime)
     _login(client)
 
     response = client.post(
@@ -154,21 +163,21 @@ def test_topology_confirm_route_commits_canonical_action_and_detail(tmp_path: Pa
     )
 
     assert response.status_code == 200
-    with sqlite3.connect(database) as connection:
-        rows = connection.execute(
-            "SELECT action,target_id,actor_type,auth_mechanism,detail_json "
-            "FROM audit_events WHERE action NOT LIKE 'audit.%'"
-        ).fetchall()
+    rows = postgres_product_sandbox.admin.execute(
+        "SELECT action,target_id,actor_type,auth_mechanism,detail_json FROM audit_events "
+        "WHERE action NOT LIKE 'audit.%' AND action NOT LIKE 'auth.%' ORDER BY audit_id"
+    ).fetchall()
     assert rows == [
         ("topology.confirm", CONFIRMATION_ID, "user", "dashboard_session", '{"version":1}')
     ]
 
 
 def test_authenticated_local_routes_confirm_with_server_held_token_hidden(
-    tmp_path: Path,
+    postgres_product_sandbox: ProductSandbox,
+    postgres_audit_runtime: PostgresAuditRuntime,
 ) -> None:
     # Given
-    client, upstream = _app_client(tmp_path / "catalog.sqlite3")
+    client, upstream = _app_client(postgres_product_sandbox, postgres_audit_runtime)
     _login(client)
 
     # When

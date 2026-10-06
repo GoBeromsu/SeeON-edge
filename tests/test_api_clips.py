@@ -2,25 +2,24 @@ from __future__ import annotations
 
 import json
 import shutil
-import sqlite3
+from collections.abc import Callable
 from hashlib import sha256
 
 import pytest
+from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from receipt_helpers import add_accepted_media_receipts
 
+from backend.app.features.audit.postgres_runtime import PostgresAuditRuntime
 from backend.app.features.clips.store import (
     PLAYBACK_H264_MANIFEST_FILENAME,
     ClipStore,
 )
-from backend.app.main import create_app as _create_app
-from backend.app.main import no_lifespan
+from tests_support.postgres_api_app import postgres_api_app
+from tests_support.postgres_clip_app import index_clips
+from tests_support.postgres_sandbox import ProductSandbox
 
-
-def create_app(*, lifespan):
-    app = _create_app(lifespan=lifespan)
-    add_accepted_media_receipts(app)
-    return app
+pytest_plugins = ("tests_support.postgres_sandbox",)
 
 
 def _write_playback_bundle(clip_dir, *, pts_identical: bool) -> tuple[object, str]:
@@ -46,11 +45,10 @@ def _write_playback_bundle(clip_dir, *, pts_identical: bool) -> tuple[object, st
     return rendition, digest
 
 
-# Dashboard auth now always resolves to a session store (persisted file > env
-# > the built-in admin/admin default, see backend/app/shared/dashboard_auth.py),
-# so a bare worker relay/bearer token is never sufficient on its own -- these
-# tests log in as the zero-config default and rely on the TestClient's cookie
-# jar to carry the session across subsequent calls.
+# Dashboard auth always resolves to a session store (bootstrapped from the
+# API_DASHBOARD_* pair the suite sets to admin/admin), so a bare worker
+# relay/bearer token is never sufficient on its own -- these tests log in and
+# rely on the TestClient's cookie jar to carry the session across calls.
 DASHBOARD_LOGIN = {"username": "admin", "password": "admin"}
 
 
@@ -106,7 +104,25 @@ def clip_env(tmp_path, monkeypatch: pytest.MonkeyPatch):
     return tmp_path
 
 
-def test_list_clips_returns_only_finalized_latest_first_and_filters_camera(clip_env) -> None:
+@pytest.fixture
+def make_app(
+    clip_env,
+    postgres_product_sandbox: ProductSandbox,
+    postgres_audit_runtime: PostgresAuditRuntime,
+) -> Callable[[], FastAPI]:
+    """Each call is a new app on the one sandbox, with receipts for the clips written so far."""
+
+    def make() -> FastAPI:
+        app = postgres_api_app(postgres_product_sandbox, postgres_audit_runtime)
+        add_accepted_media_receipts(app)
+        return app
+
+    return make
+
+
+def test_list_clips_returns_only_finalized_latest_first_and_filters_camera(
+    clip_env, make_app
+) -> None:
     clip_store = clip_env / "clip-store"
     _write_manifest(
         clip_store,
@@ -128,7 +144,10 @@ def test_list_clips_returns_only_finalized_latest_first_and_filters_camera(clip_
         finalized=False,
     )
 
-    with TestClient(create_app(lifespan=no_lifespan)) as client:
+    app = make_app()
+    index_clips(app)
+
+    with TestClient(app) as client:
         _login(client)
         listed = client.get("/api/v1/clips")
         filtered = client.get("/api/v1/clips", params={"camera_id": "camera-1"})
@@ -140,14 +159,17 @@ def test_list_clips_returns_only_finalized_latest_first_and_filters_camera(clip_
     assert [clip["clip_id"] for clip in filtered.json()["clips"]] == ["clip-old"]
 
 
-def test_clip_keyset_pages_equal_timestamps_without_skip_or_duplicate(clip_env) -> None:
+def test_clip_keyset_pages_equal_timestamps_without_skip_or_duplicate(clip_env, make_app) -> None:
     # Given: three verified manifests with the same start timestamp.
     clip_store = clip_env / "clip-store"
     for clip_id in ("clip-a", "clip-b", "clip-c"):
         _write_manifest(clip_store, clip_id, started_at="2026-07-06T00:00:00Z")
 
     # When: a dashboard traverses one-row keyset pages and probes a malformed cursor.
-    with TestClient(create_app(lifespan=no_lifespan)) as client:
+    app = make_app()
+    index_clips(app)
+
+    with TestClient(app) as client:
         _login(client)
         seen: list[str] = []
         cursor: str | None = None
@@ -169,8 +191,10 @@ def test_clip_keyset_pages_equal_timestamps_without_skip_or_duplicate(clip_env) 
     assert malformed.status_code == 400
 
 
-def test_manifest_rebuild_rolls_back_when_one_tuple_is_invalid(clip_env) -> None:
-    # Given: one valid manifest followed by a duration outside schema 18's clip bound.
+def test_manifest_rebuild_isolates_one_invalid_tuple(
+    clip_env, make_app, postgres_product_sandbox: ProductSandbox
+) -> None:
+    # Given: one valid manifest followed by a duration outside the catalogue's clip bound.
     clip_store = clip_env / "clip-store"
     _write_manifest(clip_store, "clip-a", started_at="2026-07-06T00:00:00Z")
     _write_manifest(clip_store, "clip-b", started_at="2026-07-06T00:00:01Z")
@@ -179,22 +203,32 @@ def test_manifest_rebuild_rolls_back_when_one_tuple_is_invalid(clip_env) -> None
     invalid["duration_s"] = 121.0
     invalid_path.write_text(json.dumps(invalid), encoding="utf-8")
 
-    # When: the request rebuilds both facts in one real SQLite transaction.
-    with TestClient(create_app(lifespan=no_lifespan)) as client:
+    # When: the catalogue indexes both manifests and the dashboard lists clips.
+    app = make_app()
+    outcomes = index_clips(app)
+    with TestClient(app) as client:
         _login(client)
         response = client.get("/api/v1/clips", params={"limit": 10})
 
-    # Then: the request is not misleadingly successful and no partial clip row commits.
-    assert response.status_code == 503
-    with sqlite3.connect(clip_env / ".central-fixture" / "edge.sqlite3") as connection:
-        assert connection.execute("SELECT count(*) FROM clips").fetchone() == (0,)
+    # Then: the invalid tuple is isolated and never commits; the valid clip still lists.
+    assert sum(outcome.isolated for outcome in outcomes) == 1
+    assert response.status_code == 200
+    assert [clip["clip_id"] for clip in response.json()["clips"]] == ["clip-a"]
+    rows = postgres_product_sandbox.admin.execute(
+        "SELECT clip_id FROM clips ORDER BY clip_id"
+    ).fetchall()
+    assert rows == [("clip-a",)]
 
 
-def test_compact_rebuild_removes_stale_manifest_from_page_total_and_facets(clip_env) -> None:
-    # Given: one manifest has been reconciled into compact clips.
+def test_compact_rebuild_removes_stale_manifest_from_page_total_and_facets(
+    clip_env, make_app
+) -> None:
+    # Given: one manifest has been reconciled into the catalogue.
     clip_store = clip_env / "clip-store"
     _write_manifest(clip_store, "stale")
-    with TestClient(create_app(lifespan=no_lifespan)) as client:
+    app = make_app()
+    index_clips(app)
+    with TestClient(app) as client:
         _login(client)
         first = client.get("/api/v1/clips", params={"limit": 10})
         assert first.status_code == 200
@@ -202,6 +236,7 @@ def test_compact_rebuild_removes_stale_manifest_from_page_total_and_facets(clip_
 
         # When: filesystem truth removes the complete manifest/media directory.
         shutil.rmtree(clip_store / "clips" / "stale")
+        index_clips(app)
         rebuilt = client.get("/api/v1/clips", params={"limit": 10})
 
     # Then: page, total, and facets come from the same reconciled visible set.
@@ -217,91 +252,98 @@ def test_compact_rebuild_removes_stale_manifest_from_page_total_and_facets(clip_
     assert rebuilt.json()["event_type_counts"] == {}
 
 
-def test_stale_referenced_clip_is_retained_unavailable_but_hidden(clip_env) -> None:
-    # Given: a reconciled clip is retained by PRIMARY_CLIP history.
+def test_stale_referenced_clip_is_retained_unavailable_but_hidden(
+    clip_env, make_app, postgres_product_sandbox: ProductSandbox
+) -> None:
+    # Given: an indexed clip is retained by PRIMARY_CLIP history.
     clip_store = clip_env / "clip-store"
     _write_manifest(clip_store, "history")
-    database = clip_env / ".central-fixture" / "edge.sqlite3"
-    with TestClient(create_app(lifespan=no_lifespan)) as client:
-        _login(client)
-        assert client.get("/api/v1/clips", params={"limit": 10}).status_code == 200
-        with sqlite3.connect(database) as connection:
-            clip = connection.execute(
-                "SELECT media_sha256,media_size_bytes,media_relpath FROM clips "
-                "WHERE clip_id='history'"
-            ).fetchone()
-            connection.execute(
-                """
-                INSERT INTO incidents (
-                    incident_id,edge_event_id,facility_id,camera_id,event_type,detected_at,
-                    lifecycle_state,provenance_state,provenance_missing_reason,
-                    review_version,revision,created_at,updated_at
-                ) VALUES ('incident-history','event-history','facility-1','camera-1','fall',
-                          '2026-07-06T00:00:00Z','OPEN','MISSING','NOT_RECORDED',0,1,
-                          '2026-07-06T00:00:00Z','2026-07-06T00:00:00Z')
-                """
-            )
-            connection.execute(
-                """
-                INSERT INTO artifacts (
-                    incident_id,kind,artifact_id,clip_id,state,contained_relpath,
-                    content_sha256,size_bytes,mime_type,codec,revision,created_at,updated_at
-                ) VALUES ('incident-history','PRIMARY_CLIP','artifact-history','history',
-                          'AVAILABLE',?,?,?,'video/mp4','h264',1,
-                          '2026-07-06T00:00:00Z','2026-07-06T00:00:00Z')
-                """,
-                (clip[2], clip[0], clip[1]),
-            )
-        shutil.rmtree(clip_store / "clips" / "history")
+    admin = postgres_product_sandbox.admin
+    app = make_app()
+    index_clips(app)
+    clip = admin.execute(
+        "SELECT media_sha256, media_size_bytes, media_relpath FROM clips WHERE clip_id = %s",
+        ("history",),
+    ).fetchone()
+    assert clip is not None
+    recorded_at = "2026-07-06T00:00:00Z"
+    with admin.transaction():
+        admin.execute(
+            """
+            INSERT INTO incidents (
+                incident_id, edge_event_id, facility_id, camera_id, event_type, detected_at,
+                lifecycle_state, provenance_state, provenance_missing_reason,
+                review_version, revision, created_at, updated_at
+            ) VALUES ('incident-history', 'event-history', 'facility-1', 'camera-1', 'fall',
+                      %s, 'OPEN', 'MISSING', 'NOT_RECORDED', 0, 1, %s, %s)
+            """,
+            (recorded_at, recorded_at, recorded_at),
+        )
+        admin.execute(
+            """
+            INSERT INTO artifacts (
+                incident_id, kind, artifact_id, clip_id, state, contained_relpath,
+                content_sha256, size_bytes, mime_type, codec, revision, created_at, updated_at
+            ) VALUES ('incident-history', 'PRIMARY_CLIP', 'artifact-history', 'history',
+                      'AVAILABLE', %s, %s, %s, 'video/mp4', 'h264', 1, %s, %s)
+            """,
+            (clip[2], clip[0], clip[1], recorded_at, recorded_at),
+        )
+    shutil.rmtree(clip_store / "clips" / "history")
 
-        # When: compact reconciliation observes the missing filesystem fact.
+    # When: the catalogue re-indexes the missing filesystem fact and the dashboard lists.
+    index_clips(app)
+    with TestClient(app) as client:
+        _login(client)
         rebuilt = client.get("/api/v1/clips", params={"limit": 10})
 
     # Then: history remains referentially intact but is absent from every listing projection.
     assert rebuilt.status_code == 200
     assert rebuilt.json()["pagination"]["total"] == 0
     assert rebuilt.json()["event_type_counts"] == {}
-    with sqlite3.connect(database) as connection:
-        row = connection.execute(
-            "SELECT local_state,local_reason,manifest_relpath,media_relpath FROM clips "
-            "WHERE clip_id='history'"
-        ).fetchone()
-        relation = connection.execute(
-            "SELECT clip_id FROM artifacts WHERE artifact_id='artifact-history'"
-        ).fetchone()
+    row = admin.execute(
+        "SELECT local_state, local_reason, manifest_relpath, media_relpath FROM clips "
+        "WHERE clip_id = %s",
+        ("history",),
+    ).fetchone()
+    relation = admin.execute(
+        "SELECT clip_id FROM artifacts WHERE artifact_id = %s", ("artifact-history",)
+    ).fetchone()
     assert row == ("UNAVAILABLE", "MANIFEST_MISSING", None, None)
     assert relation == ("history",)
 
 
-def test_compact_rebuild_rejects_changed_identity_without_mutating_row(clip_env) -> None:
-    # Given: one immutable manifest/media identity has been reconciled.
+def test_compact_rebuild_rejects_changed_identity_without_mutating_row(
+    clip_env, make_app, postgres_product_sandbox: ProductSandbox
+) -> None:
+    # Given: one immutable manifest/media identity has been indexed.
     clip_store = clip_env / "clip-store"
     _write_manifest(clip_store, "stable")
-    database = clip_env / ".central-fixture" / "edge.sqlite3"
-    with TestClient(create_app(lifespan=no_lifespan)) as client:
-        _login(client)
-        first = client.get("/api/v1/clips", params={"limit": 10})
-        assert first.status_code == 200
-        with sqlite3.connect(database) as connection:
-            before = connection.execute(
-                "SELECT media_sha256, media_size_bytes, publish_state FROM clips "
-                "WHERE clip_id='stable'"
-            ).fetchone()
+    admin = postgres_product_sandbox.admin
+    identity_sql = (
+        "SELECT media_sha256, media_size_bytes, publish_state FROM clips WHERE clip_id = %s"
+    )
+    app = make_app()
+    index_clips(app)
+    before = admin.execute(identity_sql, ("stable",)).fetchone()
 
-        # When: bytes change under the same immutable clip identity.
-        (clip_store / "clips" / "stable" / "clip.mp4").write_bytes(b"changed-media")
+    # When: bytes change under the same immutable clip identity and the catalogue re-indexes.
+    (clip_store / "clips" / "stable" / "clip.mp4").write_bytes(b"changed-media")
+    index_clips(app)
+    with TestClient(app) as client:
+        _login(client)
         conflict = client.get("/api/v1/clips", params={"limit": 10})
 
-    # Then: conflict is deterministic and the prior compact tuple is unchanged.
-    assert conflict.status_code == 503
-    with sqlite3.connect(database) as connection:
-        after = connection.execute(
-            "SELECT media_sha256, media_size_bytes, publish_state FROM clips WHERE clip_id='stable'"
-        ).fetchone()
-    assert after == before
+    # Then: the conflict is recorded as corruption and the prior identity is unchanged.
+    assert conflict.status_code == 200
+    assert admin.execute(identity_sql, ("stable",)).fetchone() == before
+    state = admin.execute(
+        "SELECT local_state, local_reason FROM clips WHERE clip_id = %s", ("stable",)
+    ).fetchone()
+    assert state == ("CORRUPT", "IDENTITY_CONFLICT")
 
 
-def test_list_clips_preserves_event_type_when_event_ref_is_identity(clip_env) -> None:
+def test_list_clips_preserves_event_type_when_event_ref_is_identity(clip_env, make_app) -> None:
     clip_store = clip_env / "clip-store"
     _write_manifest(
         clip_store,
@@ -310,7 +352,10 @@ def test_list_clips_preserves_event_type_when_event_ref_is_identity(clip_env) ->
         event_type="bed-exit",
     )
 
-    with TestClient(create_app(lifespan=no_lifespan)) as client:
+    app = make_app()
+    index_clips(app)
+
+    with TestClient(app) as client:
         _login(client)
         response = client.get("/api/v1/clips")
 
@@ -319,7 +364,7 @@ def test_list_clips_preserves_event_type_when_event_ref_is_identity(clip_env) ->
     assert response.json()["clips"][0]["event_type"] == "bed-exit"
 
 
-def test_clip_responses_tolerate_prechange_and_detected_at_manifests(clip_env) -> None:
+def test_clip_responses_tolerate_prechange_and_detected_at_manifests(clip_env, make_app) -> None:
     clip_store = clip_env / "clip-store"
     _write_manifest(clip_store, "older")
     _write_manifest(
@@ -329,7 +374,10 @@ def test_clip_responses_tolerate_prechange_and_detected_at_manifests(clip_env) -
         truncation_reasons=["POSTROLL_LIMIT"],
     )
 
-    with TestClient(create_app(lifespan=no_lifespan)) as client:
+    app = make_app()
+    index_clips(app)
+
+    with TestClient(app) as client:
         _login(client)
         listed = client.get("/api/v1/clips")
         older = client.get("/api/v1/clips/older/metadata")
@@ -342,8 +390,8 @@ def test_clip_responses_tolerate_prechange_and_detected_at_manifests(clip_env) -
     assert current.json()["truncation_reasons"] == ["POSTROLL_LIMIT"]
 
 
-def test_removed_clip_scene_route_returns_not_found(clip_env) -> None:
-    with TestClient(create_app(lifespan=no_lifespan)) as client:
+def test_removed_clip_scene_route_returns_not_found(clip_env, make_app) -> None:
+    with TestClient(make_app()) as client:
         _login(client)
         get = client.get("/api/v1/clips/clip-1/scene")
         head = client.head("/api/v1/clips/clip-1/scene")
@@ -351,11 +399,11 @@ def test_removed_clip_scene_route_returns_not_found(clip_env) -> None:
     assert get.status_code == head.status_code == 404
 
 
-def test_streams_manifest_video_and_appends_audit(clip_env) -> None:
+def test_streams_manifest_video_and_appends_audit(clip_env, make_app) -> None:
     clip_store = clip_env / "clip-store"
     _write_manifest(clip_store, "clip-1")
 
-    with TestClient(create_app(lifespan=no_lifespan)) as client:
+    with TestClient(make_app()) as client:
         _login(client)
         video = client.get("/api/v1/clips/clip-1/video")
         query_video = client.get("/api/v1/clips/clip-1/video", params={"token": "relay-token"})
@@ -439,7 +487,7 @@ def test_playback_manifest_with_unbound_media_falls_back_to_original(clip_env, t
 
 @pytest.mark.parametrize("with_rendition", [False, True])
 def test_video_media_parameter_binds_range_request_to_served_bytes(
-    clip_env, with_rendition: bool
+    clip_env, make_app, with_rendition: bool
 ) -> None:
     clip_store = clip_env / "clip-store"
     clip_id = "clip-rendition" if with_rendition else "clip-original"
@@ -454,7 +502,7 @@ def test_video_media_parameter_binds_range_request_to_served_bytes(
     if with_rendition:
         _, served_digest = _write_playback_bundle(clip_dir, pts_identical=True)
 
-    with TestClient(create_app(lifespan=no_lifespan)) as client:
+    with TestClient(make_app()) as client:
         _login(client)
         matched = client.get(
             f"/api/v1/clips/{clip_id}/video",
@@ -475,11 +523,14 @@ def test_video_media_parameter_binds_range_request_to_served_bytes(
     assert mismatched.json() == {"detail": "media_mismatch"}
 
 
-def test_list_clips_and_audit_view_are_recorded_in_the_audit_log(clip_env) -> None:
+def test_list_clips_and_audit_view_are_recorded_in_the_audit_log(clip_env, make_app) -> None:
     """List and audit-history access each append one closed-catalog event."""
     _write_manifest(clip_env / "clip-store", "clip-1")
 
-    with TestClient(create_app(lifespan=no_lifespan)) as client:
+    app = make_app()
+    index_clips(app)
+
+    with TestClient(app) as client:
         _login(client)
         listed = client.get("/api/v1/clips")
         first_audit = client.get("/api/v1/audit")
@@ -494,13 +545,16 @@ def test_list_clips_and_audit_view_are_recorded_in_the_audit_log(clip_env) -> No
 
 
 def test_list_clips_returns_200_without_api_label_store_env_set(
-    clip_env, monkeypatch: pytest.MonkeyPatch
+    clip_env, make_app, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Clip listing no longer creates legacy JSONL when label storage is unset."""
     monkeypatch.delenv("API_LABEL_STORE", raising=False)
     _write_manifest(clip_env / "clip-store", "clip-1")
 
-    with TestClient(create_app(lifespan=no_lifespan)) as client:
+    app = make_app()
+    index_clips(app)
+
+    with TestClient(app) as client:
         _login(client)
         response = client.get("/api/v1/clips")
 
@@ -511,13 +565,16 @@ def test_list_clips_returns_200_without_api_label_store_env_set(
 
 
 def test_list_clips_does_not_create_jsonl_audit_side_channel(
-    clip_env, monkeypatch: pytest.MonkeyPatch
+    clip_env, make_app, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     clip_store = clip_env / "clip-store"
     _write_manifest(clip_store, "clip-1")
     audit_path = clip_env / "label-store" / "audit.jsonl"
 
-    with TestClient(create_app(lifespan=no_lifespan)) as client:
+    app = make_app()
+    index_clips(app)
+
+    with TestClient(app) as client:
         _login(client)
         response = client.get("/api/v1/clips")
         audit = client.get("/api/v1/audit")
@@ -529,9 +586,9 @@ def test_list_clips_does_not_create_jsonl_audit_side_channel(
     assert not audit_path.exists()
 
 
-def test_legacy_label_route_is_absent(clip_env) -> None:
+def test_legacy_label_route_is_absent(clip_env, make_app) -> None:
     _write_manifest(clip_env / "clip-store", "clip-1")
-    with TestClient(create_app(lifespan=no_lifespan)) as client:
+    with TestClient(make_app()) as client:
         _login(client)
         response = client.put(
             "/api/v1/clips/clip-1/label",
@@ -544,13 +601,13 @@ def test_legacy_label_route_is_absent(clip_env) -> None:
     assert all(event["action"] != "label" for event in audit.json()["events"])
 
 
-def test_clip_routes_require_a_dashboard_session(clip_env) -> None:
+def test_clip_routes_require_a_dashboard_session(clip_env, make_app) -> None:
     """A bare worker relay token or forged bearer token is never a substitute
     for a real dashboard session -- the legacy bypass is unreachable now that
-    dashboard auth always resolves (persisted file > env > built-in default)."""
+    dashboard auth always resolves to a session store."""
     _write_manifest(clip_env / "clip-store", "clip-1")
 
-    with TestClient(create_app(lifespan=no_lifespan)) as client:
+    with TestClient(make_app()) as client:
         unauthenticated = client.get("/api/v1/clips")
         wrong_bearer = client.get("/api/v1/clips", headers={"Authorization": "Bearer wrong"})
         worker_relay_token = client.get(
@@ -562,12 +619,12 @@ def test_clip_routes_require_a_dashboard_session(clip_env) -> None:
     assert worker_relay_token.status_code == 401
 
 
-def test_video_rejects_manifest_path_escape(clip_env) -> None:
+def test_video_rejects_manifest_path_escape(clip_env, make_app) -> None:
     clip_store = clip_env / "clip-store"
     (clip_env / "secret.mp4").write_bytes(b"secret")
     _write_manifest(clip_store, "clip-escape", path="../secret.mp4")
 
-    with TestClient(create_app(lifespan=no_lifespan)) as client:
+    with TestClient(make_app()) as client:
         _login(client)
         response = client.get("/api/v1/clips/clip-escape/video")
         invalid_id = client.get("/api/v1/clips/%2E%2E/video")
@@ -576,12 +633,17 @@ def test_video_rejects_manifest_path_escape(clip_env) -> None:
     assert invalid_id.status_code == 400
 
 
-def test_list_clips_includes_size_bytes_stat_from_the_resolved_video_file(clip_env) -> None:
+def test_list_clips_includes_size_bytes_stat_from_the_resolved_video_file(
+    clip_env, make_app
+) -> None:
     clip_store = clip_env / "clip-store"
     _write_manifest(clip_store, "clip-1")
     video_path = clip_store / "clips" / "clip-1" / "clip.mp4"
 
-    with TestClient(create_app(lifespan=no_lifespan)) as client:
+    app = make_app()
+    index_clips(app)
+
+    with TestClient(app) as client:
         _login(client)
         response = client.get("/api/v1/clips")
 
@@ -589,7 +651,7 @@ def test_list_clips_includes_size_bytes_stat_from_the_resolved_video_file(clip_e
     assert response.json()["clips"][0]["size_bytes"] == video_path.stat().st_size
 
 
-def test_list_clips_size_bytes_is_null_when_video_is_unavailable(clip_env) -> None:
+def test_list_clips_size_bytes_is_null_when_video_is_unavailable(clip_env, make_app) -> None:
     clip_store = clip_env / "clip-store"
     clip_dir = clip_store / "clips" / "clip-no-video"
     clip_dir.mkdir(parents=True)
@@ -607,7 +669,10 @@ def test_list_clips_size_bytes_is_null_when_video_is_unavailable(clip_env) -> No
     }
     (clip_dir / "manifest.json").write_text(json.dumps(payload), encoding="utf-8")
 
-    with TestClient(create_app(lifespan=no_lifespan)) as client:
+    app = make_app()
+    index_clips(app)
+
+    with TestClient(app) as client:
         _login(client)
         response = client.get("/api/v1/clips")
 
@@ -617,6 +682,7 @@ def test_list_clips_size_bytes_is_null_when_video_is_unavailable(clip_env) -> No
 
 def test_list_clips_defaults_missing_duration_s_to_zero_instead_of_dropping_the_manifest(
     clip_env,
+    make_app,
 ) -> None:
     clip_store = clip_env / "clip-store"
     clip_dir = clip_store / "clips" / "clip-no-duration"
@@ -633,7 +699,10 @@ def test_list_clips_defaults_missing_duration_s_to_zero_instead_of_dropping_the_
     }
     (clip_dir / "manifest.json").write_text(json.dumps(payload), encoding="utf-8")
 
-    with TestClient(create_app(lifespan=no_lifespan)) as client:
+    app = make_app()
+    index_clips(app)
+
+    with TestClient(app) as client:
         _login(client)
         response = client.get("/api/v1/clips")
 
@@ -643,7 +712,9 @@ def test_list_clips_defaults_missing_duration_s_to_zero_instead_of_dropping_the_
     assert clips[0]["duration_s"] == 0.0
 
 
-def test_list_clips_finds_manifests_under_the_root_and_subdirectory_layouts(clip_env) -> None:
+def test_list_clips_finds_manifests_under_the_root_and_subdirectory_layouts(
+    clip_env, make_app
+) -> None:
     clip_store = clip_env / "clip-store"
     # Root layout: root/clips/<id>/manifest.json.
     _write_manifest(clip_store, "clip-root", started_at="2026-07-06T00:00:00Z")
@@ -662,7 +733,10 @@ def test_list_clips_finds_manifests_under_the_root_and_subdirectory_layouts(clip
         path="external/drive-1/clips/clip-second-level",
     )
 
-    with TestClient(create_app(lifespan=no_lifespan)) as client:
+    app = make_app()
+    index_clips(app)
+
+    with TestClient(app) as client:
         _login(client)
         response = client.get("/api/v1/clips")
 

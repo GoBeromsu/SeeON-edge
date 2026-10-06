@@ -8,54 +8,43 @@ import pytest
 from fastapi.testclient import TestClient
 
 from backend.app import lifespan as lifespan_module
-from backend.app.features.connection import store as connection_store_module
-from backend.app.features.connection.store import (
-    API_BACKEND_BASE_URL_ENV,
-    API_BACKEND_CONFIG_URL_ENV,
-    API_BACKEND_EVENTS_URL_ENV,
-    API_CONNECTION_SETTINGS_PATH_ENV,
-    ConnectionSettingsStore,
-)
+from backend.app.features.connection.store import API_BACKEND_BASE_URL_ENV, ConnectionSettingsStore
 from backend.app.lifespan import (
     API_EDGE_RELAY_TOKEN_ENV,
     apply_connection_settings,
 )
 from backend.app.main import create_app, no_lifespan
+from backend.app.postgres_root import PostgresRoot, install_postgres_stores
 from contracts.worker_config import PulledWorkerConfig
+from tests_support.postgres_sandbox import ProductSandbox
+
+pytest_plugins = ("tests_support.postgres_sandbox",)
 
 
 @pytest.fixture(autouse=True)
 def clear_env(monkeypatch: pytest.MonkeyPatch) -> None:
     for name in (
-        API_CONNECTION_SETTINGS_PATH_ENV,
-        API_BACKEND_EVENTS_URL_ENV,
-        API_BACKEND_CONFIG_URL_ENV,
         "API_FACILITY_ID",
         "EDGE_FACILITY_TOKEN",
         API_EDGE_RELAY_TOKEN_ENV,
         "API_CAMERA_INVENTORY",
     ):
         monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv(API_BACKEND_BASE_URL_ENV, "https://backend.example")
 
 
-def _settings_store(monkeypatch: pytest.MonkeyPatch) -> ConnectionSettingsStore:
-    monkeypatch.setenv(API_BACKEND_BASE_URL_ENV, "http://backend.example")
-    central_database = connection_store_module.EDGE_DATABASE_PATH
-    monkeypatch.setattr(
-        ConnectionSettingsStore,
-        "from_env",
-        classmethod(lambda cls: cls(central_database)),
-    )
-    store = ConnectionSettingsStore.from_env()
-    assert store.path == central_database
-    assert store.path.name == "edge.sqlite3"
-    return store
+def _root(sandbox: ProductSandbox) -> PostgresRoot:
+    return PostgresRoot(sandbox.database, sandbox.authority)
+
+
+def _settings_store(sandbox: ProductSandbox) -> ConnectionSettingsStore:
+    return ConnectionSettingsStore(sandbox.database, sandbox.authority)
 
 
 def test_boot_time_fixture_injection_still_survives_boot(
-    monkeypatch: pytest.MonkeyPatch,
+    postgres_product_sandbox: ProductSandbox,
 ) -> None:
-    store = _settings_store(monkeypatch)
+    store = _settings_store(postgres_product_sandbox)
     store.save(
         {
             "facility_code": "NH-7H2K9M4QXP",
@@ -69,19 +58,20 @@ def test_boot_time_fixture_injection_still_survives_boot(
 
     sentinel = object()
     app = create_app()
+    app.state.postgres_root = _root(postgres_product_sandbox)
     app.state.backend_ingest_client = sentinel  # assigned before lifespan runs
 
     with TestClient(app):
         # The hasattr guard in _configure_backend_ingest() must keep the
         # pre-assigned fixture client intact at boot, even though a saved
-        # connection-settings file is present and would otherwise rebuild it.
+        # PostgreSQL enrollment is present and would otherwise rebuild it.
         assert app.state.backend_ingest_client is sentinel
 
 
 def test_complete_enrollment_restores_one_generation_bundle_on_restart(
-    monkeypatch: pytest.MonkeyPatch,
+    postgres_product_sandbox: ProductSandbox,
 ) -> None:
-    store = _settings_store(monkeypatch)
+    store = _settings_store(postgres_product_sandbox)
     store.save(
         {
             "facility_code": "NH-7H2K9M4QXP",
@@ -93,6 +83,7 @@ def test_complete_enrollment_restores_one_generation_bundle_on_restart(
         }
     )
     app = create_app()
+    app.state.postgres_root = _root(postgres_product_sandbox)
     with TestClient(app):
         bundle = app.state.backend_client_bundle
         assert bundle.facility_id == "87d79f24-b32f-49a3-b534-19f0af7d9135"
@@ -103,10 +94,11 @@ def test_complete_enrollment_restores_one_generation_bundle_on_restart(
 
 
 def test_relink_publishes_a_whole_new_generation_bundle(
-    monkeypatch: pytest.MonkeyPatch,
+    postgres_product_sandbox: ProductSandbox,
 ) -> None:
-    store = _settings_store(monkeypatch)
+    store = _settings_store(postgres_product_sandbox)
     app = create_app(lifespan=no_lifespan)
+    install_postgres_stores(app, _root(postgres_product_sandbox))
     for generation, token in ((1, "token-one"), (2, "token-two")):
         store.save(
             {
@@ -129,10 +121,12 @@ def test_relink_publishes_a_whole_new_generation_bundle(
 
 
 def test_config_refresh_discards_result_when_relink_changes_generation(
+    postgres_product_sandbox: ProductSandbox,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    store = _settings_store(monkeypatch)
+    store = _settings_store(postgres_product_sandbox)
     app = create_app(lifespan=no_lifespan)
+    install_postgres_stores(app, _root(postgres_product_sandbox))
 
     def save_generation(generation: int, token: str) -> None:
         _ = store.save(
@@ -165,12 +159,15 @@ def test_config_refresh_discards_result_when_relink_changes_generation(
     assert app.state.backend_client_bundle.enrollment_generation == 2
 
 
-def test_corrupt_enrollment_store_fails_closed_despite_identity_env(
+def test_unenrolled_store_fails_closed_despite_identity_env(
+    postgres_product_sandbox: ProductSandbox,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    store = _settings_store(monkeypatch)
-    store.path.write_bytes(b"not-a-sqlite-database")
+    monkeypatch.setenv("API_FACILITY_ID", "environment-facility")
+    monkeypatch.setenv("EDGE_FACILITY_TOKEN", "environment-token")
     app = create_app(lifespan=no_lifespan)
+    install_postgres_stores(app, _root(postgres_product_sandbox))
+    app.state.backend_client_bundle = object()  # stale bundle from an earlier link
 
     apply_connection_settings(app)
 

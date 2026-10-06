@@ -143,3 +143,59 @@ def test_receipt_round_trip_and_storage_state_vocabulary() -> None:
     assert WireBatchReceipt.from_json(receipt.to_json()) == receipt
     with pytest.raises(ExecutionRecordContractError, match="storage_state"):
         WireBatchReceipt("a" * 64, 0, 0, (), "hub-accepted", 7)
+
+
+def test_legacy_unscoped_gap_keeps_observed_old_worker_batch_identity() -> None:
+    provenance = WireProvenance("rev", "image", "model", "cal", "pre", "config", "policy")
+    gap = WireGap("policy", 0, 0, 10, 10, 1, "export-failed")
+    batch = WireBatch("synthetic", "opaque-boot", provenance, (), (gap,))
+    # Captured from the unchanged wire on the onsite pre-scope source.
+    assert batch.batch_id == "49129ae21bfb733ca26985477f7c6058a9ce8dabbf8f9e301a4c25cdb2e818f7"
+    assert set(gap.to_json()) == {
+        "producer",
+        "from_sequence",
+        "to_sequence",
+        "from_ns",
+        "to_ns",
+        "record_count",
+        "cause",
+    }
+    assert WireBatch.from_json(json.loads(batch.encode())) == batch
+
+
+@pytest.mark.parametrize("scope", [(0, 0), (7, 11)])
+def test_known_gap_scope_round_trips_and_changes_batch_identity(scope) -> None:
+    legacy = WireGap("policy", 0, 0, 10, 10, 1, "export-failed")
+    gap = WireGap(
+        "policy",
+        0,
+        0,
+        10,
+        10,
+        1,
+        "export-failed",
+        source_generation=scope[0],
+        stream_epoch=scope[1],
+    )
+    batch = WireBatch("cam-1", "boot-1", _PROVENANCE, (), (gap,))
+    assert WireGap.from_json(gap.to_json()) == gap
+    assert WireBatch.from_json(json.loads(batch.encode())) == batch
+    assert batch.batch_id != WireBatch("cam-1", "boot-1", _PROVENANCE, (), (legacy,)).batch_id
+
+
+@pytest.mark.parametrize(
+    "scope",
+    [
+        {"source_generation": 0},
+        {"stream_epoch": 0},
+        {"source_generation": None, "stream_epoch": None},
+        {"source_generation": True, "stream_epoch": 0},
+        {"source_generation": 0, "stream_epoch": False},
+        {"source_generation": -1, "stream_epoch": 0},
+        {"source_generation": 0, "stream_epoch": -1},
+    ],
+)
+def test_wire_gap_rejects_ambiguous_scope(scope) -> None:
+    body = WireGap("policy", 0, 0, 10, 10, 1, "export-failed").to_json()
+    with pytest.raises(ExecutionRecordContractError):
+        WireGap.from_json({**body, **scope})

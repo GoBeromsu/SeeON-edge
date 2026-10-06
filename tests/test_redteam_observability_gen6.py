@@ -24,6 +24,7 @@ from test_observability_end_to_end import (
 )
 from test_worker_flow_evidence_binding import _binding, _event, _Plane, _trigger
 
+from backend.app.features.audit.postgres_runtime import PostgresAuditRuntime
 from shared.events.delivery_queue import (
     AdmissionFault,
     AdmissionResult,
@@ -35,6 +36,7 @@ from shared.events.evidence_export_contract import (
     DeliveryFailure,
     EventReceipt,
 )
+from tests_support.postgres_sandbox import ProductSandbox
 from worker.pipeline.diagnostics.lanes import ExecutionRecordLanes
 from worker.pipeline.output.evidence import evidence_sender as sender_module
 from worker.pipeline.output.evidence.evidence_sender import EvidenceSender, SenderConfig, SenderStep
@@ -42,6 +44,11 @@ from worker.pipeline.output.evidence.evidence_stager import DurableEvidenceStage
 from worker.pipeline.output.evidence.flow_sealed_sidecar import FlowSealedSidecars
 from worker.pipeline.output.evidence.smart_record_actor import SmartRecordActor
 from worker.runtime.flow.evidence import FlowEvidenceBinding
+
+pytest_plugins = (
+    "tests_support.postgres_sandbox",
+    "tests_support.postgres_diagnostics_sandbox",
+)
 
 _OBSERVING_BOOT = "boot-1"
 
@@ -275,7 +282,12 @@ def test_g6_6_sink_raise_does_not_change_sender_step_or_queue(
     assert "record_kind=backend.acceptance" in message
 
 
-def test_g6_7_query_returns_delivery_outcomes_then_local_acceptance(tmp_path: Path) -> None:
+def test_g6_7_query_returns_delivery_outcomes_then_local_acceptance(
+    tmp_path: Path,
+    postgres_product_sandbox: ProductSandbox,
+    postgres_audit_runtime: PostgresAuditRuntime,
+    postgres_lifespan_diagnostics_schema: str,
+) -> None:
     lanes = ExecutionRecordLanes(lane_capacity=64)
     emitted: list[object] = []
     queue_dir = tmp_path / "delivery-queue"
@@ -308,7 +320,14 @@ def test_g6_7_query_returns_delivery_outcomes_then_local_acceptance(tmp_path: Pa
         event_sink=binding,
     )
     exporter = None
-    with serve_backend(tmp_path, budget_bytes=_BUDGET_BYTES, relay_token=_RELAY_TOKEN) as backend:
+    with serve_backend(
+        tmp_path,
+        budget_bytes=_BUDGET_BYTES,
+        relay_token=_RELAY_TOKEN,
+        sandbox=postgres_product_sandbox,
+        audit_runtime=postgres_audit_runtime,
+        diagnostics_schema=postgres_lifespan_diagnostics_schema,
+    ) as backend:
         try:
             exporter = _exporter(lanes, backend.base_url, backend.relay_token)
             exporter.start()

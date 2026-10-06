@@ -54,6 +54,11 @@ from worker.types.perception_frame import (
 )
 from worker.types.trace import DecisionIdentity
 
+pytest_plugins = (
+    "tests_support.postgres_sandbox",
+    "tests_support.postgres_diagnostics_sandbox",
+)
+
 _CAMERA = "cam-1"
 _BED_MODULE = "bed_exit.v1"
 _BED_ONLY_TRACK = 21
@@ -205,7 +210,9 @@ def _domain_pair() -> tuple[FallDomainDecider, object]:
     return fall, _night_monitor()
 
 
-def test_g8_1_real_bed_exit_monitor_attributed_through_backend_query(tmp_path) -> None:
+def test_g8_1_real_bed_exit_monitor_attributed_through_backend_query(
+    tmp_path, postgres_product_sandbox, postgres_audit_runtime, postgres_lifespan_diagnostics_schema
+) -> None:
     """Real BedExitMonitor + fall decider: query names bed_exit.v1, never fall units."""
     lanes = ExecutionRecordLanes(lane_capacity=256)
     fall_identity = _fall_identity()
@@ -214,7 +221,14 @@ def test_g8_1_real_bed_exit_monitor_attributed_through_backend_query(tmp_path) -
     monitor = _night_monitor()
     _compose_bed_and_fall(pump, monitor, identities=(fall_identity, bed_identity))
     exporter = None
-    with serve_backend(tmp_path, budget_bytes=_BUDGET_BYTES, relay_token=_RELAY_TOKEN) as backend:
+    with serve_backend(
+        tmp_path,
+        budget_bytes=_BUDGET_BYTES,
+        relay_token=_RELAY_TOKEN,
+        sandbox=postgres_product_sandbox,
+        audit_runtime=postgres_audit_runtime,
+        diagnostics_schema=postgres_lifespan_diagnostics_schema,
+    ) as backend:
         try:
             exporter = _exporter(lanes, backend.base_url, backend.relay_token)
             exporter.start()

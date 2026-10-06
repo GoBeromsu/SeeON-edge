@@ -1,9 +1,9 @@
 # SHARED KNOWLEDGE BASE
 
 Backend and worker common library. Wire, versioned detection policies, RTSP
-admission. Not a runtime, and not a database owner: the edge SQLite package
-lives at `backend/app/edge_db` under backend ownership (ADR-0005), and nothing
-here may import `sqlite3`.
+admission. Not a runtime, and not a database owner: the edge database package
+lives at `backend/app/edge_db` under backend ownership (ADR-0005), runtime
+authority is PostgreSQL, and nothing here may import `sqlite3`.
 
 ## Package map
 - `events/`: backend↔worker egress. Read `events/AGENTS.md`.
@@ -28,7 +28,7 @@ requires every latest module. `resolve` picks camera, then default. Version
 mismatch raises. `make_effective_policy` stamps `effective_policy_id` from
 canonical JSON. Identity mismatch is an error. Persistence lives in
 `backend/app/features/detection_settings`. Worker YAML `detection_policies`
-is retired. Pull the versioned bundle from SQLite.
+is retired. Pull the versioned bundle from PostgreSQL.
 
 ## rtsp_url_policy.py
 Shared by API camera admission and worker open/probe. Only absolute `rtsp` /
@@ -41,7 +41,7 @@ answer. Open `pinned_url` so the decoder cannot re-resolve past the gate.
 for QA only. Metadata and link-local stay denied under PRIVATE-only.
 
 ## Where to look / tests
-Event wire: `events/`. SQLite: `backend/app/edge_db/`, which the backend owns.
+Event wire: `events/`. PostgreSQL: `backend/app/edge_db/postgres.py`, which the backend owns.
 Types live in this file. Rows live in
 `backend/app/features/detection_settings/`. Worker pull:
 `worker/runtime/config/pull_models.py`. Camera admit:

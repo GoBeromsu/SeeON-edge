@@ -1,4 +1,4 @@
-"""Compact clip listing walks keyset pages without a schema-17 index."""
+"""Catalogue clip listing walks keyset pages and never re-reads catalogued media."""
 
 from __future__ import annotations
 
@@ -8,8 +8,14 @@ from pathlib import Path
 import pytest
 from fastapi.testclient import TestClient
 
+from backend.app.features.audit.postgres_runtime import PostgresAuditRuntime
+from backend.app.features.clips import catalog_indexer
 from backend.app.features.clips.store import ClipStore
-from backend.app.main import create_app, no_lifespan
+from tests_support.postgres_api_app import postgres_api_app
+from tests_support.postgres_clip_app import index_clips
+from tests_support.postgres_sandbox import ProductSandbox
+
+pytest_plugins = ("tests_support.postgres_sandbox",)
 
 _CLIP_COUNT = 60
 _PAGE_SIZE = 20
@@ -45,12 +51,15 @@ def _write_fixture(root: Path) -> None:
 def test_compact_listing_cursor_walk_visits_each_clip_once(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    postgres_product_sandbox: ProductSandbox,
+    postgres_audit_runtime: PostgresAuditRuntime,
 ) -> None:
     root = tmp_path / "clip-store"
     _write_fixture(root)
     monkeypatch.setenv("CLIP_STORE_DIR", str(root))
-    app = create_app(lifespan=no_lifespan)
+    app = postgres_api_app(postgres_product_sandbox, postgres_audit_runtime)
     app.state.clip_store = ClipStore(root)
+    index_clips(app)
     traversed_ids: list[str] = []
     first_facets: dict[str, int] = {}
     with TestClient(app) as client:
@@ -81,7 +90,6 @@ def test_compact_listing_cursor_walk_visits_each_clip_once(
     assert set(first_facets) == {"bed-exit", "fall", "other"}
     assert len(traversed_ids) == _CLIP_COUNT
     assert len(set(traversed_ids)) == _CLIP_COUNT
-    assert not hasattr(app.state, "clip_listing_index")
 
 
 def _write_media_fixture(root: Path, count: int) -> None:
@@ -108,6 +116,8 @@ def _write_media_fixture(root: Path, count: int) -> None:
 def test_compact_listing_does_not_rehash_catalogued_media_on_every_page(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    postgres_product_sandbox: ProductSandbox,
+    postgres_audit_runtime: PostgresAuditRuntime,
 ) -> None:
     """A populated store must not re-read every clip's media per ``GET /clips``.
 
@@ -115,23 +125,25 @@ def test_compact_listing_does_not_rehash_catalogued_media_on_every_page(
     tens of seconds per request and concurrent dashboard polls never finished,
     so the events page and the room event history showed nothing at all.
     """
-    from backend.app.features.clips import compact_listing
-
     root = tmp_path / "clip-store"
     count = 12
     _write_media_fixture(root, count)
     monkeypatch.setenv("CLIP_STORE_DIR", str(root))
-    app = create_app(lifespan=no_lifespan)
+    app = postgres_api_app(postgres_product_sandbox, postgres_audit_runtime)
     app.state.clip_store = ClipStore(root)
     hashed_media: list[Path] = []
-    real_hash = compact_listing._hash_regular
+    real_hash = catalog_indexer._hash_regular
 
     def counting_hash(store_root: Path, path: Path) -> tuple[str, int]:
         if path.name == "clip.mp4":
             hashed_media.append(path)
         return real_hash(store_root, path)
 
-    monkeypatch.setattr(compact_listing, "_hash_regular", counting_hash)
+    monkeypatch.setattr(catalog_indexer, "_hash_regular", counting_hash)
+    index_clips(app)
+    assert len(hashed_media) == count, "first catalogue pass must verify every media file"
+
+    hashed_media.clear()
     with TestClient(app) as client:
         login = client.post(
             "/api/v1/auth/session",
@@ -139,21 +151,30 @@ def test_compact_listing_does_not_rehash_catalogued_media_on_every_page(
         )
         assert login.status_code == 204
         first = client.get("/api/v1/clips", params={"limit": 5})
-        assert first.status_code == 200
-        assert len(hashed_media) == count, "first catalogue pass must verify every media file"
-        assert all(clip["video_available"] for clip in first.json()["clips"])
-
-        hashed_media.clear()
         second = client.get("/api/v1/clips", params={"limit": 5})
-        assert second.status_code == 200
-        assert second.json()["clips"] == first.json()["clips"]
-        assert second.json()["pagination"]["total"] == count
-        assert hashed_media == [], "already-catalogued media must not be re-read per listing"
+    assert first.status_code == second.status_code == 200
+    assert all(clip["video_available"] for clip in first.json()["clips"])
+    assert second.json()["clips"] == first.json()["clips"]
+    assert second.json()["pagination"]["total"] == count
+    assert hashed_media == [], "listing pages must not read media"
 
-        # A media file that changes size is not trusted from the catalogue: it is
-        # hashed again and the immutable-content conflict still surfaces.
-        (root / "clips" / "clip-00003" / "clip.mp4").write_bytes(b"replaced-with-other-size")
-        hashed_media.clear()
+    index_clips(app)
+    assert hashed_media == [], "already-catalogued media must not be re-read per pass"
+
+    # A media file that changes size is not trusted from the catalogue: it is
+    # hashed again and the immutable-content conflict is recorded, not served.
+    (root / "clips" / "clip-00003" / "clip.mp4").write_bytes(b"replaced-with-other-size")
+    index_clips(app)
+    assert [path.parent.name for path in hashed_media] == ["clip-00003"]
+    with TestClient(app) as client:
+        login = client.post(
+            "/api/v1/auth/session",
+            json={"username": "admin", "password": "admin"},
+        )
+        assert login.status_code == 204
         third = client.get("/api/v1/clips", params={"limit": 5})
-        assert third.status_code == 503
-        assert [path.parent.name for path in hashed_media] == ["clip-00003"]
+    assert third.status_code == 200
+    state = postgres_product_sandbox.admin.execute(
+        "SELECT local_state, local_reason FROM clips WHERE clip_id = %s", ("clip-00003",)
+    ).fetchone()
+    assert state == ("CORRUPT", "IDENTITY_CONFLICT")

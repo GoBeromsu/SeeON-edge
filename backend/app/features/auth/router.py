@@ -12,15 +12,16 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from backend.app.features.audit.catalog import AuditAction, empty_detail
 from backend.app.features.audit.http import (
-    AuditUnavailableError,
     append_governed,
-    append_transactional,
+    audit_runtime,
+    mutation_audit,
 )
 from backend.app.features.audit.store import AuditEvent, utc_now
 from backend.app.shared.dashboard_auth import (
     DASHBOARD_SESSION_COOKIE,
     DashboardSessionStore,
     authorize_dashboard,
+    dashboard_credentials_store,
     dashboard_sessions,
     rotate_dashboard_credentials,
 )
@@ -140,13 +141,14 @@ def login(payload: DashboardLoginRequest, request: Request, response: Response) 
         )
     _LOGIN_THROTTLE.clear(key)
     try:
+        audit_runtime(request).require_mutation_admission(dashboard_credentials_store(request))
         append_governed(
             request,
             actor_id=payload.username,
             action=AuditAction.AUTH_LOGIN,
             target_id=payload.username,
         )
-    except AuditUnavailableError:
+    except BaseException:
         sessions.revoke(token)
         raise
     _set_session_cookie(response, request, sessions, token)
@@ -155,12 +157,14 @@ def login(payload: DashboardLoginRequest, request: Request, response: Response) 
 @router.get("/session", status_code=status.HTTP_204_NO_CONTENT, response_model=None)
 def session(request: Request) -> None:
     actor = authorize_dashboard(request)
+    audit_runtime(request).require_mutation_admission(dashboard_credentials_store(request))
     append_governed(request, actor_id=actor, action=AuditAction.AUTH_SESSION_READ, target_id=actor)
 
 
 @router.delete("/session", status_code=status.HTTP_204_NO_CONTENT, response_model=None)
 def logout(request: Request, response: Response) -> None:
     actor = authorize_dashboard(request)
+    audit_runtime(request).require_mutation_admission(dashboard_credentials_store(request))
     append_governed(request, actor_id=actor, action=AuditAction.AUTH_LOGOUT, target_id=actor)
     dashboard_sessions(request).revoke(request.cookies.get(DASHBOARD_SESSION_COOKIE))
     response.delete_cookie(DASHBOARD_SESSION_COOKIE, path="/", samesite="strict")
@@ -178,11 +182,15 @@ def update_credentials(
         target_id=payload.username or actor,
         detail=empty_detail(AuditAction.CREDENTIAL_ROTATE),
     )
+    audit = mutation_audit(request, lambda: event)
     token = rotate_dashboard_credentials(
         request,
         new_username=payload.username,
         new_password=payload.new_password,
-        after_write=lambda connection: append_transactional(request, connection, event),
+        persist=lambda store, username, password: audit.apply(
+            store,
+            lambda append: store.save(username=username, password=password, after_write=append),
+        ),
     )
     _set_session_cookie(response, request, dashboard_sessions(request), token)
 

@@ -10,9 +10,11 @@ constants, not deployment numbers.
     max_record_bytes = total_bytes // 256
     coverage_rows_per_epoch = 512  (design constant; RetentionBudget field)
 
-``total_bytes`` is the on-disk byte envelope of the execution_* tables and
-their indexes (not the whole edge.sqlite3 file, not the WAL). Empty b-trees
-already occupy pages, so the smallest meaningful budget is a few MiB; the
+``total_bytes`` is the byte envelope of the logical live rows of the
+execution_* tables: the summed ``pg_column_size`` of every visible row. It
+excludes indexes, page overhead, dead tuples and WAL, because PostgreSQL does
+not shrink a relation after DELETE until VACUUM; a physical-size budget would
+keep pruning rows that are already gone. Empty tables measure 0 bytes; the
 integer floor ``total_bytes >= 256`` exists only so
 ``max_record_bytes = total_bytes // 256`` is at least 1 and is not a
 deployment size.
@@ -24,9 +26,10 @@ value.
 
 from __future__ import annotations
 
-import sqlite3
 from dataclasses import dataclass
 from typing import Final
+
+import psycopg
 
 from backend.app.features.diagnostics.prune import (
     Lane,
@@ -42,19 +45,15 @@ from backend.app.features.diagnostics.terminals import (
 
 COVERAGE_ROWS_PER_EPOCH: Final = 512
 DEFAULT_UNIT_HORIZON_NS: Final = 60_000_000_000
-_DBSTAT_MISSING: Final = (
-    "dbstat is unavailable; SQLite must be compiled with SQLITE_ENABLE_DBSTAT_VTAB"
-)
 
 
 @dataclass(frozen=True, slots=True)
 class RetentionBudget:
-    """On-disk capacity envelope for the execution_* tables and indexes.
+    """Capacity envelope for the logical live rows of the execution_* tables.
 
-    ``total_bytes`` is compared against ``used_bytes`` (dbstat page sizes of
-    every execution_* table and every index whose ``tbl_name`` is an
-    execution_* table). It is not the size of edge.sqlite3 and does not
-    include the WAL.
+    ``total_bytes`` is compared against ``used_bytes`` (summed
+    ``pg_column_size`` of every visible execution_* row). It excludes
+    indexes, page overhead, dead tuples and WAL.
     """
 
     total_bytes: int
@@ -66,8 +65,8 @@ class RetentionBudget:
             raise ValueError(
                 "total_bytes must be an explicit integer >= 256 "
                 "(max_record_bytes = total_bytes // 256 must be >= 1; "
-                "this floor is not a deployment size — empty execution_* "
-                "b-trees already occupy pages, so a meaningful budget is a few MiB)"
+                "this floor is not a deployment size — it only bounds the "
+                "largest accepted record)"
             )
         if type(self.unit_horizon_ns) is not int or self.unit_horizon_ns <= 0:
             raise ValueError("unit_horizon_ns must be a positive integer")
@@ -95,33 +94,19 @@ class RetentionBudget:
         return self.total_bytes // 256
 
 
-def _execution_object_names(connection: sqlite3.Connection) -> tuple[str, ...]:
-    rows = connection.execute(
+def used_bytes(connection: psycopg.Connection) -> int:
+    """Logical live-row bytes of every execution_* table, as this transaction sees them."""
+    row = connection.execute(
         """
-        SELECT name FROM sqlite_master
-        WHERE type IN ('table', 'index')
-          AND (name LIKE 'execution_%' OR tbl_name LIKE 'execution_%')
+        SELECT
+            (SELECT COALESCE(SUM(pg_column_size(t.*)), 0) FROM execution_provenance AS t)
+          + (SELECT COALESCE(SUM(pg_column_size(t.*)), 0) FROM execution_segments AS t)
+          + (SELECT COALESCE(SUM(pg_column_size(t.*)), 0) FROM execution_units AS t)
+          + (SELECT COALESCE(SUM(pg_column_size(t.*)), 0) FROM execution_records AS t)
+          + (SELECT COALESCE(SUM(pg_column_size(t.*)), 0) FROM execution_coverage AS t)
+          + (SELECT COALESCE(SUM(pg_column_size(t.*)), 0) FROM execution_batches AS t)
         """
-    ).fetchall()
-    return tuple(str(row[0]) for row in rows)
-
-
-def used_bytes(connection: sqlite3.Connection) -> int:
-    """Exact on-disk bytes of every execution_* table and its indexes."""
-    names = _execution_object_names(connection)
-    if not names:
-        return 0
-    placeholders = ",".join("?" * len(names))
-    try:
-        row = connection.execute(
-            f"SELECT COALESCE(SUM(pgsize), 0) FROM dbstat "
-            f"WHERE aggregate = TRUE AND name IN ({placeholders})",
-            names,
-        ).fetchone()
-    except sqlite3.OperationalError as error:
-        if "no such table: dbstat" in str(error).lower():
-            raise RuntimeError(_DBSTAT_MISSING) from error
-        raise
+    ).fetchone()
     return 0 if row is None else int(row[0])
 
 
@@ -131,23 +116,22 @@ def used_bytes(connection: sqlite3.Connection) -> int:
 #: number: it only shapes latency.
 MAX_UNITS_PER_ENFORCE: Final = 32
 
-#: How long a dbstat measurement may be reused before it is taken again.
-#: Between measurements the meter adds the bytes it has been told were
-#: written, so usage is never reported below what is known. A page walk of a
-#: ~1 GB table costs ~0.4 s; taking it on every ingest call serialised the
-#: writer at ~1 call/s on the reference edge.
+#: How long a ``used_bytes`` measurement may be reused before it is taken
+#: again. Between measurements the meter adds the bytes it has been told were
+#: written, so usage is never reported below what is known. The measurement
+#: scans every live execution_* row; taking it on every ingest call would
+#: serialise the writer behind a full scan.
 USAGE_REMEASURE_NS: Final = 1_000_000_000
 
 
 class UsageMeter:
-    """Measured on-disk usage with bounded staleness.
+    """Measured logical usage with bounded staleness.
 
-    ``value()`` returns the last dbstat measurement plus the bytes accrued
-    since, and re-measures when the measurement is older than
+    ``value()`` returns the last ``used_bytes`` measurement plus the bytes
+    accrued since, and re-measures when the measurement is older than
     ``USAGE_REMEASURE_NS`` or was invalidated by a prune. Accrual scales the
-    payload bytes written by the *measured* on-disk/payload ratio taken at the
-    same instant (rows plus five indexes were 3.8x payload on the reference
-    edge), so the bridge between two measurements is derived from a
+    payload bytes written by the *measured* row/payload ratio taken at the
+    same instant, so the bridge between two measurements is derived from a
     measurement, not from a constant. The estimate is only ever used to
     decide WHEN to measure: ``enforce_budget`` re-measures exactly before it
     prunes anything, and again after pruning. Usage can exceed high_water by
@@ -174,7 +158,7 @@ class UsageMeter:
         """Account bytes a prune just freed (measured ratio) and return the estimate.
 
         Keeps the measurement usable across a draining sequence of calls so
-        the page walk runs at most once per USAGE_REMEASURE_NS while pruning,
+        the full measurement runs at most once per USAGE_REMEASURE_NS while pruning,
         instead of once per call.
         """
         if self._measured is None:
@@ -190,7 +174,7 @@ class UsageMeter:
         """
         return self._measured is not None and self._measured > high_water
 
-    def value(self, connection: sqlite3.Connection, now_ns: int) -> int:
+    def value(self, connection: psycopg.Connection, now_ns: int) -> int:
         stale = self._measured is None or now_ns - self._measured_at >= self._remeasure_ns
         if stale:
             self._measured = used_bytes(connection)
@@ -205,7 +189,7 @@ class UsageMeter:
 
 
 def enforce_budget(
-    connection: sqlite3.Connection,
+    connection: psycopg.Connection,
     budget: RetentionBudget,
     now_ns: int,
     *,

@@ -30,8 +30,7 @@ One capability per `features/<slice>/`. The slice owns its router and store. Ext
 - `status`: `/status` and `/system` from relay-derived liveness. Owns `heartbeat_store`, `runtime_status_store`.
 - `qa`: retired. No QA/replay table is a runtime owner.
 - `routes/`: app-level health + models. See `routes/AGENTS.md`.
-- `core/` is `Settings` (`ML_API_`). `shared/` is infra (mapping, sessions, sqlite bootstrap, state dir, HEAD helpers), never feature state.
-- `edge_db/`: SQLite contract, runtime connections, bootstrap. See `edge_db/AGENTS.md`.
+- `core/` is `Settings` (`ML_API_`). `shared/` is infra (mapping, sessions, state dir), never feature state.
 
 ## Wire models
 
@@ -54,7 +53,7 @@ HTTP schemas are Pydantic `BaseModel`, never `dataclass`. They live in the slice
 - diagnostics: `execution_record_store` (schema-19 execution_* tables; constructed in lifespan when `ML_API_EXECUTION_RECORDS_ENABLED`)
 - audit: `AuditStore` via `audit.http.audit_store`; lifespan calls `configure_audit_readiness`
 
-Connection and runtime settings load through their slice `from_env()` helpers. API writes remaining compact authorities and the six schema-19 execution-record tables as `RuntimeActor.API`. Do not open worker table families. `shared/sqlite_bootstrap.py` may connect; it must not import feature stores.
+Connection and runtime settings load through their slice `from_env()` helpers. API writes its PostgreSQL authorities through `backend/app/edge_db/postgres.py`. Do not write worker table families. Runtime code never imports `edge_db/migration/` (import-linter).
 
 ## Focused tests
 

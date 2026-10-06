@@ -12,13 +12,15 @@ def clip_response(
     manifest: ClipManifest,
     size_bytes: int | None,
     thumbnail_available: bool,
+    *,
+    playback_codec: str | None = None,
 ) -> ClipManifestResponse:
     return ClipManifestResponse.model_validate(
         {
             **manifest.as_response(),
             "size_bytes": size_bytes,
             "thumbnail_available": thumbnail_available,
-            "playback_codec": manifest.codec,
+            "playback_codec": manifest.codec if playback_codec is None else playback_codec,
         }
     )
 

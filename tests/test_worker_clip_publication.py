@@ -12,9 +12,16 @@ from pathlib import Path
 
 import pytest
 
-from backend.app.features.clips.catalog import strict_manifest_records
+from backend.app.features.clips.catalog_indexer import (
+    ClipCatalogIndexer,
+    ClipCatalogPage,
+    ClipCatalogQuery,
+    PostgresClipCatalog,
+)
+from backend.app.features.clips.manifest import read_manifest_file
 from backend.app.features.clips.store import ClipStore
 from tests_support.clip_analysis import no_op_ready_hook
+from tests_support.postgres_sandbox import ProductSandbox
 from tests_support.thumbnail import DeterministicThumbnailGenerator
 from worker.pipeline.output.evidence import clip_publication
 from worker.pipeline.output.evidence.clip_identity import ClipIdAllocator, ClipReservation
@@ -30,6 +37,8 @@ from worker.pipeline.output.evidence.evidence_outbox_types import (
     EdgeEventId,
     EvidenceReasonCode,
 )
+
+pytest_plugins = ("tests_support.postgres_sandbox",)
 
 EVENT_ONE = EdgeEventId("00000000-0000-4000-8000-000000000001")
 EVENT_TWO = EdgeEventId("00000000-0000-4000-8000-000000000002")
@@ -50,6 +59,16 @@ def _metadata() -> ClipPublicationMetadata:
         duration_s=1.0,
         encoder="libx264",
         runtime_manifest_sha256=RUNTIME_MANIFEST_SHA256,
+    )
+
+
+def _catalogued(sandbox: ProductSandbox, root: Path) -> ClipCatalogPage:
+    """Index ``root`` into the PostgreSQL clip catalogue and read the first page."""
+    store = ClipStore(root)
+    outcome = ClipCatalogIndexer(sandbox.database, sandbox.authority).reconcile(store)
+    assert (outcome.remaining, outcome.isolated) == (0, 0)
+    return PostgresClipCatalog(sandbox.database).page(
+        store, ClipCatalogQuery(camera_id=None, event_type=None, limit=50, cursor=None)
     )
 
 
@@ -145,6 +164,7 @@ def test_publication_retry_recovers_each_durability_boundary_with_same_clip_id(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     failure_stage: PublicationStage,
+    postgres_product_sandbox: ProductSandbox,
 ) -> None:
     reservation = ClipIdAllocator(
         tmp_path,
@@ -178,7 +198,8 @@ def test_publication_retry_recovers_each_durability_boundary_with_same_clip_id(
         on_ready=no_op_ready_hook,
     ).publish_ready(reservation, artifact, _metadata())
     payload = json.loads(published.manifest_path.read_text(encoding="utf-8"))
-    records = strict_manifest_records(ClipStore(tmp_path))
+    served = read_manifest_file(published.manifest_path)
+    page = _catalogued(postgres_product_sandbox, tmp_path)
 
     assert failed
     assert published.clip_id == "stable-clip-id"
@@ -186,14 +207,16 @@ def test_publication_retry_recovers_each_durability_boundary_with_same_clip_id(
     assert payload["state"] == "READY"
     assert payload["path"] == "clips/stable-clip-id/clip.mp4"
     assert payload["runtime_manifest_sha256"] == RUNTIME_MANIFEST_SHA256
-    assert records[0].manifest.clip_id == "stable-clip-id"
-    assert records[0].payload["runtime_manifest_sha256"] == RUNTIME_MANIFEST_SHA256
+    assert served is not None
+    assert served.clip_id == "stable-clip-id"
+    assert [clip.manifest.clip_id for clip in page.clips] == ["stable-clip-id"]
     assert not reservation.staging_dir.exists()
 
 
-def test_strict_manifest_accepts_exact_remux_translation_and_rejects_nonuniform_ticks(
+def test_exact_remux_translation_is_published_verbatim_and_listed(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    postgres_product_sandbox: ProductSandbox,
 ) -> None:
     reservation = ClipIdAllocator(
         tmp_path,
@@ -232,14 +255,16 @@ def test_strict_manifest_accepts_exact_remux_translation_and_rejects_nonuniform_
         on_ready=no_op_ready_hook,
     ).publish_ready(reservation, artifact, metadata)
 
-    records = strict_manifest_records(ClipStore(tmp_path))
-    assert records[0].payload["source_media"] == metadata.source_media
-
+    # The writer copies source_media without validating it; the rejection of a
+    # nonuniform translation is pinned in tests/test_manifest_media_models.py.
     payload = json.loads(published.manifest_path.read_text(encoding="utf-8"))
-    payload["source_media"]["streams"][0]["timestamp_translation_ticks"] = -11
-    published.manifest_path.write_text(json.dumps(payload), encoding="utf-8")
-    with pytest.raises(ValueError, match="nonuniform remux timestamp translation"):
-        strict_manifest_records(ClipStore(tmp_path))
+    served = read_manifest_file(published.manifest_path)
+    page = _catalogued(postgres_product_sandbox, tmp_path)
+
+    assert payload["source_media"] == metadata.source_media
+    assert served is not None
+    assert served.clip_id == "translation-clip"
+    assert [clip.manifest.clip_id for clip in page.clips] == ["translation-clip"]
 
 
 @pytest.mark.parametrize("invalid", ("A" * 64, "a" * 63, "a" * 65))

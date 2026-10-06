@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-import sqlite3
 from collections.abc import Callable
 from dataclasses import FrozenInstanceError, dataclass, field
 from pathlib import Path
@@ -11,14 +10,17 @@ from typing import BinaryIO
 import pytest
 from fastapi.testclient import TestClient
 
-from backend.app.features.cameras.store import CameraRegistryStore
-from backend.app.features.evidence.compact_receipts import CompactArtifactReceiptStore
-from backend.app.features.evidence.relay_projection import RelayEvent, RelayEvidenceProjection
+from backend.app.features.audit.postgres_runtime import PostgresAuditRuntime
+from backend.app.features.evidence.event_outbox import EventOutbox, OutboxBudget
+from backend.app.features.evidence.postgres_receipts import PostgresArtifactReceiptStore
+from backend.app.features.evidence.relay_projection import RelayEvent
 from backend.app.features.runtime_settings.store import RuntimeSettingsStore
-from backend.app.main import create_app, no_lifespan
 from shared.events.evidence_export_client import ReadyClipRequest, UnavailableClipRequest
 from shared.events.evidence_export_contract import BackendCapabilities, ClipReceipt, DeliveryFailure
-from tests_support.compact_authority_db import prepare_compact_database
+from tests_support.postgres_api_app import postgres_api_app
+from tests_support.postgres_sandbox import ProductSandbox
+
+pytest_plugins = ("tests_support.postgres_sandbox",)
 
 TOKEN = "relay-token"
 EVENT_ID = "00000000-0000-4000-8000-000000000001"
@@ -59,17 +61,35 @@ class FakeBackendEvidenceClient:
         return self.clip_result
 
 
-def _client(tmp_path: Path, backend: FakeBackendEvidenceClient, *, enabled: bool) -> TestClient:
-    app = create_app(lifespan=no_lifespan)
+@dataclass(frozen=True)
+class _PgRoot:
+    sandbox: ProductSandbox
+    audit_runtime: PostgresAuditRuntime
+
+
+@pytest.fixture
+def pg_root(
+    postgres_product_sandbox: ProductSandbox, postgres_audit_runtime: PostgresAuditRuntime
+) -> _PgRoot:
+    return _PgRoot(postgres_product_sandbox, postgres_audit_runtime)
+
+
+def _client(
+    tmp_path: Path,
+    pg_root: _PgRoot,
+    backend: FakeBackendEvidenceClient,
+    *,
+    enabled: bool,
+    backend_camera_id: str | None = "cmsnvr-camera-1",
+) -> TestClient:
+    sandbox = pg_root.sandbox
+    app = postgres_api_app(sandbox, pg_root.audit_runtime)
     app.state.edge_relay_token = TOKEN
     # Camera binding is registry-only now (no camera_inventory fallback --
     # see _camera_binding_from_registry in relay/router.py), so the fixture
     # must register "camera-1" in a CameraRegistryStore for _camera_binding
     # to resolve it instead of 403ing every export.
-    database = tmp_path / "catalog.sqlite3"
-    prepare_compact_database(database)
-    registry = CameraRegistryStore(database)
-    registry.create(
+    app.state.camera_registry.create(
         camera_id="camera-1",
         label="Camera 1",
         rtsp_url="rtsp://camera/1",
@@ -80,14 +100,18 @@ def _client(tmp_path: Path, backend: FakeBackendEvidenceClient, *, enabled: bool
         # about identity mapping. Clip export addresses the Hub, so an unmapped
         # camera is refused up front (issue #308) -- that path is pinned separately
         # by test_export_refused_when_camera_has_no_hub_mapping below.
-        backend_camera_id="cmsnvr-camera-1",
+        backend_camera_id=backend_camera_id,
     )
-    app.state.camera_registry = registry
     app.state.backend_evidence_client = backend
-    app.state.artifact_receipt_store = CompactArtifactReceiptStore(
-        database, tmp_path / "clip-store"
+    app.state.artifact_receipt_store = PostgresArtifactReceiptStore(
+        sandbox.database, sandbox.authority, tmp_path / "clip-store"
     )
-    RelayEvidenceProjection(database).project_event(
+    EventOutbox(
+        sandbox.database,
+        sandbox.authority,
+        OutboxBudget(4, 64 * 1024),
+        audit_runtime=pg_root.audit_runtime,
+    ).accept(
         RelayEvent(
             EVENT_ID,
             "fall",
@@ -98,12 +122,12 @@ def _client(tmp_path: Path, backend: FakeBackendEvidenceClient, *, enabled: bool
             None,
             None,
             None,
-        )
+        ),
+        backend_camera_id=None,
+        forward=False,
     )
-    runtime_settings = RuntimeSettingsStore(database)
     if enabled:
-        runtime_settings.set_clip_export_enabled(True)
-    app.state.runtime_settings_store = runtime_settings
+        app.state.runtime_settings_store.set_clip_export_enabled(True)
     app.state.clip_store_root = tmp_path / "clip-store"
     return TestClient(app)
 
@@ -189,10 +213,12 @@ def _set_attribute(target: object, name: str, value: object) -> None:
     setattr(target, name, value)
 
 
-def test_capability_requires_auth_local_enablement_and_backend_proof(tmp_path: Path) -> None:
+def test_capability_requires_auth_local_enablement_and_backend_proof(
+    tmp_path: Path, pg_root: _PgRoot
+) -> None:
     # Given: local support is enabled and a backend probe proves both capabilities.
     backend = FakeBackendEvidenceClient()
-    client = _client(tmp_path, backend, enabled=True)
+    client = _client(tmp_path, pg_root, backend, enabled=True)
 
     # When: unauthenticated and authenticated callers probe the relay.
     denied = client.get("/api/v1/relay/capabilities", params={"camera_id": "camera-1"})
@@ -208,10 +234,10 @@ def test_capability_requires_auth_local_enablement_and_backend_proof(tmp_path: P
     assert accepted.json() == {"event_idempotency": 1, "clip_export": 1}
 
 
-def test_capability_stays_zero_when_feature_is_disabled(tmp_path: Path) -> None:
+def test_capability_stays_zero_when_feature_is_disabled(tmp_path: Path, pg_root: _PgRoot) -> None:
     # Given: the compatibility image ships with export disabled.
     backend = FakeBackendEvidenceClient()
-    client = _client(tmp_path, backend, enabled=False)
+    client = _client(tmp_path, pg_root, backend, enabled=False)
 
     # When: the worker probes the local relay.
     response = client.get(
@@ -225,9 +251,11 @@ def test_capability_stays_zero_when_feature_is_disabled(tmp_path: Path) -> None:
     assert response.json() == {"event_idempotency": 1, "clip_export": 0}
 
 
-def test_capability_reads_live_persisted_setting_without_app_rebuild(tmp_path: Path) -> None:
+def test_capability_reads_live_persisted_setting_without_app_rebuild(
+    tmp_path: Path, pg_root: _PgRoot
+) -> None:
     backend = FakeBackendEvidenceClient()
-    client = _client(tmp_path, backend, enabled=False)
+    client = _client(tmp_path, pg_root, backend, enabled=False)
     headers = {"X-Edge-Relay-Token": TOKEN}
 
     before = client.get(
@@ -235,7 +263,8 @@ def test_capability_reads_live_persisted_setting_without_app_rebuild(tmp_path: P
         params={"camera_id": "camera-1"},
         headers=headers,
     )
-    RuntimeSettingsStore(tmp_path / "catalog.sqlite3").set_clip_export_enabled(True)
+    sandbox = pg_root.sandbox
+    RuntimeSettingsStore(sandbox.database, sandbox.authority).set_clip_export_enabled(True)
     after = client.get(
         "/api/v1/relay/capabilities",
         params={"camera_id": "camera-1"},
@@ -248,11 +277,12 @@ def test_capability_reads_live_persisted_setting_without_app_rebuild(tmp_path: P
 
 def test_ready_relay_resolves_owned_media_by_clip_id_and_returns_typed_receipt(
     tmp_path: Path,
+    pg_root: _PgRoot,
 ) -> None:
     # Given: strict shared-store bytes exist under the route clip ID.
     _write_ready_media(tmp_path)
     backend = FakeBackendEvidenceClient()
-    client = _client(tmp_path, backend, enabled=True)
+    client = _client(tmp_path, pg_root, backend, enabled=True)
 
     # Mutation proof: a receipt that does not match the opened bytes remains a conflict.
     bad_payload = _ready_payload() | {"sha256": "0" * 64}
@@ -319,9 +349,17 @@ def test_ready_relay_resolves_owned_media_by_clip_id_and_returns_typed_receipt(
         _set_attribute(ready_request, "camera_id", "camera-other")
 
 
-def test_evidence_receipt_route_commits_canonical_action_and_detail(tmp_path: Path) -> None:
+def test_evidence_receipt_route_commits_canonical_action_and_detail(
+    tmp_path: Path, pg_root: _PgRoot
+) -> None:
     _write_ready_media(tmp_path)
-    client = _client(tmp_path, FakeBackendEvidenceClient(), enabled=True)
+    client = _client(tmp_path, pg_root, FakeBackendEvidenceClient(), enabled=True)
+    admin = pg_root.sandbox.admin
+    # The PG seed accepts the incident through EventOutbox, which audits it as
+    # relay.alert; only rows committed by the receipt route are under test.
+    (seeded_through,) = admin.execute(
+        "SELECT coalesce(max(audit_id), 0) FROM audit_events"
+    ).fetchone()
 
     response = client.put(
         "/api/v1/relay/clips/clip-1",
@@ -330,21 +368,23 @@ def test_evidence_receipt_route_commits_canonical_action_and_detail(tmp_path: Pa
     )
 
     assert response.status_code == 200
-    with sqlite3.connect(tmp_path / "catalog.sqlite3") as connection:
-        rows = connection.execute(
-            "SELECT action,target_id,actor_type,auth_mechanism,detail_json "
-            "FROM audit_events WHERE action NOT LIKE 'audit.%'"
-        ).fetchall()
+    rows = admin.execute(
+        "SELECT action,target_id,actor_type,auth_mechanism,detail_json "
+        "FROM audit_events WHERE action NOT LIKE 'audit.%%' AND audit_id > %s ORDER BY audit_id",
+        (seeded_through,),
+    ).fetchall()
     assert rows == [("evidence.receipt", "clip-1", "service", "relay_token", '{"version":1}')]
 
 
-def test_unavailable_relay_passes_complete_immutable_state_request(tmp_path: Path) -> None:
+def test_unavailable_relay_passes_complete_immutable_state_request(
+    tmp_path: Path, pg_root: _PgRoot
+) -> None:
     # Given: capture failed before media publication, so no READY-only metadata exists.
     backend = FakeBackendEvidenceClient(
         clip_result=ClipReceipt("clip-1", "UNAVAILABLE", 3, None, None)
     )
     _write_unavailable_manifest(tmp_path)
-    client = _client(tmp_path, backend, enabled=True)
+    client = _client(tmp_path, pg_root, backend, enabled=True)
 
     # When: the worker reports the terminal unavailable state.
     response = client.put(
@@ -373,19 +413,20 @@ def test_unavailable_relay_passes_complete_immutable_state_request(tmp_path: Pat
     ) == ("clip-1", "cmsnvr-camera-1", (EVENT_ID,), 3, "CAPTURE_FAILED")
     with pytest.raises(FrozenInstanceError):
         _set_attribute(unavailable_request, "reason", "CORRUPT")
-    with sqlite3.connect(tmp_path / "catalog.sqlite3") as connection:
-        assert connection.execute(
-            "SELECT lifecycle_state, failure_reason FROM incidents WHERE edge_event_id = ?",
-            (EVENT_ID,),
-        ).fetchone() == ("FAILED", "CAPTURE_FAILED")
+    assert pg_root.sandbox.admin.execute(
+        "SELECT lifecycle_state, failure_reason FROM incidents WHERE edge_event_id = %s",
+        (EVENT_ID,),
+    ).fetchone() == ("FAILED", "CAPTURE_FAILED")
 
 
-def test_unavailable_relay_replay_is_noop_and_conflict_rolls_back(tmp_path: Path) -> None:
+def test_unavailable_relay_replay_is_noop_and_conflict_rolls_back(
+    tmp_path: Path, pg_root: _PgRoot
+) -> None:
     backend = FakeBackendEvidenceClient(
         clip_result=ClipReceipt("clip-1", "UNAVAILABLE", 3, None, None)
     )
     _write_unavailable_manifest(tmp_path)
-    client = _client(tmp_path, backend, enabled=True)
+    client = _client(tmp_path, pg_root, backend, enabled=True)
     headers = {"X-Edge-Relay-Token": TOKEN}
 
     first = client.put(
@@ -407,16 +448,17 @@ def test_unavailable_relay_replay_is_noop_and_conflict_rolls_back(tmp_path: Path
         headers=headers,
     )
     assert conflict.status_code == 409
-    with sqlite3.connect(tmp_path / "catalog.sqlite3") as connection:
-        assert connection.execute("SELECT count(*) FROM artifacts").fetchone() == (1,)
-        assert connection.execute(
-            "SELECT lifecycle_state, failure_reason FROM incidents WHERE edge_event_id = ?",
-            (EVENT_ID,),
-        ).fetchone() == ("FAILED", "CAPTURE_FAILED")
+    admin = pg_root.sandbox.admin
+    assert admin.execute("SELECT count(*) FROM artifacts").fetchone() == (1,)
+    assert admin.execute(
+        "SELECT lifecycle_state, failure_reason FROM incidents WHERE edge_event_id = %s",
+        (EVENT_ID,),
+    ).fetchone() == ("FAILED", "CAPTURE_FAILED")
 
 
 def test_ready_relay_uploads_verified_descriptor_when_path_is_swapped(
     tmp_path: Path,
+    pg_root: _PgRoot,
 ) -> None:
     # Given: an attacker swaps the pathname only after ml-api verifies and opens it.
     media = _write_ready_media(tmp_path)
@@ -427,7 +469,7 @@ def test_ready_relay_uploads_verified_descriptor_when_path_is_swapped(
         media.write_bytes(b"evil")
 
     backend.before_read = swap_path
-    client = _client(tmp_path, backend, enabled=True)
+    client = _client(tmp_path, pg_root, backend, enabled=True)
 
     # When: backend upload begins after the pathname swap.
     response = client.put(
@@ -443,9 +485,11 @@ def test_ready_relay_uploads_verified_descriptor_when_path_is_swapped(
     assert backend.opened_media is not None and backend.opened_media.closed
 
 
-def test_clip_relay_rejects_duplicate_or_non_uuid4_event_refs(tmp_path: Path) -> None:
+def test_clip_relay_rejects_duplicate_or_non_uuid4_event_refs(
+    tmp_path: Path, pg_root: _PgRoot
+) -> None:
     backend = FakeBackendEvidenceClient()
-    client = _client(tmp_path, backend, enabled=True)
+    client = _client(tmp_path, pg_root, backend, enabled=True)
     for refs in ([EVENT_ID, EVENT_ID], ["not-a-uuid"]):
         payload = _ready_payload()
         payload["event_refs"] = refs
@@ -460,6 +504,7 @@ def test_clip_relay_rejects_duplicate_or_non_uuid4_event_refs(tmp_path: Path) ->
 
 def test_ready_relay_rejects_missing_media_without_backend_call(
     tmp_path: Path,
+    pg_root: _PgRoot,
 ) -> None:
     # Given: no owned media exists for this clip id, and the payload claims a
     # mismatched facility. That mismatch is not what drives the 404 here,
@@ -474,7 +519,7 @@ def test_ready_relay_rejects_missing_media_without_backend_call(
     # written for this clip id -- and 404 (not found), not 403 (forbidden),
     # is the honest status for that.
     backend = FakeBackendEvidenceClient()
-    client = _client(tmp_path, backend, enabled=True)
+    client = _client(tmp_path, pg_root, backend, enabled=True)
     payload = _ready_payload()
     payload["facility_id"] = "facility-other"
 
@@ -491,7 +536,7 @@ def test_ready_relay_rejects_missing_media_without_backend_call(
     assert backend.ready_calls == 0
 
 
-def test_export_refused_when_camera_has_no_hub_mapping(tmp_path: Path) -> None:
+def test_export_refused_when_camera_has_no_hub_mapping(tmp_path: Path, pg_root: _PgRoot) -> None:
     """A clip export for an unmapped camera is refused before any backend call.
 
     Clip export exists to reach the Hub, so unlike the alert and heartbeat relays
@@ -501,21 +546,9 @@ def test_export_refused_when_camera_has_no_hub_mapping(tmp_path: Path) -> None:
     edge names the real reason instead, and never contacts the backend.
     """
     backend = FakeBackendEvidenceClient()
-    client = _client(tmp_path, backend, enabled=True)
     # Same app the other tests use, but with the camera's Hub mapping removed, so
     # only the mapping state differs from the passing cases above.
-    unmapped_path = tmp_path / "unmapped" / "edge.sqlite3"
-    prepare_compact_database(unmapped_path)
-    unmapped = CameraRegistryStore(unmapped_path)
-    unmapped.create(
-        camera_id="camera-1",
-        label="Camera 1",
-        rtsp_url="rtsp://camera/1",
-        space_id="facility-1",
-        status="online",
-        backend_camera_id=None,
-    )
-    client.app.state.camera_registry = unmapped
+    client = _client(tmp_path, pg_root, backend, enabled=True, backend_camera_id=None)
 
     response = client.put(
         "/api/v1/relay/clips/clip-1",

@@ -42,12 +42,10 @@ Forbidden: `features`, `sources`, `runners`, `perception`, `domains`, `runtime`,
 - `tests/test_contract.py`
 - `tests/test_frame_observation_contract.py`
 - `tests/test_events_schema.py`
-- `tests/test_contract_symbol_exports.py`, `tests/test_worker_config_contract.py`, `tests/test_replay_trace_contract.py`
-- `tests/test_edge_provisioning_contract.py`, `tests/test_edge_topology_contract.py`
-- `uv run --group lint lint-imports` and `uv run --group lint mypy contracts shared` (the AST ladder test is gone)
+- Boundary: `uv run --group lint lint-imports`
 
 ## Gotchas
 
 Contracts are consumed across every layer. Prefer additive fields or new dataclasses over changing existing constructor semantics.
-`PulledWorkerConfig` gained optional `registry_version` for restart identity; mirroring this
-contract to `eldercare-dataset-ops` is follow-up work.
+`PulledWorkerConfig` gained optional `registry_version` for restart identity. This `contracts/`
+is the authority; nothing is mirrored to the archived `eldercare-dataset-ops`.

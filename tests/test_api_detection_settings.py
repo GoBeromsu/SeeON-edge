@@ -9,22 +9,18 @@ detection_windows/night_window first, then on=true/mode=always."""
 
 from __future__ import annotations
 
-from pathlib import Path
-
 import pytest
+from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from backend.app.edge_db.bootstrap import bootstrap_database
-from backend.app.features.detection_settings.store import DetectionSettingsStore
-from backend.app.main import create_app, no_lifespan
+from backend.app.features.audit.postgres_runtime import PostgresAuditRuntime
 from contracts.worker_config import PulledNightWindow, PulledWorkerConfig
+from tests_support.postgres_api_app import postgres_api_app
+from tests_support.postgres_sandbox import ProductSandbox
+
+pytest_plugins = ("tests_support.postgres_sandbox",)
 
 DASHBOARD_LOGIN = {"username": "admin", "password": "admin"}
-
-
-@pytest.fixture(autouse=True)
-def _migrated_compact_database(tmp_path: Path) -> None:
-    bootstrap_database(tmp_path / "catalog.sqlite3")
 
 
 _DEFAULT_DOMAINS = {
@@ -38,10 +34,11 @@ def _login(client: TestClient) -> None:
     assert response.status_code == 204
 
 
-def _app_with_store(tmp_path):
-    app = create_app(lifespan=no_lifespan)
-    app.state.detection_settings_store = DetectionSettingsStore(tmp_path / "catalog.sqlite3")
-    return app
+@pytest.fixture
+def app(
+    postgres_product_sandbox: ProductSandbox, postgres_audit_runtime: PostgresAuditRuntime
+) -> FastAPI:
+    return postgres_api_app(postgres_product_sandbox, postgres_audit_runtime)
 
 
 @pytest.fixture(autouse=True)
@@ -49,8 +46,8 @@ def clear_env(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.delenv("ML_API_DETECTION_TZ", raising=False)
 
 
-def test_get_falls_back_to_on_true_mode_always_when_nothing_pulled_or_stored(tmp_path) -> None:
-    with TestClient(_app_with_store(tmp_path)) as client:
+def test_get_falls_back_to_on_true_mode_always_when_nothing_pulled_or_stored(app: FastAPI) -> None:
+    with TestClient(app) as client:
         _login(client)
         response = client.get("/api/v1/detection-settings")
 
@@ -59,9 +56,8 @@ def test_get_falls_back_to_on_true_mode_always_when_nothing_pulled_or_stored(tmp
 
 
 def test_get_falls_back_to_the_live_pulled_detection_window_when_nothing_stored(
-    tmp_path,
+    app: FastAPI,
 ) -> None:
-    app = _app_with_store(tmp_path)
     app.state.pulled_config = PulledWorkerConfig(
         config_version=1,
         restart_epoch=1,
@@ -92,8 +88,7 @@ def test_get_falls_back_to_the_live_pulled_detection_window_when_nothing_stored(
     }
 
 
-def test_get_falls_back_to_the_deprecated_night_window_alias_for_bed_exit(tmp_path) -> None:
-    app = _app_with_store(tmp_path)
+def test_get_falls_back_to_the_deprecated_night_window_alias_for_bed_exit(app: FastAPI) -> None:
     app.state.pulled_config = PulledWorkerConfig(
         config_version=1,
         restart_epoch=1,
@@ -116,8 +111,8 @@ def test_get_falls_back_to_the_deprecated_night_window_alias_for_bed_exit(tmp_pa
     assert response.json()["domains"]["fall"] == _DEFAULT_DOMAINS["fall"]
 
 
-def test_put_persists_and_a_subsequent_get_reflects_exactly_what_was_saved(tmp_path) -> None:
-    with TestClient(_app_with_store(tmp_path)) as client:
+def test_put_persists_and_a_subsequent_get_reflects_exactly_what_was_saved(app: FastAPI) -> None:
+    with TestClient(app) as client:
         _login(client)
         put_response = client.put(
             "/api/v1/detection-settings",
@@ -141,8 +136,8 @@ def test_put_persists_and_a_subsequent_get_reflects_exactly_what_was_saved(tmp_p
     assert get_response.json() == expected
 
 
-def test_put_normalizes_stray_start_end_to_null_when_mode_is_always(tmp_path) -> None:
-    with TestClient(_app_with_store(tmp_path)) as client:
+def test_put_normalizes_stray_start_end_to_null_when_mode_is_always(app: FastAPI) -> None:
+    with TestClient(app) as client:
         _login(client)
         response = client.put(
             "/api/v1/detection-settings",
@@ -168,8 +163,7 @@ def test_put_normalizes_stray_start_end_to_null_when_mode_is_always(tmp_path) ->
     }
 
 
-def test_put_once_saved_overrides_the_live_pulled_fallback_on_a_later_get(tmp_path) -> None:
-    app = _app_with_store(tmp_path)
+def test_put_once_saved_overrides_the_live_pulled_fallback_on_a_later_get(app: FastAPI) -> None:
     app.state.pulled_config = PulledWorkerConfig(
         config_version=1,
         restart_epoch=1,
@@ -207,8 +201,8 @@ def test_put_once_saved_overrides_the_live_pulled_fallback_on_a_later_get(tmp_pa
         {"on": True, "mode": "window", "start": "aa:bb", "end": "20:00"},
     ],
 )
-def test_put_rejects_malformed_hhmm_times(tmp_path, domain_payload: dict[str, object]) -> None:
-    with TestClient(_app_with_store(tmp_path)) as client:
+def test_put_rejects_malformed_hhmm_times(app: FastAPI, domain_payload: dict[str, object]) -> None:
+    with TestClient(app) as client:
         _login(client)
         response = client.put(
             "/api/v1/detection-settings",
@@ -223,8 +217,8 @@ def test_put_rejects_malformed_hhmm_times(tmp_path, domain_payload: dict[str, ob
     assert response.status_code == 422
 
 
-def test_put_requires_start_and_end_when_mode_is_window(tmp_path) -> None:
-    with TestClient(_app_with_store(tmp_path)) as client:
+def test_put_requires_start_and_end_when_mode_is_window(app: FastAPI) -> None:
+    with TestClient(app) as client:
         _login(client)
         response = client.put(
             "/api/v1/detection-settings",
@@ -239,8 +233,8 @@ def test_put_requires_start_and_end_when_mode_is_window(tmp_path) -> None:
     assert response.status_code == 422
 
 
-def test_put_rejects_equal_start_and_end(tmp_path) -> None:
-    with TestClient(_app_with_store(tmp_path)) as client:
+def test_put_rejects_equal_start_and_end(app: FastAPI) -> None:
+    with TestClient(app) as client:
         _login(client)
         response = client.put(
             "/api/v1/detection-settings",
@@ -255,8 +249,8 @@ def test_put_rejects_equal_start_and_end(tmp_path) -> None:
     assert response.status_code == 422
 
 
-def test_detection_settings_routes_require_a_dashboard_session(tmp_path) -> None:
-    with TestClient(_app_with_store(tmp_path)) as client:
+def test_detection_settings_routes_require_a_dashboard_session(app: FastAPI) -> None:
+    with TestClient(app) as client:
         get_response = client.get("/api/v1/detection-settings")
         put_response = client.put(
             "/api/v1/detection-settings",

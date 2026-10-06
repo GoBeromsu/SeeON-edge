@@ -2,17 +2,20 @@
 
 from __future__ import annotations
 
-import sqlite3
 from bisect import bisect_right
 from dataclasses import dataclass
 from typing import Final
 
+import psycopg
+
 from backend.app.features.diagnostics.records import (
     AvailabilityKind,
     CoverageKind,
+    UnitCausalState,
 )
 
 _INF: Final = 1 << 62
+UNSCOPED_GAP_CAUSE: Final = "scope-unresolved"
 
 _AVAIL_EXACT: Final = {
     CoverageKind.MISSING_NOT_RECORDED: AvailabilityKind.MISSING_NOT_RECORDED,
@@ -35,7 +38,7 @@ class QueryableRange:
 
 
 def insert_coverage(
-    connection: sqlite3.Connection,
+    connection: psycopg.Connection,
     *,
     camera_id: str,
     worker_boot_id: str,
@@ -58,7 +61,7 @@ def insert_coverage(
             camera_id, worker_boot_id, source_generation, stream_epoch,
             coverage_kind, producer, from_sequence, to_sequence,
             from_ns, to_ns, record_count, exact, cause, recorded_at_ns
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
         """,
         (
             camera_id,
@@ -77,16 +80,73 @@ def insert_coverage(
             recorded_at_ns,
         ),
     )
+    downgrade_terminal_certainty(
+        connection,
+        camera_id=camera_id,
+        worker_boot_id=worker_boot_id,
+        source_generation=source_generation,
+        stream_epoch=stream_epoch,
+        kind=kind,
+        from_ns=from_ns,
+        to_ns=to_ns,
+        exact=exact,
+        cause=cause,
+    )
+
+
+def downgrade_terminal_certainty(
+    connection: psycopg.Connection,
+    *,
+    camera_id: str,
+    worker_boot_id: str,
+    source_generation: int,
+    stream_epoch: int,
+    kind: CoverageKind,
+    from_ns: int,
+    to_ns: int,
+    exact: bool,
+    cause: str,
+) -> None:
+    # Coverage may arrive after a watermark or be coarsened after pruning.
+    # Lower terminal certainty in this same transaction; never reopen a unit
+    # or upgrade a forced/previously unknown terminal to a known state.
+    unknown = kind is not CoverageKind.MISSING_NOT_RECORDED or not exact
+    connection.execute(
+        """
+        UPDATE execution_units SET causal_state = %s
+        WHERE terminal = 1 AND causal_state IN (%s, %s)
+          AND camera_id = %s AND worker_boot_id = %s
+          AND (
+              (source_generation = %s AND stream_epoch = %s)
+              OR %s
+          )
+          AND first_observed_ns <= %s AND last_observed_ns >= %s
+        """,
+        (
+            str(
+                UnitCausalState.INCOMPLETE_UNKNOWN if unknown else UnitCausalState.INCOMPLETE_KNOWN
+            ),
+            str(UnitCausalState.COMPLETE),
+            str(UnitCausalState.INCOMPLETE_KNOWN),
+            camera_id,
+            worker_boot_id,
+            source_generation,
+            stream_epoch,
+            cause == UNSCOPED_GAP_CAUSE and not exact,
+            to_ns,
+            from_ns,
+        ),
+    )
 
 
 def parent_loss_kind(
-    connection: sqlite3.Connection, camera_id: str, observed_at_ns: int
+    connection: psycopg.Connection, camera_id: str, observed_at_ns: int
 ) -> CoverageKind | None:
     deleted = connection.execute(
         """
         SELECT coverage_id FROM execution_coverage
-        WHERE camera_id = ? AND coverage_kind = ? AND exact = 1
-          AND from_ns <= ? AND to_ns >= ?
+        WHERE camera_id = %s AND coverage_kind = %s AND exact = 1
+          AND from_ns <= %s AND to_ns >= %s
         LIMIT 1
         """,
         (camera_id, str(CoverageKind.DELETED_BY_CAPACITY), observed_at_ns, observed_at_ns),
@@ -96,8 +156,8 @@ def parent_loss_kind(
     coarsened = connection.execute(
         """
         SELECT coverage_id FROM execution_coverage
-        WHERE camera_id = ? AND coverage_kind = ? AND exact = 0
-          AND from_ns <= ? AND to_ns >= ?
+        WHERE camera_id = %s AND coverage_kind = %s AND exact = 0
+          AND from_ns <= %s AND to_ns >= %s
         LIMIT 1
         """,
         (camera_id, str(CoverageKind.UNKNOWN_COARSENED), observed_at_ns, observed_at_ns),
@@ -105,11 +165,11 @@ def parent_loss_kind(
     return CoverageKind.UNKNOWN_COARSENED if coarsened is not None else None
 
 
-def queryable_range(connection: sqlite3.Connection, camera_id: str) -> QueryableRange:
+def queryable_range(connection: psycopg.Connection, camera_id: str) -> QueryableRange:
     row = connection.execute(
         """
         SELECT MIN(observed_at_ns), MAX(observed_at_ns)
-        FROM execution_records WHERE camera_id = ?
+        FROM execution_records WHERE camera_id = %s
         """,
         (camera_id,),
     ).fetchone()
@@ -119,7 +179,7 @@ def queryable_range(connection: sqlite3.Connection, camera_id: str) -> Queryable
 
 
 def availability(
-    connection: sqlite3.Connection, camera_id: str, from_ns: int, to_ns: int
+    connection: psycopg.Connection, camera_id: str, from_ns: int, to_ns: int
 ) -> tuple[AvailabilityRange, ...]:
     """Paint the query window with the five availability words.
 
@@ -139,7 +199,7 @@ def availability(
         """
         SELECT observed_at_ns, worker_boot_id, producer, producer_sequence
         FROM execution_records
-        WHERE camera_id = ? AND observed_at_ns >= ? AND observed_at_ns <= ?
+        WHERE camera_id = %s AND observed_at_ns >= %s AND observed_at_ns <= %s
         ORDER BY worker_boot_id, producer, producer_sequence
         """,
         (camera_id, from_ns, to_ns),
@@ -147,7 +207,7 @@ def availability(
     coverage = connection.execute(
         """
         SELECT coverage_kind, exact, from_ns, to_ns FROM execution_coverage
-        WHERE camera_id = ? AND from_ns <= ? AND to_ns >= ?
+        WHERE camera_id = %s AND from_ns <= %s AND to_ns >= %s
         ORDER BY from_ns, coverage_id
         """,
         (camera_id, to_ns, from_ns),
@@ -155,10 +215,10 @@ def availability(
     bounds = connection.execute(
         """
         SELECT
-          (SELECT MIN(observed_at_ns) FROM execution_records WHERE camera_id = ?),
-          (SELECT MAX(observed_at_ns) FROM execution_records WHERE camera_id = ?),
-          (SELECT MIN(from_ns) FROM execution_coverage WHERE camera_id = ?),
-          (SELECT MAX(to_ns) FROM execution_coverage WHERE camera_id = ?)
+          (SELECT MIN(observed_at_ns) FROM execution_records WHERE camera_id = %s),
+          (SELECT MAX(observed_at_ns) FROM execution_records WHERE camera_id = %s),
+          (SELECT MIN(from_ns) FROM execution_coverage WHERE camera_id = %s),
+          (SELECT MAX(to_ns) FROM execution_coverage WHERE camera_id = %s)
         """,
         (camera_id, camera_id, camera_id, camera_id),
     ).fetchone()
@@ -267,9 +327,11 @@ def _atom_kind(
 
 
 __all__ = [
+    "UNSCOPED_GAP_CAUSE",
     "AvailabilityRange",
     "QueryableRange",
     "availability",
+    "downgrade_terminal_certainty",
     "insert_coverage",
     "parent_loss_kind",
     "queryable_range",

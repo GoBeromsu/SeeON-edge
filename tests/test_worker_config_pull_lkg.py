@@ -283,12 +283,10 @@ def test_pull_worker_config_returns_none_on_urllib_error() -> None:
 
 
 def test_load_on_fresh_central_edge_db_returns_none_not_migration_error(tmp_path) -> None:
-    # Regression: on the production central edge DB path (edge.sqlite3),
-    # open_connection routes through backend.app.edge_db.open_runtime_database,
-    # which raises MigrationRequiredError (an EdgeDatabaseError, not a
-    # sqlite3.Error) when the file does not exist yet. An unprovisioned
-    # first boot must degrade to "no LKG" (None) so `--check-config`'s static
-    # path exits 0 without touching disk -- it must NOT propagate and crash.
+    # Regression: the LKG cache path is derived from the retired edge.sqlite3
+    # name, and on an unprovisioned first boot neither exists yet. Loading must
+    # degrade to "no LKG" (None) so `--check-config`'s static path exits 0
+    # without touching disk -- it must NOT propagate and crash.
     store = WorkerConfigLkgStore(tmp_path / "edge.sqlite3")
     assert not (tmp_path / "edge.sqlite3").exists()
 

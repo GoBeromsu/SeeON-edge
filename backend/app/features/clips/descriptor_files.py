@@ -43,7 +43,7 @@ def open_contained_regular_file(root: Path, path: Path) -> OpenedRegularFile:
             directory_fd = next_fd
         media_fd = os.open(
             relative.parts[-1],
-            os.O_RDONLY | os.O_NOFOLLOW,
+            os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK,
             dir_fd=directory_fd,
         )
         opened_stat = os.fstat(media_fd)

@@ -1,11 +1,10 @@
 from __future__ import annotations
 
 import inspect
-import sqlite3
 import threading
 from pathlib import Path
 
-from backend.app.edge_db.bootstrap import bootstrap_database
+from backend.app.edge_db.migration.mapping import DIAGNOSTICS_TARGET_TABLES, EXPECTED_TARGET_TABLES
 from backend.app.features.status.heartbeat_store import NEVER_SEEN, ONLINE, STALE, HeartbeatStore
 
 
@@ -156,11 +155,7 @@ def test_cardinality_cap_evicts_oldest_first() -> None:
     assert "cam-a" not in snap["cameras"]
 
 
-def test_one_hundred_heartbeat_ids_are_memory_only_and_lost_on_restart(
-    tmp_path: Path,
-) -> None:
-    database = tmp_path / "edge.sqlite3"
-    bootstrap_database(database)
+def test_one_hundred_heartbeat_ids_are_memory_only_and_lost_on_restart() -> None:
     store = HeartbeatStore(stale_after_sec=90.0, clock=_Clock(1_000.0))
     for index in range(100):
         store.record(f"cam-{index}", f"fac-{index}", received_at=1_000.0)
@@ -175,15 +170,10 @@ def test_one_hundred_heartbeat_ids_are_memory_only_and_lost_on_restart(
     assert all(row["status"] == ONLINE for row in first["cameras"].values())
     assert all(row["status"] == NEVER_SEEN for row in lost["cameras"].values())
     assert all(row["last_heartbeat_at"] is None for row in lost["cameras"].values())
-    with sqlite3.connect(database) as connection:
-        tables = {
-            str(row[0])
-            for row in connection.execute(
-                "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'"
-            )
-        }
-        assert "control_heartbeats" not in tables
-        assert "runtime_latency" not in tables
+    # Provisioning checks the PostgreSQL product and diagnostics schemas against these sets.
+    tables = EXPECTED_TARGET_TABLES | DIAGNOSTICS_TARGET_TABLES
+    assert "control_heartbeats" not in tables
+    assert "runtime_latency" not in tables
 
 
 def test_concurrent_records_keep_latest_timestamp() -> None:

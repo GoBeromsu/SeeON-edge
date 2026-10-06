@@ -2,17 +2,22 @@
 
 from __future__ import annotations
 
-import sqlite3
 from collections.abc import Iterable
 
-from backend.app.features.diagnostics.coverage import insert_coverage
+import psycopg
+
+from backend.app.features.diagnostics.coverage import (
+    UNSCOPED_GAP_CAUSE,
+    downgrade_terminal_certainty,
+    insert_coverage,
+)
 from backend.app.features.diagnostics.records import (
     CoverageKind,
     SegmentStorageState,
 )
 
 
-def next_prunable_unit(connection: sqlite3.Connection) -> str | None:
+def next_prunable_unit(connection: psycopg.Connection) -> str | None:
     """Oldest terminal unit by last observation - the order execution_units_prune_order
     indexes, so this is a single index seek rather than a sort of every
     terminal unit on each ingest."""
@@ -20,7 +25,7 @@ def next_prunable_unit(connection: sqlite3.Connection) -> str | None:
         """
         SELECT causal_unit_id FROM execution_units
         WHERE terminal = 1
-        ORDER BY last_observed_ns, causal_unit_id
+        ORDER BY last_observed_ns, causal_unit_id COLLATE pg_catalog."C"
         LIMIT 1
         """
     ).fetchone()
@@ -28,14 +33,14 @@ def next_prunable_unit(connection: sqlite3.Connection) -> str | None:
 
 
 def prune_unit(
-    connection: sqlite3.Connection, unit_id: str, now_ns: int
+    connection: psycopg.Connection, unit_id: str, now_ns: int
 ) -> tuple[int, Lane | None]:
     """Delete one whole unit; returns (payload bytes it held, its lane) or (0, None)."""
     unit = connection.execute(
         """
         SELECT camera_id, worker_boot_id, source_generation, stream_epoch,
                first_observed_ns, last_observed_ns, record_count
-        FROM execution_units WHERE causal_unit_id = ?
+        FROM execution_units WHERE causal_unit_id = %s
         """,
         (unit_id,),
     ).fetchone()
@@ -47,7 +52,7 @@ def prune_unit(
         """
         SELECT producer, MIN(producer_sequence), MAX(producer_sequence),
                MIN(observed_at_ns), MAX(observed_at_ns), COUNT(*)
-        FROM execution_records WHERE causal_unit_id = ?
+        FROM execution_records WHERE causal_unit_id = %s
         GROUP BY producer
         """,
         (unit_id,),
@@ -55,32 +60,32 @@ def prune_unit(
     segment_deltas = connection.execute(
         """
         SELECT segment_id, COUNT(*), COALESCE(SUM(payload_bytes), 0)
-        FROM execution_records WHERE causal_unit_id = ?
+        FROM execution_records WHERE causal_unit_id = %s
         GROUP BY segment_id
         """,
         (unit_id,),
     ).fetchall()
     freed = sum(int(row[2]) for row in segment_deltas)
-    connection.execute("DELETE FROM execution_units WHERE causal_unit_id = ?", (unit_id,))
+    connection.execute("DELETE FROM execution_units WHERE causal_unit_id = %s", (unit_id,))
     for segment_id, count, bytes_removed in segment_deltas:
         connection.execute(
             """
             UPDATE execution_segments
-            SET record_count = record_count - ?, payload_bytes = payload_bytes - ?
-            WHERE segment_id = ?
+            SET record_count = record_count - %s, payload_bytes = payload_bytes - %s
+            WHERE segment_id = %s
             """,
             (int(count), int(bytes_removed), int(segment_id)),
         )
         emptied = connection.execute(
-            "SELECT record_count FROM execution_segments WHERE segment_id = ?",
+            "SELECT record_count FROM execution_segments WHERE segment_id = %s",
             (int(segment_id),),
         ).fetchone()
         if emptied is not None and int(emptied[0]) <= 0:
             connection.execute(
                 """
                 UPDATE execution_segments
-                SET storage_state = ?, record_count = 0, payload_bytes = 0
-                WHERE segment_id = ?
+                SET storage_state = %s, record_count = 0, payload_bytes = 0
+                WHERE segment_id = %s
                 """,
                 (str(SegmentStorageState.PRUNED_SUMMARY), int(segment_id)),
             )
@@ -139,7 +144,7 @@ def prune_unit(
 
 
 def _extend_contiguous_deletion(
-    connection: sqlite3.Connection,
+    connection: psycopg.Connection,
     *,
     camera_id: str,
     worker_boot_id: str,
@@ -160,10 +165,10 @@ def _extend_contiguous_deletion(
     """
     row = connection.execute(
         """
-        SELECT coverage_id FROM execution_coverage
-        WHERE camera_id = ? AND worker_boot_id = ? AND source_generation = ?
-          AND stream_epoch = ? AND producer = ? AND coverage_kind = ? AND exact = 1
-          AND to_sequence = ? - 1
+        SELECT coverage_id, from_ns, to_ns FROM execution_coverage
+        WHERE camera_id = %s AND worker_boot_id = %s AND source_generation = %s
+          AND stream_epoch = %s AND producer = %s AND coverage_kind = %s AND exact = 1
+          AND to_sequence = %s - 1
         """,
         (
             camera_id,
@@ -180,16 +185,28 @@ def _extend_contiguous_deletion(
     connection.execute(
         """
         UPDATE execution_coverage
-        SET to_sequence = ?, to_ns = MAX(to_ns, ?), record_count = record_count + ?,
-            recorded_at_ns = ?
-        WHERE coverage_id = ?
+        SET to_sequence = %s, to_ns = GREATEST(to_ns, %s), record_count = record_count + %s,
+            recorded_at_ns = %s
+        WHERE coverage_id = %s
         """,
         (to_sequence, to_ns, record_count, recorded_at_ns, int(row[0])),
+    )
+    downgrade_terminal_certainty(
+        connection,
+        camera_id=camera_id,
+        worker_boot_id=worker_boot_id,
+        source_generation=source_generation,
+        stream_epoch=stream_epoch,
+        kind=CoverageKind.DELETED_BY_CAPACITY,
+        from_ns=int(row[1]),
+        to_ns=max(int(row[2]), to_ns),
+        exact=True,
+        cause="capacity",
     )
     return True
 
 
-def drop_orphan_batches(connection: sqlite3.Connection) -> None:
+def drop_orphan_batches(connection: psycopg.Connection) -> None:
     """Delete batch receipts none of whose records can still exist.
 
     A receipt exists so a retried batch is answered idempotently. Every record
@@ -206,9 +223,9 @@ def drop_orphan_batches(connection: sqlite3.Connection) -> None:
         connection.execute(
             """
             DELETE FROM execution_batches
-            WHERE camera_id = ? AND received_at_ns < (
+            WHERE camera_id = %s AND received_at_ns < (
                 SELECT COALESCE(MIN(observed_at_ns), 0) FROM execution_records
-                WHERE camera_id = ?
+                WHERE camera_id = %s
             )
             """,
             (camera_id, camera_id),
@@ -219,7 +236,7 @@ Lane = tuple[str, str, int, int]
 
 
 def coarsen_coverage(
-    connection: sqlite3.Connection,
+    connection: psycopg.Connection,
     coverage_rows_per_epoch: int,
     now_ns: int,
     lanes: Iterable[Lane] | None = None,
@@ -237,7 +254,7 @@ def coarsen_coverage(
             SELECT camera_id, worker_boot_id, source_generation, stream_epoch, COUNT(*)
             FROM execution_coverage
             GROUP BY camera_id, worker_boot_id, source_generation, stream_epoch
-            HAVING COUNT(*) > ?
+            HAVING COUNT(*) > %s
             """,
             (coverage_rows_per_epoch,),
         ).fetchall()
@@ -247,8 +264,8 @@ def coarsen_coverage(
             count = connection.execute(
                 """
                 SELECT COUNT(*) FROM execution_coverage
-                WHERE camera_id = ? AND worker_boot_id = ? AND source_generation = ?
-                  AND stream_epoch = ?
+                WHERE camera_id = %s AND worker_boot_id = %s AND source_generation = %s
+                  AND stream_epoch = %s
                 """,
                 (camera_id, boot, gen, epoch),
             ).fetchone()
@@ -260,11 +277,11 @@ def coarsen_coverage(
             continue
         rows = connection.execute(
             """
-            SELECT coverage_id, from_ns, to_ns, record_count FROM execution_coverage
-            WHERE camera_id = ? AND worker_boot_id = ? AND source_generation = ?
-              AND stream_epoch = ?
+            SELECT coverage_id, from_ns, to_ns, record_count, cause FROM execution_coverage
+            WHERE camera_id = %s AND worker_boot_id = %s AND source_generation = %s
+              AND stream_epoch = %s
             ORDER BY from_ns, coverage_id
-            LIMIT ?
+            LIMIT %s
             """,
             (camera_id, boot, gen, epoch, overflow + 1),
         ).fetchall()
@@ -272,8 +289,8 @@ def coarsen_coverage(
             continue
         ids = [int(row[0]) for row in rows]
         connection.execute(
-            f"DELETE FROM execution_coverage WHERE coverage_id IN ({','.join('?' * len(ids))})",
-            ids,
+            "DELETE FROM execution_coverage WHERE coverage_id = ANY(%s)",
+            (ids,),
         )
         insert_coverage(
             connection,
@@ -289,7 +306,11 @@ def coarsen_coverage(
             to_ns=max(int(row[2]) for row in rows),
             record_count=sum(int(row[3]) for row in rows),
             exact=False,
-            cause="coarsened",
+            cause=(
+                UNSCOPED_GAP_CAUSE
+                if any(row[4] == UNSCOPED_GAP_CAUSE for row in rows)
+                else "coarsened"
+            ),
             recorded_at_ns=now_ns,
         )
 

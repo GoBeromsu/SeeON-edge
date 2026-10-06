@@ -1,57 +1,27 @@
-"""Startup owner for bounded audit verification and readiness state."""
+"""Refresh the audit verification and deferred process session."""
 
 from __future__ import annotations
 
 import logging
-import sqlite3
-from pathlib import Path
 
-from fastapi import FastAPI
-
-from backend.app.edge_db.compatibility import EdgeDatabaseError
-from backend.app.features.audit.http import AuditReadiness
-from backend.app.features.audit.sessions import close_session, start_session
-from backend.app.features.audit.store import AuditStore, AuditVerificationError
+from backend.app.edge_db.postgres import CommitOutcomeUnknown
+from backend.app.features.audit.postgres_runtime import (
+    AuditRuntimeUnavailable,
+    PostgresAuditRuntime,
+)
 
 _LOGGER = logging.getLogger(__name__)
 
 
-def close_audit_session(app: FastAPI) -> bool:
-    """Close a healthy session; failure deliberately leaves an unclean restart marker."""
-    store = getattr(app.state, "audit_store", None)
-    readiness = getattr(app.state, "audit_readiness", None)
-    if not isinstance(store, AuditStore):
-        return False
-    closed = False
-    if (
-        isinstance(readiness, AuditReadiness)
-        and readiness.healthy
-        and readiness.session is not None
-    ):
-        try:
-            close_session(store, readiness.session)
-            closed = True
-        except (AuditVerificationError, OSError, sqlite3.Error, EdgeDatabaseError):
-            _LOGGER.warning("audit session close failed; next startup will fence it")
-    store.close_verifier()
-    return closed
-
-
-def configure_audit_readiness(app: FastAPI, database_path: Path) -> bool:
-    """Verify schema-18 audit history and publish explicit process state."""
-    store = AuditStore(database_path)
-    app.state.audit_store = store
+def verify_audit_runtime(runtime: PostgresAuditRuntime) -> None:
+    """Refresh verification without owning HTTP readiness publication."""
     try:
-        app.state.audit_checkpoint = store.verify()
-        session = start_session(store)
-    except (AuditVerificationError, OSError, sqlite3.Error, EdgeDatabaseError) as error:
-        app.state.audit_error = str(error)
-        app.state.audit_readiness = AuditReadiness(
-            healthy=False, failure_code="startup_verification"
-        )
-        return False
-    app.state.audit_readiness = AuditReadiness(session=session)
-    return True
+        runtime.verify_once()
+        if not runtime.snapshot().session_established:
+            runtime.start_session_once()
+    except (AuditRuntimeUnavailable, CommitOutcomeUnknown):
+        _LOGGER.warning("audit verification failed; audit is degraded")
 
 
-__all__ = ["close_audit_session", "configure_audit_readiness"]
+
+__all__ = ["verify_audit_runtime"]

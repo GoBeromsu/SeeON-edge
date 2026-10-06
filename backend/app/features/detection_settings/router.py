@@ -3,8 +3,8 @@
 ``GET``/``PUT /api/v1/detection-settings`` -- a dashboard-only, facility-wide
 toggle (applied to every camera) for whether each detection domain (``fall``,
 ``bed_exit``) runs at all, and optionally restricts it to a nightly window.
-Persisted in ``DetectionSettingsStore`` (its own row per domain in
-``catalog.sqlite3``); once saved, these local settings take precedence over
+Persisted by the injected ``DetectionSettingsStore`` in the API-owned
+PostgreSQL ``edge_site`` row; once saved, these local settings take precedence over
 whatever the backend externally pulls, merged in at
 ``cameras.router.worker_config_snapshot`` response-build time -- this router
 never touches ``app.state.pulled_config`` itself (see that function's
@@ -27,11 +27,11 @@ from fastapi import APIRouter, FastAPI, HTTPException, Request, status
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from backend.app.features.audit.catalog import AuditAction, empty_detail
-from backend.app.features.audit.http import append_transactional
+from backend.app.features.audit.http import mutation_audit
 from backend.app.features.audit.store import AuditEvent
 from backend.app.features.audit.store import utc_now as audit_now
 from backend.app.features.cameras.store import CameraRegistryStore
-from backend.app.features.connection.store import ConnectionSettingsStore
+from backend.app.features.connection.dependencies import get_connection_settings_store
 from backend.app.features.detection_settings.policy_store import (
     DetectionPolicyStore,
     PolicyActivationRefused,
@@ -161,9 +161,10 @@ def put_detection_settings(
         target_id="detection-settings",
         detail=empty_detail(AuditAction.DETECTION_SETTINGS_UPDATE),
     )
-    _store(request.app).replace_all(
-        settings,
-        after_write=lambda connection: append_transactional(request, connection, event),
+    store = _store(request.app)
+    mutation_audit(request, lambda: event).apply(
+        store,
+        lambda append: store.replace_all(settings, after_write=append),
     )
     return {"domains": {domain: setting.as_dict() for domain, setting in settings.items()}}
 
@@ -175,9 +176,7 @@ def get_detection_policies(
     _authorize(request)
     facility_id = _require_enrolled_facility(request.app)
     store = _policy_store(request.app)
-    registry = getattr(request.app.state, "camera_registry", None)
-    if not isinstance(registry, CameraRegistryStore):
-        registry = CameraRegistryStore.from_env()
+    registry = _registry(request.app)
     # Kept as-is on purpose. Omitting unmapped cameras here drops them from the
     # resolved policy bundle, which pairs with the worker-config projection that
     # still serves them; a camera the worker watches but has no policy for is a
@@ -262,17 +261,21 @@ def apply_detection_policy(
         target_id=payload.camera_id or payload.module_id,
         detail=empty_detail(AuditAction.POLICY_APPLY),
     )
+    store = _policy_store(request.app)
     try:
-        activation = _policy_store(request.app).apply(
-            facility_id=facility_id,
-            module_id=payload.module_id,
-            module_version=payload.module_version,
-            schema_id=payload.schema_id,
-            schema_version=payload.schema_version,
-            camera_id=payload.camera_id,
-            values=payload.values,
-            expected_revision_id=payload.expected_revision_id,
-            after_write=lambda connection: append_transactional(request, connection, event),
+        activation = mutation_audit(request, lambda: event).apply(
+            store,
+            lambda append: store.apply(
+                facility_id=facility_id,
+                module_id=payload.module_id,
+                module_version=payload.module_version,
+                schema_id=payload.schema_id,
+                schema_version=payload.schema_version,
+                camera_id=payload.camera_id,
+                values=payload.values,
+                expected_revision_id=payload.expected_revision_id,
+                after_write=append,
+            ),
         )
     except PolicyRevisionConflict as error:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(error)) from error
@@ -298,14 +301,18 @@ def rollback_detection_policy(
         target_id=payload.camera_id or payload.module_id,
         detail=empty_detail(AuditAction.POLICY_ROLLBACK),
     )
+    store = _policy_store(request.app)
     try:
-        activation = _policy_store(request.app).rollback(
-            facility_id=facility_id,
-            module_id=payload.module_id,
-            module_version=payload.module_version,
-            camera_id=payload.camera_id,
-            expected_revision_id=payload.expected_revision_id,
-            after_write=lambda connection: append_transactional(request, connection, event),
+        activation = mutation_audit(request, lambda: event).apply(
+            store,
+            lambda append: store.rollback(
+                facility_id=facility_id,
+                module_id=payload.module_id,
+                module_version=payload.module_version,
+                camera_id=payload.camera_id,
+                expected_revision_id=payload.expected_revision_id,
+                after_write=append,
+            ),
         )
     except PolicyRevisionConflict as error:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(error)) from error
@@ -358,29 +365,24 @@ def _default_setting_dict(pulled: object, domain: str) -> dict[str, object]:
 
 def _store(app: FastAPI) -> DetectionSettingsStore:
     store = getattr(app.state, "detection_settings_store", None)
+    if store is None:
+        raise RuntimeError("detection settings store is not injected")
     if not isinstance(store, DetectionSettingsStore):
-        store = DetectionSettingsStore.from_env()
-        app.state.detection_settings_store = store
+        raise TypeError("detection settings store has invalid type")
     return store
 
 
 def _policy_store(app: FastAPI) -> DetectionPolicyStore:
     store = getattr(app.state, "detection_policy_store", None)
+    if store is None:
+        raise RuntimeError("detection policy store is not injected")
     if not isinstance(store, DetectionPolicyStore):
-        store = DetectionPolicyStore.from_env()
-        app.state.detection_policy_store = store
+        raise TypeError("detection policy store has invalid type")
     return store
 
 
-def _connection_store(app: FastAPI) -> ConnectionSettingsStore:
-    store = getattr(app.state, "connection_settings_store", None)
-    if isinstance(store, ConnectionSettingsStore):
-        return store
-    return ConnectionSettingsStore.from_env()
-
-
 def _require_enrolled_facility(app: FastAPI) -> str:
-    facility_id = _connection_store(app).load().facility_id
+    facility_id = get_connection_settings_store(app).load().facility_id
     if facility_id is None:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
@@ -389,13 +391,19 @@ def _require_enrolled_facility(app: FastAPI) -> str:
     return facility_id
 
 
+def _registry(app: FastAPI) -> CameraRegistryStore:
+    registry = getattr(app.state, "camera_registry", None)
+    if registry is None:
+        raise RuntimeError("camera registry is not injected")
+    if not isinstance(registry, CameraRegistryStore):
+        raise TypeError("camera registry has invalid type")
+    return registry
+
+
 def _require_policy_camera(app: FastAPI, camera_id: str | None) -> None:
     if camera_id is None:
         return
-    registry = getattr(app.state, "camera_registry", None)
-    if not isinstance(registry, CameraRegistryStore):
-        registry = CameraRegistryStore.from_env()
-    records = registry.snapshot()["cameras"]
+    records = _registry(app).snapshot()["cameras"]
     if any(
         camera_id == (record.get("backend_camera_id") or record.get("id")) for record in records
     ):

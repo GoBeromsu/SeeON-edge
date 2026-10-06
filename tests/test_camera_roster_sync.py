@@ -1,23 +1,25 @@
 from __future__ import annotations
 
 import json
-from collections.abc import Iterator
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from pathlib import Path
 from threading import Thread
 
 import pytest
 from fastapi.testclient import TestClient
 
-from backend.app.features.cameras.roster_sync import sync_camera_roster
+from backend.app.features.audit.postgres_runtime import PostgresAuditRuntime
+from backend.app.features.cameras.dependencies import sync_camera_roster
 from backend.app.features.cameras.store import CameraRegistryStore
 from backend.app.features.connection.store import (
-    API_CONNECTION_SETTINGS_PATH_ENV,
+    API_BACKEND_BASE_URL_ENV,
     ConnectionSettingsStore,
 )
 from backend.app.lifespan import apply_connection_settings
 from backend.app.main import create_app, no_lifespan
-from tests_support.compact_authority_db import prepare_compact_database
+from backend.app.postgres_root import PostgresRoot, install_postgres_stores
+from tests_support.postgres_sandbox import ProductSandbox
+
+pytest_plugins = ("tests_support.postgres_sandbox",)
 
 
 class _TopologyHandler(BaseHTTPRequestHandler):
@@ -54,31 +56,24 @@ class _TopologyHandler(BaseHTTPRequestHandler):
         _ = format, args
 
 
-@pytest.fixture(autouse=True)
-def connection_path(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Iterator[None]:
-    monkeypatch.setenv(API_CONNECTION_SETTINGS_PATH_ENV, str(tmp_path / "connection.sqlite3"))
-    yield
-
-
 def _run_server(server: ThreadingHTTPServer) -> Thread:
     thread = Thread(target=server.serve_forever, daemon=True)
     thread.start()
     return thread
 
 
-def _ready_app(tmp_path: Path, events_url: str, monkeypatch: pytest.MonkeyPatch):
+def _postgres_app(sandbox: ProductSandbox):
     app = create_app(lifespan=no_lifespan)
-    registry_path = tmp_path / "catalog.sqlite3"
-    prepare_compact_database(registry_path)
-    store = CameraRegistryStore(registry_path)
-    app.state.camera_registry = store
-    monkeypatch.setattr(
-        ConnectionSettingsStore,
-        "from_env",
-        classmethod(lambda cls: cls(registry_path)),
-    )
-    monkeypatch.setenv("API_BACKEND_BASE_URL", events_url.removesuffix("/api/v1/events"))
-    ConnectionSettingsStore.from_env().save(
+    install_postgres_stores(app, PostgresRoot(sandbox.database, sandbox.authority))
+    store = app.state.camera_registry
+    assert isinstance(store, CameraRegistryStore)
+    return app, store
+
+
+def _ready_app(sandbox: ProductSandbox, base_url: str, monkeypatch: pytest.MonkeyPatch):
+    app, store = _postgres_app(sandbox)
+    monkeypatch.setenv(API_BACKEND_BASE_URL_ENV, base_url)
+    ConnectionSettingsStore(sandbox.database, sandbox.authority).save(
         {
             "facility_code": "FAC-001",
             "client_installation_ref": "edge-unit-001",
@@ -104,7 +99,7 @@ def _ready_app(tmp_path: Path, events_url: str, monkeypatch: pytest.MonkeyPatch)
 
 
 def test_sync_camera_roster_sends_complete_stable_topology_without_local_secrets(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    postgres_product_sandbox: ProductSandbox, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     # Given
     _TopologyHandler.requests = []
@@ -112,8 +107,8 @@ def test_sync_camera_roster_sends_complete_stable_topology_without_local_secrets
     thread = _run_server(server)
     try:
         app, store = _ready_app(
-            tmp_path,
-            f"http://127.0.0.1:{server.server_port}/api/v1/events",
+            postgres_product_sandbox,
+            f"http://127.0.0.1:{server.server_port}",
             monkeypatch,
         )
 
@@ -140,13 +135,11 @@ def test_sync_camera_roster_sends_complete_stable_topology_without_local_secrets
         thread.join(timeout=1)
 
 
-def test_sync_camera_roster_fails_closed_for_unmapped_camera(tmp_path: Path) -> None:
+def test_sync_camera_roster_fails_closed_for_unmapped_camera(
+    postgres_product_sandbox: ProductSandbox,
+) -> None:
     # Given
-    app = create_app(lifespan=no_lifespan)
-    registry_path = tmp_path / "catalog.sqlite3"
-    prepare_compact_database(registry_path)
-    store = CameraRegistryStore(registry_path)
-    app.state.camera_registry = store
+    app, store = _postgres_app(postgres_product_sandbox)
     store.create(
         camera_id="legacy-camera",
         label="Legacy",
@@ -166,13 +159,13 @@ def test_sync_camera_roster_fails_closed_for_unmapped_camera(tmp_path: Path) -> 
 
 
 def test_floor_crud_emits_one_event_driven_sync_trigger(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    postgres_product_sandbox: ProductSandbox,
+    postgres_audit_runtime: PostgresAuditRuntime,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     # Given
-    app = create_app(lifespan=no_lifespan)
-    registry_path = tmp_path / "catalog.sqlite3"
-    prepare_compact_database(registry_path)
-    app.state.camera_registry = CameraRegistryStore(registry_path)
+    app, _store = _postgres_app(postgres_product_sandbox)
+    app.state.audit_runtime = postgres_audit_runtime
     calls: list[tuple[bool, bool]] = []
     from backend.app.features.cameras import router as router_module
 

@@ -1,17 +1,23 @@
-"""Active compact listing contracts after the schema-17 index was removed."""
+"""Clip listing filter, facet and lifespan contracts on the PostgreSQL catalogue."""
 
 from __future__ import annotations
 
 import json
-import sqlite3
 from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
 
-from backend.app.edge_db.bootstrap import bootstrap_database
+from backend.app.features.audit.postgres_runtime import PostgresAuditRuntime
+from backend.app.features.clips.catalog_indexer import API_CLIP_CATALOG_INTERVAL_SEC_ENV
 from backend.app.features.clips.store import ClipStore
-from backend.app.main import create_app, no_lifespan
+from backend.app.main import create_app
+from tests_support.postgres_api_app import postgres_api_app
+from tests_support.postgres_app_env import inject_sandbox_root
+from tests_support.postgres_clip_app import index_clips
+from tests_support.postgres_sandbox import ProductSandbox
+
+pytest_plugins = ("tests_support.postgres_sandbox", "tests_support.postgres_app_env")
 
 
 def _write_manifest(
@@ -54,10 +60,12 @@ def _login(client: TestClient) -> None:
 def test_event_type_filter_rejects_noncanonical_values(
     tmp_path: Path,
     params: dict[str, str | int],
+    postgres_product_sandbox: ProductSandbox,
+    postgres_audit_runtime: PostgresAuditRuntime,
 ) -> None:
     root = tmp_path / "clip-store"
     _write_manifest(root, "clip-01")
-    app = create_app(lifespan=no_lifespan)
+    app = postgres_api_app(postgres_product_sandbox, postgres_audit_runtime)
     app.state.clip_store = ClipStore(root)
 
     with TestClient(app) as client:
@@ -67,36 +75,18 @@ def test_event_type_filter_rejects_noncanonical_values(
     assert response.status_code == 422
 
 
-def test_runtime_open_on_migrated_edge_database_executes_no_ddl(
+def test_listing_lifespan_can_enter_same_app_twice(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    postgres_product_sandbox: ProductSandbox,
+    postgres_audit_runtime: PostgresAuditRuntime,
 ) -> None:
-    path = tmp_path / "edge.sqlite3"
-    bootstrap_database(path)
-    from backend.app.edge_db.connection import RuntimeActor, open_runtime_database
-
-    connection = open_runtime_database(path, actor=RuntimeActor.API)
-    try:
-        tables = {
-            str(row[0])
-            for row in connection.execute(
-                "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'"
-            )
-        }
-        with pytest.raises(sqlite3.DatabaseError):
-            connection.execute(
-                "CREATE TABLE clip_listing_generation (id INTEGER PRIMARY KEY, "
-                "active_generation INTEGER NOT NULL, next_generation INTEGER NOT NULL) STRICT"
-            )
-    finally:
-        connection.close()
-    assert "clip_listing_generation" not in tables
-
-
-def test_listing_lifespan_can_enter_same_app_twice(tmp_path: Path) -> None:
+    monkeypatch.setenv(API_CLIP_CATALOG_INTERVAL_SEC_ENV, "300")
     root = tmp_path / "clip-store"
     _write_manifest(root, "clip-01")
     app = create_app()
     app.state.clip_store = ClipStore(root)
+    inject_sandbox_root(app, postgres_product_sandbox, postgres_audit_runtime)
 
     pages: list[int] = []
     for _ in range(2):
@@ -105,19 +95,22 @@ def test_listing_lifespan_can_enter_same_app_twice(tmp_path: Path) -> None:
             response = client.get("/api/v1/clips", params={"limit": 48})
             assert response.status_code == 200
             pages.append(len(response.json()["clips"]))
-            assert not hasattr(app.state, "clip_listing_index")
-        assert not hasattr(app.state, "clip_listing_index")
 
     assert pages == [1, 1]
 
 
-def test_http_listing_exposes_canonical_event_facets(tmp_path: Path) -> None:
+def test_http_listing_exposes_canonical_event_facets(
+    tmp_path: Path,
+    postgres_product_sandbox: ProductSandbox,
+    postgres_audit_runtime: PostgresAuditRuntime,
+) -> None:
     root = tmp_path / "clip-store"
     _write_manifest(root, "clip-01", event_type="fall")
     _write_manifest(root, "clip-02", event_type="bed-exit")
     _write_manifest(root, "clip-03", event_type=None, event_ref="legacy")
-    app = create_app(lifespan=no_lifespan)
+    app = postgres_api_app(postgres_product_sandbox, postgres_audit_runtime)
     app.state.clip_store = ClipStore(root)
+    index_clips(app)
     with TestClient(app) as client:
         _login(client)
         response = client.get("/api/v1/clips")

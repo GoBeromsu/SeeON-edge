@@ -20,100 +20,70 @@ only the backend HTTP API.
 The one supported edge deployment is one local Linux host, one Compose release
 unit, one API process, and one worker process. Those processes remain
 import-independent and HTTP remains their command/event notification boundary.
-The backend alone owns `/var/lib/seeon-state/edge.sqlite3`; the database,
-`edge.sqlite3-wal`, and `edge.sqlite3-shm` stay together in the same private
-`0700` local directory and the database is `0600`. The runtime slot has no
-database mount and never opens, migrates, or repairs a SQLite database.
+The backend alone opens PostgreSQL. The `postgres` compose service holds the
+only durable store; the worker slot has no database credentials and never
+opens, migrates, or repairs the database.
 
-### Schema 19; bootstrap creates or extends, never rewrites schema 18
+### PostgreSQL schemas and provisioning
 
-Schema 19 is schema 18 (the compact ten-table contract in
-`backend/app/edge_db/compact_schema_ddl.py`) plus six STRICT execution-record
-tables (`backend/app/edge_db/execution_records_ddl.py`). The v1-v18 migration
-ledger, the schema-17 to schema-18 cutover, the legacy state import, and the
-drain and inventory gates were retired (2026-08-28). Schema-18 tables and rows
-are never ALTER/DROP rewritten.
+The backend connects through `open_postgres_root`
+(`backend/app/postgres_root.py`). Three environment values, set in
+`compose.edge.yaml`, name what it needs: `API_POSTGRES_DSN_FILE` (connection
+string file), `API_POSTGRES_AUTHORITY_FILE` (persistence authority file), and
+`API_POSTGRES_SCHEMA` (default `seeon_edge`). The DDL lives in
+`backend/app/edge_db/postgres_product.sql` (ten product tables, including
+`schema_migrations`), `postgres_delivery.sql` (`deployment_authority` and the
+four event-delivery tables), and `postgres_diagnostics.sql` (the six
+`execution_*` record tables).
 
-Only the one-shot `python -m backend.app.edge_db` bootstrap
-(`backend/app/edge_db/bootstrap.py`, run by the `edge-db-migrator` compose
-service before `ml-api`) executes DDL or sets `PRAGMA user_version`. Its
-contract:
+Only the one-shot `edge-db-migrator` compose service, which runs
+`python -m backend.app.edge_db.migration provision`, creates the schemas, the
+runtime role, and the authority row, before `ml-api` starts. The runtime never
+executes DDL.
 
-| `edge.sqlite3` on the `edge-state` volume | Bootstrap behavior |
+| Schema | Content |
 | --- | --- |
-| absent or empty | create schema 19 in one transaction, record ledger row 19 only, `user_version = 19`, print `EDGE_DB_BOOTSTRAP_OK ... created=true extended=false` |
-| exact schema 18 | consistent backup to `<name>.schema18-backup.sqlite3`, then create the six execution tables in one transaction, ledger row 19 with `source_schema_version=18`, `user_version = 19`, print `... created=false extended=true` |
-| schema 19 | verify the ledger ends at the schema-19 identity, the sixteen STRICT tables, and the structural manifest; mutate nothing; print `... created=false extended=false` |
-| `user_version` greater than 19 | refuse with `NewerSchemaError`; leave the file unmigrated |
-| any other `user_version` | refuse with `EDGE_DB_BOOTSTRAP_FAILED`; there is no rewrite path |
-| `user_version = 0` but tables exist | refuse; never bootstrap over foreign data |
-
-The bootstrap holds the exclusive `deployment.lock` that every runtime
-connection takes shared, so it refuses while a runtime is open and runtimes
-refuse while it runs. The ledger may contain rows 1-17 plus 18 plus 19
-(upgraded deployed DB), 18 plus 19 (extended fresh-18 DB), or only 19 (fresh
-create). The newest row must be the frozen schema-19 identity and nothing may
-sit beyond it.
-
-Backend connections verify that contract on open, enable foreign keys, use WAL
-with `synchronous=FULL` and a fixed 5000 ms busy timeout, and are guarded by a
-SQLite authorizer that rejects DDL and unauthorized writes. Transactions are
-short: never hold one across hash, fsync, HTTP, or other external work.
-
-| Table | Sole writer |
-| --- | --- |
-| `schema_migrations` | one-shot bootstrap |
-| the fifteen application tables (nine compact plus six execution-record) | backend API |
-
-Schema compatibility is an explicit inclusive range, `19..19`:
-
-| Database version relative to binary range | Runtime behavior |
-| --- | --- |
-| below minimum (including no database) | refuse; bootstrap required |
-| 19 | open read/write with ownership guard, no DDL |
-| above maximum | refuse; binary is too old |
-
-### `edge-diagnostics.sqlite3`: an isolated sibling file for execution-record telemetry
+| `<API_POSTGRES_SCHEMA>` (default `seeon_edge`) | product tables and event delivery |
+| `<API_POSTGRES_SCHEMA>_diagnostics` (default `seeon_edge_diagnostics`) | execution-record telemetry |
 
 Execution-record telemetry (the six `execution_*` tables) is written on every
 worker flush (~250 ms) and pruned toward its retention budget on that same hot
-path. It lives in its own SQLite file, `edge-diagnostics.sqlite3`, next to
-`edge.sqlite3` in the same `edge-state` directory -- SQLite's writer lock and
-WAL are per-file, so this telemetry's writer lock, WAL, and checkpoint
-pressure can never be shared with alerts, incidents, or policy writes in
-`edge.sqlite3` (#579/#580). The product database's own six `execution_*`
-tables are left in place untouched (no destructive migration); retiring them
-is a later ops step (tracked separately in #583).
+path. It lives in its own schema so that write load stays apart from alerts,
+incidents, and policy writes in the product schema.
 
-Its schema ledger is intentionally simpler than `edge.sqlite3`'s: a flat
-`PRAGMA user_version` stamp (currently `1`), with no `schema_migrations` table
-and no migration path -- there is exactly one version this file will ever
-hold. The same one-shot `python -m backend.app.edge_db` bootstrap creates or
-verifies it, under the same exclusive `deployment.lock` as `edge.sqlite3`
-(`DeploymentLock.require_for` only checks that the database's containing
-directory matches the locked directory, so one lock legitimately covers both
-sibling files). It prints a second line,
-`EDGE_DIAGNOSTICS_DB_BOOTSTRAP_OK path=... schema=1 created=<bool>`.
+### Authority fence
 
-At runtime, `backend/app/edge_db/diagnostics_connection.py` only opens and
-verifies this file (mirroring `open_runtime_database` for the product
-database) -- it never creates the file or its schema. It installs no
-per-table write authorizer, since it has exactly one table family and no
-other feature to protect.
+`deployment_authority` holds one row: `generation`, `writer_token`,
+`accepting`, and `egress_enabled`. The backend reads its token from the
+authority file, and every write transaction calls `require_authority`, which
+locks the row `FOR SHARE` and refuses when the generation, token, or
+`accepting` flag does not match. `freeze_authority` closes the fence, so a
+runtime holding a stale token can no longer write.
 
-### Image rollback preserves the state volume
+### Connection budget
+
+The backend pool is fixed by `DEFAULT_POOL_BUDGET`: at most 8 connections, 32
+waiting requests, a 2 s acquire timeout, a 5000 ms statement timeout, a
+3000 ms lock timeout, and a 10 s startup timeout. Transactions are short:
+never hold one across hash, fsync, HTTP, or other external work.
+
+### Retired SQLite file
+
+The runtime does not read `edge.sqlite3` or `edge-diagnostics.sqlite3`. Only
+`backend/app/edge_db/migration/` opens the retired `edge.sqlite3`, once, to
+copy it into PostgreSQL through the `edge-db-cutover` compose service (ops
+profile); import-linter contracts in `pyproject.toml` keep every other module
+from importing `sqlite3`. Cutover and rollback are described in
+[`docs/runbooks/postgresql-cutover.md`](runbooks/postgresql-cutover.md).
+
+### Image rollback preserves the state
 
 Rollback is binary-only and image-digest based. Pin the previous `@sha256:`
 digests in `ML_API_IMAGE` / `ML_WORKER_IMAGE`, never a mutable tag, and restart
-in the fixed order `edge-db-migrator` -> `ml-api` (healthy) -> `ml-worker`. A
-schema-18 image refuses a schema-19 database by design. Rolling back to a
-schema-18 image after extension requires stopping the stack and restoring
-`<database name>.schema18-backup.sqlite3` over `edge.sqlite3` (remove `-wal` /
-`-shm`); that restore discards every application write made after the
-extension. There is no in-process downgrade path. Never run `down -v`, never
-delete the `edge-state` volume, and never repair `edge.sqlite3` with direct
-SQL. See
-[`docs/runbooks/edge-database-schema-19.md`](runbooks/edge-database-schema-19.md),
+in the fixed order `edge-db-migrator` -> `ml-api` (healthy) -> `ml-worker`.
+There is no in-process downgrade path. Never run `down -v`, never delete the
+`edge-pgdata` volume, and never repair the database with direct SQL. See
+[`docs/runbooks/postgresql-cutover.md`](runbooks/postgresql-cutover.md),
 [`docs/runbooks/edge-redeploy-identity-continuity.md`](runbooks/edge-redeploy-identity-continuity.md),
 and for querying and interpreting execution records
 [`docs/runbooks/observability-diagnostics.md`](runbooks/observability-diagnostics.md).
@@ -169,10 +139,10 @@ only package permitted to import everything.
 ## Types and the contracts boundary
 
 Worker-internal ports and envelopes live under `worker/`; cross-instance L0 data
-stays in `contracts`. `contracts/` is ADR-0006 vendored byte-for-byte from
-`eldercare-dataset-ops` and is snapshotted by `tests/test_vendor_drift.py`,
-including `contracts/AGENTS.md` — never edit anything under it as part of worker
-work, and never duplicate or shadow a vendored type inside `worker/`.
+stays in `contracts`. `contracts/` is the ADR-0006 typed-vocabulary leaf and the
+authority for it; the copy in the archived `eldercare-dataset-ops` is historical
+only, and no test compares the two. Never edit anything under it as part of
+worker work, and never duplicate or shadow a contract type inside `worker/`.
 
 | Envelope | Module | Carries pixels |
 | --- | --- | --- |
@@ -193,17 +163,19 @@ reads back.
 The rule for both: **each side owns its own definition of the interface, and
 a test -- not a shared module -- catches drift.** The provider owns the schema
 it serves or writes; the consumer owns the schema it expects. `contracts/` is
-the ADR-0006 byte-mirrored ML vocabulary shared with eldercare-dataset-ops,
-not an edge-internal interface package, so neither seam is defined there.
+the ADR-0006 ML vocabulary (this repository holds the authoritative copy; the
+archived eldercare-dataset-ops copy is historical only), not an edge-internal
+interface package, so neither seam is defined there.
 
 | Seam | Provider (worker) | Consumer (backend) |
 | --- | --- | --- |
 | `:8090` HTTP | `worker/pipeline/output/live_view_api.py` -- route matchers, relay-token header, MJPEG media type, request/response bodies | `backend/app/features/cameras/streams_router.py`, `bed_zone_router.py`, `router.py` (probe) -- path builders and response parsers |
-| `manifest.json` | `worker/pipeline/output/evidence/manifest_models.py` + `clip_manifest_payload.py` -- the fields the writer emits | `backend/app/features/clips/manifest.py` (lenient serving parser), `catalog.py` `_MANIFEST_FIELDS` (strict migration reader) |
+| `manifest.json` | `worker/pipeline/output/evidence/manifest_models.py` + `clip_manifest_payload.py` -- the fields the writer emits | `backend/app/features/clips/manifest.py` (lenient serving parser) |
 
 `tests/test_backend_worker_runtime_contracts.py` is the drift guard and the
 one sanctioned place that imports both packages: it publishes a manifest with
-the worker writer and parses it with both backend readers, asserts every path
+the worker writer, parses it with the backend serving parser and lists it
+through the PostgreSQL clip catalogue, asserts every path
 the backend builds is matched by the worker's route and by no other, and
 round-trips each worker response body (probe, pose overlay, bed zone) through
 the backend parser. A field either side adds must pass there before it ships.
@@ -221,7 +193,7 @@ The non-saving recognize request accepts a confidence and returns multiple
 candidate regions. The operator may edit polygons, then explicitly persists
 them with `PUT /cameras/{id}/bed-zone`. The backend stores the canonical
 `{regions, image_width, image_height, recognized_at}` value as compact JSON in
-SQLite and sends all regions to the worker; `regions: []` explicitly clears
+PostgreSQL and sends all regions to the worker; `regions: []` explicitly clears
 the bed zone. The shared snapshot tiler/OSD/file bridge serializes requests
 across cameras.
 Operator preview selections do not disable overlays on alert-evidence JPEGs
@@ -537,27 +509,26 @@ cited test failing on your machine may be pinning a real runtime floor, or may
 just be instrumentation that was never written to be portable, and the two look
 identical from the test report.
 
-**Resolved: the shipped example config pinned a fall contract nothing produces yet.**
+**Resolved: the shipped example config pinned a fall contract nothing produced.**
 `worker/ml-worker.example.yaml` used to pin `models.fall.schema_version: 2`
 and the current coco17 `preprocessing_identity`, while
 `models/fall/lstm/metadata.yaml` declares neither — so it loads as
 `LEGACY_SCHEMA_VERSION` (1) with the legacy identity, and the pinned pair was
 refused. Neither side was malformed: the loader supports both generations as
 first-class cases (`worker/adapters/model/lstm_manifest.py`,
-`SUPPORTED_PREPROCESSING_IDENTITIES`), but `eldercare-dataset-ops` currently
-emits `schema_version: 1` for fall and no preprocessing identity
+`SUPPORTED_PREPROCESSING_IDENTITIES`), but the archived `eldercare-dataset-ops`
+emitted `schema_version: 1` for fall and no preprocessing identity
 (`ml/training/model_artifacts.py::build_fall_lstm_metadata`, which never
-writes either field), so schema_version 2 is not a contract any export path
-produces today — the example was documenting an aspirational target, not the
+wrote either field), so schema_version 2 was not a contract any export path
+produced — the example was documenting an aspirational target, not the
 artifact it ships with.
 
 The example was corrected to pin the legacy contract
 (`schema_version: 1`, `legacy-coco17-xyc-frame-normalized-zero-fill-v1`) that
-the shipped artifact and current training pipeline actually satisfy, so
-copying the example boots the fall model it ships with. When
-`eldercare-dataset-ops` starts exporting fall artifacts with
-`schema_version: 2` and the current coco17 identity, re-export
-`models/fall/lstm` from that pipeline and bump the example's pins back to the
+the shipped artifact satisfies and the archived training pipeline emitted, so
+copying the example boots the fall model it ships with. If a fall artifact is
+ever exported with `schema_version: 2` and the current coco17 identity,
+replace `models/fall/lstm` with it and bump the example's pins back to the
 v2 values at the same time — the fail-closed validation in
 `_validate_expected_identity` (`worker/adapters/model/torch_lstm_fall.py`)
 stays unchanged either way; only the pinned values move. The regression is
@@ -618,7 +589,7 @@ Decision-trace replay is written by the worker as bounded on-disk JSONL
 trace directory is configured. It is a replay-fidelity input, not the
 original-run observability record (that is the execution-record path,
 `docs/runbooks/observability-diagnostics.md`). There is no backend
-analysis-trace HTTP or SQLite warehouse.
+analysis-trace HTTP or database warehouse.
 
 ### Replay trace v2
 

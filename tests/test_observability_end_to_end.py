@@ -25,6 +25,11 @@ from worker.runtime.flow.execution_record_emit import emit_policy_consume
 from worker.types.metadata import MetadataCounters, MetadataFrame
 from worker.types.trace import DecisionIdentity
 
+pytest_plugins = (
+    "tests_support.postgres_sandbox",
+    "tests_support.postgres_diagnostics_sandbox",
+)
+
 _CAMERA = "cam-1"
 _RELAY_TOKEN = "obs-relay-token"
 _BUDGET_BYTES = 2**20
@@ -134,7 +139,9 @@ class _NoClipPublisher:
         raise FlowClipPublicationError("clip publication unused in hermetic e2e")
 
 
-def test_alert_joins_record_with_five_kinds_provenance_and_availability(tmp_path) -> None:
+def test_alert_joins_record_with_five_kinds_provenance_and_availability(
+    tmp_path, postgres_product_sandbox, postgres_audit_runtime, postgres_lifespan_diagnostics_schema
+) -> None:
     """Five kinds plus decision -> delivery -> acceptance.
 
     decision->delivery is by frame identity (camera, boot, epoch, frame_seq)
@@ -173,7 +180,14 @@ def test_alert_joins_record_with_five_kinds_provenance_and_availability(tmp_path
         event_sink=binding,
     )
     exporter: ExecutionRecordExporter | None = None
-    with serve_backend(tmp_path, budget_bytes=_BUDGET_BYTES, relay_token=_RELAY_TOKEN) as backend:
+    with serve_backend(
+        tmp_path,
+        budget_bytes=_BUDGET_BYTES,
+        relay_token=_RELAY_TOKEN,
+        sandbox=postgres_product_sandbox,
+        audit_runtime=postgres_audit_runtime,
+        diagnostics_schema=postgres_lifespan_diagnostics_schema,
+    ) as backend:
         try:
             exporter = _exporter(lanes, backend.base_url, backend.relay_token)
             exporter.start()
@@ -286,7 +300,9 @@ def test_alert_joins_record_with_five_kinds_provenance_and_availability(tmp_path
                 exporter.stop()
 
 
-def test_lane_overflow_is_reported_as_missing_not_recorded(tmp_path) -> None:
+def test_lane_overflow_is_reported_as_missing_not_recorded(
+    tmp_path, postgres_product_sandbox, postgres_audit_runtime, postgres_lifespan_diagnostics_schema
+) -> None:
     lanes = ExecutionRecordLanes(lane_capacity=2)
     pump = _pump(lanes, identity=_identity(), emitted=[], fall_transition=0.9)
     # Mixed producers on purpose: sdk.frame carries PTS-derived ns while
@@ -296,7 +312,14 @@ def test_lane_overflow_is_reported_as_missing_not_recorded(tmp_path) -> None:
     # exporter thread on a contract error.
     _drive_frames(pump, 6, publish=True, consume=True)
     exporter: ExecutionRecordExporter | None = None
-    with serve_backend(tmp_path, budget_bytes=_BUDGET_BYTES, relay_token=_RELAY_TOKEN) as backend:
+    with serve_backend(
+        tmp_path,
+        budget_bytes=_BUDGET_BYTES,
+        relay_token=_RELAY_TOKEN,
+        sandbox=postgres_product_sandbox,
+        audit_runtime=postgres_audit_runtime,
+        diagnostics_schema=postgres_lifespan_diagnostics_schema,
+    ) as backend:
         try:
             exporter = _exporter(lanes, backend.base_url, backend.relay_token, batch_max=32)
             exporter.start()
@@ -338,12 +361,21 @@ def test_lane_overflow_is_reported_as_missing_not_recorded(tmp_path) -> None:
                 exporter.stop()
 
 
-def test_restart_reopens_the_same_execution_records(tmp_path) -> None:
+def test_restart_reopens_the_same_execution_records(
+    tmp_path, postgres_product_sandbox, postgres_audit_runtime, postgres_lifespan_diagnostics_schema
+) -> None:
     lanes = ExecutionRecordLanes(lane_capacity=64)
     pump = _pump(lanes, identity=_identity(), emitted=[], fall_transition=0.9)
     exporter: ExecutionRecordExporter | None = None
     record_ids: list[str] = []
-    with serve_backend(tmp_path, budget_bytes=_BUDGET_BYTES, relay_token=_RELAY_TOKEN) as backend:
+    with serve_backend(
+        tmp_path,
+        budget_bytes=_BUDGET_BYTES,
+        relay_token=_RELAY_TOKEN,
+        sandbox=postgres_product_sandbox,
+        audit_runtime=postgres_audit_runtime,
+        diagnostics_schema=postgres_lifespan_diagnostics_schema,
+    ) as backend:
         try:
             exporter = _exporter(lanes, backend.base_url, backend.relay_token)
             exporter.start()
@@ -359,6 +391,13 @@ def test_restart_reopens_the_same_execution_records(tmp_path) -> None:
             if exporter is not None:
                 exporter.stop()
 
-    with serve_backend(tmp_path, budget_bytes=_BUDGET_BYTES, relay_token=_RELAY_TOKEN) as restarted:
+    with serve_backend(
+        tmp_path,
+        budget_bytes=_BUDGET_BYTES,
+        relay_token=_RELAY_TOKEN,
+        sandbox=postgres_product_sandbox,
+        audit_runtime=postgres_audit_runtime,
+        diagnostics_schema=postgres_lifespan_diagnostics_schema,
+    ) as restarted:
         body = _query(restarted)
         assert [row["record_id"] for row in body["records"]] == record_ids

@@ -1,28 +1,26 @@
 """Shared diagnostic runtime helpers: served Hub fixture + real relay client.
 
-Both live entirely on loopback with no credentials, no RTSP, and no media.
+Both live entirely on loopback with no credentials, no RTSP, and no media. The
+relay runs on the PostgreSQL product sandbox; register next to the sandbox
+plugin: ``pytest_plugins = ("tests_support.postgres_sandbox",)``.
 """
 
 from __future__ import annotations
 
 import socket
-import tempfile
 import threading
 from contextlib import closing
-from pathlib import Path
+from typing import Any
 
 import uvicorn
 from fastapi.testclient import TestClient
 
-from backend.app.features.cameras.store import CameraRegistryStore
-from backend.app.features.clips.catalog import CatalogStore
-from backend.app.features.evidence.relay_projection import RelayEvidenceProjection
-from backend.app.main import create_app, no_lifespan
+from backend.app.features.audit.postgres_runtime import PostgresAuditRuntime
 from shared.events.edge_ingest_client import EdgeIngestClient
-from tests_support.compact_authority_db import prepare_compact_database
 from tests_support.local_backend_fixture import LocalBackendFixture
+from tests_support.postgres_sandbox import ProductSandbox
+from tests_support.relay_postgres_runtime import RELAY_TOKEN, relay_postgres_app
 
-RELAY_TOKEN = "relay-token"
 CAMERA_ID = "room-camera"
 FACILITY_ID = "facility-1"
 
@@ -33,13 +31,26 @@ def free_port() -> int:
         return int(sock.getsockname()[1])
 
 
+class _StartupSignalServer(uvicorn.Server):
+    """uvicorn server that signals an event once its sockets are listening."""
+
+    def __init__(self, config: uvicorn.Config) -> None:
+        super().__init__(config)
+        self.listening = threading.Event()
+
+    async def startup(self, sockets: list[socket.socket] | None = None) -> None:
+        await super().startup(sockets=sockets)
+        if self.started:
+            self.listening.set()
+
+
 class ServedFixture:
     """Runs the contract-exact Hub fixture over real loopback HTTP."""
 
     def __init__(self, *, faulty_event_identity: bool = False) -> None:
         self.fixture = LocalBackendFixture(faulty_event_identity=faulty_event_identity)
         self.port = free_port()
-        self._server = uvicorn.Server(
+        self._server = _StartupSignalServer(
             uvicorn.Config(
                 self.fixture.app,
                 host="127.0.0.1",
@@ -56,44 +67,47 @@ class ServedFixture:
 
     def __enter__(self) -> ServedFixture:
         self._thread.start()
-        waiter = threading.Event()
-        for _ in range(200):
-            if self._server.started:
-                return self
-            waiter.wait(0.05)
-        raise RuntimeError("fixture Hub did not start")
+        if not self._server.listening.wait(timeout=10.0):
+            raise RuntimeError("fixture Hub did not start")
+        return self
 
     def __exit__(self, *_args: object) -> None:
         self._server.should_exit = True
         self._thread.join(timeout=10)
 
 
-def relay_client(origin: str, tmp_path: Path, *, database: Path | None = None) -> TestClient:
-    """Real ml-api app wired to a real EdgeIngestClient against ``origin``."""
+def hub_client(origin: str) -> EdgeIngestClient:
+    """The real Hub ingest client pointed at ``origin``."""
 
-    app = create_app(lifespan=no_lifespan)
-    app.state.edge_relay_token = RELAY_TOKEN
-    registry_path = Path(tempfile.mkdtemp()) / "registry.sqlite3"
-    prepare_compact_database(registry_path)
-    registry = CameraRegistryStore(registry_path)
-    registry.create(
-        camera_id=CAMERA_ID,
-        label=CAMERA_ID,
-        rtsp_url=f"rtsp://role-gateway:8554/{CAMERA_ID}",
-        space_id=None,
-        status="online",
-        backend_camera_id=CAMERA_ID,
-    )
-    app.state.camera_registry = registry
-    app.state.catalog_store = CatalogStore.open(tmp_path / "relay-catalog.sqlite3")
-    if database is not None:
-        app.state.relay_evidence_projection = RelayEvidenceProjection(database)
     # Loopback http needs no insecure opt-in under the product's own hub policy.
-    app.state.backend_ingest_client = EdgeIngestClient(
+    return EdgeIngestClient(
         events_url=f"{origin}/api/v1/events",
         bearer_token="fixture-token",
         camera_id=CAMERA_ID,
         timeout_sec=5.0,
+    )
+
+
+def relay_client(
+    origin: str,
+    sandbox: ProductSandbox,
+    audit_runtime: PostgresAuditRuntime,
+    *,
+    ingest_client: Any = None,
+) -> TestClient:
+    """Real ml-api app on the PostgreSQL product root, delivering to ``origin``.
+
+    ``ingest_client`` replaces the default ``hub_client(origin)``; the relay
+    commits the incident and its outbox row before any Hub delivery.
+    """
+
+    app = relay_postgres_app(
+        sandbox,
+        audit_runtime,
+        client=hub_client(origin) if ingest_client is None else ingest_client,
+        camera_id=CAMERA_ID,
+        backend_camera_id=CAMERA_ID,
+        rtsp_url=f"rtsp://role-gateway:8554/{CAMERA_ID}",
     )
     return TestClient(app)
 
@@ -129,5 +143,6 @@ __all__ = [
     "ServedFixture",
     "deliver_alert",
     "free_port",
+    "hub_client",
     "relay_client",
 ]

@@ -2,28 +2,31 @@
 
 from __future__ import annotations
 
-import hmac
 import os
-import secrets
-import sqlite3
 import threading
-import time
 from collections.abc import Callable
-from dataclasses import dataclass, field
-from typing import Protocol
 
 from fastapi import HTTPException, Request, status
 
+from backend.app.shared.dashboard_credential_rotation import (
+    DashboardSessionRequired,
+    rotate_credentials,
+)
 from backend.app.shared.dashboard_credentials import (
-    DashboardCredentialsStore,
-    DashboardCredentialsStoreError,
     PersistedDashboardCredentials,
 )
+from backend.app.shared.dashboard_sessions import (
+    DASHBOARD_SESSION_TTL_SECONDS,
+    DashboardCredentials,
+    DashboardSessionStore,
+    HashedDashboardCredentials,
+    PlaintextDashboardCredentials,
+)
+from backend.app.shared.postgres_dashboard_credentials import PostgresDashboardCredentialsStore
 
 API_DASHBOARD_USERNAME_ENV = "API_DASHBOARD_USERNAME"
 API_DASHBOARD_PASSWORD_ENV = "API_DASHBOARD_PASSWORD"
 DASHBOARD_SESSION_COOKIE = "ml_dashboard_session"
-DASHBOARD_SESSION_TTL_SECONDS = 12 * 60 * 60
 
 # Known insecure pair. Never used as a runtime authority fallback. Preflight
 # rejects this pair in deployment env files; tests may still set it explicitly
@@ -36,133 +39,18 @@ KNOWN_DEFAULT_DASHBOARD_PASSWORD = DEFAULT_DASHBOARD_PASSWORD
 _SESSION_STORE_INIT_LOCK = threading.Lock()
 
 
-def _compare_str(candidate: str, expected: str) -> bool:
-    """Constant-time compare of two ``str`` values that may contain non-ASCII
-    text (e.g. a Korean username or password).
-
-    ``hmac.compare_digest`` raises ``TypeError`` for non-ASCII ``str``
-    arguments -- it only accepts ASCII ``str`` or ``bytes``/``bytes``-like
-    objects. Encoding to UTF-8 bytes first keeps the comparison constant-time
-    while supporting any username/password the product's Korean-language UI
-    can produce.
-    """
-
-    return hmac.compare_digest(candidate.encode("utf-8"), expected.encode("utf-8"))
-
-
-class DashboardCredentials(Protocol):
-    """Something that knows one dashboard username and can verify a login."""
-
-    @property
-    def username(self) -> str: ...
-
-    def verify(self, username: str, password: str) -> bool: ...
-
-
-@dataclass(frozen=True, slots=True)
-class PlaintextDashboardCredentials:
-    """Env-var or built-in-default credentials: compared directly."""
-
-    username: str
-    password: str
-
-    def verify(self, username: str, password: str) -> bool:
-        return _compare_str(username, self.username) and _compare_str(password, self.password)
-
-
-@dataclass(frozen=True, slots=True)
-class HashedDashboardCredentials:
-    """Persisted-file credentials: password compared via scrypt verify."""
-
-    persisted: PersistedDashboardCredentials
-
-    @property
-    def username(self) -> str:
-        return self.persisted.username
-
-    def verify(self, username: str, password: str) -> bool:
-        return _compare_str(username, self.persisted.username) and (
-            self.persisted.verify_password(password)
-        )
-
-
-@dataclass(slots=True)
-class DashboardSessionStore:
-    credentials: DashboardCredentials
-    ttl_seconds: int = DASHBOARD_SESSION_TTL_SECONDS
-    _sessions: dict[str, float] = field(default_factory=dict)
-    _lock: threading.Lock = field(default_factory=threading.Lock)
-
-    @property
-    def username(self) -> str:
-        return self.credentials.username
-
-    def authenticate(self, username: str, password: str) -> str | None:
-        if not self.credentials.verify(username, password):
-            return None
-        token = secrets.token_urlsafe(32)
-        with self._lock:
-            self._prune_locked()
-            self._sessions[token] = time.monotonic() + self.ttl_seconds
-        return token
-
-    def actor(self, token: str | None) -> str | None:
-        if token is None:
-            return None
-        with self._lock:
-            self._prune_locked()
-            if token not in self._sessions:
-                return None
-        return self.username
-
-    def revoke(self, token: str | None) -> None:
-        if token is None:
-            return
-        with self._lock:
-            self._sessions.pop(token, None)
-
-    def revoke_all(self) -> None:
-        with self._lock:
-            self._sessions.clear()
-
-    def rotate_credentials(self, persisted: PersistedDashboardCredentials) -> None:
-        """Swap in newly-persisted credentials and revoke every existing session.
-
-        Called after a successful ``PUT /auth/credentials``; the caller is
-        expected to hold ``_SESSION_STORE_INIT_LOCK`` while calling this so the
-        swap is observed atomically by concurrent requests resolving the
-        session store for the first time.
-        """
-        self.credentials = HashedDashboardCredentials(persisted)
-        self.revoke_all()
-
-    def _prune_locked(self) -> None:
-        now = time.monotonic()
-        expired = [token for token, deadline in self._sessions.items() if deadline <= now]
-        for token in expired:
-            self._sessions.pop(token, None)
-
-
-def dashboard_credentials_store(request: Request) -> DashboardCredentialsStore:
+def dashboard_credentials_store(request: Request) -> PostgresDashboardCredentialsStore:
     existing = getattr(request.app.state, "dashboard_credentials_store", None)
-    if isinstance(existing, DashboardCredentialsStore):
-        return existing
-    store = DashboardCredentialsStore.from_env()
-    request.app.state.dashboard_credentials_store = store
-    return store
+    if existing is None:
+        raise RuntimeError("dashboard credentials store is not injected")
+    if not isinstance(existing, PostgresDashboardCredentialsStore):
+        raise TypeError("dashboard credentials store has invalid type")
+    return existing
 
 
 def _resolve_credentials(request: Request) -> DashboardCredentials:
     store = dashboard_credentials_store(request)
-    try:
-        persisted = store.load()
-    except DashboardCredentialsStoreError as exc:
-        # Fail closed: a corrupt/unreadable store after rotation must not
-        # resurrect env or known-default credentials.
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="dashboard credentials store is unreadable",
-        ) from exc
+    persisted = store.load()
     if persisted is not None:
         return HashedDashboardCredentials(persisted)
 
@@ -214,38 +102,30 @@ def rotate_dashboard_credentials(
     *,
     new_username: str | None,
     new_password: str,
-    after_write: Callable[[sqlite3.Connection], None] | None = None,
+    persist: Callable[[PostgresDashboardCredentialsStore, str, str], PersistedDashboardCredentials],
 ) -> str:
-    """Persist the new credentials, revoke every existing session, and return
-    a fresh session token for the caller (so the PUT response can carry a
-    live cookie).
-
-    The caller must already hold a valid dashboard session -- callers reach
-    this function only after ``authorize_dashboard`` -- so no current-password
-    check is performed here; the session cookie is the sole auth gate.
-
-    The whole persist -> swap -> mint sequence runs under
-    ``_SESSION_STORE_INIT_LOCK`` so two concurrent rotations can't interleave
-    (e.g. two admin tabs submitting at once).
-    """
-
+    """Adapt the request and serialize complete credential rotations."""
     sessions = dashboard_sessions(request)
     store = dashboard_credentials_store(request)
 
     with _SESSION_STORE_INIT_LOCK:
-        resolved_username = (new_username or "").strip() or sessions.username
-        persisted = store.save(
-            username=resolved_username, password=new_password, after_write=after_write
-        )
-
-        sessions.rotate_credentials(persisted)
-
-        token = sessions.authenticate(resolved_username, new_password)
-        if token is None:
-            # Defensive: rotate_credentials() just persisted this exact pair,
-            # so authenticate() against it must succeed.
-            raise RuntimeError("dashboard credential rotation produced an unauthenticated store")
-        return token
+        if getattr(request.app.state, "dashboard_sessions", None) is not sessions:
+            raise HTTPException(status_code=401, detail="dashboard session required")
+        try:
+            return rotate_credentials(
+                sessions,
+                store,
+                token=request.cookies.get(DASHBOARD_SESSION_COOKIE),
+                new_username=new_username,
+                new_password=new_password,
+                persist=persist,
+            )
+        except DashboardSessionRequired as error:
+            raise HTTPException(status_code=401, detail="dashboard session required") from error
+        except BaseException:
+            if getattr(request.app.state, "dashboard_sessions", None) is sessions:
+                del request.app.state.dashboard_sessions
+            raise
 
 
 def authorize_dashboard(request: Request) -> str:

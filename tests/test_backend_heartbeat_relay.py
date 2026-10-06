@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-import tempfile
-from pathlib import Path
+import functools
+from collections.abc import Callable
 from types import SimpleNamespace
 
 import pytest
@@ -16,7 +16,9 @@ from backend.app.features.status.backend_heartbeat_relay import (
 from backend.app.features.status.heartbeat_store import HeartbeatStore
 from backend.app.lifespan import API_BACKEND_HEARTBEAT_RELAY_SEC_ENV
 from backend.app.main import create_app
-from tests_support.compact_authority_db import prepare_compact_database
+from tests_support.postgres_sandbox import ProductSandbox
+
+pytest_plugins = ("tests_support.postgres_sandbox", "tests_support.postgres_app_env")
 
 
 @pytest.fixture(autouse=True)
@@ -76,16 +78,14 @@ class FakeClassifiedIngestClient:
         return SimpleNamespace(ok=error_class is None, error_class=error_class)
 
 
-def _registry(records: list[dict[str, str | None]]) -> CameraRegistryStore:
-    """Build a real (tempdir-backed) CameraRegistryStore seeded with the given
-    ``{id, backend_camera_id}`` records. relay_heartbeats_once only trusts an
-    actual ``CameraRegistryStore`` instance (its ``isinstance`` check treats
-    anything else, including a duck-typed fake, as "no registry" -- see
+def _registry(sandbox: ProductSandbox, records: list[dict[str, str | None]]) -> CameraRegistryStore:
+    """Build a real (PostgreSQL sandbox-backed) CameraRegistryStore seeded with
+    the given ``{id, backend_camera_id}`` records. relay_heartbeats_once only
+    trusts an actual ``CameraRegistryStore`` instance (its ``isinstance`` check
+    treats anything else, including a duck-typed fake, as "no registry" -- see
     ``registry_store = registry if isinstance(registry, CameraRegistryStore)
     else None``), so tests need the real thing rather than a stub."""
-    registry_path = Path(tempfile.mkdtemp()) / "catalog.sqlite3"
-    prepare_compact_database(registry_path)
-    store = CameraRegistryStore(registry_path)
+    store = CameraRegistryStore(sandbox.database, sandbox.authority)
     for record in records:
         camera_id = record["id"]
         assert isinstance(camera_id, str)
@@ -101,6 +101,7 @@ def _registry(records: list[dict[str, str | None]]) -> CameraRegistryStore:
 
 
 def _make_app(
+    sandbox: ProductSandbox,
     *,
     client: object | None,
     inventory: dict[str, dict[str, str | None]] | None = None,
@@ -123,16 +124,23 @@ def _make_app(
         ]
     state = SimpleNamespace(
         heartbeat_store=HeartbeatStore(stale_after_sec=90.0),
-        camera_registry=_registry(registry_records),
+        camera_registry=_registry(sandbox, registry_records),
     )
     if client is not None:
         state.backend_ingest_client = client
     return SimpleNamespace(state=state)
 
 
-def test_online_camera_relayed_stale_and_never_seen_not_called() -> None:
+@pytest.fixture
+def make_app(postgres_product_sandbox: ProductSandbox) -> Callable[..., object]:
+    return functools.partial(_make_app, postgres_product_sandbox)
+
+
+def test_online_camera_relayed_stale_and_never_seen_not_called(
+    make_app: Callable[..., object],
+) -> None:
     client = FakeIngestClient()
-    app = _make_app(
+    app = make_app(
         client=client,
         inventory={
             "cam-online": {"camera_id": "cam-online"},
@@ -151,8 +159,8 @@ def test_online_camera_relayed_stale_and_never_seen_not_called() -> None:
     assert result.skipped_reason is None
 
 
-def test_no_client_attr_is_noop() -> None:
-    app = _make_app(client=None, inventory={"cam-a": {"camera_id": "cam-a", "facility_id": "f"}})
+def test_no_client_attr_is_noop(make_app: Callable[..., object]) -> None:
+    app = make_app(client=None, inventory={"cam-a": {"camera_id": "cam-a", "facility_id": "f"}})
 
     result = relay_heartbeats_once(app, now=0.0)
 
@@ -160,10 +168,12 @@ def test_no_client_attr_is_noop() -> None:
     assert result.attempted == 0
 
 
-def test_client_without_send_heartbeat_or_for_camera_is_noop_no_exception() -> None:
+def test_client_without_send_heartbeat_or_for_camera_is_noop_no_exception(
+    make_app: Callable[..., object],
+) -> None:
     # Bare sentinel like the fakes injected by other tests (e.g. object()) --
     # missing .for_camera entirely must be treated as unusable, not crash.
-    app = _make_app(client=object(), inventory={})
+    app = make_app(client=object(), inventory={})
     app.state.heartbeat_store.record("cam-a", "fac-1", received_at=0.0)
 
     result = relay_heartbeats_once(app, now=1.0)
@@ -171,12 +181,14 @@ def test_client_without_send_heartbeat_or_for_camera_is_noop_no_exception() -> N
     assert result.skipped_reason == "no_client"
 
 
-def test_client_with_for_camera_but_no_send_heartbeat_on_clone_is_noop() -> None:
+def test_client_with_for_camera_but_no_send_heartbeat_on_clone_is_noop(
+    make_app: Callable[..., object],
+) -> None:
     class NoSendHeartbeat:
         def for_camera(self, camera_id: str) -> object:
             return object()  # clone has neither send_heartbeat nor for_camera
 
-    app = _make_app(
+    app = make_app(
         client=NoSendHeartbeat(),
         inventory={"cam-a": {"camera_id": "cam-a", "facility_id": "fac-1"}},
     )
@@ -190,21 +202,21 @@ def test_client_with_for_camera_but_no_send_heartbeat_on_clone_is_noop() -> None
     assert result.failed == 1
 
 
-def test_no_online_cameras_is_noop() -> None:
-    app = _make_app(client=FakeIngestClient(), inventory={})
+def test_no_online_cameras_is_noop(make_app: Callable[..., object]) -> None:
+    app = make_app(client=FakeIngestClient(), inventory={})
 
     result = relay_heartbeats_once(app, now=0.0)
 
     assert result.skipped_reason == "no_online_cameras"
 
 
-def test_per_camera_failure_does_not_stop_others() -> None:
+def test_per_camera_failure_does_not_stop_others(make_app: Callable[..., object]) -> None:
     inventory = {
         "cam-good": {"camera_id": "cam-good", "facility_id": "fac-1"},
         "cam-bad": {"camera_id": "cam-bad", "facility_id": "fac-1"},
     }
     client = FakeIngestClient(failing_camera_ids=frozenset({"cam-bad"}))
-    app = _make_app(client=client, inventory=inventory)
+    app = make_app(client=client, inventory=inventory)
     app.state.heartbeat_store.record("cam-good", "fac-1", received_at=1000.0)
     app.state.heartbeat_store.record("cam-bad", "fac-1", received_at=1000.0)
 
@@ -216,10 +228,12 @@ def test_per_camera_failure_does_not_stop_others() -> None:
     assert result.failed == 1
 
 
-def test_backoff_doubles_on_consecutive_all_fail_ticks_and_resets_on_success() -> None:
+def test_backoff_doubles_on_consecutive_all_fail_ticks_and_resets_on_success(
+    make_app: Callable[..., object],
+) -> None:
     inventory = {"cam-a": {"camera_id": "cam-a", "facility_id": "fac-1"}}
     failing_client = FakeIngestClient(failing_camera_ids=frozenset({"cam-a"}))
-    app = _make_app(client=failing_client, inventory=inventory)
+    app = make_app(client=failing_client, inventory=inventory)
     app.state.heartbeat_store.record("cam-a", "fac-1", received_at=1000.0)
 
     relay_heartbeats_once(app, now=1010.0)
@@ -252,9 +266,11 @@ def test_backoff_doubles_on_consecutive_all_fail_ticks_and_resets_on_success() -
 # --------------------------------------------------------------------------
 
 
-def test_relay_canonicalizes_worker_local_id_to_backend_camera_id() -> None:
+def test_relay_canonicalizes_worker_local_id_to_backend_camera_id(
+    make_app: Callable[..., object],
+) -> None:
     client = FakeIngestClient()
-    app = _make_app(
+    app = make_app(
         client=client,
         registry_records=[{"id": "cam-local-1", "backend_camera_id": "backend-cam-9"}],
     )
@@ -270,10 +286,11 @@ def test_relay_canonicalizes_worker_local_id_to_backend_camera_id() -> None:
 
 
 def test_camera_with_no_backend_mapping_is_skipped_while_mapped_camera_still_relayed(
+    make_app: Callable[..., object],
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     client = FakeIngestClient()
-    app = _make_app(
+    app = make_app(
         client=client,
         registry_records=[
             {"id": "cam-mapped", "backend_camera_id": "backend-cam-1"},
@@ -297,8 +314,10 @@ def test_camera_with_no_backend_mapping_is_skipped_while_mapped_camera_still_rel
     assert len(skipped_logs) == 2  # cam-pending and cam-unknown both skipped-and-logged
 
 
-def test_all_cameras_unmapped_is_skipped_tick_and_backoff_untouched() -> None:
-    app = _make_app(
+def test_all_cameras_unmapped_is_skipped_tick_and_backoff_untouched(
+    make_app: Callable[..., object],
+) -> None:
+    app = make_app(
         client=FakeIngestClient(),
         registry_records=[{"id": "cam-a", "backend_camera_id": None}],
     )
@@ -318,7 +337,9 @@ def test_all_cameras_unmapped_is_skipped_tick_and_backoff_untouched() -> None:
 # --------------------------------------------------------------------------
 
 
-def test_relay_tick_prefers_classified_result_and_reports_most_severe_error_class() -> None:
+def test_relay_tick_prefers_classified_result_and_reports_most_severe_error_class(
+    make_app: Callable[..., object],
+) -> None:
     inventory = {
         "cam-auth": {"camera_id": "cam-auth", "facility_id": "fac-1"},
         "cam-timeout": {"camera_id": "cam-timeout", "facility_id": "fac-1"},
@@ -327,7 +348,7 @@ def test_relay_tick_prefers_classified_result_and_reports_most_severe_error_clas
     client = FakeClassifiedIngestClient(
         error_class_by_camera_id={"cam-auth": "auth", "cam-timeout": "timeout", "cam-ok": None}
     )
-    app = _make_app(client=client, inventory=inventory)
+    app = make_app(client=client, inventory=inventory)
     for camera_id in inventory:
         app.state.heartbeat_store.record(camera_id, "fac-1", received_at=1000.0)
 
@@ -344,10 +365,12 @@ def test_relay_tick_prefers_classified_result_and_reports_most_severe_error_clas
     assert state.last_success_at is not None  # cam-ok succeeded this tick
 
 
-def test_relay_tick_falls_back_to_plain_bool_with_no_error_class() -> None:
+def test_relay_tick_falls_back_to_plain_bool_with_no_error_class(
+    make_app: Callable[..., object],
+) -> None:
     inventory = {"cam-bad": {"camera_id": "cam-bad", "facility_id": "fac-1"}}
     client = FakeIngestClient(failing_camera_ids=frozenset({"cam-bad"}))
-    app = _make_app(client=client, inventory=inventory)
+    app = make_app(client=client, inventory=inventory)
     app.state.heartbeat_store.record("cam-bad", "fac-1", received_at=1000.0)
 
     result = relay_heartbeats_once(app, now=1010.0)
@@ -360,10 +383,11 @@ def test_relay_tick_falls_back_to_plain_bool_with_no_error_class() -> None:
 
 
 def test_relay_state_error_class_transitions_are_logged_as_warnings(
+    make_app: Callable[..., object],
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     inventory = {"cam-a": {"camera_id": "cam-a", "facility_id": "fac-1"}}
-    app = _make_app(client=None, inventory=inventory)  # placeholder; replaced per tick below
+    app = make_app(client=None, inventory=inventory)  # placeholder; replaced per tick below
 
     def _tick(error_class: str | None, now: float) -> None:
         error_map = {} if error_class is None else {"cam-a": error_class}
@@ -391,8 +415,8 @@ def test_relay_state_error_class_transitions_are_logged_as_warnings(
     assert state.last_success_at is not None
 
 
-def test_skipped_tick_does_not_touch_backoff_state() -> None:
-    app = _make_app(client=None, inventory={})
+def test_skipped_tick_does_not_touch_backoff_state(make_app: Callable[..., object]) -> None:
+    app = make_app(client=None, inventory={})
     initial_state = get_heartbeat_relay_state(app)
     initial_state.backoff_multiplier = 4
     initial_state.consecutive_all_fail_ticks = 2
@@ -406,8 +430,10 @@ def test_skipped_tick_does_not_touch_backoff_state() -> None:
     assert state.last_error_class == "timeout"  # untouched: skipped tick did no attempt
 
 
-def test_get_heartbeat_relay_state_self_heals_and_is_cached() -> None:
-    app = _make_app(client=None, inventory={})
+def test_get_heartbeat_relay_state_self_heals_and_is_cached(
+    make_app: Callable[..., object],
+) -> None:
+    app = make_app(client=None, inventory={})
 
     first = get_heartbeat_relay_state(app)
     second = get_heartbeat_relay_state(app)
@@ -416,6 +442,7 @@ def test_get_heartbeat_relay_state_self_heals_and_is_cached() -> None:
     assert first is second
 
 
+@pytest.mark.usefixtures("postgres_app_env")
 def test_disabled_via_env_zero_never_schedules_the_loop(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv(API_BACKEND_HEARTBEAT_RELAY_SEC_ENV, "0")
 
@@ -425,6 +452,7 @@ def test_disabled_via_env_zero_never_schedules_the_loop(monkeypatch: pytest.Monk
         assert app.state.backend_heartbeat_relay_executor is None
 
 
+@pytest.mark.usefixtures("postgres_app_env")
 def test_disabled_via_invalid_env_never_schedules_the_loop(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -434,6 +462,7 @@ def test_disabled_via_invalid_env_never_schedules_the_loop(
         assert client.app.state.backend_heartbeat_relay_task is None
 
 
+@pytest.mark.usefixtures("postgres_app_env")
 def test_real_lifespan_boots_and_shuts_down_cleanly_with_relay_enabled_and_empty_inventory(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

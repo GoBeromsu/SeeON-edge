@@ -4,10 +4,14 @@ from __future__ import annotations
 
 import hashlib
 import json
-import sqlite3
+from collections.abc import Mapping
 from dataclasses import dataclass
+from datetime import UTC, datetime
+from typing import Any
 
-from backend.app.edge_db.configuration import utc_now
+import psycopg
+from psycopg.rows import dict_row
+
 from backend.app.features.detection_settings.policy_rows import (
     PolicyRecord,
     decode_policy_values,
@@ -30,8 +34,8 @@ class PolicyWrite:
 
 
 def save_policy(
-    connection: sqlite3.Connection,
-    raw: tuple[object, ...] | None,
+    connection: psycopg.Connection,
+    raw: Mapping[str, Any] | None,
     write: PolicyWrite,
 ) -> int:
     active_json, active_hash = encode_policy(write.active_values)
@@ -54,25 +58,30 @@ def save_policy(
         now,
     )
     if raw is None:
-        cursor = connection.execute(
-            "INSERT INTO policies(facility_id,camera_id,module_id,module_version,schema_id,"
-            "schema_version,active_values_json,active_content_sha256,previous_present,"
-            "previous_values_json,previous_content_sha256,activation_generation,status,"
-            "activated_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,'pending',?,?)",
-            params,
-        )
-        if cursor.lastrowid is None:
+        with connection.cursor(row_factory=dict_row) as cursor:
+            row = cursor.execute(
+                "INSERT INTO policies(facility_id,camera_id,module_id,module_version,schema_id,"
+                "schema_version,active_values_json,active_content_sha256,previous_present,"
+                "previous_values_json,previous_content_sha256,activation_generation,status,"
+                "activated_at,updated_at) "
+                "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,'pending',%s,%s) RETURNING policy_id",
+                params,
+            ).fetchone()
+        if row is None:
             raise PolicyDocumentError("policy insert did not return a row id")
-        return cursor.lastrowid
-    policy_id = int(raw[0])
-    connection.execute(
-        "UPDATE policies SET schema_id=?,schema_version=?,active_values_json=?,"
-        "active_content_sha256=?,previous_present=?,previous_values_json=?,"
-        "previous_content_sha256=?,activation_generation=?,status='pending',"
-        "refusal_reason=NULL,activated_at=?,applied_at=NULL,updated_at=? WHERE policy_id=?",
-        (params[4], params[5], *params[6:12], now, now, policy_id),
-    )
-    return policy_id
+        return int(row["policy_id"])
+    with connection.cursor(row_factory=dict_row) as cursor:
+        row = cursor.execute(
+            "UPDATE policies SET schema_id=%s,schema_version=%s,active_values_json=%s,"
+            "active_content_sha256=%s,previous_present=%s,previous_values_json=%s,"
+            "previous_content_sha256=%s,activation_generation=%s,status='pending',"
+            "refusal_reason=NULL,activated_at=%s,applied_at=NULL,updated_at=%s "
+            "WHERE policy_id=%s RETURNING policy_id",
+            (params[4], params[5], *params[6:12], now, now, int(raw["policy_id"])),
+        ).fetchone()
+    if row is None:
+        raise PolicyDocumentError("policy row is missing")
+    return int(row["policy_id"])
 
 
 def encode_policy(values: NumericPolicy | None) -> tuple[str | None, str | None]:
@@ -83,20 +92,32 @@ def encode_policy(values: NumericPolicy | None) -> tuple[str | None, str | None]
 
 
 def previous_state(
-    raw: tuple[object, ...] | None,
+    raw: Mapping[str, Any] | None,
     record: PolicyRecord | None,
     camera_id: str | None,
 ) -> tuple[bool, NumericPolicy | None]:
     if record is not None and record.status != "failed":
         return True, record.active_values
     if raw is not None:
-        previous = None if raw[10] is None else decode_policy_values(raw[10], raw[11], raw)
-        return bool(raw[9]), previous
+        previous = decode_policy_values(
+            raw["previous_values_json"], raw["previous_content_sha256"], raw
+        )
+        return bool(raw["previous_present"]), previous
     return camera_id is not None, None
 
 
-def next_generation(connection: sqlite3.Connection, facility_id: str) -> int:
-    row = connection.execute(
-        "SELECT max(activation_generation) FROM policies WHERE facility_id=?", (facility_id,)
-    ).fetchone()
-    return 1 if row is None or row[0] is None else int(row[0]) + 1
+def current_generation(connection: psycopg.Connection, facility_id: str) -> int:
+    with connection.cursor(row_factory=dict_row) as cursor:
+        row = cursor.execute(
+            "SELECT max(activation_generation) AS generation FROM policies WHERE facility_id=%s",
+            (facility_id,),
+        ).fetchone()
+    return 0 if row is None or row["generation"] is None else int(row["generation"])
+
+
+def next_generation(connection: psycopg.Connection, facility_id: str) -> int:
+    return current_generation(connection, facility_id) + 1
+
+
+def utc_now() -> str:
+    return datetime.now(UTC).isoformat(timespec="milliseconds").replace("+00:00", "Z")

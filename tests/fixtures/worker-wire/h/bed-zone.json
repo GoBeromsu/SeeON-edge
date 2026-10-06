@@ -1,0 +1,301 @@
+{
+  "cases": {
+    "bad-confidence": {
+      "request": {
+        "body": {
+          "confidence": 2
+        },
+        "body_raw": "{\"confidence\":2}",
+        "headers": {
+          "content-type": "application/json",
+          "x-edge-relay-token": "<relay-token>"
+        },
+        "method": "POST",
+        "path": "/overlay/camera-1/bed-zone/recognize"
+      },
+      "response": {
+        "body_text": "<!DOCTYPE HTML>\n<html lang=\"en\">\n    <head>\n        <meta charset=\"utf-8\">\n        <title>Error response</title>\n    </head>\n    <body>\n        <h1>Error response</h1>\n        <p>Error code: 400</p>\n        <p>Message: Bad Request.</p>\n        <p>Error code explanation: 400 - Bad request syntax or unsupported method.</p>\n    </body>\n</html>\n",
+        "headers": {
+          "content-length": "343",
+          "content-type": "text/html;charset=utf-8"
+        },
+        "status": 400
+      }
+    },
+    "bed-not-found": {
+      "backend": {
+        "parser": "backend.app.features.cameras.bed_zone_router.recognize_bed_zone",
+        "result": {
+          "detail": {
+            "error_class": "bed_not_found"
+          },
+          "status_code": 422
+        }
+      },
+      "request": {
+        "body": {
+          "confidence": 0.15
+        },
+        "body_raw": "{\"confidence\":0.15}",
+        "headers": {
+          "content-type": "application/json",
+          "x-edge-relay-token": "<relay-token>"
+        },
+        "method": "POST",
+        "path": "/overlay/camera-1/bed-zone/recognize",
+        "timeout_sec": 5.0
+      },
+      "response": {
+        "body": {
+          "error_class": "bed_not_found"
+        },
+        "headers": {
+          "content-length": "31",
+          "content-type": "application/json"
+        },
+        "status": 404
+      }
+    },
+    "empty-snapshot": {
+      "backend": {
+        "parser": "backend.app.features.cameras.bed_zone_router.recognize_bed_zone",
+        "result": {
+          "detail": "worker bed-zone recognition unavailable",
+          "status_code": 503
+        }
+      },
+      "request": {
+        "body": {
+          "confidence": 0.15
+        },
+        "body_raw": "{\"confidence\":0.15}",
+        "headers": {
+          "content-type": "application/json",
+          "x-edge-relay-token": "<relay-token>"
+        },
+        "method": "POST",
+        "path": "/overlay/camera-1/bed-zone/recognize",
+        "timeout_sec": 5.0
+      },
+      "response": {
+        "body_text": "<!DOCTYPE HTML>\n<html lang=\"en\">\n    <head>\n        <meta charset=\"utf-8\">\n        <title>Error response</title>\n    </head>\n    <body>\n        <h1>Error response</h1>\n        <p>Error code: 503</p>\n        <p>Message: Service Unavailable.</p>\n        <p>Error code explanation: 503 - The server cannot process the request due to a high load.</p>\n    </body>\n</html>\n",
+        "headers": {
+          "content-length": "367",
+          "content-type": "text/html;charset=utf-8"
+        },
+        "status": 503
+      }
+    },
+    "forbidden-no-token": {
+      "request": {
+        "body": {
+          "confidence": 0.15
+        },
+        "body_raw": "{\"confidence\":0.15}",
+        "headers": {
+          "content-type": "application/json"
+        },
+        "method": "POST",
+        "path": "/overlay/camera-1/bed-zone/recognize"
+      },
+      "response": {
+        "body_text": "<!DOCTYPE HTML>\n<html lang=\"en\">\n    <head>\n        <meta charset=\"utf-8\">\n        <title>Error response</title>\n    </head>\n    <body>\n        <h1>Error response</h1>\n        <p>Error code: 403</p>\n        <p>Message: Forbidden.</p>\n        <p>Error code explanation: 403 - Request forbidden -- authorization will not help.</p>\n    </body>\n</html>\n",
+        "headers": {
+          "content-length": "349",
+          "content-type": "text/html;charset=utf-8"
+        },
+        "status": 403
+      }
+    },
+    "ok-confidence-0.25": {
+      "backend": {
+        "parser": "backend.app.features.cameras.bed_zone_router.recognize_bed_zone",
+        "result": {
+          "bed_zone": {
+            "image_height": 48,
+            "image_width": 64,
+            "recognized_at": "<normalised>",
+            "regions": [
+              {
+                "id": "bed-1",
+                "origin": "model",
+                "polygon": [
+                  [
+                    4,
+                    4
+                  ],
+                  [
+                    60,
+                    4
+                  ],
+                  [
+                    60,
+                    44
+                  ],
+                  [
+                    4,
+                    44
+                  ]
+                ]
+              }
+            ]
+          }
+        }
+      },
+      "request": {
+        "body": {
+          "confidence": 0.25
+        },
+        "body_raw": "{\"confidence\":0.25}",
+        "headers": {
+          "content-type": "application/json",
+          "x-edge-relay-token": "<relay-token>"
+        },
+        "method": "POST",
+        "path": "/overlay/camera-1/bed-zone/recognize",
+        "timeout_sec": 5.0
+      },
+      "response": {
+        "body": {
+          "image_height": 48,
+          "image_width": 64,
+          "regions": [
+            {
+              "id": "bed-1",
+              "origin": "model",
+              "polygon": [
+                [
+                  4,
+                  4
+                ],
+                [
+                  60,
+                  4
+                ],
+                [
+                  60,
+                  44
+                ],
+                [
+                  4,
+                  44
+                ]
+              ]
+            }
+          ]
+        },
+        "headers": {
+          "content-length": "120",
+          "content-type": "application/json"
+        },
+        "status": 200
+      }
+    },
+    "ok-default-confidence": {
+      "backend": {
+        "parser": "backend.app.features.cameras.bed_zone_router.recognize_bed_zone",
+        "result": {
+          "bed_zone": {
+            "image_height": 48,
+            "image_width": 64,
+            "recognized_at": "<normalised>",
+            "regions": [
+              {
+                "id": "bed-1",
+                "origin": "model",
+                "polygon": [
+                  [
+                    4,
+                    4
+                  ],
+                  [
+                    60,
+                    4
+                  ],
+                  [
+                    60,
+                    44
+                  ],
+                  [
+                    4,
+                    44
+                  ]
+                ]
+              }
+            ]
+          }
+        }
+      },
+      "request": {
+        "body": {
+          "confidence": 0.15
+        },
+        "body_raw": "{\"confidence\":0.15}",
+        "headers": {
+          "content-type": "application/json",
+          "x-edge-relay-token": "<relay-token>"
+        },
+        "method": "POST",
+        "path": "/overlay/camera-1/bed-zone/recognize",
+        "timeout_sec": 5.0
+      },
+      "response": {
+        "body": {
+          "image_height": 48,
+          "image_width": 64,
+          "regions": [
+            {
+              "id": "bed-1",
+              "origin": "model",
+              "polygon": [
+                [
+                  4,
+                  4
+                ],
+                [
+                  60,
+                  4
+                ],
+                [
+                  60,
+                  44
+                ],
+                [
+                  4,
+                  44
+                ]
+              ]
+            }
+          ]
+        },
+        "headers": {
+          "content-length": "120",
+          "content-type": "application/json"
+        },
+        "status": 200
+      }
+    },
+    "unknown-camera": {
+      "request": {
+        "body": {
+          "confidence": 0.15
+        },
+        "body_raw": "{\"confidence\":0.15}",
+        "headers": {
+          "content-type": "application/json",
+          "x-edge-relay-token": "<relay-token>"
+        },
+        "method": "POST",
+        "path": "/overlay/camera-unknown/bed-zone/recognize"
+      },
+      "response": {
+        "body_text": "<!DOCTYPE HTML>\n<html lang=\"en\">\n    <head>\n        <meta charset=\"utf-8\">\n        <title>Error response</title>\n    </head>\n    <body>\n        <h1>Error response</h1>\n        <p>Error code: 404</p>\n        <p>Message: Not Found.</p>\n        <p>Error code explanation: 404 - Nothing matches the given URI.</p>\n    </body>\n</html>\n",
+        "headers": {
+          "content-length": "330",
+          "content-type": "text/html;charset=utf-8"
+        },
+        "status": 404
+      }
+    }
+  }
+}

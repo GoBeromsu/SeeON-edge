@@ -14,9 +14,15 @@ import pytest
 from observability_load_harness import ObservabilityLoadSkip, run_measurement, skip_reason
 
 pytestmark = pytest.mark.real_stack
+pytest_plugins = (
+    "tests_support.postgres_sandbox",
+    "tests_support.postgres_diagnostics_sandbox",
+)
 
 
-def test_observability_load_measurement_writes_structural_document() -> None:
+def test_observability_load_measurement_writes_structural_document(
+    postgres_product_sandbox, postgres_audit_runtime, postgres_lifespan_diagnostics_schema
+) -> None:
     reason = skip_reason()
     if reason is not None:
         pytest.skip(reason)
@@ -33,6 +39,9 @@ def test_observability_load_measurement_writes_structural_document() -> None:
             duration_sec=duration_sec,
             camera_fps=camera_fps,
             output_dir=output_dir,
+            sandbox=postgres_product_sandbox,
+            audit_runtime=postgres_audit_runtime,
+            diagnostics_schema=postgres_lifespan_diagnostics_schema,
         )
     except ObservabilityLoadSkip as skipped:
         pytest.skip(str(skipped))
