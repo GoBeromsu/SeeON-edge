@@ -128,6 +128,17 @@ def _patch_minimal_dependencies(
         raising=True,
     )
     monkeypatch.setattr(cameras_router, "_bed_zone_store", lambda app: _FakeBedZoneStore())
+    # Clip storage location store (empty selection by default -> key absent)
+    class _FakeClipStorageLocationStore:
+        def get(self) -> str:
+            return ""
+
+    monkeypatch.setattr(
+        cameras_router,
+        "_clip_storage_location_store",
+        lambda app: _FakeClipStorageLocationStore(),
+        raising=True,
+    )
     # No local detection overrides by default
     monkeypatch.setattr(
         cameras_router, "_detection_settings_store", lambda app: _FakeDetectionSettingsStore({})
@@ -144,6 +155,13 @@ def _patch_minimal_dependencies(
         cameras_router,
         "get_runtime_settings_store",
         lambda app: _FakeRuntimeSettingsStore(enabled=runtime_enabled, version=runtime_version),
+        raising=True,
+    )
+    # No numeric policies by default
+    monkeypatch.setattr(
+        cameras_router,
+        "_detection_policy_store",
+        lambda app: _FakeDetectionPolicyStore(generation=0, bundle=None),
         raising=True,
     )
 
@@ -201,14 +219,14 @@ def test_byte_snapshot_no_policies_includes_unmapped_camera_and_runtime_defaults
         "cameras": [
             {
                 "camera_id": "local-1",
-                "rtsp_url": "rtsp://camera.invalid/a",
                 "space_id": "space-101",
+                "rtsp_url": "rtsp://camera.invalid/a",
                 "decode_backend": "auto",
             },
             {
                 "camera_id": "hub-2",
-                "rtsp_url": "rtsp://camera.invalid/b",
                 "space_id": "space-101",
+                "rtsp_url": "rtsp://camera.invalid/b",
                 "decode_backend": "cpu",
             },
         ],
@@ -253,7 +271,9 @@ def test_byte_snapshot_with_policies_threads_facility_and_scales_version(
         payload={"module_id": "fall", "schema_id": "fall.policy", "values": {"threshold": 0.7}},
     )
     monkeypatch.setattr(
-        cameras_router, "_detection_policy_store", lambda app: _FakeDetectionPolicyStore(1, bundle)
+        cameras_router,
+        "_detection_policy_store",
+        lambda app: _FakeDetectionPolicyStore(generation=1, bundle=bundle),
     )
 
     with TestClient(app) as client:
@@ -265,9 +285,9 @@ def test_byte_snapshot_with_policies_threads_facility_and_scales_version(
         "cameras": [
             {
                 "camera_id": "hub-x",
-                "rtsp_url": "rtsp://camera.invalid/x",
-                "space_id": "space-201",
                 "facility_id": "facility-1",
+                "space_id": "space-201",
+                "rtsp_url": "rtsp://camera.invalid/x",
             }
         ],
         "config_version": 7 * 1_000_000_000 + 0x42,
@@ -322,26 +342,24 @@ def test_byte_snapshot_with_local_detection_overrides_applies_and_sets_domains(
         "cameras": [],
         "config_version": 3
         + 1
-        + int(
-            (
-                __import__("hashlib")
-                .sha256(
-                    json.dumps(
-                        {
-                            "domains": {"bed_exit": {"enabled": True}, "fall": {"enabled": True}},
-                            "detection_windows": {
-                                "fall": {"start": "09:00", "end": "18:00", "tz": "Asia/Seoul"}
-                            },
-                            "night_window": None,
+        + (int(
+            __import__("hashlib")
+            .sha256(
+                json.dumps(
+                    {
+                        "domains": {"bed_exit": {"enabled": True}, "fall": {"enabled": True}},
+                        "detection_windows": {
+                            "fall": {"start": "09:00", "end": "18:00", "tz": "Asia/Seoul"}
                         },
-                        sort_keys=True,
-                    ).encode("utf-8")
-                )
-                .hexdigest()[:8],
-                16,
+                        "night_window": None,
+                    },
+                    sort_keys=True,
+                ).encode("utf-8")
             )
-            % 1_000_000
-        ),
+            .hexdigest()[:8],
+            16,
+        )
+        % 1_000_000),
         "restart_epoch": 1,
         "detection_windows": {"fall": {"start": "09:00", "end": "18:00", "tz": "Asia/Seoul"}},
         "domains": {"fall": {"enabled": True}, "bed_exit": {"enabled": True}},
