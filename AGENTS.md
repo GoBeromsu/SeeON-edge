@@ -99,6 +99,12 @@ pnpm --dir front build && pnpm --dir front lint
   secrets, RTSP URLs, or camera IPs in docs, issues, or shell history.
 - No `docker compose down -v`, `edge-state` deletion, or direct SQL repair of
   `edge.sqlite3`; no mutable image tags (`latest`, `:dev`) or hand-written digests.
+- Production edge runs only from immutable release images — `ML_API_IMAGE`/`ML_WORKER_IMAGE`
+  pinned to `@sha256:` digests — brought up with `compose.edge.yaml` (plus the
+  required hardware overlay) and invoked with `--pull never`. Never run the edge
+  from a dev checkout or via bind-mounts of source code. Rationale: in 2026-09 an
+  unmerged branch ended up running as production code, which caused about 1,780
+  false-positive alerts.
 - 기사님한테 회사 숙제 시키기: baking company-known deploy values (backend URL)
   into a field-tech form. Company-known values go in env/image; only site-local
   values (facility id, token) stay in the UI.
