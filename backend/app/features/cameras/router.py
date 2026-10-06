@@ -792,7 +792,11 @@ def _worker_config_response(request: Request, *, require_available: bool) -> dic
     inputs = WorkerConfigInputs(
         registry_snapshot=snapshot,
         bed_zones=bed_zones,
-        pulled=(getattr(request.app.state, "pulled_config", None) if isinstance(getattr(request.app.state, "pulled_config", None), PulledWorkerConfig) else getattr(request.app.state, "pulled_config", None)),
+        pulled=(
+            getattr(request.app.state, "pulled_config", None)
+            if isinstance(getattr(request.app.state, "pulled_config", None), PulledWorkerConfig)
+            else None
+        ),
         live_config_version=int(getattr(request.app.state, "config_version", 0)),
         live_restart_epoch=int(getattr(request.app.state, "restart_epoch", 0)),
         detection_settings=_detection_settings_store(request.app).get_all(),

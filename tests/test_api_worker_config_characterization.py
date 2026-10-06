@@ -120,6 +120,13 @@ def _patch_minimal_dependencies(
 ) -> None:
     import backend.app.features.cameras.router as cameras_router
 
+    class _FakeConnSettingsStore:
+        def load(self) -> Any:
+            class _Loaded:
+                facility_id: str = "facility-1"
+
+            return _Loaded()
+
     # Camera registry and bed zones
     monkeypatch.setattr(
         cameras_router,
@@ -147,7 +154,7 @@ def _patch_minimal_dependencies(
     monkeypatch.setattr(
         cameras_router,
         "get_connection_settings_store",
-        lambda app: type("S", (), {"load": lambda self: type("X", (), {"facility_id": "facility-1"})()})(),
+        lambda app: _FakeConnSettingsStore(),
         raising=True,
     )
     # Runtime export setting
@@ -292,7 +299,11 @@ def test_byte_snapshot_with_policies_threads_facility_and_scales_version(
         ],
         "config_version": 7 * 1_000_000_000 + 0x42,
         "restart_epoch": 3,
-        "detection_policies": {"module_id": "fall", "schema_id": "fall.policy", "values": {"threshold": 0.7}},
+        "detection_policies": {
+            "module_id": "fall",
+            "schema_id": "fall.policy",
+            "values": {"threshold": 0.7},
+        },
         "clip_export_enabled": False,
         "clip_export_version": 0,
     }

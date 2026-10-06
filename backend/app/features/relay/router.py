@@ -536,19 +536,34 @@ def worker_config(
     authorize_relay(request, relay_token)
     snapshot_store = getattr(request.app.state, "camera_registry", None)
     if not isinstance(snapshot_store, CameraRegistryStore):
-        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="camera registry is not injected")
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="camera registry is not injected",
+        )
     bed_zone_store = getattr(request.app.state, "bed_zone_store", None)
     if not isinstance(bed_zone_store, BedZoneStore):
-        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="bed zone store is not injected")
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="bed zone store is not injected",
+        )
     detection_settings_store = getattr(request.app.state, "detection_settings_store", None)
     if not isinstance(detection_settings_store, DetectionSettingsStore):
-        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="detection settings store is not injected")
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="detection settings store is not injected",
+        )
     clip_store = getattr(request.app.state, "clip_storage_location_store", None)
     if not isinstance(clip_store, ClipStorageLocationStore):
-        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="clip storage location store is not injected")
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="clip storage location store is not injected",
+        )
     policy_store = getattr(request.app.state, "detection_policy_store", None)
     if not isinstance(policy_store, DetectionPolicyStore):
-        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="detection policy store is not injected")
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="detection policy store is not injected",
+        )
     snapshot = snapshot_store.snapshot()
     bed_zones = bed_zone_store.get_all()
     facility_id = get_connection_settings_store(request.app).load().facility_id
@@ -576,7 +591,10 @@ def worker_config(
     response["clip_export_enabled"] = runtime_setting.clip_export_enabled
     response["clip_export_version"] = runtime_setting.version
     if not response.get("cameras"):
-        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="worker config unavailable")
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="worker config unavailable",
+        )
     return response
 
 
