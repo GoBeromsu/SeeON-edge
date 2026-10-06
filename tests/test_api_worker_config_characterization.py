@@ -292,7 +292,7 @@ def test_byte_snapshot_with_policies_threads_facility_and_scales_version(
         ],
         "config_version": 7 * 1_000_000_000 + 0x42,
         "restart_epoch": 3,
-        "detection_policies": {"module_id": "fall", "schema_id": "fall.policy", "values": {"threshold": 0.7}},
+        "detection_policies": {"module_id": "fall", "schema_id": "fall.policy", "values": {"threshold": 0.73}},
         "clip_export_enabled": False,
         "clip_export_version": 0,
     }
