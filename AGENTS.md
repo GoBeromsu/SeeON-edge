@@ -99,8 +99,10 @@ pnpm --dir front build && pnpm --dir front lint
   secrets, RTSP URLs, or camera IPs in docs, issues, or shell history.
 - No `docker compose down -v`, `edge-state` deletion, or direct SQL repair of
   `edge.sqlite3`; no mutable image tags (`latest`, `:dev`) or hand-written digests.
-- Production edge runs only from immutable release images — `ML_API_IMAGE`/`ML_WORKER_IMAGE`
-  pinned to `@sha256:` digests — brought up with `compose.edge.yaml` (plus the
+- Production edge runs the `main-<sha>` images CI built from a `main` commit —
+  `ML_API_IMAGE`/`ML_WORKER_IMAGE` pinned to the `@sha256:` digests CI recorded
+  (in the job summary or the `edge-ml-image-refs-<sha>` artifact) — brought up
+  with `compose.edge.yaml` (plus the
   required hardware overlay) and invoked with `--pull never`. Never run the edge
   from a dev checkout or via bind-mounts of source code. Rationale: in 2026-09 an
   unmerged branch ended up running as production code, which caused about 1,780
