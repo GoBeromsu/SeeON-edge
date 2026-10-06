@@ -55,6 +55,11 @@ from backend.app.features.cameras.topology import (
     TopologyConflictError,
 )
 from backend.app.features.cameras.update_command import CameraUpdate
+from backend.app.features.cameras.worker_config_service import (
+    WorkerConfigInputs,
+    assemble_worker_config,
+    compute_policy_camera_identities,
+)
 from backend.app.features.clips.storage_location_store import ClipStorageLocationStore
 from backend.app.features.connection.dependencies import get_connection_settings_store
 from backend.app.features.detection_settings.policy_store import (
@@ -737,8 +742,17 @@ def worker_config(
     authorization: Annotated[str | None, Header(alias="Authorization")] = None,
 ) -> dict[str, object]:
     _authorize_worker(request, relay_token or _bearer_token(authorization))
-    return worker_config_snapshot(request)
+    return _worker_config_response(request, require_available=False)
 
+def worker_config_snapshot(
+    request: Request, *, require_available: bool = False
+) -> dict[str, object]:
+    """
+    Compatibility shim for legacy callers (relay) that expect the previous
+    worker_config_snapshot() symbol. Delegates to the service-backed builder
+    via _worker_config_response and preserves the require_available gating.
+    """
+    return _worker_config_response(request, require_available=require_available)
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -779,100 +793,47 @@ def _hub_canonical_id(record: dict[str, object]) -> str | None:
     return None
 
 
-def worker_config_snapshot(
-    request: Request, *, require_available: bool = False
-) -> dict[str, object]:
+def _worker_config_response(request: Request, *, require_available: bool) -> dict[str, object]:
     snapshot = _store(request.app).snapshot()
     bed_zones = _bed_zone_store(request.app).get_all()
     facility_id = get_connection_settings_store(request.app).load().facility_id
-    cameras = []
-    policy_cameras: list[PolicyCameraIdentity] = []
-    for record in _snapshot_camera_records(snapshot):
-        rtsp_url = record.get("rtsp_url")
-        if not isinstance(rtsp_url, str) or not rtsp_url.strip():
-            continue
-        # DO NOT exclude unmapped cameras here. worker-config.cameras is the
-        # exact set the worker ingests (worker/runtime/worker.py:1978 feeds it to
-        # build_camera_source_registry), so dropping a camera stops fall
-        # detection for that room entirely. On a live nursing-home edge that is
-        # strictly worse than the issue #308 symptom it was meant to fix, where
-        # the camera is still watched and only the upstream submission is
-        # rejected. The Hub-boundary fix belongs at the relay/report path, not
-        # here -- tracked as a review blocker on this goal.
-        canonical_id = str(record.get("backend_camera_id") or record.get("id", ""))
-        if _hub_canonical_id(record) is None:
-            _LOGGER.warning(
-                "worker-config emitting camera %s without a Hub mapping (state=%s)",
-                record.get("id"),
-                _mapping_state(record),
-                extra={
-                    "local_camera_id": record.get("id"),
-                    "mapping_state": _mapping_state(record),
-                },
+    policy_gen = _detection_policy_store(request.app).generation(facility_id)
+    # Resolve policy bundle under the router's HTTP boundary so resolution errors map to 503
+    policy_bundle = None
+    if facility_id is not None and policy_gen != 0:
+        try:
+            policy_bundle = _detection_policy_store(request.app).resolve_bundle(
+                facility_id, compute_policy_camera_identities(snapshot)
             )
-        # No site facility stamp: worker defaults missing facility_id to the
-        # local wire placeholder "local". space_id is optional registry metadata.
-        camera: dict[str, object] = {
-            "camera_id": canonical_id,
-            "rtsp_url": rtsp_url,
-        }
-        policy_cameras.append(PolicyCameraIdentity(camera_id=canonical_id))
-        space_id = record.get("space_id")
-        if isinstance(space_id, str) and space_id.strip():
-            camera["space_id"] = space_id
-        # frame_stride/decode_backend are per-camera registry values only.
-        # The facility-wide ML_DEFAULT_* environment fallbacks were retired
-        # (see core.config._RETIRED_BACKEND_ENV, which fails boot on them);
-        # the registry is the sole authority, so an unset value is simply
-        # omitted and the worker keeps its own default.
-        #
-        # fps is deliberately NOT emitted: the worker's TemporalProfile owns
-        # ingest pacing (design B), so a relay-declared per-camera fps was a
-        # dead control that saved successfully and changed nothing.
-        decode_backend = record.get("decode_backend")
-        if decode_backend is not None:
-            camera["decode_backend"] = decode_backend
-        bed_zone = _lookup_bed_zone(bed_zones, record.get("id"))
-        if bed_zone is not None:
-            camera["bed_zone_regions"] = [region.as_dict() for region in bed_zone.regions]
-            camera["bed_zone_image_width"] = bed_zone.image_width
-            camera["bed_zone_image_height"] = bed_zone.image_height
-        cameras.append(camera)
-    pulled = getattr(request.app.state, "pulled_config", None)
-    if require_available and not cameras:
+        except PolicyActivationRefused as error:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(error)
+            ) from error
+    inputs = WorkerConfigInputs(
+        registry_snapshot=snapshot,
+        bed_zones=bed_zones,
+        pulled=(
+            getattr(request.app.state, "pulled_config", None)
+            if isinstance(getattr(request.app.state, "pulled_config", None), PulledWorkerConfig)
+            else None
+        ),
+        live_config_version=int(getattr(request.app.state, "config_version", 0)),
+        live_restart_epoch=int(getattr(request.app.state, "restart_epoch", 0)),
+        detection_settings=_detection_settings_store(request.app).get_all(),
+        clip_store_subdir=_clip_storage_location_store(request.app).get() or None,
+        facility_id=facility_id,
+        policy_generation=policy_gen,
+        policy_bundle=policy_bundle,
+    )
+    response = assemble_worker_config(inputs)
+    runtime_setting = get_runtime_settings_store(request.app).get()
+    response["clip_export_enabled"] = runtime_setting.clip_export_enabled
+    response["clip_export_version"] = runtime_setting.version
+    if require_available and not response.get("cameras"):
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="worker config unavailable",
         )
-    response: dict[str, object] = {
-        "registry_version": snapshot["registry_version"],
-        "cameras": cameras,
-    }
-    live_pulled: PulledWorkerConfig | None = None
-    if isinstance(pulled, PulledWorkerConfig):
-        live_pulled = _live_pulled_config(request, pulled)
-        response["config_version"] = live_pulled.config_version
-        response["restart_epoch"] = live_pulled.restart_epoch
-        if live_pulled.night_window is not None:
-            response["night_window"] = live_pulled.night_window.as_dict()
-        if live_pulled.detection_windows:
-            response["detection_windows"] = {
-                domain: window.as_dict() for domain, window in live_pulled.detection_windows.items()
-            }
-    # Local overrides run unconditionally (not only when an external pull
-    # exists): an operator can save detection settings or a clip storage
-    # location before the backend has ever successfully pulled anything.
-    _apply_local_detection_overrides(request.app, response, live_pulled)
-    _apply_clip_storage_override(request.app, response)
-    _apply_numeric_detection_policies(
-        request.app,
-        response,
-        facility_id=facility_id,
-        cameras=tuple(policy_cameras),
-    )
-    runtime_setting = get_runtime_settings_store(request.app).get()
-    response["clip_export_enabled"] = runtime_setting.clip_export_enabled
-    response["clip_export_version"] = runtime_setting.version
     return response
 
 
@@ -1006,7 +967,7 @@ def acknowledge_applied_detection_policies(
     enrolled_facility = get_connection_settings_store(request.app).load().facility_id
     if enrolled_facility != facility_id or config_version is None:
         return
-    expected = worker_config_snapshot(request).get("config_version")
+    expected = _worker_config_response(request, require_available=False).get("config_version")
     if expected != config_version:
         return
     _detection_policy_store(request.app).acknowledge_applied(facility_id)
@@ -1543,5 +1504,4 @@ def _probe_response(probe: ProbeResult) -> dict[str, object]:
 __all__ = [
     "acknowledge_applied_detection_policies",
     "router",
-    "worker_config_snapshot",
 ]
