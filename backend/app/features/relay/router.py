@@ -28,12 +28,19 @@ from backend.app.features.audit.catalog import (
 from backend.app.features.audit.http import audit_runtime, mutation_audit
 from backend.app.features.audit.store import AuditEvent
 from backend.app.features.audit.store import utc_now as audit_now
-from backend.app.features.cameras.router import (
-    acknowledge_applied_detection_policies,
-    worker_config_snapshot,
-)
+from backend.app.features.cameras.bed_zone_store import BedZoneStore
+from backend.app.features.cameras.router import acknowledge_applied_detection_policies
 from backend.app.features.cameras.store import CameraRegistryStore
 from backend.app.features.cameras.update_command import CameraUpdate
+from backend.app.features.cameras.worker_config_service import (
+    WorkerConfigInputs,
+    assemble_worker_config,
+    compute_policy_camera_identities,
+)
+from backend.app.features.clips.storage_location_store import ClipStorageLocationStore
+from backend.app.features.connection.dependencies import get_connection_settings_store
+from backend.app.features.detection_settings.policy_store import DetectionPolicyStore
+from backend.app.features.detection_settings.store import DetectionSettingsStore
 from backend.app.features.evidence.event_outbox import (
     AcceptedEvent,
     EventIdentityConflict,
@@ -53,6 +60,7 @@ from backend.app.features.evidence.relay_projection import (
     RelaySnapshot,
 )
 from backend.app.features.relay.auth import authorize_relay
+from backend.app.features.runtime_settings.dependencies import get_runtime_settings_store
 from backend.app.features.status.heartbeat_store import get_heartbeat_store
 from backend.app.features.status.runtime_status_store import get_runtime_status_store
 from contracts import AlertEventType
@@ -526,7 +534,50 @@ def worker_config(
     relay_token: Annotated[str | None, Header(alias=RELAY_TOKEN_HEADER)] = None,
 ) -> dict[str, object]:
     authorize_relay(request, relay_token)
-    return worker_config_snapshot(request, require_available=True)
+    snapshot_store = getattr(request.app.state, "camera_registry", None)
+    if not isinstance(snapshot_store, CameraRegistryStore):
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="camera registry is not injected")
+    bed_zone_store = getattr(request.app.state, "bed_zone_store", None)
+    if not isinstance(bed_zone_store, BedZoneStore):
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="bed zone store is not injected")
+    detection_settings_store = getattr(request.app.state, "detection_settings_store", None)
+    if not isinstance(detection_settings_store, DetectionSettingsStore):
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="detection settings store is not injected")
+    clip_store = getattr(request.app.state, "clip_storage_location_store", None)
+    if not isinstance(clip_store, ClipStorageLocationStore):
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="clip storage location store is not injected")
+    policy_store = getattr(request.app.state, "detection_policy_store", None)
+    if not isinstance(policy_store, DetectionPolicyStore):
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="detection policy store is not injected")
+    snapshot = snapshot_store.snapshot()
+    bed_zones = bed_zone_store.get_all()
+    facility_id = get_connection_settings_store(request.app).load().facility_id
+    inputs = WorkerConfigInputs(
+        registry_snapshot=snapshot,
+        bed_zones=bed_zones,
+        pulled=getattr(request.app.state, "pulled_config", None),
+        live_config_version=int(getattr(request.app.state, "config_version", 0)),
+        live_restart_epoch=int(getattr(request.app.state, "restart_epoch", 0)),
+        detection_settings=detection_settings_store.get_all(),
+        clip_store_subdir=clip_store.get() or None,
+        facility_id=facility_id,
+        policy_generation=policy_store.generation(facility_id),
+        policy_bundle=(
+            None
+            if facility_id is None
+            else policy_store.resolve_bundle(
+                facility_id, compute_policy_camera_identities(snapshot)
+            )
+        ),
+    )
+    response = assemble_worker_config(inputs)
+    # runtime export settings threaded after assembly to preserve key order
+    runtime_setting = get_runtime_settings_store(request.app).get()
+    response["clip_export_enabled"] = runtime_setting.clip_export_enabled
+    response["clip_export_version"] = runtime_setting.version
+    if not response.get("cameras"):
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="worker config unavailable")
+    return response
 
 
 @router.post("/restart", status_code=status.HTTP_202_ACCEPTED)
