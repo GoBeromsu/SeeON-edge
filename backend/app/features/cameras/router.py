@@ -798,6 +798,17 @@ def _worker_config_response(request: Request, *, require_available: bool) -> dic
     bed_zones = _bed_zone_store(request.app).get_all()
     facility_id = get_connection_settings_store(request.app).load().facility_id
     policy_gen = _detection_policy_store(request.app).generation(facility_id)
+    # Resolve policy bundle under the router's HTTP boundary so resolution errors map to 503
+    policy_bundle = None
+    if facility_id is not None and policy_gen != 0:
+        try:
+            policy_bundle = _detection_policy_store(request.app).resolve_bundle(
+                facility_id, compute_policy_camera_identities(snapshot)
+            )
+        except PolicyActivationRefused as error:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(error)
+            ) from error
     inputs = WorkerConfigInputs(
         registry_snapshot=snapshot,
         bed_zones=bed_zones,
@@ -812,13 +823,7 @@ def _worker_config_response(request: Request, *, require_available: bool) -> dic
         clip_store_subdir=_clip_storage_location_store(request.app).get() or None,
         facility_id=facility_id,
         policy_generation=policy_gen,
-        policy_bundle=(
-            None
-            if facility_id is None or policy_gen == 0
-            else _detection_policy_store(request.app).resolve_bundle(
-                facility_id, compute_policy_camera_identities(snapshot)
-            )
-        ),
+        policy_bundle=policy_bundle,
     )
     response = assemble_worker_config(inputs)
     runtime_setting = get_runtime_settings_store(request.app).get()
