@@ -19,6 +19,7 @@ from backend.app.features.audit.postgres_store import PostgresAuditStore
 from backend.app.features.audit.store import AuditEvent
 from backend.app.features.evidence.event_outbox import EventOutbox, OutboxBudget
 from backend.app.features.evidence.record_store import (
+    LEGACY_DELIVERY_STATE,
     CentralEvidenceQuery,
     CentralEvidenceReviewStore,
     EvidenceProjectionUnavailable,
@@ -209,6 +210,35 @@ def test_missing_delivery_obligation_is_not_reported_as_acknowledged(setup):
         query.get("unbound")
     with pytest.raises(EvidenceProjectionUnavailable, match="obligation is missing"):
         query.list()
+
+
+def test_incident_imported_from_sqlite_lists_without_a_delivery_obligation(setup):
+    sandbox, _, _, query = setup
+    sandbox.admin.execute(
+        "INSERT INTO incidents (incident_id,edge_event_id,facility_id,camera_id,event_type,"
+        "detected_at,lifecycle_state,provenance_state,provenance_missing_reason,"
+        "review_version,revision,created_at,updated_at) "
+        "VALUES ('legacy','legacy','facility-1','camera-1','fall',%s,'OPEN','MISSING',"
+        "'NOT_RECORDED',0,1,%s,%s)",
+        (_TIME, _TIME, _TIME),
+    )
+    # Given: the ledger carries the stamp the SQLite import leaves behind.
+    sandbox.admin.execute(
+        "INSERT INTO schema_migrations (version,name,checksum,applied_at,"
+        "source_schema_version,source_db_sha256,reconciliation_sha256) "
+        "VALUES (9999,'sqlite-import',repeat('c',64),%s,19,repeat('a',64),repeat('b',64))",
+        (_TIME,),
+    )
+
+    legacy = query.get("legacy")
+    listed, _ = query.list()
+
+    assert legacy is not None and legacy.event_delivery_state == LEGACY_DELIVERY_STATE
+    assert {item.incident_id: item.event_delivery_state for item in listed}["legacy"] == (
+        LEGACY_DELIVERY_STATE
+    )
+    # Incidents accepted through the outbox keep their real delivery state.
+    assert query.get("a").event_delivery_state != LEGACY_DELIVERY_STATE
 
 
 def test_purged_primary_identity_remains_available_to_incident_review(setup):
