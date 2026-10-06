@@ -83,8 +83,15 @@ def transfer(
                     "transfer did not commit; the authority is unchanged"
                 ) from error
             return successor
-        except (AuthorityFenced, MigrationError, PostgresError, psycopg.Error):
-            discard(pending)
+        except (AuthorityFenced, MigrationError, PostgresError, psycopg.Error) as error:
+            # Return validation or pool exit can fail after COMMIT; keep the only
+            # new token until the database proves whether it committed.
+            try:
+                resolved = _resolve(database, schema, authority_path, pending)
+            except (PostgresError, psycopg.Error):
+                raise error from None
+            if resolved is not None:
+                return successor
             raise
         publish_authority_file(pending, authority_path, replace=True)
         return successor

@@ -8,6 +8,7 @@ import stat
 from collections.abc import Callable
 from dataclasses import dataclass, replace
 from pathlib import Path
+from typing import TypeVar
 
 import psycopg
 import pytest
@@ -23,7 +24,7 @@ from backend.app.edge_db.migration.snapshot import export_snapshot
 from backend.app.edge_db.migration.sqlite_fence import fence_sqlite
 from backend.app.edge_db.migration.transfer import freeze, pending_authority_path, transfer
 from backend.app.edge_db.migration.worker_state import queue_digest
-from backend.app.edge_db.postgres import PoolBudget
+from backend.app.edge_db.postgres import PoolBudget, PostgresUnavailable
 from backend.app.features.diagnostics.postgres_database import DIAGNOSTICS_POOL_BUDGET
 from backend.app.postgres_root import (
     API_POSTGRES_AUTHORITY_FILE_ENV,
@@ -51,6 +52,7 @@ from tests_support.postgres_migration import (
 pytest_plugins = ("tests_support.postgres_migration",)
 
 _Fault = Callable[[psycopg.Connection, Callable[[], None]], None]
+_Result = TypeVar("_Result")
 _ROOT_BUDGET = PoolBudget(
     max_connections=1,
     max_waiting=1,
@@ -133,6 +135,33 @@ def _died_after_commit(connection: psycopg.Connection, commit: Callable[[], None
 def _died_before_commit(connection: psycopg.Connection, commit: Callable[[], None]) -> None:
     connection.close()
     raise _ProcessDeath
+
+
+def _fail_return_after_transfer_commit(
+    patch: pytest.MonkeyPatch, target: MigrationTarget, *, resolve_unavailable: bool = False
+) -> PostgresUnavailable:
+    """Fail return validation only after the real generation-2 COMMIT."""
+    original = target.database._validate_return
+    error = PostgresUnavailable("injected post-commit return failure")
+
+    def unavailable_read(callback: Callable[[psycopg.Connection], _Result]) -> _Result:
+        raise PostgresUnavailable("injected resolve read failure")
+
+    def validate_return(
+        connection: psycopg.Connection, primary_error: BaseException | None
+    ) -> None:
+        patch.setattr(target.database, "_validate_return", original)
+        original(connection, primary_error)
+        if resolve_unavailable:
+            patch.setattr(target.database, "read", unavailable_read)
+        raise error
+
+    def committed(connection: psycopg.Connection, commit: Callable[[], None]) -> None:
+        commit()
+        patch.setattr(target.database, "_validate_return", validate_return)
+
+    _fault_at_transfer_commit(patch, target.schema, committed)
+    return error
 
 
 def _transfer(target: MigrationTarget, **options: object) -> AuthorityToken:
@@ -272,6 +301,57 @@ def test_lost_commit_receipt_without_commit_keeps_the_old_authority(
     assert authority_row(target.admin, target.schema) == (generation, token, False, False)
     assert not pending_authority_path(target.authority_path).exists()
     assert _transfer(target).generation == 2
+
+
+def test_post_commit_return_failure_publishes_when_resolve_read_succeeds(
+    imported: MigrationTarget, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Given a real transfer whose COMMIT succeeds but return validation fails.
+    target = imported
+    with monkeypatch.context() as patch:
+        _fail_return_after_transfer_commit(patch, target)
+
+        # When the transfer resolves the failure against the database.
+        successor = _transfer(target)
+
+    # Then the committed authority is published with no pending token left.
+    assert successor.generation == 2
+    assert _file_token(target.authority_path) == successor
+    assert authority_row(target.admin, target.schema) == (2, successor.writer_token, True, True)
+    assert not pending_authority_path(target.authority_path).exists()
+
+
+def test_post_commit_return_failure_keeps_pending_when_resolve_read_is_unavailable(
+    imported: MigrationTarget, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Given a committed transfer followed by return failure and an unavailable resolve read.
+    target = imported
+    pending = pending_authority_path(target.authority_path)
+    authority_bytes = target.authority_path.read_bytes()
+    with monkeypatch.context() as patch:
+        original_error = _fail_return_after_transfer_commit(
+            patch, target, resolve_unavailable=True
+        )
+
+        # When the transfer cannot resolve its committed outcome.
+        with pytest.raises(PostgresUnavailable) as failure:
+            _transfer(target)
+
+    # Then it preserves the original error and the only copy of the committed token.
+    assert failure.value is original_error
+    assert pending.exists()
+    staged = _file_token(pending)
+    assert staged.generation == 2
+    assert authority_row(target.admin, target.schema) == (2, staged.writer_token, True, True)
+    assert target.authority_path.read_bytes() == authority_bytes
+
+    # A fresh database owner resumes from that same durable pending token.
+    with runtime_database(target.dsn, target.schema) as restarted:
+        resumed = transfer(restarted, target.authority_path, schema=target.schema)
+
+    assert resumed == staged
+    assert _file_token(target.authority_path) == staged
+    assert not pending.exists()
 
 
 def test_death_after_commit_is_completed_by_the_rerun(
