@@ -744,6 +744,15 @@ def worker_config(
     _authorize_worker(request, relay_token or _bearer_token(authorization))
     return _worker_config_response(request, require_available=False)
 
+def worker_config_snapshot(
+    request: Request, *, require_available: bool = False
+) -> dict[str, object]:
+    """
+    Compatibility shim for legacy callers (relay) that expect the previous
+    worker_config_snapshot() symbol. Delegates to the service-backed builder
+    via _worker_config_response and preserves the require_available gating.
+    """
+    return _worker_config_response(request, require_available=require_available)
 
 _LOGGER = logging.getLogger(__name__)
 
