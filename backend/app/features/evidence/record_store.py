@@ -51,6 +51,10 @@ class EvidenceReviewConflictError(RuntimeError):
         )
 
 
+# Delivery state reported for an incident that predates the event outbox.
+LEGACY_DELIVERY_STATE = "LEGACY_UNTRACKED"
+
+
 class EvidenceProjectionUnavailable(RuntimeError):
     """An incident lacks a required durable delivery obligation."""
 
@@ -187,7 +191,8 @@ SELECT incident.incident_id, incident.edge_event_id, incident.camera_id,
        primary_artifact.clip_id, primary_artifact.state, snapshot_artifact.state,
        clip.publish_state, clip.retention_state,
        incident.review_version, incident.review_actor, incident.review_at,
-       incident.review_disposition, incident.review_notes, delivery.state
+       incident.review_disposition, incident.review_notes, delivery.state,
+       EXISTS (SELECT 1 FROM schema_migrations WHERE source_db_sha256 IS NOT NULL)
 FROM incidents AS incident
 LEFT JOIN artifacts AS primary_artifact
   ON primary_artifact.incident_id = incident.incident_id
@@ -201,8 +206,14 @@ LEFT JOIN event_outbox AS delivery ON delivery.edge_event_id = incident.edge_eve
 
 
 def _summary_from_row(row: tuple[object, ...]) -> CentralEvidenceSummary:
-    if row[21] is None:
-        raise EvidenceProjectionUnavailable("incident delivery obligation is missing")
+    delivery_state = row[21]
+    if delivery_state is None:
+        # The SQLite runtime delivered synchronously and kept no outbox, so an
+        # incident imported from it has no obligation row. Only a database that
+        # was never imported treats a missing obligation as a broken commit.
+        if row[22] is not True:
+            raise EvidenceProjectionUnavailable("incident delivery obligation is missing")
+        delivery_state = LEGACY_DELIVERY_STATE
     review_version = _integer(row[16])
     review = None
     if review_version > 0:
@@ -236,7 +247,7 @@ def _summary_from_row(row: tuple[object, ...]) -> CentralEvidenceSummary:
         primary_clip_id=_text(row[11]),
         primary_artifact_state=_text(row[12]),
         snapshot_artifact_state=_text(row[13]),
-        event_delivery_state=str(row[21]),
+        event_delivery_state=str(delivery_state),
         clip_publish_state=_text(row[14]),
         retention_state=_text(row[15]),
         review=review,
@@ -288,6 +299,7 @@ def _text(value: object) -> str | None:
 
 
 __all__ = [
+    "LEGACY_DELIVERY_STATE",
     "CentralEvidenceQuery",
     "CentralEvidenceReviewStore",
     "CentralEvidenceSummary",
