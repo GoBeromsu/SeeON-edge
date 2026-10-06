@@ -8,9 +8,11 @@ from pathlib import Path
 import pytest
 from fastapi.testclient import TestClient
 
-from backend.app.edge_db.bootstrap import bootstrap_database
 from backend.app.edge_db.compact_schema import APPLICATION_TABLES
 from backend.app.main import create_app
+from tests_support.sqlite_source import create_schema19_source
+
+pytest_plugins = ("tests_support.postgres_sandbox", "tests_support.postgres_app_env")
 
 ROOT = Path(__file__).resolve().parents[1]
 RETIRED_TABLES = frozenset(
@@ -40,6 +42,7 @@ RETIRED_TABLES = frozenset(
 _STATUS_ROOT = ROOT / "backend/app/features/status"
 _LISTING_RUNTIME = ROOT / "backend/app/features/clips/listing_runtime.py"
 _QA_ROOT = ROOT / "backend/app/features/qa"
+_EDGE_DB_ROOT = ROOT / "backend/app/edge_db"
 
 
 def _module_sql_kinds(path: Path) -> frozenset[str]:
@@ -77,6 +80,15 @@ def test_listing_runtime_startup_module_is_absent() -> None:
         importlib.import_module("backend.app.features.clips.listing_runtime")
 
 
+def test_edge_db_bootstrap_entrypoint_is_absent() -> None:
+    assert not (_EDGE_DB_ROOT / "bootstrap.py").exists()
+    assert not (_EDGE_DB_ROOT / "__main__.py").exists()
+    with pytest.raises(ModuleNotFoundError):
+        importlib.import_module("backend.app.edge_db.bootstrap")
+    with pytest.raises(ModuleNotFoundError):
+        importlib.import_module("backend.app.edge_db.__main__")
+
+
 def test_status_modules_have_no_sqlite_or_retired_ddl() -> None:
     offenders: list[str] = []
     for path in sorted(_STATUS_ROOT.glob("*.py")):
@@ -86,28 +98,9 @@ def test_status_modules_have_no_sqlite_or_retired_ddl() -> None:
     assert offenders == []
 
 
-def test_reintroducing_status_sqlite_fails_this_named_boundary() -> None:
-    kinds = _module_sql_kinds(_STATUS_ROOT / "heartbeat_store.py")
-    injected = ast.parse("import sqlite3\nsqlite3.connect('x')\nCREATE = 'CREATE TABLE x (id INT)'")
-    visitor_kinds = _module_sql_kinds
-    del visitor_kinds
-    found = set(kinds)
-    for node in ast.walk(injected):
-        if isinstance(node, ast.Import):
-            for alias in node.names:
-                if alias.name == "sqlite3":
-                    found.add("import:sqlite3")
-        if isinstance(node, ast.Constant) and isinstance(node.value, str):
-            if "CREATE TABLE" in node.value.upper():
-                found.add("ddl:create-table")
-    assert "import:sqlite3" in found
-    assert "ddl:create-table" in found
-    assert kinds == frozenset()
-
-
 def test_schema19_runtime_has_no_telemetry_qa_or_listing_tables(tmp_path: Path) -> None:
     database = tmp_path / "edge.sqlite3"
-    bootstrap_database(database)
+    create_schema19_source(database)
     with sqlite3.connect(database) as connection:
         tables = {
             str(row[0])
@@ -119,6 +112,7 @@ def test_schema19_runtime_has_no_telemetry_qa_or_listing_tables(tmp_path: Path) 
     assert tables.isdisjoint(RETIRED_TABLES)
 
 
+@pytest.mark.usefixtures("postgres_app_env")
 def test_lifespan_boot_does_not_create_retired_tables_or_listing_index() -> None:
     app = create_app()
     with TestClient(app) as client:
@@ -132,25 +126,3 @@ def test_lifespan_boot_does_not_create_retired_tables_or_listing_index() -> None
     body = status.json()
     assert body["cameras"] == {}
     assert body["runtime"]["facilities"] == {}
-
-
-def test_authorizer_denies_telemetry_ddl(tmp_path: Path) -> None:
-    from backend.app.edge_db.connection import RuntimeActor, open_runtime_database
-
-    database = tmp_path / "edge.sqlite3"
-    bootstrap_database(database)
-    connection = open_runtime_database(database, actor=RuntimeActor.API)
-    try:
-        with pytest.raises(sqlite3.DatabaseError):
-            connection.execute(
-                "CREATE TABLE control_heartbeats (camera_id TEXT PRIMARY KEY, "
-                "facility_id TEXT NOT NULL, received_at REAL NOT NULL, "
-                "config_version INTEGER) STRICT"
-            )
-        with pytest.raises(sqlite3.DatabaseError):
-            connection.execute(
-                "CREATE TABLE runtime_latency (facility_id TEXT PRIMARY KEY, "
-                "payload_json TEXT NOT NULL) STRICT"
-            )
-    finally:
-        connection.close()

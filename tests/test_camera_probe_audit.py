@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import ast
 import json
-import sqlite3
 from pathlib import Path
 
 import pytest
@@ -10,16 +9,25 @@ from fastapi import HTTPException
 from fastapi.testclient import TestClient
 
 from backend.app.features.audit.catalog import AuditAction
-from backend.app.features.audit.store import AuditEvent, AuditRecord, AuditStore
+from backend.app.features.audit.postgres_runtime import PostgresAuditRuntime
+from backend.app.features.audit.postgres_store import PostgresAuditStore
 from backend.app.features.cameras.camera_values import ProbeResult
-from backend.app.features.cameras.store import CameraRegistryStore
-from backend.app.main import create_app, no_lifespan
+from tests_support.postgres_api_app import postgres_api_app
+from tests_support.postgres_sandbox import ProductSandbox
+
+pytest_plugins = ("tests_support.postgres_sandbox",)
 
 
-def _database_path() -> Path:
-    from backend.app.features.audit import store
-
-    return store.EDGE_DATABASE_PATH
+def _app_with_camera(sandbox: ProductSandbox, audit_runtime: PostgresAuditRuntime):
+    app = postgres_api_app(sandbox, audit_runtime)
+    app.state.camera_registry.create(
+        camera_id="camera-a",
+        label="A",
+        rtsp_url="rtsp://camera.example/live",
+        space_id=None,
+        status="offline",
+    )
+    return app
 
 
 def _login(client: TestClient) -> None:
@@ -27,18 +35,19 @@ def _login(client: TestClient) -> None:
     assert response.status_code == 204
 
 
+def _action_count(sandbox: ProductSandbox, action: AuditAction) -> int:
+    return sandbox.admin.execute(
+        "SELECT COUNT(*) FROM audit_events WHERE action=%s", (action.value,)
+    ).fetchone()[0]
+
+
 def test_camera_probe_persisted_outcomes_append_exactly_one_typed_audit(
+    postgres_product_sandbox: ProductSandbox,
+    postgres_audit_runtime: PostgresAuditRuntime,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    app = create_app(lifespan=no_lifespan)
-    store = app.state.camera_registry = CameraRegistryStore(_database_path())
-    store.create(
-        camera_id="camera-a",
-        label="A",
-        rtsp_url="rtsp://camera.example/live",
-        space_id=None,
-        status="offline",
-    )
+    sandbox = postgres_product_sandbox
+    app = _app_with_camera(sandbox, postgres_audit_runtime)
     outcomes = iter((ProbeResult(True, width=640, height=480), ProbeResult(False, "timeout")))
     monkeypatch.setattr(
         "backend.app.features.cameras.router._probe_rtsp_url",
@@ -46,21 +55,21 @@ def test_camera_probe_persisted_outcomes_append_exactly_one_typed_audit(
     )
     with TestClient(app) as client:
         _login(client)
-        before = _action_count(AuditAction.CAMERA_PROBE)
+        before = _action_count(sandbox, AuditAction.CAMERA_PROBE)
         online = client.post("/api/v1/cameras/camera-a/test")
-        middle = _action_count(AuditAction.CAMERA_PROBE)
+        middle = _action_count(sandbox, AuditAction.CAMERA_PROBE)
         offline = client.post("/api/v1/cameras/camera-a/test")
-        after = _action_count(AuditAction.CAMERA_PROBE)
+        after = _action_count(sandbox, AuditAction.CAMERA_PROBE)
 
     assert online.status_code == offline.status_code == 200
     assert (middle - before, after - middle) == (1, 1)
-    with sqlite3.connect(_database_path()) as connection:
-        details = [
-            json.loads(row[0])
-            for row in connection.execute(
-                "SELECT detail_json FROM audit_events WHERE action='camera.probe' ORDER BY audit_id"
-            )
-        ]
+    details = [
+        json.loads(row[0])
+        for row in sandbox.admin.execute(
+            "SELECT detail_json FROM audit_events WHERE action=%s ORDER BY audit_id",
+            (AuditAction.CAMERA_PROBE.value,),
+        )
+    ]
     assert details == [
         {"error_class": None, "ok": True, "version": 1},
         {"error_class": "timeout", "ok": False, "version": 1},
@@ -68,17 +77,13 @@ def test_camera_probe_persisted_outcomes_append_exactly_one_typed_audit(
 
 
 def test_camera_probe_error_without_persistence_appends_no_success(
+    postgres_product_sandbox: ProductSandbox,
+    postgres_audit_runtime: PostgresAuditRuntime,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    app = create_app(lifespan=no_lifespan)
-    store = app.state.camera_registry = CameraRegistryStore(_database_path())
-    store.create(
-        camera_id="camera-a",
-        label="A",
-        rtsp_url="rtsp://camera.example/live",
-        space_id=None,
-        status="offline",
-    )
+    sandbox = postgres_product_sandbox
+    app = _app_with_camera(sandbox, postgres_audit_runtime)
+    store = app.state.camera_registry
     calls = 0
 
     def unavailable(*_args):
@@ -90,7 +95,7 @@ def test_camera_probe_error_without_persistence_appends_no_success(
     with TestClient(app) as client:
         _login(client)
         before = store.get("camera-a")
-        before_count = _action_count(AuditAction.CAMERA_PROBE)
+        before_count = _action_count(sandbox, AuditAction.CAMERA_PROBE)
         failed = client.post("/api/v1/cameras/camera-a/test")
         unauthorized = TestClient(app).post("/api/v1/cameras/camera-a/test")
 
@@ -98,38 +103,17 @@ def test_camera_probe_error_without_persistence_appends_no_success(
     assert unauthorized.status_code == 401
     assert calls == 1
     assert store.get("camera-a") == before
-    assert _action_count(AuditAction.CAMERA_PROBE) == before_count
-
-
-class _DenyAuditInsertStore(AuditStore):
-    def _append(self, connection: sqlite3.Connection, event: AuditEvent) -> AuditRecord:
-        def authorize(
-            action: int,
-            arg1: str | None,
-            _arg2: str | None,
-            _database: str | None,
-            _source: str | None,
-        ) -> int:
-            if action == sqlite3.SQLITE_INSERT and arg1 == "audit_events":
-                return sqlite3.SQLITE_DENY
-            return sqlite3.SQLITE_OK
-
-        connection.set_authorizer(authorize)
-        return super()._append(connection, event)
+    assert _action_count(sandbox, AuditAction.CAMERA_PROBE) == before_count
 
 
 def test_camera_probe_audit_denial_rolls_back_persisted_outcome(
+    postgres_product_sandbox: ProductSandbox,
+    postgres_audit_runtime: PostgresAuditRuntime,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    app = create_app(lifespan=no_lifespan)
-    store = app.state.camera_registry = CameraRegistryStore(_database_path())
-    store.create(
-        camera_id="camera-a",
-        label="A",
-        rtsp_url="rtsp://camera.example/live",
-        space_id=None,
-        status="offline",
-    )
+    sandbox = postgres_product_sandbox
+    app = _app_with_camera(sandbox, postgres_audit_runtime)
+    store = app.state.camera_registry
     monkeypatch.setattr(
         "backend.app.features.cameras.router._probe_rtsp_url",
         lambda *_args: ProbeResult(True, width=640, height=480),
@@ -137,36 +121,38 @@ def test_camera_probe_audit_denial_rolls_back_persisted_outcome(
     with TestClient(app) as client:
         _login(client)
         before = store.get("camera-a")
-        before_count = _action_count(AuditAction.CAMERA_PROBE)
-        app.state.audit_store = _DenyAuditInsertStore(_database_path())
+        before_count = _action_count(sandbox, AuditAction.CAMERA_PROBE)
+        sandbox.admin.execute(
+            "CREATE FUNCTION reject_audit_test() RETURNS trigger LANGUAGE plpgsql AS $$ "
+            "BEGIN RAISE EXCEPTION 'injected audit failure'; END $$"
+        )
+        sandbox.admin.execute(
+            "CREATE TRIGGER reject_audit_test BEFORE INSERT ON audit_events "
+            "FOR EACH ROW EXECUTE FUNCTION reject_audit_test()"
+        )
         response = client.post("/api/v1/cameras/camera-a/test")
 
     assert (response.status_code, response.content) == (503, b"")
     assert "set-cookie" not in response.headers
     assert store.get("camera-a") == before
-    assert _action_count(AuditAction.CAMERA_PROBE) == before_count
-
-
-def _action_count(action: AuditAction) -> int:
-    with sqlite3.connect(_database_path()) as connection:
-        return connection.execute(
-            "SELECT COUNT(*) FROM audit_events WHERE action=?", (action.value,)
-        ).fetchone()[0]
+    assert _action_count(sandbox, AuditAction.CAMERA_PROBE) == before_count
 
 
 def test_fail_open_heartbeat_does_not_invoke_audit_verification(
+    postgres_product_sandbox: ProductSandbox,
+    postgres_audit_runtime: PostgresAuditRuntime,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     calls = 0
-    original = AuditStore.verify
+    original = PostgresAuditStore.verify
 
-    def counted(self: AuditStore, checkpoint=None):
+    def counted(self: PostgresAuditStore, checkpoint=None):
         nonlocal calls
         calls += 1
         return original(self, checkpoint)
 
-    monkeypatch.setattr(AuditStore, "verify", counted)
-    app = create_app(lifespan=no_lifespan)
+    monkeypatch.setattr(PostgresAuditStore, "verify", counted)
+    app = postgres_api_app(postgres_product_sandbox, postgres_audit_runtime)
     app.state.edge_relay_token = "relay-token"
     with TestClient(app) as client:
         responses = tuple(
@@ -224,7 +210,6 @@ def test_camera_probe_production_wiring_is_covered_and_mutation_sensitive() -> N
         "CLIP_PLAY",
         "CLIP_THUMBNAIL",
         "CLIP_ARTIFACT",
-
         "AUDIT_LIST",
         "AUDIT_DETAIL",
         "RELAY_ALERT",

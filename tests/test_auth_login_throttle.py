@@ -2,19 +2,26 @@
 
 from __future__ import annotations
 
+import pytest
+from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
+from backend.app.features.audit.postgres_runtime import PostgresAuditRuntime
 from backend.app.features.auth import router as auth_router
-from backend.app.features.cameras.store import CameraRegistryStore
-from backend.app.main import create_app, no_lifespan
-from tests_support.compact_authority_db import prepare_compact_database
+from tests_support.postgres_api_app import postgres_api_app
+from tests_support.postgres_sandbox import ProductSandbox
+
+pytest_plugins = ("tests_support.postgres_sandbox",)
 
 
-def _client(tmp_path):
-    app = create_app(lifespan=no_lifespan)
-    registry_path = tmp_path / "catalog.sqlite3"
-    prepare_compact_database(registry_path)
-    app.state.camera_registry = CameraRegistryStore(registry_path)
+@pytest.fixture
+def app(
+    postgres_product_sandbox: ProductSandbox, postgres_audit_runtime: PostgresAuditRuntime
+) -> FastAPI:
+    return postgres_api_app(postgres_product_sandbox, postgres_audit_runtime)
+
+
+def _client(app: FastAPI) -> TestClient:
     app.state.dashboard_username = "operator"
     app.state.dashboard_password = "correct-horse"
     return TestClient(app)
@@ -33,7 +40,7 @@ def test_auth_204_routes_declare_no_response_model() -> None:
         assert route.response_model is None
 
 
-def test_login_throttle_returns_429_after_bounded_failures(tmp_path, monkeypatch) -> None:
+def test_login_throttle_returns_429_after_bounded_failures(app: FastAPI, monkeypatch) -> None:
     # Deterministic window: inject fixed monotonic stamps via record/allow path.
     throttle = auth_router._LoginThrottle()
     monkeypatch.setattr(auth_router, "_LOGIN_THROTTLE", throttle)
@@ -57,7 +64,7 @@ def test_login_throttle_returns_429_after_bounded_failures(tmp_path, monkeypatch
     # phase starts from an empty window.
     throttle.clear(key)
 
-    with _client(tmp_path) as client:
+    with _client(app) as client:
         for _ in range(3):
             denied = client.post(
                 "/api/v1/auth/session",

@@ -8,7 +8,8 @@ from typing import Annotated
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from starlette.concurrency import run_in_threadpool
 
-from backend.app.edge_db.compatibility import EdgeDatabaseError
+from backend.app.edge_db import DatabaseDriverError
+from backend.app.edge_db.postgres import PostgresError
 from backend.app.features.diagnostics.schemas import (
     ExecutionQueryParams,
     ExecutionQueryResponse,
@@ -22,11 +23,11 @@ from backend.app.shared.dashboard_auth import authorize_dashboard
 from shared.events.execution_records import ExecutionRecordContractError, WireBatch
 
 DISABLED_DETAIL = "execution records disabled"
-# The one-shot edge_db bootstrap stamps edge-diagnostics.sqlite3 before the
-# runtime ever starts (#579/#580, S1/S2); if a deploy skipped it, the store's
-# connection factory raises EdgeDatabaseError on first use rather than
-# creating the file, so that failure must not surface as an opaque 500.
-UNAVAILABLE_DETAIL = "diagnostics store unavailable: run edge-db bootstrap"
+# The migration `provision` step creates the diagnostics schema before the
+# runtime ever starts (#579/#580, S1/S2); if a deploy skipped it, or
+# PostgreSQL is down, the store raises a PostgreSQL error on first use rather
+# than creating tables, so that failure must not surface as an opaque 500.
+UNAVAILABLE_DETAIL = "diagnostics store unavailable: check PostgreSQL and run migration provision"
 
 router = APIRouter(tags=["diagnostics"], route_class=BoundedBodyRoute)
 
@@ -70,11 +71,11 @@ async def ingest_execution_records(
             detail=str(error),
         ) from error
     ingest = ingest_batch_from_wire(batch, backend_build_revision=backend_build_revision(request))
-    # SQLite work (including bounded capacity pruning) never runs on the event
-    # loop: a busy ingest must not stall /health or the dashboard.
+    # Database work (including bounded capacity pruning) never runs on the
+    # event loop: a busy ingest must not stall /health or the dashboard.
     try:
         receipt = await run_in_threadpool(store.ingest_batch, ingest)
-    except EdgeDatabaseError as error:
+    except (PostgresError, DatabaseDriverError) as error:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail=UNAVAILABLE_DETAIL,
@@ -97,7 +98,7 @@ def query_execution_records(
             params.limit,
             params.cursor,
         )
-    except EdgeDatabaseError as error:
+    except (PostgresError, DatabaseDriverError) as error:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail=UNAVAILABLE_DETAIL,

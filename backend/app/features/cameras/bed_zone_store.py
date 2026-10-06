@@ -3,22 +3,24 @@
 from __future__ import annotations
 
 import json
-import sqlite3
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
-from pathlib import Path
-from threading import Lock
 from typing import Literal
 
+import psycopg
 from pydantic import ConfigDict, TypeAdapter, ValidationError
 
-from backend.app.edge_db import EDGE_DATABASE_PATH
-from backend.app.edge_db.configuration import open_configuration_database, utc_now
-from backend.app.edge_db.connection import write_transaction
-from backend.app.features.cameras.camera_repository import record_registry_mutation
+from backend.app.edge_db.authority import AuthorityToken, require_authority
+from backend.app.edge_db.postgres import PostgresDatabase
+from backend.app.features.cameras.camera_repository import (
+    CameraRegistryNotInitialized,
+    lock_registry,
+    record_registry_mutation,
+    utc_now,
+)
 
 BedZoneOrigin = Literal["manual", "model"]
-BedZoneWriteHook = Callable[[sqlite3.Connection], None]
+BedZoneWriteHook = Callable[[psycopg.Connection], None]
 
 
 @dataclass(frozen=True, slots=True)
@@ -52,44 +54,60 @@ class BedZone:
 
 
 class BedZoneStore:
-    def __init__(self, path: str | Path) -> None:
-        self.path = Path(path)
-        self._lock = Lock()
-        self._connection = open_configuration_database(self.path)
+    """Borrow the API-owned pool; bootstrap and transaction lifecycle stay external."""
 
-    @classmethod
-    def from_env(cls) -> BedZoneStore:
-        return cls(EDGE_DATABASE_PATH)
+    def __init__(self, database: PostgresDatabase, authority: AuthorityToken) -> None:
+        self.database = database
+        self.authority = authority
 
     def camera_exists(self, camera_id: str) -> bool:
-        with self._lock:
-            row = self._connection.execute(
-                "SELECT 1 FROM cameras WHERE camera_id=?",
+        def read(connection: psycopg.Connection) -> bool:
+            row = connection.execute(
+                "SELECT c.camera_id FROM edge_site AS s "
+                "LEFT JOIN cameras AS c ON c.camera_id=%s WHERE s.id=1",
                 (camera_id,),
             ).fetchone()
-        return row is not None
+            if row is None:
+                raise CameraRegistryNotInitialized()
+            return row[0] is not None
+
+        return self.database.read(read)
 
     def get(self, camera_id: str) -> BedZone | None:
-        with self._lock:
-            row = self._connection.execute(
-                "SELECT bed_polygon_json,bed_image_width,bed_image_height,bed_recognized_at "
-                "FROM cameras WHERE camera_id=?",
+        def read(connection: psycopg.Connection) -> BedZone | None:
+            row = connection.execute(
+                "SELECT c.bed_polygon_json,c.bed_image_width,c.bed_image_height,"
+                "c.bed_recognized_at FROM edge_site AS s "
+                "LEFT JOIN cameras AS c ON c.camera_id=%s WHERE s.id=1",
                 (camera_id,),
             ).fetchone()
-        return None if row is None or row[0] is None else _row_to_bed_zone(row)
+            if row is None:
+                raise CameraRegistryNotInitialized()
+            return None if row[0] is None else _row_to_bed_zone(row)
+
+        return self.database.read(read)
 
     def get_all(self) -> dict[str, BedZone]:
-        with self._lock:
-            rows = self._connection.execute(
-                "SELECT camera_id,bed_polygon_json,bed_image_width,bed_image_height,"
-                "bed_recognized_at FROM cameras WHERE bed_polygon_json IS NOT NULL"
+        def read(connection: psycopg.Connection) -> dict[str, BedZone]:
+            # Keep the bootstrap sentinel and all zones in one statement snapshot.
+            rows = connection.execute(
+                "SELECT c.camera_id,c.bed_polygon_json,c.bed_image_width,c.bed_image_height,"
+                "c.bed_recognized_at FROM edge_site AS s "
+                "LEFT JOIN cameras AS c ON c.bed_polygon_json IS NOT NULL "
+                'WHERE s.id=1 ORDER BY c.camera_id COLLATE "C"'
             ).fetchall()
-        result: dict[str, BedZone] = {}
-        for row in rows:
-            bed_zone = _row_to_bed_zone(row[1:])
-            if bed_zone is not None:
-                result[str(row[0])] = bed_zone
-        return result
+            if not rows:
+                raise CameraRegistryNotInitialized()
+            result: dict[str, BedZone] = {}
+            for row in rows:
+                if row[0] is None:
+                    continue
+                bed_zone = _row_to_bed_zone(row[1:])
+                if bed_zone is not None:
+                    result[str(row[0])] = bed_zone
+            return result
+
+        return self.database.read(read)
 
     def put(
         self,
@@ -101,24 +119,28 @@ class BedZoneStore:
         recognized_at: str,
         after_write: BedZoneWriteHook | None = None,
     ) -> BedZone:
-        bed_zone, encoded = validate_bed_zone(
-            regions,
-            image_width=image_width,
-            image_height=image_height,
-            recognized_at=recognized_at,
-        )
-        with self._lock, write_transaction(self._connection):
-            cursor = self._connection.execute(
-                "UPDATE cameras SET bed_polygon_json=?,bed_image_width=?,bed_image_height=?,"
-                "bed_recognized_at=?,revision=revision+1,updated_at=? WHERE camera_id=?",
+        def persist(connection: psycopg.Connection) -> BedZone:
+            require_authority(connection, self.authority)
+            lock_registry(connection)
+            bed_zone, encoded = validate_bed_zone(
+                regions,
+                image_width=image_width,
+                image_height=image_height,
+                recognized_at=recognized_at,
+            )
+            cursor = connection.execute(
+                "UPDATE cameras SET bed_polygon_json=%s,bed_image_width=%s,bed_image_height=%s,"
+                "bed_recognized_at=%s,revision=revision+1,updated_at=%s WHERE camera_id=%s",
                 (encoded, image_width, image_height, recognized_at, utc_now(), camera_id),
             )
             if cursor.rowcount != 1:
-                raise sqlite3.IntegrityError("bed-zone camera does not exist")
-            record_registry_mutation(self._connection)
+                raise psycopg.IntegrityError("bed-zone camera does not exist")
+            record_registry_mutation(connection)
             if after_write is not None:
-                after_write(self._connection)
-        return bed_zone
+                after_write(connection)
+            return bed_zone
+
+        return self.database.transact(persist)
 
     def delete(
         self,
@@ -126,19 +148,23 @@ class BedZoneStore:
         *,
         after_write: BedZoneWriteHook | None = None,
     ) -> bool:
-        with self._lock, write_transaction(self._connection):
-            cursor = self._connection.execute(
+        def persist(connection: psycopg.Connection) -> bool:
+            require_authority(connection, self.authority)
+            lock_registry(connection)
+            cursor = connection.execute(
                 "UPDATE cameras SET bed_polygon_json=NULL,bed_image_width=NULL,"
-                "bed_image_height=NULL,bed_recognized_at=NULL,revision=revision+1,updated_at=? "
-                "WHERE camera_id=? AND bed_polygon_json IS NOT NULL",
+                "bed_image_height=NULL,bed_recognized_at=NULL,revision=revision+1,updated_at=%s "
+                "WHERE camera_id=%s AND bed_polygon_json IS NOT NULL",
                 (utc_now(), camera_id),
             )
             changed = cursor.rowcount > 0
             if changed:
-                record_registry_mutation(self._connection)
+                record_registry_mutation(connection)
                 if after_write is not None:
-                    after_write(self._connection)
-        return changed
+                    after_write(connection)
+            return changed
+
+        return self.database.transact(persist)
 
 
 _BED_ZONE_ROW = TypeAdapter(tuple[str, int, int, str], config=ConfigDict(strict=True))

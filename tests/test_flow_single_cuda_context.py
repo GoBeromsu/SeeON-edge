@@ -17,7 +17,9 @@ it and the receipt comes from running it inside the shipped image.
 from __future__ import annotations
 
 import ctypes
+import subprocess
 import sys
+from pathlib import Path
 
 import numpy as np
 import pytest
@@ -25,6 +27,7 @@ import pytest
 pytestmark = pytest.mark.real_stack
 
 _CUDA_SUCCESS = 0
+_REPO_ROOT = Path(__file__).resolve().parents[1]
 
 
 def _driver() -> ctypes.CDLL:
@@ -67,14 +70,31 @@ def test_the_host_copy_path_makes_no_cuda_context_current() -> None:
     )
 
 
-def test_the_worker_process_imports_no_other_cuda_client() -> None:
-    import worker.adapters.deepstream.service_maker  # noqa: F401
-    import worker.adapters.model.ort_bed_seg  # noqa: F401
-    import worker.adapters.model.ort_pose_bbox56  # noqa: F401
-    import worker.runtime.flow  # noqa: F401
+_WORKER_IMPORTS_PROBE = """
+import sys
 
-    assert "torch" not in sys.modules
-    assert "cupy" not in sys.modules
+import worker.adapters.deepstream.service_maker
+import worker.adapters.model.ort_bed_seg
+import worker.adapters.model.ort_pose_bbox56
+import worker.runtime.flow
+
+print(",".join(name for name in ("torch", "cupy") if name in sys.modules))
+"""
+
+
+def test_the_worker_process_imports_no_other_cuda_client() -> None:
+    # A fresh interpreter is the worker process; this pytest process may already
+    # hold Torch from unrelated tests, so sys.modules here proves nothing.
+    probe = subprocess.run(
+        [sys.executable, "-c", _WORKER_IMPORTS_PROBE],
+        capture_output=True,
+        text=True,
+        check=False,
+        cwd=_REPO_ROOT,
+        timeout=120,
+    )
+    assert probe.returncode == 0, probe.stderr
+    assert probe.stdout.strip() == "", f"worker imports load another CUDA client: {probe.stdout}"
 
 
 def test_ort_runs_on_cpu_and_leaves_the_gpu_alone() -> None:

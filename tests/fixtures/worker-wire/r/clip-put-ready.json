@@ -1,0 +1,17 @@
+{
+  "camera_id": "cmsnw6rjc01vhlh01oswn99yq",
+  "clip_end_at": "2026-08-20T17:21:02.000000Z",
+  "clip_start_at": "2026-08-20T17:20:50.000000Z",
+  "codec": "h264",
+  "duration_ms": 12000,
+  "event_refs": [
+    "a5e15ff2-90fd-4764-be74-a7da4f573cc9"
+  ],
+  "facility_id": "facility-1",
+  "finalized_at": "2026-08-20T17:21:03.500000Z",
+  "mime_type": "video/mp4",
+  "sha256": "951a58799b7c700b9f4b011473df0ed6d61ab8f97a2cc6953e35823ea8c455df",
+  "size_bytes": 524288,
+  "state": "READY",
+  "state_version": 1
+}

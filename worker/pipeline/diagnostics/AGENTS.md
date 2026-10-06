@@ -1,19 +1,45 @@
 # worker/pipeline/diagnostics
 
 Own the Worker-side execution-record buffer and export drain. Producers only
-read existing values and call `try_emit`. The Backend SQLite store is out of
-scope.
+read existing values and call `try_emit`. The backend PostgreSQL store is out
+of scope.
 
 ## Ownership
 
 - `lanes.py`: per-(camera, producer) bounded deques. Overflow is counted and
   reported as `WireGap` cause `lane-overflow`. A contract failure after the
   sequence was consumed is a one-item `WireGap` cause `record-invalid`.
-  `try_emit` is a short-lock append-or-drop and never raises.
-- `exporter.py`: runtime-owned drain thread. Batches per (camera, boot) up to
-  configured N records or T ms. Export failure drops the batch and reports
-  `WireGap` cause `export-failed` on the next successful batch. No Worker DB
-  and no persistent spool (D0).
+  `try_emit` is a short-lock append-or-drop and never raises. Encoding and
+  HTTP stay outside the lane lock. `account_unsendable_records` turns drained
+  records that cannot be exported into one `record-invalid` gap each,
+  preserving neighbor order and existing gap counts. New gaps carry the
+  dropped record's generation/epoch; runs never bridge scope or sequence holes.
+  Legacy gaps without scope retain their wire hash but are UNKNOWN at ingest,
+  never assigned a surviving neighbour's scope. This supports old Worker to
+  new API, not scoped new Worker to old API.
+- `exporter.py`: runtime-owned drain thread. One drain takes up to configured
+  N records or waits T ms, then splits that drain's records and gaps into
+  batches whose UTF-8 bodies — provenance and envelope included — are at most
+  `MAX_EXECUTION_RECORD_BODY_BYTES` (1MiB). Camera, boot, and producer
+  sequence stay in order; each gap `record_count` is preserved. A record that
+  cannot fit alone becomes one `record-invalid` gap plus an operator-visible
+  log line (camera id and the reason are in the message). A failed chunk is
+  `export-failed` for that attempted chunk only; the same camera/boot drain
+  stops there. Never-attempted records return to the fronts of their original
+  lanes without new identities or sequences; unattempted gaps are restored
+  unchanged. Restoration preserves older work before concurrent arrivals and
+  reports any bounded-capacity tail eviction as `lane-overflow`. Flushes are
+  serialized without holding the producer lock across encoding or HTTP.
+  Already-known gaps must commit before later watermark-advancing records;
+  independent cameras can still progress. Delayed loss can lower Backend
+  terminal certainty without reopening the unit.
+  `STORAGE_UNAVAILABLE` is a failed delivery, not a committed receipt.
+  If the provenance/gap envelope itself cannot fit, the exporter logs
+  that and retains its loss accounting; the drain backs off interruptibly
+  rather than spinning or silently deleting gaps. Receipt and failure histories keep at most
+  `EXPORT_HISTORY_LIMIT` (256) newest entries. Transport and encoding
+  exceptions are logged and do not kill the drain thread. No Worker DB and
+  no persistent spool (D0).
 - `provenance.py`: build `WireProvenance` from identities the composition root
   already resolved. Missing identities refuse to start by name; never stamp
   `unknown`.
@@ -60,7 +86,9 @@ track or generation is absent.
 Seam default is `None` (feature off). No stub sink.
 
 Focused tests: `tests/test_execution_record_lanes.py`,
-`tests/test_execution_record_exporter.py`. Boundary:
+`tests/test_execution_record_exporter.py`,
+`tests/test_execution_record_gap_integration.py`,
+`tests/test_execution_records_wire.py`. Boundary:
 `uv run --group lint lint-imports`.
 
 ## Attribution (every policy.decision names its producer)

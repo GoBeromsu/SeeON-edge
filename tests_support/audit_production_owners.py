@@ -16,12 +16,12 @@ class AuditOwnerCatalogError(RuntimeError):
 
 def production_action_owners() -> dict[AuditAction, tuple[Callable[..., Any], ...]]:
     """Return actual handlers/stores that own each shipped audit action."""
-    from backend.app.features.audit.router import get_audit, list_audit
-    from backend.app.features.audit.sessions import (
+    from backend.app.features.audit.postgres_sessions import (
         append_with_recovery,
         close_session,
         start_session,
     )
+    from backend.app.features.audit.router import get_audit, list_audit
     from backend.app.features.auth.router import login, logout, session, update_credentials
     from backend.app.features.cameras.bed_zone_router import recognize_bed_zone
     from backend.app.features.cameras.router import (

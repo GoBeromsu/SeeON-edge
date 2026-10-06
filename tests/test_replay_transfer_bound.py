@@ -15,7 +15,6 @@ literal.
 
 from __future__ import annotations
 
-from pathlib import Path
 from typing import Any
 
 import pytest
@@ -146,18 +145,12 @@ def test_persisted_analysis_recovery_is_retired() -> None:
         importlib.import_module("backend.app.features.qa.runtime_trace_store")
 
 
-def test_schema18_does_not_grow_runtime_analysis_tables(tmp_path: Path) -> None:
-    import sqlite3
+def test_product_schema_does_not_grow_runtime_analysis_tables() -> None:
+    from backend.app.edge_db.migration.mapping import (
+        DIAGNOSTICS_TARGET_TABLES,
+        EXPECTED_TARGET_TABLES,
+    )
 
-    from backend.app.edge_db.bootstrap import bootstrap_database
-
-    database = tmp_path / "edge.sqlite3"
-    bootstrap_database(database)
-    with sqlite3.connect(database) as connection:
-        tables = {
-            str(row[0])
-            for row in connection.execute(
-                "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'"
-            )
-        }
+    # Provisioning checks the PostgreSQL product and diagnostics schemas against these sets.
+    tables = EXPECTED_TARGET_TABLES | DIAGNOSTICS_TARGET_TABLES
     assert not any(name.startswith("runtime_analysis_") for name in tables)

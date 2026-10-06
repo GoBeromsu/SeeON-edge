@@ -14,8 +14,8 @@ from backend.app.edge_db.execution_records_ddl import (
 # provenance columns below are byte-for-byte what every deployed schema-18
 # database carries (the columns were added with ALTER TABLE, so the stored
 # `sqlite_schema.sql` text differs from an inline CREATE). Keeping the same
-# statements means a freshly bootstrapped database and a deployed one compile to
-# the identical structural manifest.
+# statements means a freshly created schema-19 SQLite source and a deployed one
+# compile to the identical structural manifest.
 SCHEMA_MIGRATIONS_LEDGER_TABLE_SQL: Final = """
         CREATE TABLE schema_migrations (
             version INTEGER PRIMARY KEY CHECK (version > 0),

@@ -6,24 +6,24 @@ import urllib.error
 import urllib.request
 from collections.abc import AsyncIterator, Callable, Iterator
 from email.message import Message
-from pathlib import Path
 from types import TracebackType
 from typing import NoReturn, Self, TypedDict, cast
 
 import httpx
 import pytest
-from fastapi import Request
+from fastapi import FastAPI, Request
 from fastapi.testclient import TestClient
 
 from backend.app.core.config import get_settings
+from backend.app.features.audit.postgres_runtime import PostgresAuditRuntime
 from backend.app.features.cameras import streams_router
-from backend.app.features.cameras.store import CameraRegistryStore
 from backend.app.features.cameras.streams_router import _iter_upstream, _UpstreamCloser
-from backend.app.main import LifespanFactory, create_app, no_lifespan
-from tests_support.compact_authority_db import prepare_compact_database
+from tests_support.postgres_api_app import postgres_api_app
+from tests_support.postgres_sandbox import ProductSandbox
+
+pytest_plugins = ("tests_support.postgres_sandbox",)
 
 AUTH = {"Authorization": "Bearer relay-token"}
-NO_LIFESPAN: LifespanFactory = no_lifespan
 
 # The suite explicitly supplies disposable admin/admin bootstrap credentials
 # in tests/conftest.py. A worker relay/bearer/query token is never sufficient
@@ -85,6 +85,13 @@ class FiniteStreamResponse:
         self.close()
 
 
+@pytest.fixture
+def app(
+    postgres_product_sandbox: ProductSandbox, postgres_audit_runtime: PostgresAuditRuntime
+) -> FastAPI:
+    return postgres_api_app(postgres_product_sandbox, postgres_audit_runtime)
+
+
 @pytest.fixture(autouse=True)
 def stream_env(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     monkeypatch.setenv("API_EDGE_RELAY_TOKEN", "relay-token")
@@ -120,6 +127,7 @@ def _install_mock_transport(
 
 def test_stream_proxy_forwards_mjpeg_with_a_dashboard_session(
     monkeypatch: pytest.MonkeyPatch,
+    app: FastAPI,
 ) -> None:
     body = b"--frame\r\nContent-Type: image/jpeg\r\n\r\n\xff\xd8camera-jpeg\xff\xd9\r\n"
     calls: list[StreamCall] = []
@@ -144,7 +152,7 @@ def test_stream_proxy_forwards_mjpeg_with_a_dashboard_session(
 
     _install_mock_transport(monkeypatch, handler)
 
-    with TestClient(create_app(lifespan=NO_LIFESPAN)) as client:
+    with TestClient(app) as client:
         _login(client)
         response = client.get("/api/v1/streams/cam_sp_201")
 
@@ -165,7 +173,7 @@ def test_stream_proxy_forwards_mjpeg_with_a_dashboard_session(
 
 def test_stream_proxy_resolves_dashboard_id_to_worker_id(
     monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
+    app: FastAPI,
 ) -> None:
     calls: list[StreamCall] = []
 
@@ -188,10 +196,7 @@ def test_stream_proxy_resolves_dashboard_id_to_worker_id(
         )
 
     _install_mock_transport(monkeypatch, handler)
-    registry_path = tmp_path / "catalog.sqlite3"
-    prepare_compact_database(registry_path)
-    registry = CameraRegistryStore(registry_path)
-    _ = registry.create(
+    _ = app.state.camera_registry.create(
         camera_id="dashboard-camera-id",
         label="Room 201",
         rtsp_url="rtsp://camera/stream",
@@ -199,8 +204,6 @@ def test_stream_proxy_resolves_dashboard_id_to_worker_id(
         status="online",
         backend_camera_id="worker-camera-id",
     )
-    app = create_app(lifespan=NO_LIFESPAN)
-    app.state.camera_registry = registry
 
     with TestClient(app) as client:
         _login(client)
@@ -218,6 +221,7 @@ def test_stream_proxy_resolves_dashboard_id_to_worker_id(
 
 def test_stream_proxy_requires_a_dashboard_session(
     monkeypatch: pytest.MonkeyPatch,
+    app: FastAPI,
 ) -> None:
     """Worker relay credentials never substitute for a dashboard session."""
     calls: list[str] = []
@@ -232,7 +236,7 @@ def test_stream_proxy_requires_a_dashboard_session(
 
     _install_mock_transport(monkeypatch, handler)
 
-    with TestClient(create_app(lifespan=NO_LIFESPAN)) as client:
+    with TestClient(app) as client:
         missing = client.get("/api/v1/streams/cam_sp_201")
         relay_query_token = client.get(
             "/api/v1/streams/cam_sp_201", params={"token": "relay-token"}
@@ -252,6 +256,7 @@ def test_stream_proxy_requires_a_dashboard_session(
 def test_stream_proxy_preserves_upstream_404_and_503(
     code: int,
     monkeypatch: pytest.MonkeyPatch,
+    app: FastAPI,
 ) -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         del request
@@ -259,7 +264,7 @@ def test_stream_proxy_preserves_upstream_404_and_503(
 
     _install_mock_transport(monkeypatch, handler)
 
-    with TestClient(create_app(lifespan=NO_LIFESPAN)) as client:
+    with TestClient(app) as client:
         _login(client)
         response = client.get("/api/v1/streams/missing")
 
@@ -269,13 +274,14 @@ def test_stream_proxy_preserves_upstream_404_and_503(
 
 def test_stream_proxy_reports_connection_failure_as_unavailable(
     monkeypatch: pytest.MonkeyPatch,
+    app: FastAPI,
 ) -> None:
     def handler(request: httpx.Request) -> NoReturn:
         raise httpx.ConnectError("connection refused", request=request)
 
     _install_mock_transport(monkeypatch, handler)
 
-    with TestClient(create_app(lifespan=NO_LIFESPAN)) as client:
+    with TestClient(app) as client:
         _login(client)
         response = client.get("/api/v1/streams/cam_sp_201")
 
@@ -405,6 +411,7 @@ def test_stream_proxy_closes_upstream_via_background_when_never_iterated(
 
 def test_snapshot_proxy_forwards_jpeg_with_a_dashboard_session(
     monkeypatch: pytest.MonkeyPatch,
+    app: FastAPI,
 ) -> None:
     body = b"\xff\xd8camera-jpeg\xff\xd9"
     calls: list[UrlopenCall] = []
@@ -425,7 +432,7 @@ def test_snapshot_proxy_forwards_jpeg_with_a_dashboard_session(
 
     monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
 
-    with TestClient(create_app(lifespan=NO_LIFESPAN)) as client:
+    with TestClient(app) as client:
         _login(client)
         response = client.get("/api/v1/streams/cam_sp_201/snapshot")
 
@@ -447,6 +454,7 @@ def test_snapshot_proxy_forwards_jpeg_with_a_dashboard_session(
 
 def test_snapshot_proxy_requires_a_dashboard_session(
     monkeypatch: pytest.MonkeyPatch,
+    app: FastAPI,
 ) -> None:
     calls: list[str] = []
 
@@ -457,7 +465,7 @@ def test_snapshot_proxy_requires_a_dashboard_session(
 
     monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
 
-    with TestClient(create_app(lifespan=NO_LIFESPAN)) as client:
+    with TestClient(app) as client:
         missing = client.get("/api/v1/streams/cam_sp_201/snapshot")
         relay_query_token = client.get(
             "/api/v1/streams/cam_sp_201/snapshot", params={"token": "relay-token"}
@@ -477,6 +485,7 @@ def test_snapshot_proxy_requires_a_dashboard_session(
 def test_snapshot_proxy_preserves_upstream_404_and_503(
     code: int,
     monkeypatch: pytest.MonkeyPatch,
+    app: FastAPI,
 ) -> None:
     def fake_urlopen(request: urllib.request.Request, timeout: float) -> NoReturn:
         del timeout
@@ -490,7 +499,7 @@ def test_snapshot_proxy_preserves_upstream_404_and_503(
 
     monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
 
-    with TestClient(create_app(lifespan=NO_LIFESPAN)) as client:
+    with TestClient(app) as client:
         _login(client)
         response = client.get("/api/v1/streams/missing/snapshot")
 
@@ -500,6 +509,7 @@ def test_snapshot_proxy_preserves_upstream_404_and_503(
 
 def test_snapshot_proxy_reports_connection_failure_as_unavailable(
     monkeypatch: pytest.MonkeyPatch,
+    app: FastAPI,
 ) -> None:
     def fake_urlopen(request: urllib.request.Request, timeout: float) -> NoReturn:
         del request, timeout
@@ -507,7 +517,7 @@ def test_snapshot_proxy_reports_connection_failure_as_unavailable(
 
     monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
 
-    with TestClient(create_app(lifespan=NO_LIFESPAN)) as client:
+    with TestClient(app) as client:
         _login(client)
         response = client.get("/api/v1/streams/cam_sp_201/snapshot")
 
@@ -521,6 +531,7 @@ class PoseJsonResponse(FiniteStreamResponse):
 
 def test_pose_get_forwards_and_returns_current_state_with_a_dashboard_session(
     monkeypatch: pytest.MonkeyPatch,
+    app: FastAPI,
 ) -> None:
     calls: list[UrlopenCall] = []
 
@@ -536,7 +547,7 @@ def test_pose_get_forwards_and_returns_current_state_with_a_dashboard_session(
 
     monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
 
-    with TestClient(create_app(lifespan=NO_LIFESPAN)) as client:
+    with TestClient(app) as client:
         _login(client)
         response = client.get("/api/v1/streams/cam_sp_201/pose")
 
@@ -553,6 +564,7 @@ def test_pose_get_forwards_and_returns_current_state_with_a_dashboard_session(
 
 def test_pose_set_forwards_the_requested_value_with_a_dashboard_session(
     monkeypatch: pytest.MonkeyPatch,
+    app: FastAPI,
 ) -> None:
     calls: list[dict[str, object]] = []
 
@@ -569,7 +581,7 @@ def test_pose_set_forwards_the_requested_value_with_a_dashboard_session(
 
     monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
 
-    with TestClient(create_app(lifespan=NO_LIFESPAN)) as client:
+    with TestClient(app) as client:
         _login(client)
         response = client.post(
             "/api/v1/streams/cam_sp_201/pose",
@@ -590,6 +602,7 @@ def test_pose_set_forwards_the_requested_value_with_a_dashboard_session(
 
 def test_stream_proxy_forwards_the_relay_token_to_the_worker(
     monkeypatch: pytest.MonkeyPatch,
+    app: FastAPI,
 ) -> None:
     """Security finding #3: worker /stream requires the relay token; the API
     proxy must forward it server-side without exposing it to the browser.
@@ -616,7 +629,7 @@ def test_stream_proxy_forwards_the_relay_token_to_the_worker(
 
     _install_mock_transport(monkeypatch, handler)
 
-    with TestClient(create_app(lifespan=NO_LIFESPAN)) as client:
+    with TestClient(app) as client:
         _login(client)
         response = client.get("/api/v1/streams/cam_sp_201")
 
@@ -633,6 +646,7 @@ def test_stream_proxy_forwards_the_relay_token_to_the_worker(
 
 def test_pose_get_forwards_the_relay_token_to_the_worker(
     monkeypatch: pytest.MonkeyPatch,
+    app: FastAPI,
 ) -> None:
     """Issue #71: the worker now gates GET /overlay/{camera_id}/pose on the
     same relay token as /probe, so the proxy must forward it (mirroring
@@ -654,7 +668,7 @@ def test_pose_get_forwards_the_relay_token_to_the_worker(
 
     monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
 
-    with TestClient(create_app(lifespan=NO_LIFESPAN)) as client:
+    with TestClient(app) as client:
         _login(client)
         response = client.get("/api/v1/streams/cam_sp_201/pose")
 
@@ -670,6 +684,7 @@ def test_pose_get_forwards_the_relay_token_to_the_worker(
 
 def test_pose_set_forwards_the_relay_token_to_the_worker(
     monkeypatch: pytest.MonkeyPatch,
+    app: FastAPI,
 ) -> None:
     """Issue #71: same as the GET case above, but for POST /overlay/{camera_id}/pose."""
     calls: list[UrlopenCallWithHeaders] = []
@@ -687,7 +702,7 @@ def test_pose_set_forwards_the_relay_token_to_the_worker(
 
     monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
 
-    with TestClient(create_app(lifespan=NO_LIFESPAN)) as client:
+    with TestClient(app) as client:
         _login(client)
         response = client.post(
             "/api/v1/streams/cam_sp_201/pose",
@@ -709,6 +724,7 @@ def test_pose_set_forwards_the_relay_token_to_the_worker(
 
 def test_pose_get_and_set_require_a_dashboard_session(
     monkeypatch: pytest.MonkeyPatch,
+    app: FastAPI,
 ) -> None:
     def fake_urlopen(request: urllib.request.Request, timeout: float) -> PoseJsonResponse:
         del timeout
@@ -716,7 +732,7 @@ def test_pose_get_and_set_require_a_dashboard_session(
 
     monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
 
-    with TestClient(create_app(lifespan=NO_LIFESPAN)) as client:
+    with TestClient(app) as client:
         missing = client.get("/api/v1/streams/cam_sp_201/pose")
         missing_post = client.post(
             "/api/v1/streams/cam_sp_201/pose",
@@ -744,6 +760,7 @@ def test_pose_get_and_set_require_a_dashboard_session(
 def test_pose_set_rejects_invalid_body(
     payload: dict[str, object],
     monkeypatch: pytest.MonkeyPatch,
+    app: FastAPI,
 ) -> None:
     def fake_urlopen(request: urllib.request.Request, timeout: float) -> NoReturn:
         del request, timeout
@@ -751,7 +768,7 @@ def test_pose_set_rejects_invalid_body(
 
     monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
 
-    with TestClient(create_app(lifespan=NO_LIFESPAN)) as client:
+    with TestClient(app) as client:
         _login(client)
         response = client.post(
             "/api/v1/streams/cam_sp_201/pose",
@@ -765,6 +782,7 @@ def test_pose_set_rejects_invalid_body(
 def test_pose_get_preserves_upstream_404_and_503(
     code: int,
     monkeypatch: pytest.MonkeyPatch,
+    app: FastAPI,
 ) -> None:
     def fake_urlopen(request: urllib.request.Request, timeout: float) -> NoReturn:
         del timeout
@@ -774,7 +792,7 @@ def test_pose_get_preserves_upstream_404_and_503(
 
     monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
 
-    with TestClient(create_app(lifespan=NO_LIFESPAN)) as client:
+    with TestClient(app) as client:
         _login(client)
         response = client.get("/api/v1/streams/missing/pose")
 
@@ -784,6 +802,7 @@ def test_pose_get_preserves_upstream_404_and_503(
 
 def test_head_snapshot_answers_with_the_get_header_section_and_no_body(
     monkeypatch: pytest.MonkeyPatch,
+    app: FastAPI,
 ) -> None:
     """The snapshot proxy shared the clip routes' #452 HEAD gap."""
     body = b"\xff\xd8camera-jpeg\xff\xd9"
@@ -797,7 +816,7 @@ def test_head_snapshot_answers_with_the_get_header_section_and_no_body(
 
     monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
 
-    with TestClient(create_app(lifespan=NO_LIFESPAN)) as client:
+    with TestClient(app) as client:
         unauthorized = client.head("/api/v1/streams/cam_sp_201/snapshot")
         _login(client)
         head = client.head("/api/v1/streams/cam_sp_201/snapshot")
@@ -813,9 +832,9 @@ def test_head_snapshot_answers_with_the_get_header_section_and_no_body(
     assert head.headers["content-length"] == str(len(body))
 
 
-def test_head_is_not_offered_on_the_unbounded_mjpeg_stream() -> None:
+def test_head_is_not_offered_on_the_unbounded_mjpeg_stream(app: FastAPI) -> None:
     """No Content-Length exists for a stream that never ends."""
-    with TestClient(create_app(lifespan=NO_LIFESPAN)) as client:
+    with TestClient(app) as client:
         _login(client)
         response = client.head("/api/v1/streams/cam_sp_201")
 

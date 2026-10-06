@@ -3,24 +3,24 @@
 Media-free by construction. This drives the actual product composition
 (``DurableEvidenceStager`` -> ``EvidenceOutbox.stage`` -> central incident
 staging -> ``CentralEvidenceQuery`` -> authenticated ``GET /api/v1/incidents``)
-on a disposable migrated edge database. No RTSP, no frames, no clip bytes, no
-human adjudication, and no model/policy attribution.
+on the disposable PostgreSQL product sandbox. No RTSP, no frames, no clip bytes,
+no human adjudication, and no model/policy attribution.
 """
 
 from __future__ import annotations
 
 import base64
 import json
-import sqlite3
 from pathlib import Path
 
+import psycopg
 import pytest
 from fastapi.testclient import TestClient
 
-from backend.app.edge_db.bootstrap import bootstrap_database
-from backend.app.features.evidence.record_store import CentralEvidenceQuery
-from backend.app.features.evidence.relay_projection import RelayEvidenceProjection
-from backend.app.main import create_app, no_lifespan
+from backend.app.features.audit.postgres_runtime import PostgresAuditRuntime
+from backend.app.features.evidence.postgres_relay_projection import (
+    PostgresRelayEvidenceProjection,
+)
 from tests_support.alert_amplification_harness import (
     DiagnosticOutcome,
     IncidentProjection,
@@ -28,7 +28,10 @@ from tests_support.alert_amplification_harness import (
     rows_from_relations,
 )
 from tests_support.alert_amplification_runtime import RELAY_TOKEN, ServedFixture, relay_client
+from tests_support.postgres_sandbox import ProductSandbox
 from worker.pipeline.output.evidence.evidence_stager import DurableEvidenceStager
+
+pytest_plugins = ("tests_support.postgres_sandbox",)
 
 _EDGE_EVENT_ID = "00000000-0000-4000-8000-0000000000b1"
 _BACKEND_EVENT_ID = "d39d274b-5ecb-53f4-b892-74937e902c65"
@@ -57,31 +60,23 @@ def _event(edge_event_id: str = _EDGE_EVENT_ID) -> dict[str, object]:
     }
 
 
-def _migrated(tmp_path: Path) -> Path:
-    database = tmp_path / "edge.sqlite3"
-    bootstrap_database(database)
-    return database
-
-
-def _stage_and_deliver(database: Path, tmp_path: Path, edge_event_id: str = _EDGE_EVENT_ID) -> None:
+def _stage_and_deliver(
+    relay: TestClient, tmp_path: Path, edge_event_id: str = _EDGE_EVENT_ID
+) -> None:
     stager = _stager(tmp_path / "delivery-queue")
     stager.stage(_event(edge_event_id))
     entry = next(item for item in stager.queue.entries() if item["edge_event_id"] == edge_event_id)
     payload = json.loads(base64.b64decode(str(entry["values_b64"])))
-    with ServedFixture() as served:
-        relay = relay_client(served.origin, tmp_path, database=database)
-        response = relay.post(
-            "/api/v1/relay/alerts",
-            json=payload,
-            headers={"X-Edge-Relay-Token": RELAY_TOKEN},
-        )
-        assert response.status_code == 202, response.text
+    response = relay.post(
+        "/api/v1/relay/alerts",
+        json=payload,
+        headers={"X-Edge-Relay-Token": RELAY_TOKEN},
+    )
+    assert response.status_code == 202, response.text
 
 
-def _incidents_via_api(database: Path) -> list[dict[str, object]]:
-    app = create_app(lifespan=no_lifespan)
-    app.state.central_evidence_query = CentralEvidenceQuery(database)
-    with TestClient(app) as client:
+def _incidents_via_api(relay: TestClient) -> list[dict[str, object]]:
+    with TestClient(relay.app) as client:
         assert (
             client.post(
                 "/api/v1/auth/session", json={"username": "admin", "password": "admin"}
@@ -97,24 +92,34 @@ def _incidents_via_api(database: Path) -> list[dict[str, object]]:
         return list(first.json()["incidents"])
 
 
-def test_idempotent_relay_redelivery_projects_one_incident_identity(tmp_path: Path) -> None:
-    database = _migrated(tmp_path)
-    _stage_and_deliver(database, tmp_path)
-    _stage_and_deliver(database, tmp_path)
+def test_idempotent_relay_redelivery_projects_one_incident_identity(
+    tmp_path: Path,
+    postgres_product_sandbox: ProductSandbox,
+    postgres_audit_runtime: PostgresAuditRuntime,
+) -> None:
+    with ServedFixture() as served:
+        relay = relay_client(served.origin, postgres_product_sandbox, postgres_audit_runtime)
+        _stage_and_deliver(relay, tmp_path)
+        _stage_and_deliver(relay, tmp_path)
 
-    incidents = _incidents_via_api(database)
+    incidents = _incidents_via_api(relay)
     assert len(incidents) == 1
     projected = incidents[0]
     assert projected["edge_event_id"] == _EDGE_EVENT_ID
     assert projected["review"] is None
 
 
-def test_measured_b_to_i_chain_classifies_healthy_convergence(tmp_path: Path) -> None:
-    database = _migrated(tmp_path)
-    _stage_and_deliver(database, tmp_path)
-    _stage_and_deliver(database, tmp_path)
+def test_measured_b_to_i_chain_classifies_healthy_convergence(
+    tmp_path: Path,
+    postgres_product_sandbox: ProductSandbox,
+    postgres_audit_runtime: PostgresAuditRuntime,
+) -> None:
+    with ServedFixture() as served:
+        relay = relay_client(served.origin, postgres_product_sandbox, postgres_audit_runtime)
+        _stage_and_deliver(relay, tmp_path)
+        _stage_and_deliver(relay, tmp_path)
 
-    incidents = _incidents_via_api(database)
+    incidents = _incidents_via_api(relay)
     projections = [
         IncidentProjection(
             str(item["incident_id"]),
@@ -140,19 +145,28 @@ def test_measured_b_to_i_chain_classifies_healthy_convergence(tmp_path: Path) ->
     assert classify_rows(rows).outcome is DiagnosticOutcome.TRANSPORT_RETRY
 
 
-def test_api_projection_lacks_a_projection_timestamp_field(tmp_path: Path) -> None:
+def test_api_projection_lacks_a_projection_timestamp_field(
+    tmp_path: Path,
+    postgres_product_sandbox: ProductSandbox,
+    postgres_audit_runtime: PostgresAuditRuntime,
+) -> None:
     """Measured finite gap, recorded rather than fabricated."""
 
-    database = _migrated(tmp_path)
-    _stage_and_deliver(database, tmp_path)
+    with ServedFixture() as served:
+        relay = relay_client(served.origin, postgres_product_sandbox, postgres_audit_runtime)
+        _stage_and_deliver(relay, tmp_path)
 
-    [projected] = _incidents_via_api(database)
+    [projected] = _incidents_via_api(relay)
 
     assert "projection_timestamp" not in projected
     assert "detected_at" in projected
 
 
-def test_incident_multiplication_is_structurally_impossible(tmp_path: Path) -> None:
+def test_incident_multiplication_is_structurally_impossible(
+    tmp_path: Path,
+    postgres_product_sandbox: ProductSandbox,
+    postgres_audit_runtime: PostgresAuditRuntime,
+) -> None:
     """The falsifier cannot even be staged: the schema forbids two I for one E.
 
     This is stronger than detecting duplication after the fact — one
@@ -160,58 +174,64 @@ def test_incident_multiplication_is_structurally_impossible(tmp_path: Path) -> N
     amplification is ruled out by construction rather than by observation.
     """
 
-    database = _migrated(tmp_path)
-    _stage_and_deliver(database, tmp_path)
-    [projected] = _incidents_via_api(database)
+    with ServedFixture() as served:
+        relay = relay_client(served.origin, postgres_product_sandbox, postgres_audit_runtime)
+        _stage_and_deliver(relay, tmp_path)
+    [projected] = _incidents_via_api(relay)
 
-    with sqlite3.connect(database) as connection:
-        connection.execute("PRAGMA foreign_keys = ON")
-        with pytest.raises(sqlite3.IntegrityError, match="incidents.edge_event_id"):
-            connection.execute(
-                """
-                INSERT INTO incidents (
-                    incident_id, edge_event_id, facility_id, camera_id, event_type,
-                    detected_at, lifecycle_state, provenance_state,
-                    provenance_missing_reason, review_version, revision, created_at, updated_at
-                ) VALUES (?, ?, 'facility-1', 'room-camera', 'fall', ?, 'OPEN',
-                          'MISSING', 'NOT_RECORDED', 0, 1, ?, ?)
-                """,
-                (
-                    f"{projected['incident_id']}-duplicate",
-                    _EDGE_EVENT_ID,
-                    _DETECTED_AT,
-                    _DETECTED_AT,
-                    _DETECTED_AT,
-                ),
-            )
+    with pytest.raises(psycopg.errors.UniqueViolation) as rejected:
+        postgres_product_sandbox.admin.execute(
+            """
+            INSERT INTO incidents (
+                incident_id, edge_event_id, facility_id, camera_id, event_type,
+                detected_at, lifecycle_state, provenance_state,
+                provenance_missing_reason, review_version, revision, created_at, updated_at
+            ) VALUES (%s, %s, 'facility-1', 'room-camera', 'fall', %s, 'OPEN',
+                      'MISSING', 'NOT_RECORDED', 0, 1, %s, %s)
+            """,
+            (
+                f"{projected['incident_id']}-duplicate",
+                _EDGE_EVENT_ID,
+                _DETECTED_AT,
+                _DETECTED_AT,
+                _DETECTED_AT,
+            ),
+        )
+    assert rejected.value.diag.constraint_name == "incidents_edge_event_id_key"
 
-    assert len(_incidents_via_api(database)) == 1
+    assert len(_incidents_via_api(relay)) == 1
 
 
-def test_snapshot_companions_bind_without_mutating_the_delivered_event(tmp_path: Path) -> None:
-    database = _migrated(tmp_path)
-    _stage_and_deliver(database, tmp_path)
-    projection = RelayEvidenceProjection(database)
-
-    projection.attach_snapshot(
-        edge_event_id=_EDGE_EVENT_ID,
-        snapshot_id="snapshot-1",
-        sha256="a" * 64,
-        media_reference="snapshots/snapshot-1.jpg",
-        size_bytes=1,
-        mime_type="image/jpeg",
-    )
-    projection.attach_snapshot(
-        edge_event_id=_EDGE_EVENT_ID,
-        snapshot_id="snapshot-1",
-        sha256="a" * 64,
-        media_reference="snapshots/snapshot-1.jpg",
-        size_bytes=1,
-        mime_type="image/jpeg",
-    )
-
+def test_snapshot_companions_bind_without_mutating_the_delivered_event(
+    tmp_path: Path,
+    postgres_product_sandbox: ProductSandbox,
+    postgres_audit_runtime: PostgresAuditRuntime,
+) -> None:
+    sandbox = postgres_product_sandbox
+    projection = PostgresRelayEvidenceProjection(sandbox.database, sandbox.authority)
     second_event_id = "00000000-0000-4000-8000-0000000000b2"
-    _stage_and_deliver(database, tmp_path, second_event_id)
+    with ServedFixture() as served:
+        relay = relay_client(served.origin, sandbox, postgres_audit_runtime)
+        _stage_and_deliver(relay, tmp_path)
+        _stage_and_deliver(relay, tmp_path, second_event_id)
+
+    projection.attach_snapshot(
+        edge_event_id=_EDGE_EVENT_ID,
+        snapshot_id="snapshot-1",
+        sha256="a" * 64,
+        media_reference="snapshots/snapshot-1.jpg",
+        size_bytes=1,
+        mime_type="image/jpeg",
+    )
+    projection.attach_snapshot(
+        edge_event_id=_EDGE_EVENT_ID,
+        snapshot_id="snapshot-1",
+        sha256="a" * 64,
+        media_reference="snapshots/snapshot-1.jpg",
+        size_bytes=1,
+        mime_type="image/jpeg",
+    )
+
     projection.record_snapshot_disposition(
         edge_event_id=second_event_id,
         snapshot_id="snapshot-2",
@@ -219,16 +239,16 @@ def test_snapshot_companions_bind_without_mutating_the_delivered_event(tmp_path:
         reason="capture_failed",
     )
 
-    with sqlite3.connect(database) as connection:
-        assert connection.execute(
-            "SELECT review_version, revision FROM incidents WHERE edge_event_id = ?",
-            (_EDGE_EVENT_ID,),
-        ).fetchone() == (0, 1)
-        assert connection.execute(
-            "SELECT state FROM artifacts WHERE incident_id = ? AND kind = 'SNAPSHOT'",
-            (f"incident:{_EDGE_EVENT_ID}",),
-        ).fetchone() == ("AVAILABLE",)
-        assert connection.execute(
-            "SELECT state, reason FROM artifacts WHERE incident_id = ? AND kind = 'SNAPSHOT'",
-            (f"incident:{second_event_id}",),
-        ).fetchone() == ("UNAVAILABLE", "UNAVAILABLE:capture_failed")
+    admin = sandbox.admin
+    assert admin.execute(
+        "SELECT review_version, revision FROM incidents WHERE edge_event_id = %s",
+        (_EDGE_EVENT_ID,),
+    ).fetchone() == (0, 1)
+    assert admin.execute(
+        "SELECT state FROM artifacts WHERE incident_id = %s AND kind = 'SNAPSHOT'",
+        (f"incident:{_EDGE_EVENT_ID}",),
+    ).fetchone() == ("AVAILABLE",)
+    assert admin.execute(
+        "SELECT state, reason FROM artifacts WHERE incident_id = %s AND kind = 'SNAPSHOT'",
+        (f"incident:{second_event_id}",),
+    ).fetchone() == ("UNAVAILABLE", "UNAVAILABLE:capture_failed")

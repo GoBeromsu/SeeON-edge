@@ -1,15 +1,13 @@
 from __future__ import annotations
 
-from pathlib import Path
-
 from fastapi.testclient import TestClient
 
-from backend.app.edge_db.bootstrap import bootstrap_database
-from backend.app.features.cameras.store import CameraRegistryStore
-from backend.app.features.connection.store import ConnectionSettingsStore
-from backend.app.features.detection_settings.policy_store import DetectionPolicyStore
-from backend.app.main import create_app, no_lifespan
+from backend.app.features.audit.postgres_runtime import PostgresAuditRuntime
+from tests_support.postgres_api_app import postgres_api_app
+from tests_support.postgres_sandbox import ProductSandbox
 from worker.runtime.config.restart import RestartDirective, RestartDirectiveTracker
+
+pytest_plugins = ("tests_support.postgres_sandbox",)
 
 _FACILITY_ID = "facility/restart-acceptance"
 _CAMERA_ID = "camera/restart-acceptance"
@@ -32,15 +30,11 @@ def _activation_status(client: TestClient) -> str:
 
 
 def test_policy_restart_requires_matching_worker_ack_before_pending_becomes_applied(
-    tmp_path: Path,
+    postgres_product_sandbox: ProductSandbox,
+    postgres_audit_runtime: PostgresAuditRuntime,
 ) -> None:
-    database = tmp_path / "edge.sqlite3"
-    bootstrap_database(database)
-    app = create_app(lifespan=no_lifespan)
+    app = postgres_api_app(postgres_product_sandbox, postgres_audit_runtime)
     app.state.edge_relay_token = "restart-relay-token"
-    app.state.camera_registry = CameraRegistryStore(database)
-    app.state.connection_settings_store = ConnectionSettingsStore(database)
-    app.state.detection_policy_store = DetectionPolicyStore(database)
     app.state.connection_settings_store.save(
         {
             "facility_code": "NH-RESTART01",

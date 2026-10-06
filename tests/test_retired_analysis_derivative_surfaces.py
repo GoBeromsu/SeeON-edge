@@ -11,7 +11,12 @@ import pytest
 from fastapi.routing import APIRoute
 from fastapi.testclient import TestClient
 
+from backend.app.features.audit.postgres_runtime import PostgresAuditRuntime
 from backend.app.main import create_app, no_lifespan
+from tests_support.postgres_api_app import postgres_api_app
+from tests_support.postgres_sandbox import ProductSandbox
+
+pytest_plugins = ("tests_support.postgres_sandbox",)
 
 ROOT = Path(__file__).resolve().parents[1]
 RETIRED_ROUTE_PATHS = frozenset(
@@ -98,7 +103,10 @@ def test_retired_routes_are_absent_from_the_app_table() -> None:
 
 
 def test_retired_http_surfaces_are_404_by_absence(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    postgres_product_sandbox: ProductSandbox,
+    postgres_audit_runtime: PostgresAuditRuntime,
 ) -> None:
     clip_dir = tmp_path / "clip-store" / "clips" / "clip-a"
     clip_dir.mkdir(parents=True)
@@ -121,7 +129,7 @@ def test_retired_http_surfaces_are_404_by_absence(
         encoding="utf-8",
     )
     monkeypatch.setenv("CLIP_STORE_DIR", str(tmp_path / "clip-store"))
-    app = create_app(lifespan=no_lifespan)
+    app = postgres_api_app(postgres_product_sandbox, postgres_audit_runtime)
     with TestClient(app) as client:
         _login(client)
         probes = (
@@ -179,7 +187,10 @@ def test_app_and_worker_import_graphs_have_no_retired_production_symbol() -> Non
 
 
 def test_clip_artifacts_schema_is_only_clean_and_optional_snapshot(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    postgres_product_sandbox: ProductSandbox,
+    postgres_audit_runtime: PostgresAuditRuntime,
 ) -> None:
     clip_dir = tmp_path / "clip-store" / "clips" / "clip-a"
     clip_dir.mkdir(parents=True)
@@ -202,7 +213,7 @@ def test_clip_artifacts_schema_is_only_clean_and_optional_snapshot(
         encoding="utf-8",
     )
     monkeypatch.setenv("CLIP_STORE_DIR", str(tmp_path / "clip-store"))
-    app = create_app(lifespan=no_lifespan)
+    app = postgres_api_app(postgres_product_sandbox, postgres_audit_runtime)
     with TestClient(app) as client:
         _login(client)
         response = client.get("/api/v1/clips/clip-a/artifacts")

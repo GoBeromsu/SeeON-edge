@@ -1,12 +1,10 @@
 from __future__ import annotations
 
 import importlib
-import sqlite3
-from pathlib import Path
 
 import pytest
 
-from backend.app.edge_db.bootstrap import bootstrap_database
+from backend.app.edge_db.migration.mapping import DIAGNOSTICS_TARGET_TABLES, EXPECTED_TARGET_TABLES
 
 
 def test_runtime_analysis_store_is_removed() -> None:
@@ -14,15 +12,8 @@ def test_runtime_analysis_store_is_removed() -> None:
         importlib.import_module("backend.app.features.qa.runtime_trace_store")
 
 
-def test_schema18_has_no_runtime_analysis_tables(tmp_path: Path) -> None:
-    database = tmp_path / "edge.sqlite3"
-    bootstrap_database(database)
-    with sqlite3.connect(database) as connection:
-        tables = {
-            str(row[0])
-            for row in connection.execute(
-                "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'"
-            )
-        }
+def test_product_schema_has_no_runtime_analysis_tables() -> None:
+    # Provisioning checks the PostgreSQL product and diagnostics schemas against these sets.
+    tables = EXPECTED_TARGET_TABLES | DIAGNOSTICS_TARGET_TABLES
     assert not any(name.startswith("runtime_analysis_") for name in tables)
     assert not any(name.startswith("qa_") for name in tables)

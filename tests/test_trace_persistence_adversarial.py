@@ -3,7 +3,6 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from backend.app.edge_db.bootstrap import bootstrap_database
 from shared.events.delivery_queue import DeliveryQueue, EventEntry
 from worker.runtime.provenance.models import AppliedRuntimeManifest
 from worker.runtime.provenance.store import (
@@ -53,10 +52,8 @@ def test_delivery_queue_refuses_conflicting_event_basis(tmp_path: Path) -> None:
 
 
 def test_provenance_history_is_retained_locally_within_bound(tmp_path: Path) -> None:
-    database = tmp_path / "edge.sqlite3"
-    bootstrap_database(database)
     store = AppliedRuntimeManifestStore(
-        database,
+        tmp_path / "edge.sqlite3",
         ProvenanceRetentionPolicy(max_boots=2, max_boots_per_camera=1),
     )
     for index in range(3):

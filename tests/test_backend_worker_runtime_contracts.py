@@ -7,7 +7,7 @@ as provider, owns the routes it serves and the ``manifest.json`` it writes
 as consumer, owns the paths it calls and the parsers it reads with
 (``backend/app/features/cameras/*``, ``backend/app/features/clips/*``). There
 is deliberately no shared edge-internal contract module -- ``contracts/`` is
-the byte-mirrored ML vocabulary (ADR-0006), not an interface package.
+the ML vocabulary (ADR-0006), not an interface package.
 
 This file is the sanctioned meeting point: it imports both packages and
 round-trips real provider output through the real consumer parser, so drift
@@ -25,10 +25,16 @@ from fastapi import HTTPException
 
 from backend.app.features.cameras import bed_zone_router, router, streams_router
 from backend.app.features.cameras.store import ProbeResult
-from backend.app.features.clips import catalog
+from backend.app.features.clips.catalog_indexer import (
+    ClipCatalogIndexer,
+    ClipCatalogPage,
+    ClipCatalogQuery,
+    PostgresClipCatalog,
+)
 from backend.app.features.clips.manifest import read_manifest_file
 from backend.app.features.clips.store import ClipStore
 from tests_support.clip_analysis import no_op_ready_hook
+from tests_support.postgres_sandbox import ProductSandbox
 from tests_support.thumbnail import DeterministicThumbnailGenerator
 from worker.pipeline.output import live_view_api
 from worker.pipeline.output.evidence.clip_identity import ClipReservation
@@ -41,11 +47,9 @@ from worker.pipeline.output.evidence.evidence_outbox_types import (
     EdgeEventId,
     EvidenceReasonCode,
 )
-from worker.pipeline.output.evidence.manifest_models import (
-    ReadyClipManifest,
-    UnavailableClipManifest,
-)
 from worker.types.preview import OverlaySelection
+
+pytest_plugins = ("tests_support.postgres_sandbox",)
 
 EVENT_ONE = EdgeEventId("00000000-0000-4000-8000-000000000001")
 START = datetime(2026, 7, 16, 1, 2, 3, tzinfo=UTC)
@@ -65,12 +69,14 @@ def _metadata() -> ClipPublicationMetadata:
         duration_s=1.0,
         encoder="libx264",
         # The real pipeline always sets this (BusinessEvent.domain is required);
-        # the strict backend reader must accept the key.
+        # the PostgreSQL catalogue must still list a manifest that carries it.
         domain="fall",
     )
 
 
-def _publish_unavailable(root: Path) -> Path:
+def _publish_unavailable(
+    root: Path, reason: EvidenceReasonCode = EvidenceReasonCode.NO_FRAMES
+) -> Path:
     reservation = ClipReservation(
         ClipId("clip-a"), "camera-1", root / "clips/.staging/clip-a", root / "clips/clip-a"
     )
@@ -80,8 +86,18 @@ def _publish_unavailable(root: Path) -> Path:
             error=AssertionError("publish_unavailable must not generate a thumbnail")
         ),
         on_ready=no_op_ready_hook,
-    ).publish_unavailable(reservation, _metadata(), EvidenceReasonCode.NO_FRAMES)
+    ).publish_unavailable(reservation, _metadata(), reason)
     return published.manifest_path
+
+
+def _catalogued(sandbox: ProductSandbox, root: Path) -> ClipCatalogPage:
+    """Index ``root`` into the PostgreSQL clip catalogue and read the first page."""
+    store = ClipStore(root)
+    outcome = ClipCatalogIndexer(sandbox.database, sandbox.authority).reconcile(store)
+    assert (outcome.remaining, outcome.isolated) == (0, 0)
+    return PostgresClipCatalog(sandbox.database).page(
+        store, ClipCatalogQuery(camera_id=None, event_type=None, limit=50, cursor=None)
+    )
 
 
 # --- worker writes manifest.json, backend reads it ---------------------------
@@ -110,29 +126,33 @@ def test_worker_manifest_is_served_by_the_backend_lenient_parser(tmp_path: Path)
     assert [m.clip_id for m in store.list_manifests()] == ["clip-a"]
 
 
-def test_worker_manifest_with_domain_passes_the_backend_strict_reader(tmp_path: Path) -> None:
+def test_worker_manifest_with_domain_is_listed_by_the_postgres_catalogue(
+    tmp_path: Path, postgres_product_sandbox: ProductSandbox
+) -> None:
     manifest_path = _publish_unavailable(tmp_path)
     raw = json.loads(manifest_path.read_text(encoding="utf-8"))
-    assert set(raw) <= catalog._MANIFEST_FIELDS  # noqa: SLF001
-    assert "domain" in raw
+    assert raw["domain"] == "fall"
 
-    records = catalog.strict_manifest_records(ClipStore(tmp_path))
-    assert [record.manifest.clip_id for record in records] == ["clip-a"]
-    assert records[0].payload["domain"] == "fall"
+    page = _catalogued(postgres_product_sandbox, tmp_path)
+
+    assert [clip.manifest.clip_id for clip in page.clips] == ["clip-a"]
+    assert page.event_type_counts == {"fall": 1}
 
 
-def test_worker_manifest_vocabulary_is_within_the_backend_strict_sets() -> None:
-    writer_fields = set(ReadyClipManifest.model_fields) | set(UnavailableClipManifest.model_fields)
-    assert writer_fields <= catalog._MANIFEST_FIELDS  # noqa: SLF001
-    assert ReadyClipManifest.model_fields["manifest_schema_version"].default == (
-        catalog._MANIFEST_SCHEMA_VERSION  # noqa: SLF001
-    )
-    assert UnavailableClipManifest.model_fields["manifest_schema_version"].default == (
-        catalog._MANIFEST_SCHEMA_VERSION  # noqa: SLF001
-    )
-    for state in ("READY", "UNAVAILABLE"):
-        assert state in catalog._MANIFEST_STATES  # noqa: SLF001
-    assert {code.value for code in EvidenceReasonCode} == catalog._UNAVAILABLE_REASON_CODES  # noqa: SLF001
+@pytest.mark.parametrize("reason", tuple(EvidenceReasonCode))
+def test_every_unavailable_reason_reaches_the_postgres_catalogue(
+    tmp_path: Path, postgres_product_sandbox: ProductSandbox, reason: EvidenceReasonCode
+) -> None:
+    manifest_path = _publish_unavailable(tmp_path, reason)
+
+    served = read_manifest_file(manifest_path)
+    page = _catalogued(postgres_product_sandbox, tmp_path)
+
+    assert served is not None
+    assert served.video_error == reason.value
+    assert [(clip.manifest.clip_id, clip.manifest.video_error) for clip in page.clips] == [
+        ("clip-a", reason.value)
+    ]
 
 
 # --- backend calls the worker's routes ---------------------------------------

@@ -3,14 +3,17 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+from collections.abc import Callable
 from pathlib import Path
 from typing import BinaryIO, cast
 
 import pytest
+from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from receipt_helpers import MediaReceiptStore, add_accepted_media_receipts
 
 import backend.app.features.clips.router as clips_router
+from backend.app.features.audit.postgres_runtime import PostgresAuditRuntime
 from backend.app.features.clips.descriptor_files import OpenedRegularFile
 from backend.app.features.clips.store import (
     PLAYBACK_H264_MANIFEST_FILENAME,
@@ -18,15 +21,10 @@ from backend.app.features.clips.store import (
     LocatedClip,
 )
 from backend.app.features.evidence.receipt_store import ArtifactReceipt
-from backend.app.main import create_app as _create_app
-from backend.app.main import no_lifespan
+from tests_support.postgres_api_app import postgres_api_app
+from tests_support.postgres_sandbox import ProductSandbox
 
-
-def create_app(*, lifespan):
-    app = _create_app(lifespan=lifespan)
-    add_accepted_media_receipts(app)
-    return app
-
+pytest_plugins = ("tests_support.postgres_sandbox",)
 
 VIDEO = b"0123456789"
 
@@ -38,6 +36,22 @@ def clip_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     monkeypatch.setenv("API_LABEL_STORE", str(tmp_path / "label-store"))
     monkeypatch.setenv("API_EDGE_RELAY_TOKEN", "relay-token")
     return root
+
+
+@pytest.fixture
+def make_app(
+    clip_env: Path,
+    postgres_product_sandbox: ProductSandbox,
+    postgres_audit_runtime: PostgresAuditRuntime,
+) -> Callable[[], FastAPI]:
+    """Each call is a new app on the one sandbox, with receipts for the clips written so far."""
+
+    def make() -> FastAPI:
+        app = postgres_api_app(postgres_product_sandbox, postgres_audit_runtime)
+        add_accepted_media_receipts(app)
+        return app
+
+    return make
 
 
 def _login(client: TestClient) -> None:
@@ -107,6 +121,7 @@ def _write_playback(video_path: Path, content: bytes, *, valid_sidecar: bool = T
 
 def test_video_serves_verified_playback_rendition_without_receipt_verification(
     clip_env: Path,
+    make_app: Callable[[], FastAPI],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     clip_id = "clip-playback"
@@ -124,7 +139,7 @@ def test_video_serves_verified_playback_rendition_without_receipt_verification(
         raise AssertionError("a rendition must not be checked against an original receipt")
 
     monkeypatch.setattr(clips_router, "verify_artifact", receipt_must_not_be_checked)
-    with TestClient(create_app(lifespan=no_lifespan)) as client:
+    with TestClient(make_app()) as client:
         _login(client)
         metadata = client.get(f"/api/v1/clips/{clip_id}/metadata")
         response = client.get(
@@ -143,6 +158,7 @@ def test_video_serves_verified_playback_rendition_without_receipt_verification(
 @pytest.mark.parametrize("write_sidecar", (False, True))
 def test_video_falls_back_to_original_when_playback_sidecar_is_missing_or_invalid(
     clip_env: Path,
+    make_app: Callable[[], FastAPI],
     write_sidecar: bool,
 ) -> None:
     clip_id = f"clip-playback-fallback-{write_sidecar}"
@@ -158,7 +174,7 @@ def test_video_falls_back_to_original_when_playback_sidecar_is_missing_or_invali
     else:
         original.with_name("clip.playback-h264.mp4").write_bytes(b"untrusted playback")
 
-    with TestClient(create_app(lifespan=no_lifespan)) as client:
+    with TestClient(make_app()) as client:
         _login(client)
         metadata = client.get(f"/api/v1/clips/{clip_id}/metadata")
         response = client.get(f"/api/v1/clips/{clip_id}/video")
@@ -176,6 +192,7 @@ def test_video_falls_back_to_original_when_playback_sidecar_is_missing_or_invali
 )
 def test_relative_video_path_resolves_from_located_recording_root(
     clip_env: Path,
+    make_app: Callable[[], FastAPI],
     layout: Path,
 ) -> None:
     layout_name = "root" if layout == Path() else layout.as_posix().replace("/", "-")
@@ -187,7 +204,7 @@ def test_relative_video_path_resolves_from_located_recording_root(
         f"clips/{clip_id}/clip.mp4",
     )
 
-    with TestClient(create_app(lifespan=no_lifespan)) as client:
+    with TestClient(make_app()) as client:
         _login(client)
         metadata = client.get(f"/api/v1/clips/{clip_id}/metadata")
         video = client.get(
@@ -207,11 +224,12 @@ def test_relative_video_path_resolves_from_located_recording_root(
 
 def test_video_full_and_invalid_range_responses_expose_browser_headers(
     clip_env: Path,
+    make_app: Callable[[], FastAPI],
 ) -> None:
     clip_id = "clip-range-contract"
     _write_clip(clip_env, Path(), clip_id, f"clips/{clip_id}/clip.mp4")
 
-    with TestClient(create_app(lifespan=no_lifespan)) as client:
+    with TestClient(make_app()) as client:
         _login(client)
         full = client.get(f"/api/v1/clips/{clip_id}/video")
         malformed = client.get(
@@ -239,6 +257,7 @@ def test_video_full_and_invalid_range_responses_expose_browser_headers(
 
 def test_video_open_descriptor_is_closed_after_response(
     clip_env: Path,
+    make_app: Callable[[], FastAPI],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     clip_id = "clip-close"
@@ -253,7 +272,7 @@ def test_video_open_descriptor_is_closed_after_response(
 
     monkeypatch.setattr(ClipStore, "open_located_video", observed_open)
 
-    with TestClient(create_app(lifespan=no_lifespan)) as client:
+    with TestClient(make_app()) as client:
         _login(client)
         response = client.get(f"/api/v1/clips/{clip_id}/video")
 
@@ -264,6 +283,7 @@ def test_video_open_descriptor_is_closed_after_response(
 
 def test_video_symlink_swap_after_validation_cannot_serve_outside_bytes(
     clip_env: Path,
+    make_app: Callable[[], FastAPI],
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -281,7 +301,7 @@ def test_video_symlink_swap_after_validation_cannot_serve_outside_bytes(
 
     monkeypatch.setattr(ClipStore, "resolve_located_video_path", swap_after_validation)
 
-    with TestClient(create_app(lifespan=no_lifespan)) as client:
+    with TestClient(make_app()) as client:
         _login(client)
         response = client.get(f"/api/v1/clips/{clip_id}/video")
 
@@ -289,7 +309,9 @@ def test_video_symlink_swap_after_validation_cannot_serve_outside_bytes(
     assert response.content != outside.read_bytes()
 
 
-def test_nested_worker_path_ignores_root_level_decoy(clip_env: Path) -> None:
+def test_nested_worker_path_ignores_root_level_decoy(
+    clip_env: Path, make_app: Callable[[], FastAPI]
+) -> None:
     clip_id = "clip-nested-decoy"
     _write_clip(
         clip_env,
@@ -301,7 +323,7 @@ def test_nested_worker_path_ignores_root_level_decoy(clip_env: Path) -> None:
     decoy_path.parent.mkdir(parents=True)
     decoy_path.write_bytes(b"root-level-decoy")
 
-    with TestClient(create_app(lifespan=no_lifespan)) as client:
+    with TestClient(make_app()) as client:
         _login(client)
         response = client.get(f"/api/v1/clips/{clip_id}/video")
 
@@ -309,7 +331,9 @@ def test_nested_worker_path_ignores_root_level_decoy(clip_env: Path) -> None:
     assert response.content == VIDEO
 
 
-def test_absolute_contained_video_path_remains_supported(clip_env: Path) -> None:
+def test_absolute_contained_video_path_remains_supported(
+    clip_env: Path, make_app: Callable[[], FastAPI]
+) -> None:
     clip_id = "clip-absolute"
     video_path = _write_clip(clip_env, Path("archive"), clip_id, "placeholder")
     manifest_path = video_path.parent / "manifest.json"
@@ -317,7 +341,7 @@ def test_absolute_contained_video_path_remains_supported(clip_env: Path) -> None
     payload["path"] = str(video_path)
     manifest_path.write_text(json.dumps(payload), encoding="utf-8")
 
-    with TestClient(create_app(lifespan=no_lifespan)) as client:
+    with TestClient(make_app()) as client:
         _login(client)
         response = client.get(f"/api/v1/clips/{clip_id}/video")
 
@@ -327,6 +351,7 @@ def test_absolute_contained_video_path_remains_supported(clip_env: Path) -> None
 
 def test_nested_relative_video_path_cannot_escape_physical_store(
     clip_env: Path,
+    make_app: Callable[[], FastAPI],
     tmp_path: Path,
 ) -> None:
     secret = tmp_path / "secret.mp4"
@@ -339,7 +364,7 @@ def test_nested_relative_video_path_cannot_escape_physical_store(
         "../../../secret.mp4",
     )
 
-    with TestClient(create_app(lifespan=no_lifespan)) as client:
+    with TestClient(make_app()) as client:
         _login(client)
         response = client.get(f"/api/v1/clips/{clip_id}/video")
 
@@ -347,7 +372,9 @@ def test_nested_relative_video_path_cannot_escape_physical_store(
     assert response.json()["detail"] == "manifest path escapes clip store"
 
 
-def test_local_evidence_plays_when_no_backend_receipt_exists(clip_env: Path) -> None:
+def test_local_evidence_plays_when_no_backend_receipt_exists(
+    clip_env: Path, make_app: Callable[[], FastAPI]
+) -> None:
     """An operator must be able to watch what this box recorded.
 
     A receipt is only committed after a successful upstream export, which needs
@@ -360,7 +387,7 @@ def test_local_evidence_plays_when_no_backend_receipt_exists(clip_env: Path) -> 
     clip_id = "clip-no-receipt"
     _write_clip(clip_env, Path(), clip_id, f"clips/{clip_id}/clip.mp4")
 
-    with TestClient(create_app(lifespan=no_lifespan)) as client:
+    with TestClient(make_app()) as client:
         _login(client)
         # A deployment where no receipt was ever committed, because clip
         # export never ran. The suite otherwise injects accepted receipts for
@@ -376,6 +403,7 @@ def test_local_evidence_plays_when_no_backend_receipt_exists(clip_env: Path) -> 
 @pytest.mark.parametrize("with_playback", (False, True))
 def test_a_receipt_that_was_refused_still_blocks_playback(
     clip_env: Path,
+    make_app: Callable[[], FastAPI],
     with_playback: bool,
 ) -> None:
     """Dropping the existence requirement must not admit a refused artifact."""
@@ -385,7 +413,7 @@ def test_a_receipt_that_was_refused_still_blocks_playback(
         _write_playback(video, b"browser-safe-playback")
     content = video.read_bytes()
 
-    with TestClient(create_app(lifespan=no_lifespan)) as client:
+    with TestClient(make_app()) as client:
         _login(client)
         store = MediaReceiptStore()
         store.commit(
@@ -403,12 +431,14 @@ def test_a_receipt_that_was_refused_still_blocks_playback(
     assert response.json()["detail"] == "clip video receipt not accepted"
 
 
-def test_bytes_that_disagree_with_their_receipt_are_still_refused(clip_env: Path) -> None:
+def test_bytes_that_disagree_with_their_receipt_are_still_refused(
+    clip_env: Path, make_app: Callable[[], FastAPI]
+) -> None:
     """The integrity guarantee is the part worth keeping, and it stays strict."""
     clip_id = "clip-tampered"
     _write_clip(clip_env, Path(), clip_id, f"clips/{clip_id}/clip.mp4")
 
-    with TestClient(create_app(lifespan=no_lifespan)) as client:
+    with TestClient(make_app()) as client:
         _login(client)
         store = MediaReceiptStore()
         store.commit(
@@ -465,12 +495,13 @@ def _count_video_reads(monkeypatch: pytest.MonkeyPatch) -> list[_CountingHandle]
 
 def test_head_video_answers_with_the_get_header_section_and_no_body(
     clip_env: Path,
+    make_app: Callable[[], FastAPI],
 ) -> None:
     """A player probes the clip before it opens one; HEAD must not 404 (#452)."""
     clip_id = "clip-head-contract"
     _write_clip(clip_env, Path(), clip_id, f"clips/{clip_id}/clip.mp4")
 
-    with TestClient(create_app(lifespan=no_lifespan)) as client:
+    with TestClient(make_app()) as client:
         _login(client)
         head = client.head(f"/api/v1/clips/{clip_id}/video")
         get = client.get(f"/api/v1/clips/{clip_id}/video")
@@ -487,6 +518,7 @@ def test_head_video_answers_with_the_get_header_section_and_no_body(
 
 def test_head_video_reads_no_clip_bytes_and_releases_the_descriptor(
     clip_env: Path,
+    make_app: Callable[[], FastAPI],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A HEAD that streamed the file would cost exactly what it exists to avoid."""
@@ -494,7 +526,7 @@ def test_head_video_reads_no_clip_bytes_and_releases_the_descriptor(
     _write_clip(clip_env, Path(), clip_id, f"clips/{clip_id}/clip.mp4")
     handles = _count_video_reads(monkeypatch)
 
-    with TestClient(create_app(lifespan=no_lifespan)) as client:
+    with TestClient(make_app()) as client:
         _login(client)
         head = client.head(f"/api/v1/clips/{clip_id}/video")
         head_reads = [handle.reads for handle in handles]
@@ -507,13 +539,15 @@ def test_head_video_reads_no_clip_bytes_and_releases_the_descriptor(
     assert all(handle.closed for handle in handles)
 
 
-def test_head_video_matches_get_on_missing_clips_and_ranges(clip_env: Path) -> None:
+def test_head_video_matches_get_on_missing_clips_and_ranges(
+    clip_env: Path, make_app: Callable[[], FastAPI]
+) -> None:
     clip_id = "clip-head-errors"
     _write_clip(clip_env, Path(), clip_id, f"clips/{clip_id}/clip.mp4")
 
-    with TestClient(create_app(lifespan=no_lifespan)) as client:
+    with TestClient(make_app()) as client:
         _login(client)
-        unauthorized_client = TestClient(create_app(lifespan=no_lifespan))
+        unauthorized_client = TestClient(make_app())
         unauthorized = unauthorized_client.head(f"/api/v1/clips/{clip_id}/video")
         missing = client.head("/api/v1/clips/clip-absent/video")
         partial = client.head(
@@ -540,11 +574,13 @@ def test_head_video_matches_get_on_missing_clips_and_ranges(clip_env: Path) -> N
     assert malformed.status_code == 400
 
 
-def test_get_video_range_handling_is_unchanged_by_head_support(clip_env: Path) -> None:
+def test_get_video_range_handling_is_unchanged_by_head_support(
+    clip_env: Path, make_app: Callable[[], FastAPI]
+) -> None:
     clip_id = "clip-head-get-regression"
     _write_clip(clip_env, Path(), clip_id, f"clips/{clip_id}/clip.mp4")
 
-    with TestClient(create_app(lifespan=no_lifespan)) as client:
+    with TestClient(make_app()) as client:
         _login(client)
         full = client.get(f"/api/v1/clips/{clip_id}/video")
         partial = client.get(

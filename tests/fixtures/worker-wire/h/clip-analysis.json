@@ -1,0 +1,554 @@
+{
+  "cases": {
+    "cancel": {
+      "backend": {
+        "body": null,
+        "status": 204
+      },
+      "worker_exchanges": [
+        {
+          "request": {
+            "body": {},
+            "body_raw": "{}",
+            "headers": {
+              "content-type": "application/json",
+              "x-edge-relay-token": "<relay-token>"
+            },
+            "method": "POST",
+            "path": "/clips/22222222-2222-4222-8222-222222222222/analysis/cancel",
+            "timeout_sec": 5.0
+          },
+          "response": {
+            "headers": {},
+            "status": 204
+          }
+        }
+      ]
+    },
+    "get-disabled": {
+      "backend": {
+        "body": {
+          "reason": "analysis_disabled",
+          "served_media_sha256": "67905ad3cc2dd52b1f5f6a6d2814de0396618b29b4238b9af5207aeb69936e6d",
+          "state": "unavailable"
+        },
+        "parser": "ok: backend.app.features.clips.schemas.ClipAnalysisResponse.model_validate",
+        "status": 200
+      },
+      "worker_exchanges": [
+        {
+          "request": {
+            "headers": {
+              "x-edge-relay-token": "<relay-token>"
+            },
+            "method": "GET",
+            "path": "/clips/22222222-2222-4222-8222-222222222222/analysis",
+            "timeout_sec": 5.0
+          },
+          "response": {
+            "body": {
+              "error": "clip_analysis_disabled"
+            },
+            "headers": {
+              "content-length": "34",
+              "content-type": "application/json"
+            },
+            "status": 503
+          }
+        }
+      ]
+    },
+    "get-running": {
+      "backend": {
+        "body": {
+          "served_media_sha256": "67905ad3cc2dd52b1f5f6a6d2814de0396618b29b4238b9af5207aeb69936e6d",
+          "state": "running"
+        },
+        "parser": "ok: backend.app.features.clips.schemas.ClipAnalysisResponse.model_validate",
+        "status": 200
+      },
+      "worker_exchanges": [
+        {
+          "request": {
+            "headers": {
+              "x-edge-relay-token": "<relay-token>"
+            },
+            "method": "GET",
+            "path": "/clips/22222222-2222-4222-8222-222222222222/analysis",
+            "timeout_sec": 5.0
+          },
+          "response": {
+            "body": {
+              "reason": null,
+              "state": "running"
+            },
+            "headers": {
+              "content-length": "33",
+              "content-type": "application/json"
+            },
+            "status": 200
+          }
+        }
+      ]
+    },
+    "get-with-sidecar": {
+      "backend": {
+        "body": {
+          "result": {
+            "analysis_profile_sha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+            "bed_geometries": [
+              {
+                "points": [
+                  [
+                    100.0,
+                    100.0
+                  ],
+                  [
+                    500.0,
+                    100.0
+                  ],
+                  [
+                    500.0,
+                    300.0
+                  ]
+                ],
+                "provenance_pts": 0
+              }
+            ],
+            "bed_model_sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+            "clip_id": "22222222-2222-4222-8222-222222222222",
+            "clip_sha256": "67905ad3cc2dd52b1f5f6a6d2814de0396618b29b4238b9af5207aeb69936e6d",
+            "decoder_identity": "ffmpeg",
+            "frames": [
+              {
+                "boxes": [
+                  {
+                    "confidence": 0.9,
+                    "x1": 1.0,
+                    "x2": 10.0,
+                    "y1": 1.0,
+                    "y2": 10.0
+                  }
+                ],
+                "pts": 0,
+                "status": "available"
+              }
+            ],
+            "image_height": 360,
+            "image_width": 640,
+            "pose_model_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            "source": "clip_reanalysis",
+            "time_base": {
+              "denominator": 90000,
+              "numerator": 1
+            }
+          },
+          "served_media_sha256": "67905ad3cc2dd52b1f5f6a6d2814de0396618b29b4238b9af5207aeb69936e6d",
+          "served_timing_identical": true,
+          "state": "available"
+        },
+        "parser": "ok: backend.app.features.clips.schemas.ClipAnalysisResponse.model_validate",
+        "status": 200
+      },
+      "worker_exchanges": []
+    },
+    "post-accepted-running": {
+      "backend": {
+        "body": {
+          "served_media_sha256": "67905ad3cc2dd52b1f5f6a6d2814de0396618b29b4238b9af5207aeb69936e6d",
+          "state": "running"
+        },
+        "parser": "ok: backend.app.features.clips.schemas.ClipAnalysisResponse.model_validate",
+        "status": 202
+      },
+      "worker_exchanges": [
+        {
+          "request": {
+            "body": {
+              "clip_sha256": "67905ad3cc2dd52b1f5f6a6d2814de0396618b29b4238b9af5207aeb69936e6d"
+            },
+            "body_raw": "{\"clip_sha256\":\"67905ad3cc2dd52b1f5f6a6d2814de0396618b29b4238b9af5207aeb69936e6d\"}",
+            "headers": {
+              "content-type": "application/json",
+              "x-edge-relay-token": "<relay-token>"
+            },
+            "method": "POST",
+            "path": "/clips/22222222-2222-4222-8222-222222222222/analysis",
+            "timeout_sec": 5.0
+          },
+          "response": {
+            "body": {
+              "state": "running"
+            },
+            "headers": {
+              "content-length": "19",
+              "content-type": "application/json"
+            },
+            "status": 202
+          }
+        },
+        {
+          "request": {
+            "headers": {
+              "x-edge-relay-token": "<relay-token>"
+            },
+            "method": "GET",
+            "path": "/clips/22222222-2222-4222-8222-222222222222/analysis",
+            "timeout_sec": 5.0
+          },
+          "response": {
+            "body": {
+              "reason": null,
+              "state": "running"
+            },
+            "headers": {
+              "content-length": "33",
+              "content-type": "application/json"
+            },
+            "status": 200
+          }
+        }
+      ]
+    },
+    "post-already-running": {
+      "backend": {
+        "body": {
+          "served_media_sha256": "67905ad3cc2dd52b1f5f6a6d2814de0396618b29b4238b9af5207aeb69936e6d",
+          "state": "running"
+        },
+        "parser": "ok: backend.app.features.clips.schemas.ClipAnalysisResponse.model_validate",
+        "status": 409
+      },
+      "worker_exchanges": [
+        {
+          "request": {
+            "body": {
+              "clip_sha256": "67905ad3cc2dd52b1f5f6a6d2814de0396618b29b4238b9af5207aeb69936e6d"
+            },
+            "body_raw": "{\"clip_sha256\":\"67905ad3cc2dd52b1f5f6a6d2814de0396618b29b4238b9af5207aeb69936e6d\"}",
+            "headers": {
+              "content-type": "application/json",
+              "x-edge-relay-token": "<relay-token>"
+            },
+            "method": "POST",
+            "path": "/clips/22222222-2222-4222-8222-222222222222/analysis",
+            "timeout_sec": 5.0
+          },
+          "response": {
+            "body": {
+              "state": "running"
+            },
+            "headers": {
+              "content-length": "19",
+              "content-type": "application/json"
+            },
+            "status": 409
+          }
+        },
+        {
+          "request": {
+            "headers": {
+              "x-edge-relay-token": "<relay-token>"
+            },
+            "method": "GET",
+            "path": "/clips/22222222-2222-4222-8222-222222222222/analysis",
+            "timeout_sec": 5.0
+          },
+          "response": {
+            "body": {
+              "reason": null,
+              "state": "running"
+            },
+            "headers": {
+              "content-length": "33",
+              "content-type": "application/json"
+            },
+            "status": 200
+          }
+        }
+      ]
+    },
+    "post-disabled": {
+      "backend": {
+        "body": {
+          "served_media_sha256": "67905ad3cc2dd52b1f5f6a6d2814de0396618b29b4238b9af5207aeb69936e6d",
+          "state": "running"
+        },
+        "parser": "ok: backend.app.features.clips.schemas.ClipAnalysisResponse.model_validate",
+        "status": 503
+      },
+      "worker_exchanges": [
+        {
+          "request": {
+            "body": {
+              "clip_sha256": "67905ad3cc2dd52b1f5f6a6d2814de0396618b29b4238b9af5207aeb69936e6d"
+            },
+            "body_raw": "{\"clip_sha256\":\"67905ad3cc2dd52b1f5f6a6d2814de0396618b29b4238b9af5207aeb69936e6d\"}",
+            "headers": {
+              "content-type": "application/json",
+              "x-edge-relay-token": "<relay-token>"
+            },
+            "method": "POST",
+            "path": "/clips/22222222-2222-4222-8222-222222222222/analysis",
+            "timeout_sec": 5.0
+          },
+          "response": {
+            "body": {
+              "error": "clip_analysis_disabled"
+            },
+            "headers": {
+              "content-length": "34",
+              "content-type": "application/json"
+            },
+            "status": 503
+          }
+        },
+        {
+          "request": {
+            "headers": {
+              "x-edge-relay-token": "<relay-token>"
+            },
+            "method": "GET",
+            "path": "/clips/22222222-2222-4222-8222-222222222222/analysis",
+            "timeout_sec": 5.0
+          },
+          "response": {
+            "body": {
+              "reason": null,
+              "state": "running"
+            },
+            "headers": {
+              "content-length": "33",
+              "content-type": "application/json"
+            },
+            "status": 200
+          }
+        }
+      ]
+    },
+    "post-queue-full": {
+      "backend": {
+        "body": {
+          "served_media_sha256": "67905ad3cc2dd52b1f5f6a6d2814de0396618b29b4238b9af5207aeb69936e6d",
+          "state": "running"
+        },
+        "parser": "ok: backend.app.features.clips.schemas.ClipAnalysisResponse.model_validate",
+        "status": 409
+      },
+      "worker_exchanges": [
+        {
+          "request": {
+            "body": {
+              "clip_sha256": "67905ad3cc2dd52b1f5f6a6d2814de0396618b29b4238b9af5207aeb69936e6d"
+            },
+            "body_raw": "{\"clip_sha256\":\"67905ad3cc2dd52b1f5f6a6d2814de0396618b29b4238b9af5207aeb69936e6d\"}",
+            "headers": {
+              "content-type": "application/json",
+              "x-edge-relay-token": "<relay-token>"
+            },
+            "method": "POST",
+            "path": "/clips/22222222-2222-4222-8222-222222222222/analysis",
+            "timeout_sec": 5.0
+          },
+          "response": {
+            "body": {
+              "state": "queue_full"
+            },
+            "headers": {
+              "content-length": "22",
+              "content-type": "application/json"
+            },
+            "status": 409
+          }
+        },
+        {
+          "request": {
+            "headers": {
+              "x-edge-relay-token": "<relay-token>"
+            },
+            "method": "GET",
+            "path": "/clips/22222222-2222-4222-8222-222222222222/analysis",
+            "timeout_sec": 5.0
+          },
+          "response": {
+            "body": {
+              "reason": null,
+              "state": "running"
+            },
+            "headers": {
+              "content-length": "33",
+              "content-type": "application/json"
+            },
+            "status": 200
+          }
+        }
+      ]
+    },
+    "post-rejected-with-reason": {
+      "backend": {
+        "body": {
+          "reason": "unsupported_codec",
+          "served_media_sha256": "67905ad3cc2dd52b1f5f6a6d2814de0396618b29b4238b9af5207aeb69936e6d",
+          "state": "failed"
+        },
+        "parser": "ok: backend.app.features.clips.schemas.ClipAnalysisResponse.model_validate",
+        "status": 422
+      },
+      "worker_exchanges": [
+        {
+          "request": {
+            "body": {
+              "clip_sha256": "67905ad3cc2dd52b1f5f6a6d2814de0396618b29b4238b9af5207aeb69936e6d"
+            },
+            "body_raw": "{\"clip_sha256\":\"67905ad3cc2dd52b1f5f6a6d2814de0396618b29b4238b9af5207aeb69936e6d\"}",
+            "headers": {
+              "content-type": "application/json",
+              "x-edge-relay-token": "<relay-token>"
+            },
+            "method": "POST",
+            "path": "/clips/22222222-2222-4222-8222-222222222222/analysis",
+            "timeout_sec": 5.0
+          },
+          "response": {
+            "body": {
+              "error": "rejected",
+              "reason": "unsupported_codec"
+            },
+            "headers": {
+              "content-length": "49",
+              "content-type": "application/json"
+            },
+            "status": 422
+          }
+        }
+      ]
+    },
+    "worker-bad-body": {
+      "request": {
+        "body": {
+          "clip_sha256": "ABC"
+        },
+        "body_raw": "{\"clip_sha256\":\"ABC\"}",
+        "headers": {
+          "content-type": "application/json",
+          "x-edge-relay-token": "<relay-token>"
+        },
+        "method": "POST",
+        "path": "/clips/22222222-2222-4222-8222-222222222222/analysis"
+      },
+      "response": {
+        "body_text": "<!DOCTYPE HTML>\n<html lang=\"en\">\n    <head>\n        <meta charset=\"utf-8\">\n        <title>Error response</title>\n    </head>\n    <body>\n        <h1>Error response</h1>\n        <p>Error code: 400</p>\n        <p>Message: Bad Request.</p>\n        <p>Error code explanation: 400 - Bad request syntax or unsupported method.</p>\n    </body>\n</html>\n",
+        "headers": {
+          "content-length": "343",
+          "content-type": "text/html;charset=utf-8"
+        },
+        "status": 400
+      }
+    },
+    "worker-bad-clip-id": {
+      "request": {
+        "headers": {
+          "x-edge-relay-token": "<relay-token>"
+        },
+        "method": "GET",
+        "path": "/clips/not-a-uuid/analysis"
+      },
+      "response": {
+        "body": {
+          "reason": null,
+          "state": "running"
+        },
+        "headers": {
+          "content-length": "33",
+          "content-type": "application/json"
+        },
+        "status": 200
+      }
+    },
+    "worker-cancel-disabled": {
+      "request": {
+        "body": {},
+        "body_raw": "{}",
+        "headers": {
+          "content-type": "application/json",
+          "x-edge-relay-token": "<relay-token>"
+        },
+        "method": "POST",
+        "path": "/clips/22222222-2222-4222-8222-222222222222/analysis/cancel"
+      },
+      "response": {
+        "body": {
+          "error": "clip_analysis_disabled"
+        },
+        "headers": {
+          "content-length": "34",
+          "content-type": "application/json"
+        },
+        "status": 503
+      }
+    },
+    "worker-forbidden-no-token": {
+      "request": {
+        "headers": {},
+        "method": "GET",
+        "path": "/clips/22222222-2222-4222-8222-222222222222/analysis"
+      },
+      "response": {
+        "body_text": "<!DOCTYPE HTML>\n<html lang=\"en\">\n    <head>\n        <meta charset=\"utf-8\">\n        <title>Error response</title>\n    </head>\n    <body>\n        <h1>Error response</h1>\n        <p>Error code: 403</p>\n        <p>Message: Forbidden.</p>\n        <p>Error code explanation: 403 - Request forbidden -- authorization will not help.</p>\n    </body>\n</html>\n",
+        "headers": {
+          "content-length": "349",
+          "content-type": "text/html;charset=utf-8"
+        },
+        "status": 403
+      }
+    },
+    "worker-sha-mismatch": {
+      "request": {
+        "body": {
+          "clip_sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+        },
+        "body_raw": "{\"clip_sha256\":\"0000000000000000000000000000000000000000000000000000000000000000\"}",
+        "headers": {
+          "content-type": "application/json",
+          "x-edge-relay-token": "<relay-token>"
+        },
+        "method": "POST",
+        "path": "/clips/22222222-2222-4222-8222-222222222222/analysis"
+      },
+      "response": {
+        "body": {
+          "error": "sha_mismatch"
+        },
+        "headers": {
+          "content-length": "24",
+          "content-type": "application/json"
+        },
+        "status": 400
+      }
+    },
+    "worker-unknown-clip": {
+      "request": {
+        "body": {
+          "clip_sha256": "67905ad3cc2dd52b1f5f6a6d2814de0396618b29b4238b9af5207aeb69936e6d"
+        },
+        "body_raw": "{\"clip_sha256\":\"67905ad3cc2dd52b1f5f6a6d2814de0396618b29b4238b9af5207aeb69936e6d\"}",
+        "headers": {
+          "content-type": "application/json",
+          "x-edge-relay-token": "<relay-token>"
+        },
+        "method": "POST",
+        "path": "/clips/33333333-3333-4333-8333-333333333333/analysis"
+      },
+      "response": {
+        "body_text": "<!DOCTYPE HTML>\n<html lang=\"en\">\n    <head>\n        <meta charset=\"utf-8\">\n        <title>Error response</title>\n    </head>\n    <body>\n        <h1>Error response</h1>\n        <p>Error code: 404</p>\n        <p>Message: Not Found.</p>\n        <p>Error code explanation: 404 - Nothing matches the given URI.</p>\n    </body>\n</html>\n",
+        "headers": {
+          "content-length": "330",
+          "content-type": "text/html;charset=utf-8"
+        },
+        "status": 404
+      }
+    }
+  },
+  "clip_id": "22222222-2222-4222-8222-222222222222",
+  "clip_sha256": "67905ad3cc2dd52b1f5f6a6d2814de0396618b29b4238b9af5207aeb69936e6d"
+}

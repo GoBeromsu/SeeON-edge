@@ -54,7 +54,7 @@ _DEFAULT_TRANSPORT_HINT: Final = "cannot reach relay host; will keep retrying"
 
 def _server_error_hint(status: int | None) -> str:
     # Neutral and status-specific on purpose: a fast 5xx here can originate
-    # from the edge API's own local contention (e.g. a SQLite writer lock)
+    # from the edge API's own local contention (e.g. a PostgreSQL lock timeout)
     # just as easily as from something genuinely "upstream" -- naming a side
     # we have not confirmed misleads whoever reads this log (#579).
     if status is None:

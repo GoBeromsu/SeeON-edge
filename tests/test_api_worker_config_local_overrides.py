@@ -15,14 +15,15 @@ compatibility with a worker that has never seen these fields is preserved."""
 from __future__ import annotations
 
 import pytest
+from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from backend.app.features.cameras.store import CameraRegistryStore
-from backend.app.features.clips.storage_location_store import ClipStorageLocationStore
-from backend.app.features.detection_settings.store import DetectionSettingsStore
-from backend.app.main import create_app, no_lifespan
+from backend.app.features.audit.postgres_runtime import PostgresAuditRuntime
 from contracts.worker_config import PulledNightWindow, PulledWorkerConfig
-from tests_support.compact_authority_db import prepare_compact_database
+from tests_support.postgres_api_app import postgres_api_app
+from tests_support.postgres_sandbox import ProductSandbox
+
+pytest_plugins = ("tests_support.postgres_sandbox",)
 
 AUTH = {"Authorization": "Bearer relay-token"}
 DASHBOARD_LOGIN = {"username": "admin", "password": "admin"}
@@ -40,20 +41,16 @@ def clear_env(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.delenv("ML_API_DETECTION_TZ", raising=False)
 
 
-def _app(tmp_path):
-    app = create_app(lifespan=no_lifespan)
-    db_path = tmp_path / "catalog.sqlite3"
-    prepare_compact_database(db_path)
-    app.state.camera_registry = CameraRegistryStore(db_path)
-    app.state.detection_settings_store = DetectionSettingsStore(db_path)
-    app.state.clip_storage_location_store = ClipStorageLocationStore(db_path)
-    return app
+@pytest.fixture
+def app(
+    postgres_product_sandbox: ProductSandbox, postgres_audit_runtime: PostgresAuditRuntime
+) -> FastAPI:
+    return postgres_api_app(postgres_product_sandbox, postgres_audit_runtime)
 
 
 def test_with_no_local_overrides_the_response_reflects_the_externally_pulled_state(
-    tmp_path,
+    app: FastAPI,
 ) -> None:
-    app = _app(tmp_path)
     app.state.pulled_config = PulledWorkerConfig(
         config_version=3,
         restart_epoch=1,
@@ -81,8 +78,7 @@ def test_with_no_local_overrides_the_response_reflects_the_externally_pulled_sta
     assert "clip_store_subdir" not in body
 
 
-def test_local_window_setting_overrides_the_pulled_window_and_reuses_its_tz(tmp_path) -> None:
-    app = _app(tmp_path)
+def test_local_window_setting_overrides_the_pulled_window_and_reuses_its_tz(app: FastAPI) -> None:
     app.state.pulled_config = PulledWorkerConfig(
         config_version=1,
         restart_epoch=1,
@@ -121,8 +117,7 @@ def test_local_window_setting_overrides_the_pulled_window_and_reuses_its_tz(tmp_
     assert "night_window" not in body
 
 
-def test_local_always_on_setting_removes_any_pulled_window_for_that_domain(tmp_path) -> None:
-    app = _app(tmp_path)
+def test_local_always_on_setting_removes_any_pulled_window_for_that_domain(app: FastAPI) -> None:
     app.state.pulled_config = PulledWorkerConfig(
         config_version=1,
         restart_epoch=1,
@@ -151,9 +146,8 @@ def test_local_always_on_setting_removes_any_pulled_window_for_that_domain(tmp_p
 
 
 def test_local_off_setting_disables_the_domain_and_drops_its_window_and_alias(
-    tmp_path,
+    app: FastAPI,
 ) -> None:
-    app = _app(tmp_path)
     app.state.pulled_config = PulledWorkerConfig(
         config_version=1,
         restart_epoch=1,
@@ -181,9 +175,7 @@ def test_local_off_setting_disables_the_domain_and_drops_its_window_and_alias(
     assert "night_window" not in body
 
 
-def test_clip_store_subdir_is_absent_until_a_non_root_location_is_selected(tmp_path) -> None:
-    app = _app(tmp_path)
-
+def test_clip_store_subdir_is_absent_until_a_non_root_location_is_selected(app: FastAPI) -> None:
     with TestClient(app) as client:
         before = client.get("/api/v1/cameras/worker-config", headers=AUTH)
         assert "clip_store_subdir" not in before.json()
@@ -194,12 +186,11 @@ def test_clip_store_subdir_is_absent_until_a_non_root_location_is_selected(tmp_p
         assert put_response.status_code in (200, 404)
 
 
-def test_clip_store_subdir_appears_once_a_selection_is_persisted_directly(tmp_path) -> None:
+def test_clip_store_subdir_appears_once_a_selection_is_persisted_directly(app: FastAPI) -> None:
     """Persists a selection directly via the store (bypassing the browse/PUT
     filesystem-existence check, which is exercised separately in
     test_api_clip_storage.py) to isolate this test to the worker-config merge
     itself."""
-    app = _app(tmp_path)
     app.state.clip_storage_location_store.put("external-drive")
 
     with TestClient(app) as client:
@@ -209,12 +200,11 @@ def test_clip_store_subdir_appears_once_a_selection_is_persisted_directly(tmp_pa
     assert response.json()["clip_store_subdir"] == "external-drive"
 
 
-def test_no_local_overrides_leaves_config_version_unchanged_from_pulled(tmp_path) -> None:
+def test_no_local_overrides_leaves_config_version_unchanged_from_pulled(app: FastAPI) -> None:
     """Issue #190 regression, case 1: with nothing saved via
     ``PUT /api/v1/detection-settings``, ``_apply_local_detection_overrides``
     early-returns and the response's ``config_version`` must stay exactly
     what was externally pulled -- no behavior change for this case."""
-    app = _app(tmp_path)
     app.state.pulled_config = PulledWorkerConfig(
         config_version=7,
         restart_epoch=2,
@@ -237,12 +227,11 @@ def test_no_local_overrides_leaves_config_version_unchanged_from_pulled(tmp_path
     assert response.json()["config_version"] == 7
 
 
-def test_local_overrides_present_move_config_version_away_from_pulled(tmp_path) -> None:
+def test_local_overrides_present_move_config_version_away_from_pulled(app: FastAPI) -> None:
     """Issue #190 regression, case 2: once an operator has saved detection
     settings, ``config_version`` must differ from the raw pulled value --
     otherwise the worker's restart poll (which compares only
     ``(restart_epoch, config_version)``) never observes the edit."""
-    app = _app(tmp_path)
     app.state.pulled_config = PulledWorkerConfig(
         config_version=7,
         restart_epoch=2,
@@ -275,13 +264,12 @@ def test_local_overrides_present_move_config_version_away_from_pulled(tmp_path) 
     assert body["config_version"] != 7
 
 
-def test_same_overrides_saved_twice_yield_an_identical_config_version(tmp_path) -> None:
+def test_same_overrides_saved_twice_yield_an_identical_config_version(app: FastAPI) -> None:
     """Issue #190 regression, case 3 (restart-storm guard): the derived
     version must be a pure function of the effective override content, not a
     timestamp or a counter -- saving the exact same settings again (and
     polling repeatedly in between) must not move ``config_version``, or the
     worker would restart on every ~60s poll forever."""
-    app = _app(tmp_path)
     app.state.pulled_config = PulledWorkerConfig(
         config_version=7,
         restart_epoch=2,
@@ -315,11 +303,10 @@ def test_same_overrides_saved_twice_yield_an_identical_config_version(tmp_path) 
     assert first["config_version"] == second["config_version"] == third["config_version"]
 
 
-def test_different_override_content_yields_a_different_config_version(tmp_path) -> None:
+def test_different_override_content_yields_a_different_config_version(app: FastAPI) -> None:
     """Issue #190 regression, case 4: changing the effective override content
     (here, flipping ``fall`` off) must move ``config_version`` to a new value
     so the worker's restart poll picks up the change."""
-    app = _app(tmp_path)
     app.state.pulled_config = PulledWorkerConfig(
         config_version=7,
         restart_epoch=2,
@@ -362,9 +349,7 @@ def test_different_override_content_yields_a_different_config_version(tmp_path) 
     assert first["config_version"] != second["config_version"]
 
 
-def test_worker_config_route_requires_relay_authorization(tmp_path) -> None:
-    app = _app(tmp_path)
-
+def test_worker_config_route_requires_relay_authorization(app: FastAPI) -> None:
     with TestClient(app) as client:
         unauthenticated = client.get("/api/v1/cameras/worker-config")
         wrong_token = client.get(

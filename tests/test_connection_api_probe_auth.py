@@ -1,10 +1,10 @@
 from __future__ import annotations
 
 from http.server import ThreadingHTTPServer
-from pathlib import Path
 
 import pytest
 
+from backend.app.features.audit.postgres_runtime import PostgresAuditRuntime
 from backend.app.features.connection.store import API_BACKEND_BASE_URL_ENV
 from tests_support.connection_api import (
     EnrollmentVerifyHandler,
@@ -13,10 +13,15 @@ from tests_support.connection_api import (
     response_json,
     run_server,
 )
+from tests_support.postgres_sandbox import ProductSandbox
+
+pytest_plugins = ("tests_support.postgres_sandbox",)
 
 
 def test_connection_test_classifies_rejected_token_without_leaking_it(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    postgres_product_sandbox: ProductSandbox,
+    postgres_audit_runtime: PostgresAuditRuntime,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     EnrollmentVerifyHandler.reset()
     EnrollmentVerifyHandler.response_status = 403
@@ -24,7 +29,7 @@ def test_connection_test_classifies_rejected_token_without_leaking_it(
     thread = run_server(server)
     try:
         monkeypatch.setenv(API_BACKEND_BASE_URL_ENV, f"http://127.0.0.1:{server.server_port}")
-        client = connection_client(tmp_path, monkeypatch)
+        client = connection_client(postgres_product_sandbox, postgres_audit_runtime, monkeypatch)
         login(client)
 
         response = client.post(

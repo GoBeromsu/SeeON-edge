@@ -302,7 +302,7 @@ carriers into lockstep and retag; do not weaken the guard.
 `front/src/shared/releaseIdentity.ts` is **not** a version carrier. It is the
 on-disk database *format* identity (paired with
 `EDGE_DATABASE_SCHEMA_VERSION`), it only coincidentally spells like the tag,
-and it moves when the SQLite format lineage changes — never when the product
+and it moves when the database format lineage changes — never when the product
 ships. Bumping it to match a release tag would tell every edge device its
 existing database belongs to a different lineage. The same goes for the
 torch/CUDA/ultralytics versions reported by
@@ -506,7 +506,7 @@ sequence is:
 
 The cloud verification endpoint is `/api/v1/edge/enrollments/verify`. Canonical
 facility identity, installation ID, and enrollment generation come from its
-response and persist in SQLite. Complete topology comes from the camera registry.
+response and persist in PostgreSQL. Complete topology comes from the camera registry.
 
 ## Stop conditions
 

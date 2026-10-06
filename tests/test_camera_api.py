@@ -1,18 +1,21 @@
 from __future__ import annotations
 
-from pathlib import Path
-
 import pytest
+from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from backend.app.edge_db.bootstrap import bootstrap_database
-from backend.app.features.cameras.store import CameraRegistryStore
-from backend.app.main import create_app, no_lifespan
+from backend.app.features.audit.postgres_runtime import PostgresAuditRuntime
+from tests_support.postgres_api_app import postgres_api_app
+from tests_support.postgres_sandbox import ProductSandbox
+
+pytest_plugins = ("tests_support.postgres_sandbox",)
 
 
-@pytest.fixture(autouse=True)
-def _migrated_compact_database(tmp_path: Path) -> None:
-    bootstrap_database(tmp_path / "catalog.sqlite3")
+@pytest.fixture
+def app(
+    postgres_product_sandbox: ProductSandbox, postgres_audit_runtime: PostgresAuditRuntime
+) -> FastAPI:
+    return postgres_api_app(postgres_product_sandbox, postgres_audit_runtime)
 
 
 def _login(client: TestClient) -> None:
@@ -24,12 +27,10 @@ def _login(client: TestClient) -> None:
 
 
 def test_camera_topology_api_binds_stable_refs_without_exposing_transport(
-    tmp_path, monkeypatch
+    app: FastAPI, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     # Given
     monkeypatch.setenv("ML_API_WORKER_PROBE_ORIGIN", "")
-    app = create_app(lifespan=no_lifespan)
-    app.state.camera_registry = CameraRegistryStore(tmp_path / "catalog.sqlite3")
 
     # When
     with TestClient(app) as client:
@@ -78,11 +79,10 @@ def test_camera_topology_api_binds_stable_refs_without_exposing_transport(
 
 
 def test_camera_topology_api_returns_typed_conflict_without_partial_write(
-    tmp_path,
+    app: FastAPI,
 ) -> None:
     # Given
-    app = create_app(lifespan=no_lifespan)
-    store = app.state.camera_registry = CameraRegistryStore(tmp_path / "catalog.sqlite3")
+    store = app.state.camera_registry
 
     # When
     with TestClient(app) as client:
@@ -99,11 +99,10 @@ def test_camera_topology_api_returns_typed_conflict_without_partial_write(
 
 
 def test_camera_patch_binds_explicit_edge_and_room_refs_in_one_registry_revision(
-    tmp_path,
+    app: FastAPI,
 ) -> None:
     # Given
-    app = create_app(lifespan=no_lifespan)
-    store = app.state.camera_registry = CameraRegistryStore(tmp_path / "catalog.sqlite3")
+    store = app.state.camera_registry
     store.create_floor(edge_ref="floor-a", name="First", order_index=1)
     store.create_room(edge_ref="room-a", floor_edge_ref="floor-a", name="101")
     store.create(
@@ -134,11 +133,10 @@ def test_camera_patch_binds_explicit_edge_and_room_refs_in_one_registry_revision
 
 
 def test_camera_patch_invalid_rebind_rolls_back_record_binding_and_dirty_marker(
-    tmp_path,
+    app: FastAPI,
 ) -> None:
     # Given
-    app = create_app(lifespan=no_lifespan)
-    store = app.state.camera_registry = CameraRegistryStore(tmp_path / "catalog.sqlite3")
+    store = app.state.camera_registry
     store.create_floor(edge_ref="floor-a", name="First", order_index=1)
     store.create_room(edge_ref="room-a", floor_edge_ref="floor-a", name="101")
     store.create(

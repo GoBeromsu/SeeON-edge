@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-import sqlite3
 import sys
 from dataclasses import dataclass
 from importlib.util import module_from_spec, spec_from_file_location
@@ -12,7 +11,6 @@ from urllib.request import Request, urlopen
 
 import pytest
 
-from backend.app.edge_db.bootstrap import bootstrap_database
 from shared.detection_policies import BedExitPolicyV1, FallPolicyV2, make_effective_policy
 from worker.pipeline.output.live_view import LatestFrameStore
 from worker.pipeline.output.mjpeg_server import MjpegServer, MjpegServerConfig
@@ -193,26 +191,10 @@ def _replay_command() -> object:
     return module
 
 
-def _assert_no_replay_tables(database: Path) -> None:
-    connection = sqlite3.connect(database)
-    try:
-        tables = {
-            str(row[0])
-            for row in connection.execute(
-                "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'"
-            )
-        }
-    finally:
-        connection.close()
-    assert "qa_replay_runs" not in tables
-    assert not any(name.startswith("runtime_analysis_") for name in tables)
-
-
 def test_packaged_replay_command_posts_without_persisting(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
     database = tmp_path / "edge.sqlite3"
-    bootstrap_database(database)
     trace_path = tmp_path / "trace.json"
     _ = trace_path.write_text(json.dumps(_trace()), encoding="utf-8")
     server = _server(tmp_path)
@@ -246,12 +228,11 @@ def test_packaged_replay_command_posts_without_persisting(
         "detail": "worker refused incomplete replay input",
         "status": "refused",
     }
-    _assert_no_replay_tables(database)
+    assert not database.exists()
 
 
 def test_packaged_replay_command_missing_input_does_not_open_sqlite(tmp_path: Path) -> None:
     database = tmp_path / "edge.sqlite3"
-    bootstrap_database(database)
     status = _replay_command().main(  # type: ignore[attr-defined]
         [
             "--database",
@@ -271,14 +252,13 @@ def test_packaged_replay_command_missing_input_does_not_open_sqlite(tmp_path: Pa
         ]
     )
     assert status == 2
-    _assert_no_replay_tables(database)
+    assert not database.exists()
 
 
 def test_packaged_replay_command_refuses_truncated_input_without_persisting(
     tmp_path: Path,
 ) -> None:
     database = tmp_path / "edge.sqlite3"
-    bootstrap_database(database)
     trace = _trace()
     truncation = trace["truncation"]
     assert isinstance(truncation, dict)
@@ -311,4 +291,4 @@ def test_packaged_replay_command_refuses_truncated_input_without_persisting(
     finally:
         server.stop()
     assert status == 2
-    _assert_no_replay_tables(database)
+    assert not database.exists()

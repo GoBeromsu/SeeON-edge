@@ -1,17 +1,14 @@
 from __future__ import annotations
 
-import sqlite3
-from pathlib import Path
-
 import pytest
+from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from backend.app.edge_db.bootstrap import bootstrap_database
-from backend.app.features.cameras.store import CameraRegistryStore
-from backend.app.features.connection.store import ConnectionSettingsStore
-from backend.app.features.detection_settings import policy_store
-from backend.app.features.detection_settings.policy_store import DetectionPolicyStore
-from backend.app.main import create_app, no_lifespan
+from backend.app.features.audit.postgres_runtime import PostgresAuditRuntime
+from tests_support.postgres_api_app import postgres_api_app
+from tests_support.postgres_sandbox import ProductSandbox
+
+pytest_plugins = ("tests_support.postgres_sandbox",)
 
 DASHBOARD_LOGIN = {"username": "admin", "password": "admin"}
 RELAY_HEADERS = {"X-Edge-Relay-Token": "relay-token"}
@@ -20,12 +17,12 @@ LOCAL_CAMERA_ID = "local/camera:room-1"
 CANONICAL_CAMERA_ID = "hub-camera|opaque|A-17"
 
 
-def _app(database: Path):
-    app = create_app(lifespan=no_lifespan)
+@pytest.fixture
+def app(
+    postgres_product_sandbox: ProductSandbox, postgres_audit_runtime: PostgresAuditRuntime
+) -> FastAPI:
+    app = postgres_api_app(postgres_product_sandbox, postgres_audit_runtime)
     app.state.edge_relay_token = "relay-token"
-    app.state.camera_registry = CameraRegistryStore(database)
-    app.state.connection_settings_store = ConnectionSettingsStore(database)
-    app.state.detection_policy_store = DetectionPolicyStore(database)
     app.state.connection_settings_store.save(
         {
             "facility_code": "NH-0123456789",
@@ -126,10 +123,9 @@ def _rollback(
     )
 
 
-def test_policy_diff_apply_precedence_revision_activation_and_rollback(tmp_path: Path) -> None:
-    database = tmp_path / "edge.sqlite3"
-    bootstrap_database(database)
-    app = _app(database)
+def test_policy_diff_apply_precedence_revision_activation_and_rollback(
+    app: FastAPI, postgres_product_sandbox: ProductSandbox
+) -> None:
     facility_fall = _request(
         module_id="fall",
         schema_id="fall.policy",
@@ -157,8 +153,9 @@ def test_policy_diff_apply_precedence_revision_activation_and_rollback(tmp_path:
             "camera_id": None,
             "values": {"transition_threshold": 0.62},
         }
-        with sqlite3.connect(database) as connection:
-            assert connection.execute("SELECT count(*) FROM policies").fetchone() == (0,)
+        assert postgres_product_sandbox.admin.execute(
+            "SELECT count(*) FROM policies"
+        ).fetchone() == (0,)
 
         first = _apply(client, facility_fall, expected_revision_id=0)
         assert first.status_code == 202
@@ -214,21 +211,17 @@ def test_policy_diff_apply_precedence_revision_activation_and_rollback(tmp_path:
         assert rolled_back.status_code == 202
         assert rolled_back.json()["active_revision_id"] > second_revision
 
-    with sqlite3.connect(database) as connection:
-        rows = connection.execute(
-            "SELECT active_values_json,previous_present,previous_values_json FROM policies "
-            "WHERE facility_id=? AND camera_id IS NULL",
-            (FACILITY_ID,),
-        ).fetchall()
+    rows = postgres_product_sandbox.admin.execute(
+        "SELECT active_values_json,previous_present,previous_values_json FROM policies "
+        "WHERE facility_id=%s AND camera_id IS NULL",
+        (FACILITY_ID,),
+    ).fetchall()
     assert rows == [('{"transition_threshold":0.62}', 0, None)]
 
 
 def test_policy_resolution_uses_only_worker_camera_ids_when_namespaces_collide(
-    tmp_path: Path,
+    app: FastAPI,
 ) -> None:
-    database = tmp_path / "edge.sqlite3"
-    bootstrap_database(database)
-    app = _app(database)
     second_worker_id = "worker-camera/second:opaque"
     app.state.camera_registry.create(
         camera_id=CANONICAL_CAMERA_ID,
@@ -263,11 +256,8 @@ def test_policy_resolution_uses_only_worker_camera_ids_when_namespaces_collide(
 
 
 def test_policy_diff_reports_equal_numeric_values_with_new_source_as_changed(
-    tmp_path: Path,
+    app: FastAPI,
 ) -> None:
-    database = tmp_path / "edge.sqlite3"
-    bootstrap_database(database)
-    app = _app(database)
     facility_default = _request(
         module_id="fall",
         schema_id="fall.policy",
@@ -292,10 +282,7 @@ def test_policy_diff_reports_equal_numeric_values_with_new_source_as_changed(
         assert camera_diff.json()["concurrency_token"] == 0
 
 
-def test_rollback_keeps_only_immediately_previous_policy_state(tmp_path: Path) -> None:
-    database = tmp_path / "edge.sqlite3"
-    bootstrap_database(database)
-    app = _app(database)
+def test_rollback_keeps_only_immediately_previous_policy_state(app: FastAPI) -> None:
 
     with TestClient(app) as client:
         _login(client)
@@ -334,10 +321,7 @@ def test_rollback_keeps_only_immediately_previous_policy_state(tmp_path: Path) -
     assert second.status_code == 409
 
 
-def test_nullable_camera_override_returns_to_facility_default(tmp_path: Path) -> None:
-    database = tmp_path / "edge.sqlite3"
-    bootstrap_database(database)
-    app = _app(database)
+def test_nullable_camera_override_returns_to_facility_default(app: FastAPI) -> None:
 
     with TestClient(app) as client:
         _login(client)
@@ -390,11 +374,8 @@ def test_nullable_camera_override_returns_to_facility_default(tmp_path: Path) ->
 
 
 def test_api_rejects_malformed_nonfinite_unknown_cross_field_and_unknown_camera(
-    tmp_path: Path,
+    app: FastAPI,
 ) -> None:
-    database = tmp_path / "edge.sqlite3"
-    bootstrap_database(database)
-    app = _app(database)
 
     invalid = (
         _request(
@@ -458,10 +439,9 @@ def test_api_rejects_malformed_nonfinite_unknown_cross_field_and_unknown_camera(
     assert drift.status_code == 422
 
 
-def test_corrupt_revision_is_refused_and_failed_status_persists(tmp_path: Path) -> None:
-    database = tmp_path / "edge.sqlite3"
-    bootstrap_database(database)
-    app = _app(database)
+def test_corrupt_revision_is_refused_and_failed_status_persists(
+    app: FastAPI, postgres_product_sandbox: ProductSandbox
+) -> None:
 
     with TestClient(app) as client:
         _login(client)
@@ -477,11 +457,10 @@ def test_corrupt_revision_is_refused_and_failed_status_persists(tmp_path: Path) 
         assert applied.status_code == 202
         revision_id = applied.json()["active_revision_id"]
 
-        with sqlite3.connect(database) as connection:
-            connection.execute(
-                "UPDATE policies SET active_content_sha256=? WHERE activation_generation=?",
-                ("0" * 64, revision_id),
-            )
+        postgres_product_sandbox.admin.execute(
+            "UPDATE policies SET active_content_sha256=%s WHERE activation_generation=%s",
+            ("0" * 64, revision_id),
+        )
 
         refused = client.get("/api/v1/cameras/worker-config", headers=RELAY_HEADERS)
         assert refused.status_code == 503
@@ -509,19 +488,17 @@ def test_corrupt_revision_is_refused_and_failed_status_persists(tmp_path: Path) 
             "transition_threshold": 0.74
         }
 
-    with sqlite3.connect(database) as connection:
-        current_hash = connection.execute(
-            "SELECT active_content_sha256 FROM policies WHERE facility_id=? AND camera_id IS NULL",
-            (FACILITY_ID,),
-        ).fetchone()
+    current_hash = postgres_product_sandbox.admin.execute(
+        "SELECT active_content_sha256 FROM policies WHERE facility_id=%s AND camera_id IS NULL",
+        (FACILITY_ID,),
+    ).fetchone()
     assert current_hash is not None
     assert current_hash != ("0" * 64,)
 
 
-def test_fresh_apply_recovers_corrupt_active_without_prior_read(tmp_path: Path) -> None:
-    database = tmp_path / "edge.sqlite3"
-    bootstrap_database(database)
-    app = _app(database)
+def test_fresh_apply_recovers_corrupt_active_without_prior_read(
+    app: FastAPI, postgres_product_sandbox: ProductSandbox
+) -> None:
 
     with TestClient(app) as client:
         _login(client)
@@ -536,11 +513,10 @@ def test_fresh_apply_recovers_corrupt_active_without_prior_read(tmp_path: Path) 
         )
         assert applied.status_code == 202
         corrupt_revision_id = applied.json()["active_revision_id"]
-        with sqlite3.connect(database) as connection:
-            connection.execute(
-                "UPDATE policies SET active_content_sha256=? WHERE activation_generation=?",
-                ("0" * 64, corrupt_revision_id),
-            )
+        postgres_product_sandbox.admin.execute(
+            "UPDATE policies SET active_content_sha256=%s WHERE activation_generation=%s",
+            ("0" * 64, corrupt_revision_id),
+        )
 
         recovered = _apply(
             client,
@@ -562,11 +538,8 @@ def test_fresh_apply_recovers_corrupt_active_without_prior_read(tmp_path: Path) 
 
 
 def test_two_operator_first_facility_apply_race_uses_generation_zero_token(
-    tmp_path: Path,
+    app: FastAPI,
 ) -> None:
-    database = tmp_path / "edge.sqlite3"
-    bootstrap_database(database)
-    app = _app(database)
     operator_a = _request(
         module_id="fall",
         schema_id="fall.policy",
@@ -603,11 +576,8 @@ def test_two_operator_first_facility_apply_race_uses_generation_zero_token(
 
 
 def test_two_operator_inherited_camera_apply_race_uses_token_zero(
-    tmp_path: Path,
+    app: FastAPI,
 ) -> None:
-    database = tmp_path / "edge.sqlite3"
-    bootstrap_database(database)
-    app = _app(database)
     facility = _request(
         module_id="fall",
         schema_id="fall.policy",
@@ -648,10 +618,7 @@ def test_two_operator_inherited_camera_apply_race_uses_token_zero(
     assert effective["source"] == "camera-override"
 
 
-def test_two_operator_rollback_race_requires_cas_token(tmp_path: Path) -> None:
-    database = tmp_path / "edge.sqlite3"
-    bootstrap_database(database)
-    app = _app(database)
+def test_two_operator_rollback_race_requires_cas_token(app: FastAPI) -> None:
 
     with TestClient(app) as client:
         _login(client)
@@ -693,71 +660,3 @@ def test_two_operator_rollback_race_requires_cas_token(tmp_path: Path) -> None:
     assert winner.status_code == 202
     assert winner.json()["active_revision_id"] > current_revision
     assert loser.status_code == 409
-
-
-def test_acknowledge_applied_skips_write_transaction_when_nothing_pending(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    database = tmp_path / "edge.sqlite3"
-    bootstrap_database(database)
-    store = DetectionPolicyStore(database)
-    store.apply(
-        facility_id=FACILITY_ID,
-        module_id="fall",
-        module_version=2,
-        schema_id="fall.policy",
-        schema_version=2,
-        camera_id=None,
-        values={"transition_threshold": 0.62},
-        expected_revision_id=0,
-    )
-
-    calls: list[None] = []
-    real_write_transaction = policy_store.write_transaction
-
-    def _spy(connection: sqlite3.Connection):
-        calls.append(None)
-        return real_write_transaction(connection)
-
-    monkeypatch.setattr(policy_store, "write_transaction", _spy)
-
-    # The pending row is at or below the latest generation: it gets applied,
-    # through exactly one write transaction.
-    store.acknowledge_applied(FACILITY_ID)
-    assert len(calls) == 1
-    with sqlite3.connect(database) as connection:
-        assert connection.execute(
-            "SELECT status FROM policies WHERE facility_id=?", (FACILITY_ID,)
-        ).fetchone() == ("applied",)
-
-    # Nothing pending any more: acknowledge_applied must not open a write
-    # transaction.
-    store.acknowledge_applied(FACILITY_ID)
-    assert len(calls) == 1
-
-
-def test_policy_authority_writes_only_the_compact_policy_table(tmp_path: Path) -> None:
-    database = tmp_path / "edge.sqlite3"
-    bootstrap_database(database)
-    activation = DetectionPolicyStore(database).apply(
-        facility_id=FACILITY_ID,
-        module_id="fall",
-        module_version=2,
-        schema_id="fall.policy",
-        schema_version=2,
-        camera_id=None,
-        values={"transition_threshold": 0.62},
-        expected_revision_id=0,
-    )
-
-    with sqlite3.connect(database) as connection:
-        assert connection.execute(
-            "SELECT activation_generation FROM policies WHERE facility_id=?",
-            (FACILITY_ID,),
-        ).fetchone() == (activation.activation_generation,)
-        tables = {
-            str(row[0])
-            for row in connection.execute("SELECT name FROM sqlite_master WHERE type='table'")
-        }
-    assert "control_detection_policy_state" not in tables
-    assert "control_detection_policy_revisions" not in tables

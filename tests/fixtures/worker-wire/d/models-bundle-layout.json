@@ -1,0 +1,461 @@
+{
+  "bundle_tree_after": [
+    {
+      "path": "bundle-manifest.json",
+      "sha256": "63043d51cbf628a9241a8ba0ded9668f675e9c710f7e00afb35fc224aeee66cd",
+      "size": 1222
+    },
+    {
+      "path": "calibration.json",
+      "sha256": "82aa1df2af7fb0840326905fbafc1b9e1abfc90009c6cf5e39412a3dfc540088",
+      "size": 258
+    },
+    {
+      "path": "conformance/pose-bbox56-v1.json",
+      "sha256": "72d7e911acf39c7183bcdf10fad3c066dd93b7a45b7d28bef1950e1bf85b3a9c",
+      "size": 10699
+    },
+    {
+      "path": "evaluation-receipt.json",
+      "sha256": "575f7a9c844fb29e3cd09635cde1938453fe7184675a8d1b083dfa5301acc6cc",
+      "size": 693
+    },
+    {
+      "path": "field-evaluation-receipt.json",
+      "sha256": "f4f73c52cb21f1249e9fc091f7ed73c4a6d17806795eceaffcf5e5526bd7d957",
+      "size": 805
+    },
+    {
+      "path": "manifest.json",
+      "sha256": "51cef3458dbbc9c5156626c6434d1cb48c1dfdf836a311995e8ce319a0d77026",
+      "size": 1406
+    },
+    {
+      "path": "model.onnx",
+      "sha256": "e7a866a0f91458787def316c69331b557ce13ecce5bae44ff1a57a993a44b4bd",
+      "size": 4762
+    }
+  ],
+  "first_run": {
+    "results": [
+      {
+        "outcome": "fetched",
+        "path": "pose/pose.onnx",
+        "sha256": "aa613f703b0cd2a6dc4e3a1b801be2fae871940e740e6addeee2061b96c6bbde"
+      },
+      {
+        "outcome": "fetched",
+        "path": "bed/bed-seg.onnx",
+        "sha256": "4865d6e6d15df5755f06761b79e2d87c11e10d79afd61bb8f6488b652f6a0260"
+      },
+      {
+        "outcome": "fetched",
+        "path": "model.onnx",
+        "sha256": "e7a866a0f91458787def316c69331b557ce13ecce5bae44ff1a57a993a44b4bd"
+      },
+      {
+        "outcome": "fetched",
+        "path": "calibration.json",
+        "sha256": "82aa1df2af7fb0840326905fbafc1b9e1abfc90009c6cf5e39412a3dfc540088"
+      },
+      {
+        "outcome": "fetched",
+        "path": "conformance/pose-bbox56-v1.json",
+        "sha256": "72d7e911acf39c7183bcdf10fad3c066dd93b7a45b7d28bef1950e1bf85b3a9c"
+      },
+      {
+        "outcome": "fetched",
+        "path": "bundle-manifest.json",
+        "sha256": "63043d51cbf628a9241a8ba0ded9668f675e9c710f7e00afb35fc224aeee66cd"
+      },
+      {
+        "outcome": "fetched",
+        "path": "evaluation-receipt.json",
+        "sha256": "575f7a9c844fb29e3cd09635cde1938453fe7184675a8d1b083dfa5301acc6cc"
+      },
+      {
+        "outcome": "fetched",
+        "path": "field-evaluation-receipt.json",
+        "sha256": "f4f73c52cb21f1249e9fc091f7ed73c4a6d17806795eceaffcf5e5526bd7d957"
+      }
+    ]
+  },
+  "flat_manifest": {
+    "artifacts": [
+      {
+        "path": "pose/pose.onnx",
+        "remote_path": "pose.onnx",
+        "sha256": "aa613f703b0cd2a6dc4e3a1b801be2fae871940e740e6addeee2061b96c6bbde",
+        "size": 19,
+        "source": "gh"
+      },
+      {
+        "path": "bed/bed-seg.onnx",
+        "remote_path": "bed-seg.onnx",
+        "sha256": "4865d6e6d15df5755f06761b79e2d87c11e10d79afd61bb8f6488b652f6a0260",
+        "size": 18,
+        "source": "gh"
+      }
+    ],
+    "schema_version": 1,
+    "sources": {
+      "gh": {
+        "kind": "github-release",
+        "source_locator": "SeniorAILab/synthetic",
+        "tag": "models-test"
+      }
+    }
+  },
+  "log": [
+    "downloading https://github.com/SeniorAILab/synthetic/releases/download/models-test/pose.onnx -> <work>/models-selected/pose/pose.onnx",
+    "fetched          aa613f703b0cd2a6dc4e3a1b801be2fae871940e740e6addeee2061b96c6bbde  pose/pose.onnx",
+    "downloading https://github.com/SeniorAILab/synthetic/releases/download/models-test/bed-seg.onnx -> <work>/models-selected/bed/bed-seg.onnx",
+    "fetched          4865d6e6d15df5755f06761b79e2d87c11e10d79afd61bb8f6488b652f6a0260  bed/bed-seg.onnx",
+    "downloading https://huggingface.co/SeniorAILab/synthetic/resolve/cccccccccccccccccccccccccccccccccccccccc/model.onnx -> <work>/models-selected/bundles/.266dff1e0994b46ea86112a48988965bca52955c893d97023a8cdeb22207b893.<mkdtemp>/model.onnx",
+    "downloading https://huggingface.co/SeniorAILab/synthetic/resolve/cccccccccccccccccccccccccccccccccccccccc/calibration.json -> <work>/models-selected/bundles/.266dff1e0994b46ea86112a48988965bca52955c893d97023a8cdeb22207b893.<mkdtemp>/calibration.json",
+    "downloading https://huggingface.co/SeniorAILab/synthetic/resolve/cccccccccccccccccccccccccccccccccccccccc/conformance/pose-bbox56-v1.json -> <work>/models-selected/bundles/.266dff1e0994b46ea86112a48988965bca52955c893d97023a8cdeb22207b893.<mkdtemp>/conformance/pose-bbox56-v1.json",
+    "downloading https://huggingface.co/SeniorAILab/synthetic/resolve/cccccccccccccccccccccccccccccccccccccccc/bundle-manifest.json -> <work>/models-selected/bundles/.266dff1e0994b46ea86112a48988965bca52955c893d97023a8cdeb22207b893.<mkdtemp>/bundle-manifest.json",
+    "downloading https://huggingface.co/SeniorAILab/synthetic/resolve/cccccccccccccccccccccccccccccccccccccccc/evaluation-receipt.json -> <work>/models-selected/bundles/.266dff1e0994b46ea86112a48988965bca52955c893d97023a8cdeb22207b893.<mkdtemp>/evaluation-receipt.json",
+    "downloading https://huggingface.co/SeniorAILab/synthetic/resolve/cccccccccccccccccccccccccccccccccccccccc/field-evaluation-receipt.json -> <work>/models-selected/bundles/.266dff1e0994b46ea86112a48988965bca52955c893d97023a8cdeb22207b893.<mkdtemp>/field-evaluation-receipt.json",
+    "fetched          e7a866a0f91458787def316c69331b557ce13ecce5bae44ff1a57a993a44b4bd  bundles/266dff1e0994b46ea86112a48988965bca52955c893d97023a8cdeb22207b893/model.onnx",
+    "fetched          82aa1df2af7fb0840326905fbafc1b9e1abfc90009c6cf5e39412a3dfc540088  bundles/266dff1e0994b46ea86112a48988965bca52955c893d97023a8cdeb22207b893/calibration.json",
+    "fetched          72d7e911acf39c7183bcdf10fad3c066dd93b7a45b7d28bef1950e1bf85b3a9c  bundles/266dff1e0994b46ea86112a48988965bca52955c893d97023a8cdeb22207b893/conformance/pose-bbox56-v1.json",
+    "fetched          63043d51cbf628a9241a8ba0ded9668f675e9c710f7e00afb35fc224aeee66cd  bundles/266dff1e0994b46ea86112a48988965bca52955c893d97023a8cdeb22207b893/bundle-manifest.json",
+    "fetched          575f7a9c844fb29e3cd09635cde1938453fe7184675a8d1b083dfa5301acc6cc  bundles/266dff1e0994b46ea86112a48988965bca52955c893d97023a8cdeb22207b893/evaluation-receipt.json",
+    "fetched          f4f73c52cb21f1249e9fc091f7ed73c4a6d17806795eceaffcf5e5526bd7d957  bundles/266dff1e0994b46ea86112a48988965bca52955c893d97023a8cdeb22207b893/field-evaluation-receipt.json",
+    "<end of fetch_all>",
+    "present          aa613f703b0cd2a6dc4e3a1b801be2fae871940e740e6addeee2061b96c6bbde  pose/pose.onnx",
+    "present          4865d6e6d15df5755f06761b79e2d87c11e10d79afd61bb8f6488b652f6a0260  bed/bed-seg.onnx",
+    "present          e7a866a0f91458787def316c69331b557ce13ecce5bae44ff1a57a993a44b4bd  bundles/266dff1e0994b46ea86112a48988965bca52955c893d97023a8cdeb22207b893/model.onnx",
+    "present          82aa1df2af7fb0840326905fbafc1b9e1abfc90009c6cf5e39412a3dfc540088  bundles/266dff1e0994b46ea86112a48988965bca52955c893d97023a8cdeb22207b893/calibration.json",
+    "present          72d7e911acf39c7183bcdf10fad3c066dd93b7a45b7d28bef1950e1bf85b3a9c  bundles/266dff1e0994b46ea86112a48988965bca52955c893d97023a8cdeb22207b893/conformance/pose-bbox56-v1.json",
+    "present          63043d51cbf628a9241a8ba0ded9668f675e9c710f7e00afb35fc224aeee66cd  bundles/266dff1e0994b46ea86112a48988965bca52955c893d97023a8cdeb22207b893/bundle-manifest.json",
+    "present          575f7a9c844fb29e3cd09635cde1938453fe7184675a8d1b083dfa5301acc6cc  bundles/266dff1e0994b46ea86112a48988965bca52955c893d97023a8cdeb22207b893/evaluation-receipt.json",
+    "present          f4f73c52cb21f1249e9fc091f7ed73c4a6d17806795eceaffcf5e5526bd7d957  bundles/266dff1e0994b46ea86112a48988965bca52955c893d97023a8cdeb22207b893/field-evaluation-receipt.json",
+    "<end of fetch_all>"
+  ],
+  "members": {
+    "bundle-manifest.json": {
+      "files": [
+        {
+          "relative_path": "arch.json",
+          "sha256": "c558cc9f7cf0253e4e23b70831207c41d3e96d5735ebec1376624e51a355efd7",
+          "size": 246
+        },
+        {
+          "relative_path": "calibration.json",
+          "sha256": "82aa1df2af7fb0840326905fbafc1b9e1abfc90009c6cf5e39412a3dfc540088",
+          "size": 258
+        },
+        {
+          "relative_path": "conformance/pose-bbox56-v1.json",
+          "sha256": "72d7e911acf39c7183bcdf10fad3c066dd93b7a45b7d28bef1950e1bf85b3a9c",
+          "size": 10699
+        },
+        {
+          "relative_path": "evaluation-receipt.json",
+          "sha256": "5170346427e43c94b5e5e9c415a94098755280e28bbdb7a2c31c0491e403eac5",
+          "size": 252
+        },
+        {
+          "relative_path": "metadata.yaml",
+          "sha256": "aff915bee4eeeb38df6ed6e86f79c7311d85f7c4f4b3884257b735c0c30e6ed7",
+          "size": 54
+        },
+        {
+          "relative_path": "model.onnx",
+          "sha256": "e7a866a0f91458787def316c69331b557ce13ecce5bae44ff1a57a993a44b4bd",
+          "size": 4762
+        },
+        {
+          "relative_path": "model.pt",
+          "sha256": "6577816c70bbaafc9552245ba0f78bc2ea2f8654537702bf22e13659af2e5dcb",
+          "size": 5629
+        }
+      ],
+      "model_family": "gru_source_proxy_v0",
+      "preprocessing_identity_digest": "6ab6d8165fe11a374446e36c8448ff1dae32946a23715e0bb0c22d2a234877bb",
+      "schema_version": "bundle-manifest/proxy-v0"
+    },
+    "calibration.json": {
+      "class_order": [
+        "non_fall",
+        "fall_transition_proxy"
+      ],
+      "preprocessing_identity_digest": "6ab6d8165fe11a374446e36c8448ff1dae32946a23715e0bb0c22d2a234877bb",
+      "promotion_eligible": false,
+      "temperature": 1.0,
+      "temporal_rule": {
+        "m": 5,
+        "n": 5
+      },
+      "threshold": 0.05
+    },
+    "conformance/pose-bbox56-v1.json": {
+      "same_bytes_as": "tests/fixtures_fall_pose_bbox56_v1.json"
+    },
+    "model.onnx": {
+      "bytes": "not embedded; tests_support/pose_bbox56_bundle_artifact.py:write_pose_bbox56_bundle"
+    },
+    "records": [
+      {
+        "path": "model.onnx",
+        "sha256": "e7a866a0f91458787def316c69331b557ce13ecce5bae44ff1a57a993a44b4bd",
+        "size": 4762
+      },
+      {
+        "path": "calibration.json",
+        "sha256": "82aa1df2af7fb0840326905fbafc1b9e1abfc90009c6cf5e39412a3dfc540088",
+        "size": 258
+      },
+      {
+        "path": "conformance/pose-bbox56-v1.json",
+        "sha256": "72d7e911acf39c7183bcdf10fad3c066dd93b7a45b7d28bef1950e1bf85b3a9c",
+        "size": 10699
+      },
+      {
+        "path": "bundle-manifest.json",
+        "sha256": "63043d51cbf628a9241a8ba0ded9668f675e9c710f7e00afb35fc224aeee66cd",
+        "size": 1222
+      }
+    ]
+  },
+  "models_root_after": [
+    {
+      "path": "bed/bed-seg.onnx",
+      "sha256": "4865d6e6d15df5755f06761b79e2d87c11e10d79afd61bb8f6488b652f6a0260",
+      "size": 18
+    },
+    {
+      "path": "bundles/266dff1e0994b46ea86112a48988965bca52955c893d97023a8cdeb22207b893/bundle-manifest.json",
+      "sha256": "63043d51cbf628a9241a8ba0ded9668f675e9c710f7e00afb35fc224aeee66cd",
+      "size": 1222
+    },
+    {
+      "path": "bundles/266dff1e0994b46ea86112a48988965bca52955c893d97023a8cdeb22207b893/calibration.json",
+      "sha256": "82aa1df2af7fb0840326905fbafc1b9e1abfc90009c6cf5e39412a3dfc540088",
+      "size": 258
+    },
+    {
+      "path": "bundles/266dff1e0994b46ea86112a48988965bca52955c893d97023a8cdeb22207b893/conformance/pose-bbox56-v1.json",
+      "sha256": "72d7e911acf39c7183bcdf10fad3c066dd93b7a45b7d28bef1950e1bf85b3a9c",
+      "size": 10699
+    },
+    {
+      "path": "bundles/266dff1e0994b46ea86112a48988965bca52955c893d97023a8cdeb22207b893/evaluation-receipt.json",
+      "sha256": "575f7a9c844fb29e3cd09635cde1938453fe7184675a8d1b083dfa5301acc6cc",
+      "size": 693
+    },
+    {
+      "path": "bundles/266dff1e0994b46ea86112a48988965bca52955c893d97023a8cdeb22207b893/field-evaluation-receipt.json",
+      "sha256": "f4f73c52cb21f1249e9fc091f7ed73c4a6d17806795eceaffcf5e5526bd7d957",
+      "size": 805
+    },
+    {
+      "path": "bundles/266dff1e0994b46ea86112a48988965bca52955c893d97023a8cdeb22207b893/manifest.json",
+      "sha256": "51cef3458dbbc9c5156626c6434d1cb48c1dfdf836a311995e8ce319a0d77026",
+      "size": 1406
+    },
+    {
+      "path": "bundles/266dff1e0994b46ea86112a48988965bca52955c893d97023a8cdeb22207b893/model.onnx",
+      "sha256": "e7a866a0f91458787def316c69331b557ce13ecce5bae44ff1a57a993a44b4bd",
+      "size": 4762
+    },
+    {
+      "path": "pose/pose.onnx",
+      "sha256": "aa613f703b0cd2a6dc4e3a1b801be2fae871940e740e6addeee2061b96c6bbde",
+      "size": 19
+    }
+  ],
+  "published_bundle_manifest": {
+    "bundle_sha256": "266dff1e0994b46ea86112a48988965bca52955c893d97023a8cdeb22207b893",
+    "members": [
+      {
+        "path": "model.onnx",
+        "sha256": "e7a866a0f91458787def316c69331b557ce13ecce5bae44ff1a57a993a44b4bd",
+        "size": 4762
+      },
+      {
+        "path": "calibration.json",
+        "sha256": "82aa1df2af7fb0840326905fbafc1b9e1abfc90009c6cf5e39412a3dfc540088",
+        "size": 258
+      },
+      {
+        "path": "conformance/pose-bbox56-v1.json",
+        "sha256": "72d7e911acf39c7183bcdf10fad3c066dd93b7a45b7d28bef1950e1bf85b3a9c",
+        "size": 10699
+      },
+      {
+        "path": "bundle-manifest.json",
+        "sha256": "63043d51cbf628a9241a8ba0ded9668f675e9c710f7e00afb35fc224aeee66cd",
+        "size": 1222
+      }
+    ],
+    "payload": {
+      "identities": {
+        "calibration": "82aa1df2af7fb0840326905fbafc1b9e1abfc90009c6cf5e39412a3dfc540088",
+        "class": "4444444444444444444444444444444444444444444444444444444444444444",
+        "conformance": "72d7e911acf39c7183bcdf10fad3c066dd93b7a45b7d28bef1950e1bf85b3a9c",
+        "dataset": "1111111111111111111111111111111111111111111111111111111111111111",
+        "input": "pose-bbox56.v1",
+        "members": "6666666666666666666666666666666666666666666666666666666666666666",
+        "policy": "1658653ae3dcbc5d41deadac98205ded8e7ba558bb4f95ff4dad485bb0343e5c"
+      }
+    },
+    "receipts": [
+      {
+        "path": "evaluation-receipt.json",
+        "sha256": "575f7a9c844fb29e3cd09635cde1938453fe7184675a8d1b083dfa5301acc6cc",
+        "size": 693
+      },
+      {
+        "path": "field-evaluation-receipt.json",
+        "sha256": "f4f73c52cb21f1249e9fc091f7ed73c4a6d17806795eceaffcf5e5526bd7d957",
+        "size": 805
+      }
+    ],
+    "runtime_format": "onnxruntime",
+    "schema_version": 1
+  },
+  "published_bundle_manifest_sha256": "51cef3458dbbc9c5156626c6434d1cb48c1dfdf836a311995e8ce319a0d77026",
+  "receipts": {
+    "evaluation-receipt.json": {
+      "bundle_members_digest": "6666666666666666666666666666666666666666666666666666666666666666",
+      "bundle_sha256": "266dff1e0994b46ea86112a48988965bca52955c893d97023a8cdeb22207b893",
+      "calibration_digest": "82aa1df2af7fb0840326905fbafc1b9e1abfc90009c6cf5e39412a3dfc540088",
+      "conformance_digest": "72d7e911acf39c7183bcdf10fad3c066dd93b7a45b7d28bef1950e1bf85b3a9c",
+      "dataset_payload_digest": "1111111111111111111111111111111111111111111111111111111111111111",
+      "input_observation_schema": "pose-bbox56.v1",
+      "output_class_count": 2,
+      "output_class_semantics_digest": "4444444444444444444444444444444444444444444444444444444444444444",
+      "policy_digest": "1658653ae3dcbc5d41deadac98205ded8e7ba558bb4f95ff4dad485bb0343e5c"
+    },
+    "field-evaluation-receipt.json": {
+      "bundle_members_digest": "6666666666666666666666666666666666666666666666666666666666666666",
+      "bundle_sha256": "266dff1e0994b46ea86112a48988965bca52955c893d97023a8cdeb22207b893",
+      "calibration_digest": "82aa1df2af7fb0840326905fbafc1b9e1abfc90009c6cf5e39412a3dfc540088",
+      "conformance_digest": "72d7e911acf39c7183bcdf10fad3c066dd93b7a45b7d28bef1950e1bf85b3a9c",
+      "dataset_payload_digest": "1111111111111111111111111111111111111111111111111111111111111111",
+      "evaluation_receipt_digest": "d914fe3a2e90a5f7f785ba2577bf06312ac3064d1a471ace40f96380f1301043",
+      "input_observation_schema": "pose-bbox56.v1",
+      "output_class_count": 2,
+      "output_class_semantics_digest": "4444444444444444444444444444444444444444444444444444444444444444",
+      "policy_digest": "1658653ae3dcbc5d41deadac98205ded8e7ba558bb4f95ff4dad485bb0343e5c",
+      "status": "green"
+    }
+  },
+  "second_run": {
+    "results": [
+      {
+        "outcome": "present",
+        "path": "pose/pose.onnx",
+        "sha256": "aa613f703b0cd2a6dc4e3a1b801be2fae871940e740e6addeee2061b96c6bbde"
+      },
+      {
+        "outcome": "present",
+        "path": "bed/bed-seg.onnx",
+        "sha256": "4865d6e6d15df5755f06761b79e2d87c11e10d79afd61bb8f6488b652f6a0260"
+      },
+      {
+        "outcome": "present",
+        "path": "model.onnx",
+        "sha256": "e7a866a0f91458787def316c69331b557ce13ecce5bae44ff1a57a993a44b4bd"
+      },
+      {
+        "outcome": "present",
+        "path": "calibration.json",
+        "sha256": "82aa1df2af7fb0840326905fbafc1b9e1abfc90009c6cf5e39412a3dfc540088"
+      },
+      {
+        "outcome": "present",
+        "path": "conformance/pose-bbox56-v1.json",
+        "sha256": "72d7e911acf39c7183bcdf10fad3c066dd93b7a45b7d28bef1950e1bf85b3a9c"
+      },
+      {
+        "outcome": "present",
+        "path": "bundle-manifest.json",
+        "sha256": "63043d51cbf628a9241a8ba0ded9668f675e9c710f7e00afb35fc224aeee66cd"
+      },
+      {
+        "outcome": "present",
+        "path": "evaluation-receipt.json",
+        "sha256": "575f7a9c844fb29e3cd09635cde1938453fe7184675a8d1b083dfa5301acc6cc"
+      },
+      {
+        "outcome": "present",
+        "path": "field-evaluation-receipt.json",
+        "sha256": "f4f73c52cb21f1249e9fc091f7ed73c4a6d17806795eceaffcf5e5526bd7d957"
+      }
+    ]
+  },
+  "selection": {
+    "bundle_format": "bundle-manifest/proxy-v0",
+    "bundle_members_digest": "6666666666666666666666666666666666666666666666666666666666666666",
+    "calibration_digest": "82aa1df2af7fb0840326905fbafc1b9e1abfc90009c6cf5e39412a3dfc540088",
+    "conformance_digest": "72d7e911acf39c7183bcdf10fad3c066dd93b7a45b7d28bef1950e1bf85b3a9c",
+    "dataset_publication": {
+      "payload_digest": "1111111111111111111111111111111111111111111111111111111111111111",
+      "revision": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "source_locator": "SeniorAILab/synthetic"
+    },
+    "evaluation_receipt_digest": "d914fe3a2e90a5f7f785ba2577bf06312ac3064d1a471ace40f96380f1301043",
+    "field_evaluation_receipt_digest": "bccf90232b235b6775bf2d8d55f5c2cdc03a416999a75adc6a58fd13d071ab73",
+    "input_observation_schema": "pose-bbox56.v1",
+    "model_publication": {
+      "bundle_sha256": "266dff1e0994b46ea86112a48988965bca52955c893d97023a8cdeb22207b893",
+      "revision": "cccccccccccccccccccccccccccccccccccccccc",
+      "source_locator": "SeniorAILab/synthetic"
+    },
+    "output_class_count": 2,
+    "output_class_semantics_digest": "4444444444444444444444444444444444444444444444444444444444444444",
+    "policy_digest": "1658653ae3dcbc5d41deadac98205ded8e7ba558bb4f95ff4dad485bb0343e5c",
+    "preprocessing_identity": "coco17-xyc-plus-pose-head-xyxy-valid-f32-v1",
+    "runtime_format": "onnxruntime",
+    "schema_version": 2,
+    "threshold_source": "default",
+    "transition_threshold": 0.5
+  },
+  "sidecar_root_after": [],
+  "source_requests": [
+    {
+      "headers": {},
+      "url": "https://github.com/SeniorAILab/synthetic/releases/download/models-test/pose.onnx"
+    },
+    {
+      "headers": {},
+      "url": "https://github.com/SeniorAILab/synthetic/releases/download/models-test/bed-seg.onnx"
+    },
+    {
+      "headers": {},
+      "url": "https://huggingface.co/SeniorAILab/synthetic/resolve/cccccccccccccccccccccccccccccccccccccccc/manifest.json"
+    },
+    {
+      "headers": {},
+      "url": "https://huggingface.co/SeniorAILab/synthetic/resolve/cccccccccccccccccccccccccccccccccccccccc/model.onnx"
+    },
+    {
+      "headers": {},
+      "url": "https://huggingface.co/SeniorAILab/synthetic/resolve/cccccccccccccccccccccccccccccccccccccccc/calibration.json"
+    },
+    {
+      "headers": {},
+      "url": "https://huggingface.co/SeniorAILab/synthetic/resolve/cccccccccccccccccccccccccccccccccccccccc/conformance/pose-bbox56-v1.json"
+    },
+    {
+      "headers": {},
+      "url": "https://huggingface.co/SeniorAILab/synthetic/resolve/cccccccccccccccccccccccccccccccccccccccc/bundle-manifest.json"
+    },
+    {
+      "headers": {},
+      "url": "https://huggingface.co/SeniorAILab/synthetic/resolve/cccccccccccccccccccccccccccccccccccccccc/evaluation-receipt.json"
+    },
+    {
+      "headers": {},
+      "url": "https://huggingface.co/SeniorAILab/synthetic/resolve/cccccccccccccccccccccccccccccccccccccccc/field-evaluation-receipt.json"
+    },
+    {
+      "headers": {},
+      "url": "https://huggingface.co/SeniorAILab/synthetic/resolve/cccccccccccccccccccccccccccccccccccccccc/manifest.json"
+    }
+  ]
+}

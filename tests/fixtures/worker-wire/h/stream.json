@@ -1,0 +1,76 @@
+{
+  "cases": {
+    "forbidden-no-token": {
+      "request": {
+        "headers": {},
+        "method": "GET",
+        "path": "/stream/camera-1"
+      },
+      "response": {
+        "body_text": "<!DOCTYPE HTML>\n<html lang=\"en\">\n    <head>\n        <meta charset=\"utf-8\">\n        <title>Error response</title>\n    </head>\n    <body>\n        <h1>Error response</h1>\n        <p>Error code: 403</p>\n        <p>Message: Forbidden.</p>\n        <p>Error code explanation: 403 - Request forbidden -- authorization will not help.</p>\n    </body>\n</html>\n",
+        "headers": {
+          "content-length": "349",
+          "content-type": "text/html;charset=utf-8"
+        },
+        "status": 403
+      }
+    },
+    "no-first-frame": {
+      "request": {
+        "headers": {
+          "x-edge-relay-token": "<relay-token>"
+        },
+        "method": "GET",
+        "path": "/stream/camera-empty"
+      },
+      "response": {
+        "body_text": "<!DOCTYPE HTML>\n<html lang=\"en\">\n    <head>\n        <meta charset=\"utf-8\">\n        <title>Error response</title>\n    </head>\n    <body>\n        <h1>Error response</h1>\n        <p>Error code: 503</p>\n        <p>Message: Service Unavailable.</p>\n        <p>Error code explanation: 503 - The server cannot process the request due to a high load.</p>\n    </body>\n</html>\n",
+        "headers": {
+          "content-length": "367",
+          "content-type": "text/html;charset=utf-8"
+        },
+        "status": 503
+      }
+    },
+    "ok-first-part": {
+      "backend": {
+        "parser": "backend.app.features.cameras.streams_router._stream_content_type",
+        "result": "multipart/x-mixed-replace; boundary=frame"
+      },
+      "request": {
+        "headers": {
+          "x-edge-relay-token": "<relay-token>"
+        },
+        "method": "GET",
+        "path": "/stream/camera-1"
+      },
+      "response": {
+        "first_part": "stream-first-part.json",
+        "first_part_sha256": "bf046e3b410411a608cf87c523e66240af01a81e953715a6b512911f59807d9c",
+        "headers": {
+          "cache-control": "no-cache",
+          "content-type": "multipart/x-mixed-replace; boundary=frame"
+        },
+        "status": 200
+      }
+    },
+    "unknown-camera": {
+      "request": {
+        "headers": {
+          "x-edge-relay-token": "<relay-token>"
+        },
+        "method": "GET",
+        "path": "/stream/camera-unknown"
+      },
+      "response": {
+        "body_text": "<!DOCTYPE HTML>\n<html lang=\"en\">\n    <head>\n        <meta charset=\"utf-8\">\n        <title>Error response</title>\n    </head>\n    <body>\n        <h1>Error response</h1>\n        <p>Error code: 404</p>\n        <p>Message: Not Found.</p>\n        <p>Error code explanation: 404 - Nothing matches the given URI.</p>\n    </body>\n</html>\n",
+        "headers": {
+          "content-length": "330",
+          "content-type": "text/html;charset=utf-8"
+        },
+        "status": 404
+      }
+    }
+  },
+  "synthetic_jpeg_sha256": "7a2728a4b6b4bb0ab4ffb5c43b0ecee77b05fc663e2ae2a215e4490d4d1c64c5"
+}

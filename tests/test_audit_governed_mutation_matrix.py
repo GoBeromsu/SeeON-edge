@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import sqlite3
 from collections.abc import Callable
 from pathlib import Path
 
@@ -8,33 +7,16 @@ import pytest
 from fastapi.testclient import TestClient
 from pydantic import JsonValue
 
-from backend.app.features.audit.store import AuditEvent, AuditRecord, AuditStore
-from backend.app.features.audit.verification import SqlValue
-from backend.app.main import create_app, no_lifespan
+from backend.app.features.audit.postgres_runtime import PostgresAuditRuntime
 from contracts.edge_provisioning_models import (
     EnrollmentVerificationResult,
     FacilityIdentity,
     MachinePrincipal,
 )
+from tests_support.postgres_api_app import postgres_api_app
+from tests_support.postgres_sandbox import ProductSandbox
 
-
-class AuthorizerAuditDenyStore(AuditStore):
-    """Exercise SQLite's real authorizer at the audit INSERT boundary."""
-
-    def _append(self, connection: sqlite3.Connection, event: AuditEvent) -> AuditRecord:
-        def authorize(
-            action: int,
-            arg1: str | None,
-            _arg2: str | None,
-            _database: str | None,
-            _source: str | None,
-        ) -> int:
-            if action == sqlite3.SQLITE_INSERT and arg1 == "audit_events":
-                return sqlite3.SQLITE_DENY
-            return sqlite3.SQLITE_OK
-
-        connection.set_authorizer(authorize)
-        return super()._append(connection, event)
+pytest_plugins = ("tests_support.postgres_sandbox",)
 
 
 def _login(client: TestClient) -> None:
@@ -50,26 +32,32 @@ def _verified_enrollment() -> EnrollmentVerificationResult:
     )
 
 
-def _snapshot(path: Path, table: str) -> tuple[tuple[SqlValue, ...], ...]:
-    with sqlite3.connect(path) as connection:
-        try:
-            return tuple(connection.execute(f"SELECT * FROM {table} ORDER BY 1").fetchall())
-        except sqlite3.OperationalError as error:
-            if "no such table" not in str(error):
-                raise
-            return ()
+def _reject_audit_inserts(sandbox: ProductSandbox) -> None:
+    sandbox.admin.execute(
+        "CREATE OR REPLACE FUNCTION reject_audit_test() RETURNS trigger LANGUAGE plpgsql AS $$ "
+        "BEGIN RAISE EXCEPTION 'injected audit failure'; END $$"
+    )
+    sandbox.admin.execute(
+        "CREATE TRIGGER reject_audit_test BEFORE INSERT ON audit_events "
+        "FOR EACH ROW EXECUTE FUNCTION reject_audit_test()"
+    )
 
 
-def _nothing(_path: Path, _monkeypatch: pytest.MonkeyPatch) -> None:
+def _edge_site(sandbox: ProductSandbox) -> list[tuple[object, ...]]:
+    # Every governed mutation in the matrix owns columns of the single edge_site row.
+    return sandbox.admin.execute("SELECT * FROM edge_site ORDER BY 1").fetchall()
+
+
+def _nothing(_root: Path, _monkeypatch: pytest.MonkeyPatch) -> None:
     return None
 
 
-def _prepare_storage(path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("CLIP_STORE_DIR", str(path.parent / "clips"))
-    (path.parent / "clips" / "archive").mkdir(parents=True)
+def _prepare_storage(root: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("CLIP_STORE_DIR", str(root / "clips"))
+    (root / "clips" / "archive").mkdir(parents=True)
 
 
-def _prepare_connection(_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def _prepare_connection(_root: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
         "backend.app.features.connection.router.verify_enrollment",
         lambda *_args, **_kwargs: _verified_enrollment(),
@@ -77,12 +65,11 @@ def _prepare_connection(_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 @pytest.mark.parametrize(
-    ("endpoint", "payload", "table", "prepare"),
+    ("endpoint", "payload", "prepare"),
     (
         (
             "/api/v1/runtime-settings",
             {"clip_export_enabled": True, "expected_version": 0},
-            "runtime_settings",
             _nothing,
         ),
         (
@@ -93,13 +80,11 @@ def _prepare_connection(_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
                     "bed_exit": {"on": False, "mode": "always"},
                 }
             },
-            "detection_settings",
             _nothing,
         ),
         (
             "/api/v1/clips/storage/location",
             {"path": "archive"},
-            "clip_storage_location",
             _prepare_storage,
         ),
         (
@@ -109,49 +94,46 @@ def _prepare_connection(_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
                 "facility_token": "eft_v1.token.secret",
                 "client_installation_ref": "aa83ea3f-6e5f-4f45-a401-fb36c38835b6",
             },
-            "edge_site",
             _prepare_connection,
         ),
     ),
 )
-def test_real_sqlite_audit_denial_rolls_back_each_governed_mutation(
+def test_real_postgres_audit_denial_rolls_back_each_governed_mutation(
+    postgres_product_sandbox: ProductSandbox,
+    postgres_audit_runtime: PostgresAuditRuntime,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     endpoint: str,
     payload: dict[str, JsonValue],
-    table: str,
     prepare: Callable[[Path, pytest.MonkeyPatch], None],
 ) -> None:
-    # Given: a valid governed mutation and a real authorizer denial only at audit INSERT.
-    edge_database_path = tmp_path / ".central-fixture" / "edge.sqlite3"
-    prepare(edge_database_path, monkeypatch)
-    with TestClient(create_app(lifespan=no_lifespan)) as client:
+    # Given: a valid governed mutation and a real PostgreSQL rejection only at audit INSERT.
+    sandbox = postgres_product_sandbox
+    prepare(tmp_path, monkeypatch)
+    with TestClient(postgres_api_app(sandbox, postgres_audit_runtime)) as client:
         _login(client)
-        before = _snapshot(edge_database_path, table)
-        client.app.state.audit_store = AuthorizerAuditDenyStore(edge_database_path)
+        before = _edge_site(sandbox)
+        _reject_audit_inserts(sandbox)
 
         # When: the route attempts its caller-owned transactional audit append.
         response = client.put(endpoint, json=payload)
 
         # Then: no success bytes or business-state commit escape the failed transaction.
-        after = _snapshot(edge_database_path, table)
         assert response.status_code == 503
         assert response.content == b""
-        assert after == before
+        assert _edge_site(sandbox) == before
 
 
 def test_each_governed_mutation_commits_exactly_one_action(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    postgres_product_sandbox: ProductSandbox,
+    postgres_audit_runtime: PostgresAuditRuntime,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     # Given: valid payloads for every mutation omitted by the first implementation.
-    edge_database_path = tmp_path / ".central-fixture" / "edge.sqlite3"
-    clips = edge_database_path.parent / "clips"
-    (clips / "archive").mkdir(parents=True)
-    monkeypatch.setenv("CLIP_STORE_DIR", str(clips))
-    monkeypatch.setattr(
-        "backend.app.features.connection.router.verify_enrollment",
-        lambda *_args, **_kwargs: _verified_enrollment(),
-    )
+    sandbox = postgres_product_sandbox
+    _prepare_storage(tmp_path, monkeypatch)
+    _prepare_connection(tmp_path, monkeypatch)
     mutations = (
         ("/api/v1/runtime-settings", {"clip_export_enabled": True, "expected_version": 0}),
         (
@@ -175,20 +157,19 @@ def test_each_governed_mutation_commits_exactly_one_action(
     )
 
     # When: all four routes commit successfully.
-    with TestClient(create_app(lifespan=no_lifespan)) as client:
+    with TestClient(postgres_api_app(sandbox, postgres_audit_runtime)) as client:
         _login(client)
         responses = tuple(client.put(endpoint, json=payload) for endpoint, payload in mutations)
 
     # Then: each closed action appears exactly once.
     assert [response.status_code for response in responses] == [200, 200, 200, 200]
-    with sqlite3.connect(edge_database_path) as connection:
-        counts = dict(
-            connection.execute(
-                "SELECT action, COUNT(*) FROM audit_events WHERE action IN "
-                "('runtime-settings.update','detection-settings.update',"
-                "'clip-storage.update','connection.update') GROUP BY action"
-            ).fetchall()
-        )
+    counts = dict(
+        sandbox.admin.execute(
+            "SELECT action, COUNT(*) FROM audit_events WHERE action IN "
+            "('runtime-settings.update','detection-settings.update',"
+            "'clip-storage.update','connection.update') GROUP BY action"
+        ).fetchall()
+    )
     assert counts == {
         "runtime-settings.update": 1,
         "detection-settings.update": 1,

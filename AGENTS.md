@@ -6,10 +6,11 @@
 
 Python/uv + React monorepo for fall and bed-exit detection. Three deployable
 instances (`front`, `backend`, `worker`) plus `shared` and the canonical
-cross-repo `contracts` leaf mirrored into `eldercare-dataset-ops`. Import-linter
-(`[tool.importlinter]` in `pyproject.toml`) owns the boundaries. Training lives
-in `eldercare-dataset-ops`. Local weights stay under `models/` and are never
-committed.
+`contracts` leaf. This repository's `contracts/` is the authority; the copy in
+the archived `eldercare-dataset-ops` is historical only. Import-linter
+(`[tool.importlinter]` in `pyproject.toml`) owns the boundaries. Historical
+training lived in the archived `eldercare-dataset-ops`. Local weights stay
+under `models/` and are never committed.
 
 ## Package Boundaries
 
@@ -18,14 +19,13 @@ committed.
 | `front` | React/Vite SPA. Feature-sliced: `src/features/*`, `src/shared/{ui,api}`, `src/app`. Talks to the backend only over same-origin `/api/v1`. |
 | `backend` | FastAPI gateway. Eleven vertical slices under `app/features/*` (router + store); `app/lifespan.py` is its composition root. |
 | `worker` | DeepStream Flow worker. SDK media plane, CPU domain decisions, evidence, and relay egress. |
-| `shared` | `shared.events` (backend↔worker wire, publish-once delivery queue), `detection_policies` (the one fall/bed-exit policy parser for both sides), `release_identity`. Imports stdlib and `contracts` only. |
-| `contracts` | ADR-0006 canonical typed-vocabulary leaf; mirrored byte-for-byte into `eldercare-dataset-ops`. Imports no other repo package; `__init__` re-exports 34 names pinned by `tests/test_contract_symbol_exports.py`. |
-| `tests` | Flat pytest tree: contracts, boundary coverage, and workflow-pinning tests. `tests_support` is the test-only helper package, the one place `backend` and `worker` are imported together. |
+| `shared` | `shared.events` (backend↔worker wire). |
+| `contracts` | ADR-0006 canonical typed-vocabulary leaf and the contract authority; the archived `eldercare-dataset-ops` copy is historical only. |
+| `tests` | pytest contracts and boundary coverage. |
 
 `backend` and `worker` do not import each other. HTTP relay is the command/event
-boundary, one-way from worker to backend. The backend alone opens
-`/var/lib/seeon-state/edge.sqlite3` through `backend.app.edge_db`; the worker has
-no database. That file is persistence, never worker state or polling IPC.
+boundary. The backend alone opens PostgreSQL through `backend.app.edge_db`;
+the worker has no database. That database is persistence, never polling IPC.
 
 Directory names are `front`/`backend`/`worker`. Deployment images keep the
 legacy identity: `ml-api` (`Dockerfile.backend`, `ML_API_`/`API_*`) and
@@ -50,13 +50,9 @@ the sole composition root. The worker is an RTSP client only.
 | Domain decisions | `worker/domains/` | CPU fall and bed-exit decisions. `DETECTION_MODULE_REGISTRY` (`fall.v2`, `bed_exit.v1`) is the extension surface; `EpisodeAuthority` alone mints event identity. |
 | Engine build and gate | `worker/tools/` | Flow engines are image-owned artifacts: `edge_engine_build.py` builds the nvinfer engine ahead of source activation, never at boot; boot verifies digests and deployed-batch identity before accepting sources and rejects a mismatch. `export_pose_onnx.py` exports the dynamic-batch pose ONNX used by the engine build gate. `fetch_models` (compose service `edge-model-fetch`) pulls weights. `worker.tools` is banned from every production layer. |
 | Evidence | `worker/pipeline/output/evidence/` | Smart record actor, clip publication, sealed sidecar, durable stager, delivery queue, and snapshot store. |
-| Worker HTTP | `worker/pipeline/output/` | `/probe`, `/replay`, `/stream/`, `/snapshot/`, `/overlay/` on `127.0.0.1:8090` by default; `ml-api` is the only consumer, server-side. |
-| Event wire | `shared/events/` | Schemas and `edge_ingest_client.py` (events and clip receipts to the backend over relay HTTP), and the worker's `delivery_queue.py`. |
-| Release identity | `shared/release_identity.py` | `EDGE_DATABASE_SCHEMA_VERSION = 19`, read by backend bootstrap and health and by the worker pair check. A bump moves the DDL and `front/src/shared/releaseIdentity.ts` with it. |
-| Dashboard | `front/src/app/App.tsx` | `AuthGate` + `Dashboard`. Pages: events, operations, settings. URL state in `dashboardLocation.ts`. |
-| SQLite foundation | `backend/app/edge_db/` | Schema 19 (compact ten-table plus six execution-record tables), the create-or-extend bootstrap, and ownership. The backend writes the fifteen application tables; the bootstrap alone writes `schema_migrations`. `python -m backend.app.edge_db` is the sole DDL owner (create 19 or extend exact 18) and also bootstraps the telemetry file `edge-diagnostics.sqlite3`. |
-| CI and release | `.github/workflows/`, `scripts/` | `ci.yml` (`secrets`, `lint`, four `test` shards; `ci-ok` is the single required check) downloads no model weights. Release is an annotated `seeon-edge-v<semver>` tag checked by `scripts/release_guard.py`; `scripts/edge_image_plan.py` owns build-vs-reuse. Workflow YAML is pinned by tests, so a workflow change needs its test change. |
-| Docs | `docs/` | `architecture.md`, `decisions/` (ADR 0001-0008), `runbooks/`. |
+| Event wire | `shared/events/` | Schemas and `edge_ingest_client.py` (events and clip receipts to the backend over relay HTTP). |
+| Dashboard | `front/src/app/App.tsx` | `AuthGate` + `Dashboard`. Pages: events, operations, settings. |
+| Edge database | `backend/app/edge_db/` | PostgreSQL is the only durable store (`postgres.py` and the `postgres_*.sql` schemas). `migration/` imports the retired schema-19 `edge.sqlite3` once and is the only code that reads SQLite. |
 
 Read the nearest scoped `AGENTS.md` before changing a package: `worker/`,
 `backend/app/`, `shared/`, `contracts/`, `front/`, `tests/`, `tests_support/`,
@@ -81,8 +77,11 @@ pnpm --dir front build && pnpm --dir front lint
 
 ## Conventions
 
-- Keep `contracts` in sync with `eldercare-dataset-ops` (ADR-0006). Domain
-  decision math stays worker-internal.
+- `contracts/` is the contract authority (ADR-0006); nothing mirrors it to or
+  drift-checks it against the archived `eldercare-dataset-ops`. Domain decision
+  math stays worker-internal.
+- Worker→backend command/event traffic is one-way over relay HTTP. The backend's
+  PostgreSQL database is never worker persistence or polling IPC.
 - Cameras are registered at runtime through the dashboard registry. Do not seed
   them from env, YAML, or a backend `cameras` pull.
 - Use `uv`. Re-run `lint-imports` after any import-boundary change.
@@ -110,7 +109,7 @@ pnpm --dir front build && pnpm --dir front lint
   priority hidden in branch fall-through or dict insertion order. Lift the
   decision to an explicit owner (registry, config, declaration).
 - No JSON state stores for application data. Mutable application state belongs in
-  the backend-owned SQLite database (`backend/app/edge_db`); the inference-runtime
+  the backend-owned PostgreSQL database (`backend/app/edge_db`); the inference-runtime
   slot holds no database at all (ADR-0005) and uses only its approved bounded
   file surfaces: the publish-once delivery queue, a verified bounded config read
   cache, media-integrity sidecars, zero-payload lock inodes, and startup-purged

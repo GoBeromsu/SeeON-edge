@@ -51,6 +51,12 @@
       "behavior": "retired roster key; backend startup rejects injection"
     },
     {
+      "name": "API_CLIP_CATALOG_INTERVAL_SEC",
+      "category": "deployment artifact",
+      "authority": "deployment env",
+      "behavior": "clip catalog reconcile interval in seconds; typed default 5; finite value in (0, 300]; read once at startup; invalid refuses startup; no disable"
+    },
+    {
       "name": "API_CONNECTION_SETTINGS_PATH",
       "category": "fixed internal topology",
       "authority": "baked runtime state path",
@@ -106,6 +112,24 @@
       "category": "fixed internal topology",
       "authority": "baked runtime state path",
       "behavior": "retired; backend startup rejects injection"
+    },
+    {
+      "name": "API_POSTGRES_AUTHORITY_FILE",
+      "category": "secret/bootstrap",
+      "authority": "migration-owner issued secret file",
+      "behavior": "path to JSON {generation, writer_token} matching the live deployment_authority row; missing, unreadable, invalid, or fenced refuses startup"
+    },
+    {
+      "name": "API_POSTGRES_DSN_FILE",
+      "category": "secret/bootstrap",
+      "authority": "deployment secret file",
+      "behavior": "path to the PostgreSQL connection string; required; missing, unreadable, empty, or unreachable refuses startup; the value is never logged or echoed"
+    },
+    {
+      "name": "API_POSTGRES_SCHEMA",
+      "category": "deployment artifact",
+      "authority": "deployment env",
+      "behavior": "provisioned product schema; typed default seeon_edge; startup never creates or migrates it"
     },
     {
       "name": "CLIP_STORE_DIR",
@@ -364,6 +388,30 @@
       "authority": "compose.edge.nvidia.yaml constant",
       "behavior": "fixed compute,utility,video capability set present only for explicit NVIDIA topology",
       "overlay_service_environment": true
+    },
+    {
+      "name": "PG_OWNER_DSN_HOST_FILE",
+      "category": "secret/bootstrap",
+      "authority": "deployment secret file",
+      "behavior": "host path of the superuser libpq DSN file; compose mounts it as the pg_owner_dsn secret into edge-db-migrator and edge-db-cutover only; required, compose refuses to render without it",
+      "compose": true,
+      "example": true
+    },
+    {
+      "name": "PG_RUNTIME_DSN_HOST_FILE",
+      "category": "secret/bootstrap",
+      "authority": "deployment secret file",
+      "behavior": "host path of the runtime role's libpq DSN file; compose mounts it as the pg_runtime_dsn secret into ml-api and edge-db-migrator, which sets the role's password from it; required, compose refuses to render without it",
+      "compose": true,
+      "example": true
+    },
+    {
+      "name": "PG_SUPERUSER_PASSWORD_HOST_FILE",
+      "category": "secret/bootstrap",
+      "authority": "deployment secret file",
+      "behavior": "host path of the PostgreSQL superuser password file; compose mounts it as the pg_superuser_password secret into the postgres service; required, compose refuses to render without it",
+      "compose": true,
+      "example": true
     },
     {
       "name": "RELAY_TOKEN",

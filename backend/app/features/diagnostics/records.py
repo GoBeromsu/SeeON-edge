@@ -176,6 +176,8 @@ class GapReport:
     to_ns: int
     record_count: int
     cause: str
+    source_generation: int | None = None
+    stream_epoch: int | None = None
 
     def __post_init__(self) -> None:
         require_identity(self.producer, what="producer")
@@ -186,6 +188,13 @@ class GapReport:
                 raise ValueError(f"invalid {name}")
         if self.to_sequence < self.from_sequence or self.to_ns < self.from_ns:
             raise ValueError("invalid gap range")
+        if (self.source_generation is None) != (self.stream_epoch is None):
+            raise ValueError("gap scope must include generation and epoch")
+        if self.source_generation is not None:
+            for name in ("source_generation", "stream_epoch"):
+                value = getattr(self, name)
+                if type(value) is not int or value < 0:
+                    raise ValueError(f"invalid {name}")
 
 
 @dataclass(frozen=True, slots=True)

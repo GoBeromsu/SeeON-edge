@@ -4,6 +4,8 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Literal, TypeAlias
 
+import psycopg
+
 from backend.app.features.cameras.edge_topology_sync_state import (
     EdgeTopologySyncState,
     EdgeTopologySyncStateStore,
@@ -37,30 +39,37 @@ def current_retry_result(
     state_store: EdgeTopologySyncStateStore,
     *,
     attempted: bool = False,
+    connection: psycopg.Connection | None = None,
 ) -> TopologyRetryResult:
-    state = state_store.load()
+    state = state_store.load(connection=connection)
     if state.pause_reason is not None:
         pause_error: TopologySyncErrorClass = (
             "auth"
             if state.pause_reason in {TopologyPauseReason.AUTH, TopologyPauseReason.FORBIDDEN}
             else "conflict"
         )
-        return retry_result(registry, state, attempted, "failed", pause_error, _PAUSED)
+        return retry_result(
+            registry, state, attempted, "failed", pause_error, _PAUSED, connection=connection
+        )
     if state.pending is not None:
         pending_error: TopologySyncErrorClass | None = (
             "unreachable" if state.consecutive_failures else None
         )
         status: TopologySyncStatus = "failed" if pending_error else "pending"
-        return retry_result(registry, state, attempted, status, pending_error, None)
-    topology = registry.topology_snapshot()
+        return retry_result(
+            registry, state, attempted, status, pending_error, None, connection=connection
+        )
+    topology = registry.topology_snapshot(connection=connection)
     if topology.readiness_error is not None:
-        return retry_result(registry, state, attempted, "pending", None, _INCOMPLETE)
+        return retry_result(
+            registry, state, attempted, "pending", None, _INCOMPLETE, connection=connection
+        )
     status = (
         "synced"
         if topology.dirty is None and state.last_snapshotted_registry_version > 0
         else "pending"
     )
-    return retry_result(registry, state, attempted, status, None, None)
+    return retry_result(registry, state, attempted, status, None, None, connection=connection)
 
 
 def unconfigured_retry_result(registry: CameraRegistryStore) -> TopologyRetryResult:
@@ -73,7 +82,7 @@ def unconfigured_retry_result(registry: CameraRegistryStore) -> TopologyRetryRes
         _UNCONFIGURED,
         None,
         None,
-        _camera_count(registry),
+        registry.camera_count(),
     )
 
 
@@ -84,6 +93,8 @@ def retry_result(
     status: TopologySyncStatus,
     error_class: TopologySyncErrorClass | None,
     detail: str | None,
+    *,
+    connection: psycopg.Connection | None = None,
 ) -> TopologyRetryResult:
     return TopologyRetryResult(
         attempted,
@@ -92,12 +103,8 @@ def retry_result(
         detail,
         _iso_timestamp(state.last_accepted_at),
         _iso_timestamp(state.next_retry_at),
-        _camera_count(registry),
+        registry.camera_count(connection=connection),
     )
-
-
-def _camera_count(registry: CameraRegistryStore) -> int:
-    return len(registry.snapshot()["cameras"])
 
 
 def _iso_timestamp(value: float | None) -> str | None:

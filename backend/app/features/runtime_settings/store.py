@@ -1,21 +1,24 @@
-"""Schema-18 runtime settings authority."""
+"""Central/export settings on the API-owned PostgreSQL pool.
+
+The export control does not disable local clip recording. Bootstrap owns the
+site singleton; lifespan owns the pool and injects this store.
+"""
 
 from __future__ import annotations
 
-import sqlite3
 from collections.abc import Callable
 from dataclasses import dataclass
-from pathlib import Path
-from threading import Lock
+from datetime import UTC, datetime
 
-from fastapi import FastAPI
+import psycopg
 
-from backend.app.edge_db import EDGE_DATABASE_PATH
-from backend.app.edge_db.configuration import (
-    ensure_edge_site,
-    open_configuration_database,
-    utc_now,
-)
+from backend.app.edge_db.authority import AuthorityToken, require_authority
+from backend.app.edge_db.postgres import PostgresDatabase, PostgresError
+
+
+class RuntimeSettingsNotInitialized(PostgresError):
+    def __init__(self) -> None:
+        super().__init__("runtime settings bootstrap row is missing")
 
 
 @dataclass(frozen=True, slots=True)
@@ -34,54 +37,52 @@ class RuntimeSettingsVersionConflict(RuntimeError):
 
 
 class RuntimeSettingsStore:
-    def __init__(self, path: str | Path) -> None:
-        self.path = Path(path)
-        self._lock = Lock()
-        self._connection = open_configuration_database(self.path)
+    """Borrow transactions only; pool lifecycle belongs to the API."""
 
-    @classmethod
-    def from_env(cls) -> RuntimeSettingsStore:
-        return cls(EDGE_DATABASE_PATH)
+    def __init__(self, database: PostgresDatabase, authority: AuthorityToken) -> None:
+        self.database = database
+        self.authority = authority
 
     def get(self) -> RuntimeSetting:
-        with self._lock:
-            return self._get_unlocked()
+        return self.database.read(_read_setting)
 
     def set_clip_export_enabled(
         self,
         enabled: bool,
         *,
         expected_version: int | None = None,
-        after_write: Callable[[sqlite3.Connection], None] | None = None,
+        after_write: Callable[[psycopg.Connection], None] | None = None,
     ) -> RuntimeSetting:
-        with self._lock:
-            self._connection.execute("BEGIN IMMEDIATE")
-            try:
-                current = self._get_unlocked()
-                _require_expected_version(current, expected_version)
-                if current.clip_export_enabled == enabled:
-                    setting = current
-                else:
-                    ensure_edge_site(self._connection)
-                    setting = RuntimeSetting(enabled, current.version + 1)
-                    self._connection.execute(
-                        "UPDATE edge_site SET clip_export_enabled=?,runtime_settings_version=?,"
-                        "updated_at=? WHERE id=1",
-                        (int(enabled), setting.version, utc_now()),
-                    )
-                if after_write is not None:
-                    after_write(self._connection)
-                self._connection.execute("COMMIT")
-            except BaseException:
-                self._connection.execute("ROLLBACK")
-                raise
-        return setting
+        def persist(connection: psycopg.Connection) -> RuntimeSetting:
+            require_authority(connection, self.authority)
+            current = _read_setting(connection, for_update=True)
+            _require_expected_version(current, expected_version)
+            if current.clip_export_enabled == enabled:
+                setting = current
+            else:
+                setting = RuntimeSetting(enabled, current.version + 1)
+                now = datetime.now(UTC).isoformat(timespec="milliseconds").replace("+00:00", "Z")
+                connection.execute(
+                    "UPDATE edge_site SET clip_export_enabled=%s,runtime_settings_version=%s,"
+                    "updated_at=%s WHERE id=1",
+                    (int(enabled), setting.version, now),
+                )
+            if after_write is not None:
+                after_write(connection)
+            return setting
 
-    def _get_unlocked(self) -> RuntimeSetting:
-        row = self._connection.execute(
-            "SELECT clip_export_enabled,runtime_settings_version FROM edge_site WHERE id=1"
-        ).fetchone()
-        return RuntimeSetting() if row is None else RuntimeSetting(bool(row[0]), int(row[1]))
+        # Release only this transaction's candidate after known COMMIT and pool return.
+        return self.database.transact(persist)
+
+
+def _read_setting(connection: psycopg.Connection, *, for_update: bool = False) -> RuntimeSetting:
+    row = connection.execute(
+        "SELECT clip_export_enabled,runtime_settings_version FROM edge_site WHERE id=1"
+        + (" FOR UPDATE" if for_update else "")
+    ).fetchone()
+    if row is None:
+        raise RuntimeSettingsNotInitialized()
+    return RuntimeSetting(bool(row[0]), int(row[1]))
 
 
 def _require_expected_version(current: RuntimeSetting, expected: int | None) -> None:
@@ -89,18 +90,9 @@ def _require_expected_version(current: RuntimeSetting, expected: int | None) -> 
         raise RuntimeSettingsVersionConflict(current)
 
 
-def get_runtime_settings_store(app: FastAPI) -> RuntimeSettingsStore:
-    state = app.state
-    store = getattr(state, "runtime_settings_store", None)
-    if not isinstance(store, RuntimeSettingsStore):
-        store = RuntimeSettingsStore.from_env()
-        state.runtime_settings_store = store
-    return store
-
-
 __all__ = [
     "RuntimeSetting",
+    "RuntimeSettingsNotInitialized",
     "RuntimeSettingsStore",
     "RuntimeSettingsVersionConflict",
-    "get_runtime_settings_store",
 ]
