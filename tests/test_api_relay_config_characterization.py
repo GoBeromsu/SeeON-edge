@@ -3,9 +3,9 @@ from __future__ import annotations
 import json
 from typing import Any, Final
 
+import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
-import pytest
 
 from backend.app.main import create_app, no_lifespan
 from contracts.worker_config import PulledWorkerConfig
@@ -92,25 +92,41 @@ def _app() -> FastAPI:
 def _patch_minimal_dependencies(
     monkeypatch: pytest.MonkeyPatch,
     *,
+    app: FastAPI,
     registry_snapshot: dict[str, Any],
     runtime_enabled: bool = False,
     runtime_version: int = 0,
 ) -> None:
     import backend.app.features.cameras.router as cameras_router
 
+    class _FakeConnSettingsStore:
+        def load(self) -> Any:
+            class _Loaded:
+                facility_id: str = "facility-1"
+
+            return _Loaded()
+
     # Camera registry and bed zones
+    app.state.camera_registry = _FakeRegistryStore(registry_snapshot)
     monkeypatch.setattr(
         cameras_router,
         "_store",
         lambda app: _FakeRegistryStore(registry_snapshot),
         raising=True,
     )
+    # Relay route reads app.state bed zone store; seed a stub there
+    class _FakeBedZoneStoreState:
+        def get_all(self) -> dict[str, Any]:
+            return {}
+
+    app.state.bed_zone_store = _FakeBedZoneStoreState()
     monkeypatch.setattr(cameras_router, "_bed_zone_store", lambda app: _FakeBedZoneStore())
     # Clip storage location store (empty selection by default -> key absent)
     class _FakeClipStorageLocationStore:
         def get(self) -> str:
             return ""
 
+    app.state.clip_storage_location_store = _FakeClipStorageLocationStore()
     monkeypatch.setattr(
         cameras_router,
         "_clip_storage_location_store",
@@ -118,6 +134,14 @@ def _patch_minimal_dependencies(
         raising=True,
     )
     # No local detection overrides by default
+    class _FakeDetectionSettingsStoreState:
+        def __init__(self) -> None:
+            self._inner = _FakeDetectionSettingsStore({})
+
+        def get_all(self) -> dict[str, Any]:
+            return self._inner.get_all()
+
+    app.state.detection_settings_store = _FakeDetectionSettingsStoreState()
     monkeypatch.setattr(
         cameras_router, "_detection_settings_store", lambda app: _FakeDetectionSettingsStore({})
     )
@@ -125,7 +149,7 @@ def _patch_minimal_dependencies(
     monkeypatch.setattr(
         cameras_router,
         "get_connection_settings_store",
-        lambda app: type("S", (), {"load": lambda self: type("X", (), {"facility_id": "facility-1"})()})(),
+        lambda app: _FakeConnSettingsStore(),
         raising=True,
     )
     # Runtime export setting
@@ -136,6 +160,11 @@ def _patch_minimal_dependencies(
         raising=True,
     )
     # No numeric policies by default
+    class _FakePolicyStoreState:
+        def generation(self, _facility_id: str | None) -> int:
+            return 0
+
+    app.state.detection_policy_store = _FakePolicyStoreState()
     monkeypatch.setattr(
         cameras_router,
         "_detection_policy_store",
@@ -173,7 +202,7 @@ def test_relay_config_byte_snapshot_no_policies_minimal(monkeypatch: pytest.Monk
             },
         ],
     }
-    _patch_minimal_dependencies(monkeypatch, registry_snapshot=registry, runtime_enabled=False)
+    _patch_minimal_dependencies(monkeypatch, app=app, registry_snapshot=registry, runtime_enabled=False)
 
     with TestClient(app) as client:
         response = client.get("/api/v1/relay/config", headers=RELAY_HEADERS)

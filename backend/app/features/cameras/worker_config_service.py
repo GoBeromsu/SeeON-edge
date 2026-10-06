@@ -4,8 +4,6 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any
 
-from fastapi import HTTPException, status  # used only for require_available decisions at router
-
 from backend.app.features.cameras.bed_zone_store import BedZone
 from backend.app.features.cameras.store import CameraRegistryData
 from backend.app.features.detection_settings.policy_store import PolicyBundle, PolicyCameraIdentity
@@ -102,11 +100,11 @@ def _build_camera_entries(
         if _hub_canonical_id(record) is None:
             # mirror the router's warning shape; log left to the router caller
             pass
-        camera: dict[str, Any] = {
-            "camera_id": canonical_id,
-            "space_id": record.get("space_id"),
-            "rtsp_url": rtsp_url,
-        }
+        camera: dict[str, Any] = {"camera_id": canonical_id}
+        space_id = record.get("space_id")
+        if isinstance(space_id, str) and space_id.strip():
+            camera["space_id"] = space_id
+        camera["rtsp_url"] = rtsp_url
         decode_backend = record.get("decode_backend")
         if decode_backend is not None:
             camera["decode_backend"] = decode_backend

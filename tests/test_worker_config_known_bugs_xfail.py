@@ -19,7 +19,12 @@ def test_local_override_hash_can_produce_lower_config_version() -> None:
     def local_version(start: str) -> int:
         domains = {"fall": {"enabled": True}, "bed_exit": {"enabled": True}}
         windows = {"bed_exit": {"start": start, "end": "06:00", "tz": "Asia/Seoul"}}
-        return cameras_router._local_config_version(pulled_version, domains, windows, windows["bed_exit"])  # type: ignore[attr-defined]
+        return cameras_router._local_config_version(  # type: ignore[attr-defined]
+            pulled_version,
+            domains,
+            windows,
+            windows["bed_exit"],
+        )
 
     starts = [f"{h:02d}:{m:02d}" for h in range(18, 24) for m in (0, 30)]
     found = False
@@ -35,7 +40,10 @@ def test_local_override_hash_can_produce_lower_config_version() -> None:
     assert not found, "Expected to find a decreasing pair (documented in #254)"
 
 
-@pytest.mark.xfail(strict=True, reason="Known bug #591: policy-scaled config_version can exceed INT4")
+@pytest.mark.xfail(
+    strict=True,
+    reason="Known bug #591: policy-scaled config_version can exceed INT4",
+)
 def test_policy_scaled_config_version_exceeds_int4() -> None:
     """Characterizes #591: base*1e9 + hash part can exceed 32-bit signed int."""
     base = 735_739
